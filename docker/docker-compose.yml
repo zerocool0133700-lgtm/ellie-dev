@@ -1,0 +1,27 @@
+version: "3.8"
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.17.0
+    container_name: home-ellie-es
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+      - cluster.name=ellie-cluster
+      - node.name=home-ellie-es
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - ellie-es-data:/usr/share/elasticsearch/data
+    restart: unless-stopped
+    mem_limit: 4g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+
+volumes:
+  ellie-es-data:
+    driver: local

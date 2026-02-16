@@ -23,6 +23,7 @@ import {
   getRecentMessages,
 } from "./memory.ts";
 import { consolidateNow } from "./consolidate-inline.ts";
+import { indexMessage, searchElastic } from "./elasticsearch.ts";
 
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
 
@@ -236,12 +237,21 @@ async function saveMessage(
 ): Promise<void> {
   if (!supabase) return;
   try {
-    await supabase.from("messages").insert({
+    const { data } = await supabase.from("messages").insert({
       role,
       content,
       channel,
       metadata: metadata || {},
-    });
+    }).select("id").single();
+
+    // Index to ES (fire-and-forget)
+    if (data?.id) {
+      indexMessage({
+        id: data.id,
+        content, role, channel,
+        created_at: new Date().toISOString(),
+      }).catch(() => {});
+    }
   } catch (error) {
     console.error("Supabase save error:", error);
   }
@@ -400,13 +410,14 @@ bot.on("message:text", withQueue(async (ctx) => {
 
   await saveMessage("user", text);
 
-  // Gather context: docket + semantic search for this specific message
-  const [contextDocket, relevantContext] = await Promise.all([
+  // Gather context: docket + semantic search + ES full-text search
+  const [contextDocket, relevantContext, elasticContext] = await Promise.all([
     getContextDocket(),
     getRelevantContext(supabase, text),
+    searchElastic(text, { limit: 5, recencyBoost: true }),
   ]);
 
-  const enrichedPrompt = buildPrompt(text, contextDocket, relevantContext);
+  const enrichedPrompt = buildPrompt(text, contextDocket, relevantContext, elasticContext);
   const rawResponse = await callClaudeWithTyping(ctx, enrichedPrompt, { resume: true });
 
   // Parse and save any memory intents, strip tags from response
@@ -445,15 +456,17 @@ bot.on("message:voice", withQueue(async (ctx) => {
 
     await saveMessage("user", `[Voice ${voice.duration}s]: ${transcription}`);
 
-    const [contextDocket, relevantContext] = await Promise.all([
+    const [contextDocket, relevantContext, elasticContext] = await Promise.all([
       getContextDocket(),
       getRelevantContext(supabase, transcription),
+      searchElastic(transcription, { limit: 5, recencyBoost: true }),
     ]);
 
     const enrichedPrompt = buildPrompt(
       `[Voice message transcribed]: ${transcription}`,
       contextDocket,
-      relevantContext
+      relevantContext,
+      elasticContext
     );
     const rawResponse = await callClaudeWithTyping(ctx, enrichedPrompt, { resume: true });
     const claudeResponse = await processMemoryIntents(supabase, rawResponse);
@@ -565,6 +578,7 @@ function buildPrompt(
   userMessage: string,
   contextDocket?: string,
   relevantContext?: string,
+  elasticContext?: string,
 ): string {
   const parts = [
     "You are a personal AI assistant responding via Telegram. Keep responses concise and conversational.",
@@ -587,6 +601,7 @@ function buildPrompt(
   if (profileContext) parts.push(`\nProfile:\n${profileContext}`);
   if (contextDocket) parts.push(`\nCONTEXT:\n${contextDocket}`);
   if (relevantContext) parts.push(`\n${relevantContext}`);
+  if (elasticContext) parts.push(`\n${elasticContext}`);
 
   parts.push(
     "\nMEMORY MANAGEMENT:" +
@@ -852,10 +867,11 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
       .map(m => `${m.role}: ${m.content}`)
       .join("\n");
 
-    // Pull context docket + semantic search for this specific utterance
-    const [contextDocket, relevantContext] = await Promise.all([
+    // Pull context docket + semantic search + ES for this specific utterance
+    const [contextDocket, relevantContext, elasticContext] = await Promise.all([
       getContextDocket(),
       getRelevantContext(supabase, text),
+      searchElastic(text, { limit: 3, recencyBoost: true }),
     ]);
 
     const systemParts = [
@@ -867,6 +883,7 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
     if (USER_NAME) systemParts.push(`You are speaking with ${USER_NAME}.`);
     if (contextDocket) systemParts.push(`\n${contextDocket}`);
     if (relevantContext) systemParts.push(`\n${relevantContext}`);
+    if (elasticContext) systemParts.push(`\n${elasticContext}`);
 
     const systemPrompt = systemParts.join("\n");
 

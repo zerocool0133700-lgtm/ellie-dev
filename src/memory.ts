@@ -12,6 +12,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { indexMemory, classifyDomain } from "./elasticsearch.ts";
 
 /**
  * Parse Claude's response for memory intent tags.
@@ -27,10 +28,20 @@ export async function processMemoryIntents(
 
   // [REMEMBER: fact to store]
   for (const match of response.matchAll(/\[REMEMBER:\s*(.+?)\]/gi)) {
-    await supabase.from("memory").insert({
+    const { data } = await supabase.from("memory").insert({
       type: "fact",
       content: match[1],
-    });
+    }).select("id").single();
+
+    if (data?.id) {
+      indexMemory({
+        id: data.id,
+        content: match[1],
+        type: "fact",
+        domain: classifyDomain(match[1]),
+        created_at: new Date().toISOString(),
+      }).catch(() => {});
+    }
     clean = clean.replace(match[0], "");
   }
 
@@ -38,11 +49,21 @@ export async function processMemoryIntents(
   for (const match of response.matchAll(
     /\[GOAL:\s*(.+?)(?:\s*\|\s*DEADLINE:\s*(.+?))?\]/gi
   )) {
-    await supabase.from("memory").insert({
+    const { data } = await supabase.from("memory").insert({
       type: "goal",
       content: match[1],
       deadline: match[2] || null,
-    });
+    }).select("id").single();
+
+    if (data?.id) {
+      indexMemory({
+        id: data.id,
+        content: match[1],
+        type: "goal",
+        domain: classifyDomain(match[1]),
+        created_at: new Date().toISOString(),
+      }).catch(() => {});
+    }
     clean = clean.replace(match[0], "");
   }
 

@@ -13,6 +13,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { indexConversation, indexMemory, classifyDomain } from "./elasticsearch.ts";
 
 interface RawMessage {
   id: string;
@@ -175,6 +176,16 @@ Return ONLY valid JSON. No markdown fences, no explanation.`,
     console.log(
       `[consolidate] ${block.channel} (${block.messages.length} msgs): ${parsed.summary}`
     );
+
+    // Index conversation to Elasticsearch
+    indexConversation({
+      id: conversationId,
+      summary: parsed.summary,
+      channel: block.channel,
+      started_at: block.startedAt,
+      ended_at: block.endedAt,
+      message_count: block.messages.length,
+    }).catch(() => {});
   }
 
   // 5. Insert extracted memories
@@ -184,27 +195,53 @@ Return ONLY valid JSON. No markdown fences, no explanation.`,
   );
 
   if (validMemories.length > 0) {
-    await supabase.from("memory").insert(
+    const { data: insertedMemories } = await supabase.from("memory").insert(
       validMemories.map((m) => ({
         type: m.type,
         content: m.content,
         conversation_id: conversationId,
         metadata: { source: "consolidation" },
       }))
-    );
+    ).select("id, type, content");
+
     for (const mem of validMemories) {
       console.log(`  [${mem.type}] ${mem.content}`);
+    }
+
+    // Index memories to Elasticsearch
+    if (insertedMemories) {
+      for (const mem of insertedMemories) {
+        indexMemory({
+          id: mem.id,
+          content: mem.content,
+          type: mem.type,
+          domain: classifyDomain(mem.content),
+          created_at: new Date().toISOString(),
+          conversation_id: conversationId,
+        }).catch(() => {});
+      }
     }
   }
 
   // 6. Insert summary as memory entry for semantic search
   if (parsed.summary) {
-    await supabase.from("memory").insert({
+    const { data: summaryData } = await supabase.from("memory").insert({
       type: "summary",
       content: parsed.summary,
       conversation_id: conversationId,
       metadata: { source: "consolidation", channel: block.channel },
-    });
+    }).select("id").single();
+
+    if (summaryData?.id) {
+      indexMemory({
+        id: summaryData.id,
+        content: parsed.summary,
+        type: "summary",
+        domain: classifyDomain(parsed.summary),
+        created_at: new Date().toISOString(),
+        conversation_id: conversationId,
+      }).catch(() => {});
+    }
   }
 }
 
