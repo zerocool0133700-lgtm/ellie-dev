@@ -268,13 +268,12 @@ When Dave starts a Claude Code session and mentions a work item (e.g., "work on 
    POST http://localhost:3001/api/work-session/start
    {
      "work_item_id": "ELLIE-5",
-     "work_item_title": "Implement Claude Code Work Session Dispatch Protocol",
-     "agent": "dev",
-     "repository": "ellie-dev",
-     "session_id": "<generated-uuid>",
-     "timestamp": "<now-iso>"
+     "title": "Implement Claude Code Work Session Dispatch Protocol",
+     "project": "ellie-dev",
+     "agent": "dev"
    }
    ```
+   The relay creates the session record and returns `session_id` in the response.
 
 5. **Begin work** on the task.
 
@@ -289,19 +288,12 @@ On **major milestones** (schema changes, feature complete, significant commits),
 ```bash
 POST http://localhost:3001/api/work-session/update
 {
-  "session_id": "<from-start>",
   "work_item_id": "ELLIE-5",
-  "timestamp": "<now-iso>",
-  "update_type": "progress|decision|milestone|blocker",
-  "summary": "Brief description of what was done"
+  "message": "Brief description of what was done"
 }
 ```
 
-**Update types:**
-- `progress` — regular work update (files changed, features added)
-- `decision` — architectural or implementation decision made
-- `milestone` — significant checkpoint reached
-- `blocker` — stuck on something, need input
+The relay finds the active session for the work item automatically.
 
 ### Decision Logging
 When choosing between approaches, log the decision:
@@ -309,13 +301,8 @@ When choosing between approaches, log the decision:
 ```bash
 POST http://localhost:3001/api/work-session/decision
 {
-  "session_id": "<from-start>",
   "work_item_id": "ELLIE-5",
-  "timestamp": "<now-iso>",
-  "decision": "What was decided",
-  "reasoning": "Why this approach",
-  "alternatives_considered": ["option A", "option B"],
-  "impact": "architecture|implementation|testing"
+  "message": "Decision: Using X approach because Y. Alternatives considered: A, B"
 }
 ```
 
@@ -327,15 +314,11 @@ When the work item is done (or the session ends):
    ```bash
    POST http://localhost:3001/api/work-session/complete
    {
-     "session_id": "<from-start>",
      "work_item_id": "ELLIE-5",
-     "timestamp": "<now-iso>",
-     "status": "completed|blocked|paused",
-     "summary": "What was accomplished",
-     "deliverables": { "files_changed": [], "commits": [] },
-     "next_steps": "What remains to be done"
+     "summary": "What was accomplished"
    }
    ```
+   The relay marks the session complete, updates Plane to Done, and posts a summary to Telegram.
 
 2. **Update Plane issue** — move to Done (if completed) or leave In Progress (if blocked/paused). Add a completion comment with the summary.
 
