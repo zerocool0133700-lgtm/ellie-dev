@@ -243,6 +243,168 @@ Summarize what was set up and what is running. Remind the user:
 
 ---
 
+# Work Session Dispatch Protocol
+
+> **For the project owner (Dave).** If `.env` has `PLANE_API_KEY` set and Plane MCP is available, this protocol is active. Otherwise, skip this section — it does not apply to first-time setup users.
+
+## Session Startup
+
+When Dave starts a Claude Code session and mentions a work item (e.g., "work on ELLIE-5") or asks to work on something:
+
+1. **Fetch the work item** using Plane MCP:
+   ```
+   mcp__plane__get_issue_using_readable_identifier("ELLIE", "5")
+   ```
+
+2. **Display the work item** — title, description summary, priority, and acceptance criteria.
+
+3. **Move the issue to In Progress** in Plane:
+   ```
+   mcp__plane__update_issue(project_id, issue_id, { state: "<started-state-id>" })
+   ```
+
+4. **Notify the relay** so Dave sees it on Telegram:
+   ```bash
+   POST http://localhost:3001/api/work-session/start
+   {
+     "work_item_id": "ELLIE-5",
+     "work_item_title": "Implement Claude Code Work Session Dispatch Protocol",
+     "agent": "dev",
+     "repository": "ellie-dev",
+     "session_id": "<generated-uuid>",
+     "timestamp": "<now-iso>"
+   }
+   ```
+
+5. **Begin work** on the task.
+
+If Dave doesn't mention a specific work item, ask:
+> Are you working on a defined work item from Plane? I can fetch open items, or we can work without one.
+
+## During Work
+
+### Progress Updates
+On **major milestones** (schema changes, feature complete, significant commits), POST to the relay:
+
+```bash
+POST http://localhost:3001/api/work-session/update
+{
+  "session_id": "<from-start>",
+  "work_item_id": "ELLIE-5",
+  "timestamp": "<now-iso>",
+  "update_type": "progress|decision|milestone|blocker",
+  "summary": "Brief description of what was done"
+}
+```
+
+**Update types:**
+- `progress` — regular work update (files changed, features added)
+- `decision` — architectural or implementation decision made
+- `milestone` — significant checkpoint reached
+- `blocker` — stuck on something, need input
+
+### Decision Logging
+When choosing between approaches, log the decision:
+
+```bash
+POST http://localhost:3001/api/work-session/decision
+{
+  "session_id": "<from-start>",
+  "work_item_id": "ELLIE-5",
+  "timestamp": "<now-iso>",
+  "decision": "What was decided",
+  "reasoning": "Why this approach",
+  "alternatives_considered": ["option A", "option B"],
+  "impact": "architecture|implementation|testing"
+}
+```
+
+## Session Complete
+
+When the work item is done (or the session ends):
+
+1. **POST completion** to the relay:
+   ```bash
+   POST http://localhost:3001/api/work-session/complete
+   {
+     "session_id": "<from-start>",
+     "work_item_id": "ELLIE-5",
+     "timestamp": "<now-iso>",
+     "status": "completed|blocked|paused",
+     "summary": "What was accomplished",
+     "deliverables": { "files_changed": [], "commits": [] },
+     "next_steps": "What remains to be done"
+   }
+   ```
+
+2. **Update Plane issue** — move to Done (if completed) or leave In Progress (if blocked/paused). Add a completion comment with the summary.
+
+3. **Commit with work item prefix:**
+   ```
+   [ELLIE-5] Brief description of change
+   ```
+
+4. **Push to remote** if Dave asks.
+
+## Git Workflow
+
+### Commit Messages
+```
+[ELLIE-{id}] Brief description of change
+```
+
+### Pre-commit
+- Run type checks if available
+- Ensure no `.env` or secrets are staged
+- Reference the work item ID in the commit
+
+## Plane Reference
+
+- **Workspace:** evelife
+- **Project identifier:** ELLIE
+- **Project UUID:** 7194ace4-b80e-4c83-8042-c925598accf2
+- **Base URL:** https://plane.ellie-labs.dev
+
+### State IDs
+- Backlog: `f3546cc1-69ed-4af9-8350-5e3b1b22a50e`
+- Todo: `92d0bdb9-cc96-41e0-b26f-47e82ea6dab8`
+- In Progress: `e551b5a8-8bad-43dc-868e-9b5fb48c3a9e`
+- Done: `41fddf8d-d937-4964-9888-b27f416dcafa`
+- Cancelled: `3273d02b-7026-4848-8853-2711d6ba3c9b`
+
+## Relay API Reference
+
+All endpoints at `http://localhost:3001`:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /api/work-session/start` | Log session initiation, notify Telegram |
+| `POST /api/work-session/update` | Progress/decision/milestone/blocker updates |
+| `POST /api/work-session/decision` | Architectural decision with reasoning |
+| `POST /api/work-session/complete` | Session completion, Plane state update |
+
+## Project Architecture
+
+- **Relay:** `src/relay.ts` — Telegram bot + HTTP server + voice calls
+- **Memory:** `src/memory.ts` — Supabase-backed conversation history + semantic search
+- **Agents:** `src/agent-router.ts` — multi-agent routing via Supabase edge functions
+- **Work Sessions:** `src/api/work-session.ts` — session lifecycle management
+- **Plane:** `src/plane.ts` — work item state sync
+- **Voice:** Local Whisper transcription + ElevenLabs TTS streaming
+- **Database:** Supabase (messages, memory, logs, work_sessions, agents)
+- **Service:** systemd user service `claude-telegram-relay`
+
+### Key Commands
+```bash
+systemctl --user restart claude-telegram-relay   # Restart relay
+journalctl --user -u claude-telegram-relay       # View logs
+bun run start                                     # Run manually
+bun run test:telegram                             # Test Telegram
+bun run test:supabase                             # Test database
+```
+
+---
+
 ## What Comes Next — The Full Version
 
 This free relay covers the essentials. The full version unlocks:
