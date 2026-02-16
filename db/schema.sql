@@ -212,3 +212,45 @@ BEGIN
   LIMIT match_count;
 END;
 $$ LANGUAGE plpgsql;
+
+-- ============================================================
+-- WORK SESSIONS TABLE (Claude Code dispatch protocol)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS work_sessions (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  completed_at TIMESTAMPTZ,
+  work_item_id TEXT NOT NULL,
+  work_item_title TEXT NOT NULL,
+  project TEXT NOT NULL,
+  agent TEXT,
+  state TEXT DEFAULT 'active' CHECK (state IN ('active', 'blocked', 'completed')),
+  metadata JSONB DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_sessions_created_at ON work_sessions(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_work_sessions_work_item_id ON work_sessions(work_item_id);
+CREATE INDEX IF NOT EXISTS idx_work_sessions_state ON work_sessions(state);
+
+-- ============================================================
+-- WORK SESSION UPDATES TABLE (Progress tracking)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS work_session_updates (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  session_id UUID REFERENCES work_sessions(id) ON DELETE CASCADE,
+  type TEXT NOT NULL CHECK (type IN ('progress', 'decision', 'blocker')),
+  message TEXT NOT NULL,
+  metadata JSONB DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_work_session_updates_session_id ON work_session_updates(session_id);
+CREATE INDEX IF NOT EXISTS idx_work_session_updates_created_at ON work_session_updates(created_at DESC);
+
+-- RLS for work sessions
+ALTER TABLE work_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE work_session_updates ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow all for service role" ON work_sessions FOR ALL USING (true);
+CREATE POLICY "Allow all for service role" ON work_session_updates FOR ALL USING (true);

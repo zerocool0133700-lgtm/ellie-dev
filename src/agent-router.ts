@@ -1,0 +1,182 @@
+/**
+ * Agent Router — Relay-side wrapper
+ *
+ * Wraps the 3 agent edge functions (route-message, agent-dispatch, agent-sync)
+ * into a clean interface. Falls back to default behavior if edge functions
+ * are unavailable (Supabase not configured, functions not deployed, etc.).
+ */
+
+import type { SupabaseClient } from "@supabase/supabase-js";
+
+export interface AgentConfig {
+  name: string;
+  type: string;
+  system_prompt: string | null;
+  model: string | null;
+  tools_enabled: string[];
+  capabilities: string[];
+}
+
+export interface RouteResult {
+  agent_id: string;
+  agent_name: string;
+  rule_name: string;
+  session_id?: string;
+}
+
+export interface DispatchResult {
+  session_id: string;
+  agent: AgentConfig;
+  is_new: boolean;
+  context_summary?: string;
+}
+
+export interface SyncResult {
+  success: boolean;
+  handoff_id?: string;
+  new_session_id?: string;
+}
+
+/**
+ * Route a message to the appropriate agent.
+ * Returns null if routing is unavailable (falls back to default behavior).
+ */
+export async function routeMessage(
+  supabase: SupabaseClient | null,
+  message: string,
+  channel: string,
+  userId: string,
+): Promise<RouteResult | null> {
+  if (!supabase) return null;
+
+  try {
+    const { data, error } = await supabase.functions.invoke("route-message", {
+      body: { message, channel, user_id: userId },
+    });
+
+    if (error || !data?.agent_name) {
+      console.error("[agent-router] Route error:", error || "no agent_name");
+      return null;
+    }
+
+    console.log(
+      `[agent-router] Routed to "${data.agent_name}" via ${data.rule_name}`,
+    );
+    return data as RouteResult;
+  } catch (err) {
+    console.error("[agent-router] Route unavailable:", err);
+    return null;
+  }
+}
+
+/**
+ * Dispatch: create/resume an agent session and get agent config.
+ * Returns null if dispatch is unavailable.
+ */
+export async function dispatchAgent(
+  supabase: SupabaseClient | null,
+  agentName: string,
+  userId: string,
+  channel: string,
+  message: string,
+  workItemId?: string,
+): Promise<DispatchResult | null> {
+  if (!supabase) return null;
+
+  try {
+    const { data, error } = await supabase.functions.invoke("agent-dispatch", {
+      body: {
+        agent_name: agentName,
+        user_id: userId,
+        channel,
+        message,
+        work_item_id: workItemId,
+      },
+    });
+
+    if (error || !data?.session_id) {
+      console.error("[agent-router] Dispatch error:", error || "no session_id");
+      return null;
+    }
+
+    console.log(
+      `[agent-router] ${data.is_new ? "New" : "Resumed"} session ${data.session_id.slice(0, 8)} for ${agentName}`,
+    );
+    return data as DispatchResult;
+  } catch (err) {
+    console.error("[agent-router] Dispatch unavailable:", err);
+    return null;
+  }
+}
+
+/**
+ * Sync: log assistant response and update session stats.
+ * Returns null if sync is unavailable (non-fatal — message already sent).
+ */
+export async function syncResponse(
+  supabase: SupabaseClient | null,
+  sessionId: string,
+  assistantMessage: string,
+  options?: {
+    tokens?: number;
+    duration_ms?: number;
+    status?: "completed" | "failed";
+    handoff?: {
+      to_agent: string;
+      reason: string;
+      context_summary: string;
+    };
+  },
+): Promise<SyncResult | null> {
+  if (!supabase) return null;
+
+  try {
+    const { data, error } = await supabase.functions.invoke("agent-sync", {
+      body: {
+        session_id: sessionId,
+        assistant_message: assistantMessage,
+        ...options,
+      },
+    });
+
+    if (error) {
+      console.error("[agent-router] Sync error:", error);
+      return null;
+    }
+
+    return data as SyncResult;
+  } catch (err) {
+    console.error("[agent-router] Sync unavailable:", err);
+    return null;
+  }
+}
+
+/**
+ * Full pipeline: route → dispatch → return config.
+ * The relay calls this before buildPrompt(), then calls syncResponse() after.
+ *
+ * Returns null if any step fails — caller should fall back to default behavior.
+ */
+export async function routeAndDispatch(
+  supabase: SupabaseClient | null,
+  message: string,
+  channel: string,
+  userId: string,
+): Promise<{
+  route: RouteResult;
+  dispatch: DispatchResult;
+} | null> {
+  const route = await routeMessage(supabase, message, channel, userId);
+  if (!route) return null;
+
+  const dispatch = await dispatchAgent(
+    supabase,
+    route.agent_name,
+    userId,
+    channel,
+    message,
+  );
+  if (!dispatch) return null;
+
+  return { route, dispatch };
+}

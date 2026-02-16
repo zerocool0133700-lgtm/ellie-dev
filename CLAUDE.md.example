@@ -1,0 +1,446 @@
+# EveLife — Claude Code Dispatch Protocol
+
+> This file is read automatically by Claude Code sessions. It defines how work sessions integrate with Dave's unified communication strategy.
+
+## Project Overview
+
+**EveLife** is a modern EVE Online tooling suite that helps players optimize their industrial operations:
+- Planetary Interaction (PI) production tracking
+- Market arbitrage analysis
+- Manufacturing chain optimization
+- Built on: Supabase (Postgres), n8n automation, ESI MCP server for live game data
+
+**Related Projects:**
+- **EveGuru** — predecessor system being migrated from
+- **Ellie Home** — unified AI communication platform
+- **Plane** — task management system at plane.ellie-labs.dev
+
+---
+
+## Work Item Integration
+
+### Endpoint Configuration
+```
+Base URL: https://plane.ellie-labs.dev/api/v1
+Auth: Bearer token from PLANE_API_KEY environment variable
+Project ID: (to be set after Plane setup)
+```
+
+### Session Startup Protocol
+
+When a Claude Code session starts in this repository:
+
+1. **Check for active work session:**
+   ```
+   Are you here to work on a defined work item from Plane?
+   ```
+
+2. **If YES, fetch open work items:**
+   ```bash
+   GET /api/v1/projects/{project_id}/issues?state=started,unstarted
+   ```
+
+   Display to user:
+   - Issue ID and title
+   - Priority and labels
+   - Description summary
+   - Acceptance criteria (if defined)
+
+3. **User selects work item** — load full context:
+   ```bash
+   GET /api/v1/projects/{project_id}/issues/{issue_id}
+   ```
+
+4. **Proceed to agent selection** (see Agent Roster below)
+
+---
+
+## Agent Roster
+
+**Available agents for EveLife work:**
+
+- **James** (`@architecture`) — System design, database schema, API planning, architectural decisions
+- **Dev Agent** (`@implementation`) — Writing code, implementing features, fixing bugs, refactoring
+- **Research Agent** (`@discovery`) — Investigating ESI API endpoints, EVE game mechanics, library evaluation
+- **Data Agent** (`@analytics`) — Market data analysis, PI optimization algorithms, manufacturing calculations
+- **Critic Agent** (`@review`) — Code review, testing strategy, edge case analysis, security review
+
+**Agent selection rules:**
+- Architecture/schema changes → **James**
+- New feature implementation → **Dev Agent** (after James if architectural)
+- API integration/research → **Research Agent**
+- Game data analysis → **Data Agent**
+- PR review / testing → **Critic Agent**
+
+---
+
+## Communication Endpoints
+
+During work sessions, report progress to Ellie Home unified communication system:
+
+### 1. Session Start
+```bash
+POST https://relay.ellie-labs.dev/api/work-session/start
+Content-Type: application/json
+Authorization: Bearer $ELLIE_API_KEY
+
+{
+  "work_item_id": "PLANE-123",
+  "work_item_title": "Add PI production chain tracking",
+  "agent": "James",
+  "repository": "EveLife",
+  "session_id": "uuid-generated",
+  "timestamp": "2026-02-16T02:01:00Z"
+}
+```
+
+### 2. Progress Updates
+Report every **15 minutes** or on **major milestones** (file changes, decisions, breakthroughs):
+
+```bash
+POST https://relay.ellie-labs.dev/api/work-session/update
+Content-Type: application/json
+
+{
+  "session_id": "uuid-from-start",
+  "work_item_id": "PLANE-123",
+  "timestamp": "2026-02-16T02:15:00Z",
+  "update_type": "progress|decision|milestone|blocker",
+  "summary": "Created database schema for PI production chains",
+  "details": {
+    "files_changed": ["db/migrations/002_pi_chains.sql", "src/types/pi.ts"],
+    "lines_added": 145,
+    "lines_removed": 12,
+    "commits": ["abc123"]
+  }
+}
+```
+
+**Update types:**
+- `progress` — regular work update (files changed, features added)
+- `decision` — architectural or implementation decision made
+- `milestone` — significant checkpoint reached (tests passing, feature complete)
+- `blocker` — stuck on something, need input or research
+
+### 3. Decision Logging
+When choosing between approaches, log the decision:
+
+```bash
+POST https://relay.ellie-labs.dev/api/work-session/decision
+
+{
+  "session_id": "uuid",
+  "work_item_id": "PLANE-123",
+  "timestamp": "2026-02-16T02:30:00Z",
+  "decision": "Use Supabase Edge Functions for ESI data caching instead of n8n polling",
+  "reasoning": "Lower latency, better error handling, keep auth in Supabase",
+  "alternatives_considered": ["n8n scheduled workflows", "client-side caching"],
+  "impact": "architecture"
+}
+```
+
+### 4. Session Complete
+When work item is done:
+
+```bash
+POST https://relay.ellie-labs.dev/api/work-session/complete
+
+{
+  "session_id": "uuid",
+  "work_item_id": "PLANE-123",
+  "timestamp": "2026-02-16T03:45:00Z",
+  "status": "completed|blocked|paused",
+  "summary": "PI production chain tracking implemented with database schema, API endpoints, and basic UI",
+  "deliverables": {
+    "files_changed": ["db/migrations/002_pi_chains.sql", "src/api/pi.ts", "src/components/PIChain.tsx"],
+    "tests_added": 12,
+    "commits": ["abc123", "def456", "ghi789"]
+  },
+  "next_steps": "Ready for PR review. Consider adding bulk import for existing PI setups.",
+  "time_spent_minutes": 105
+}
+```
+
+This triggers:
+- Telegram notification to Dave
+- Plane issue status update
+- Memory storage in Supabase
+- Conversation log archival
+
+---
+
+## Session Lifecycle
+
+### Startup
+1. Load CLAUDE.md (this file)
+2. Check if working on defined task → fetch from Plane
+3. User selects work item + agent
+4. POST to `/work-session/start`
+5. Load relevant memories from Ellie Home (past decisions, related conversations)
+
+### During Work
+- **Every 15 minutes:** POST progress update
+- **On file changes:** Include in next update
+- **On decisions:** POST to `/work-session/decision`
+- **On blockers:** POST update with `blocker` type, notify Telegram
+
+### Completion
+1. POST to `/work-session/complete`
+2. Update Plane issue status
+3. Commit with descriptive message: `[PLANE-123] Add PI production chain tracking`
+4. Push to branch: `feature/PLANE-123-pi-chain-tracking`
+5. Summary posted to Telegram (Dave sees it in Ellie context)
+
+---
+
+## Git Workflow
+
+### Branch Naming
+```
+feature/PLANE-{id}-{short-description}
+fix/PLANE-{id}-{short-description}
+refactor/PLANE-{id}-{short-description}
+```
+
+### Commit Messages
+```
+[PLANE-{id}] Brief description of change
+
+Longer explanation if needed. Reference architectural decisions.
+Mention any breaking changes or migration steps.
+```
+
+### Pre-commit Checklist
+- [ ] Run type checker: `bun run type-check`
+- [ ] Run linter: `bun run lint`
+- [ ] Run tests: `bun run test`
+- [ ] Update CLAUDE.md if architecture changed
+- [ ] Update Plane issue with progress
+
+---
+
+## Environment Variables Required
+
+```bash
+# Plane Integration
+PLANE_API_KEY=your-plane-api-token
+PLANE_PROJECT_ID=your-project-uuid
+
+# Ellie Home Communication
+ELLIE_API_KEY=your-relay-api-token
+ELLIE_RELAY_URL=https://relay.ellie-labs.dev
+
+# Supabase (EveLife database)
+SUPABASE_URL=your-supabase-project-url
+SUPABASE_ANON_KEY=your-supabase-anon-key
+SUPABASE_SERVICE_KEY=your-supabase-service-key
+
+# ESI (EVE Online API)
+EVE_CLIENT_ID=your-eve-app-client-id
+EVE_CLIENT_SECRET=your-eve-app-secret
+
+# Optional: Local development
+DATABASE_URL=postgresql://localhost:5432/evelife_dev
+```
+
+---
+
+## Project Architecture
+
+### Database (Supabase Postgres)
+- `characters` — EVE characters linked to users
+- `pi_planets` — planetary installations
+- `pi_chains` — production chains and routes
+- `market_orders` — tracked market data
+- `manufacturing_jobs` — industry job tracking
+
+### Backend (Supabase Edge Functions)
+- `esi-proxy` — authenticated ESI requests
+- `market-analysis` — arbitrage calculations
+- `pi-optimizer` — production chain suggestions
+
+### Frontend (Next.js + React)
+- Dashboard: character overview, PI status, market watch
+- PI Manager: chain builder, planet manager
+- Market Analyzer: arbitrage opportunities, price trends
+
+### Automation (n8n on VPS #3)
+- ESI data polling (market prices, industry jobs)
+- Production cycle notifications
+- Market opportunity alerts
+
+---
+
+## Architectural Decisions
+
+### Decision Log
+**Record format:**
+```
+## [Date] Decision Title
+**Context:** What problem are we solving?
+**Decision:** What did we choose?
+**Alternatives:** What else did we consider?
+**Consequences:** What are the implications?
+```
+
+### Active Decisions
+
+#### 2026-02-16: Use Plane for Task Management
+**Context:** Need task management integrated with unified communication system
+**Decision:** Deploy Plane at plane.ellie-labs.dev, use Postgres backend compatible with Supabase
+**Alternatives:** Jira (too heavy), Linear (not self-hostable), custom system (reinventing wheel)
+**Consequences:** Visual interface Dave prefers, self-hosted control, API integration with Ellie Home
+
+*(More decisions will be added as work progresses)*
+
+---
+
+## Integration Points
+
+### ESI MCP Server
+- EveLife uses the ESI MCP server for live game data access
+- Authentication via EVE SSO (OAuth2)
+- Character data, market data, industry jobs
+- See: `mcp-servers/eve-esi/` in ellie-dev repo
+
+### Supabase Backend
+- Shared database with Ellie Home relay
+- Separate schema for EveLife tables
+- Row-level security for multi-user support
+- Edge Functions for server-side logic
+
+### n8n Automation
+- Deployed on VPS #3
+- Handles periodic ESI polling (market prices every 5 minutes)
+- Sends notifications via Ellie Home Telegram relay
+- Workflow editor at n8n.ellie-labs.dev
+
+---
+
+## Testing Strategy
+
+### Unit Tests
+- Business logic in `src/lib/`
+- Database queries in `src/db/`
+- Run: `bun test`
+
+### Integration Tests
+- ESI API mocking
+- Supabase client testing
+- Run: `bun test:integration`
+
+### Manual Testing
+- Test EVE character linking flow
+- Verify PI chain calculations
+- Check market data accuracy
+- Run: `bun run dev` (local dev server)
+
+---
+
+## Deployment
+
+### Development
+```bash
+bun run dev        # Next.js dev server
+bun run supabase:local  # Local Supabase
+```
+
+### Staging
+- Deployed to Vercel preview branches
+- Uses staging Supabase project
+- Trigger: push to any branch
+
+### Production
+- Deployed to Vercel production
+- Uses production Supabase project
+- Trigger: merge to `main` branch
+- Domain: evelife.ellie-labs.dev
+
+---
+
+## Memories to Load
+
+When starting work on EveLife, Claude Code should be aware of:
+
+1. **Dave's EVE Online context:**
+   - Plays EVE Online, focuses on Planetary Interaction (PI) production
+   - Migrating from EveGuru (previous tooling)
+   - Uses Miro for visual planning
+
+2. **Related conversations:**
+   - Elasticsearch implementation for fast context search
+   - Multi-agent architecture (James for dev work)
+   - Unified communication strategy across channels
+
+3. **Technical preferences:**
+   - Uses Bun over npm
+   - Prefers TypeScript strict mode
+   - Likes visual interfaces (hence Plane over Jira)
+
+---
+
+## Common Tasks
+
+### Starting work on a new feature
+1. Fetch work item from Plane
+2. Select agent (usually James for new features)
+3. POST to `/work-session/start`
+4. Create feature branch
+5. Implement, test, commit
+6. POST progress updates every 15 minutes
+7. POST to `/work-session/complete`
+8. Push branch, create PR
+
+### Fixing a bug
+1. Reproduce bug locally
+2. POST to `/work-session/start` with bug work item
+3. Identify root cause
+4. Implement fix
+5. Add regression test
+6. POST to `/work-session/complete`
+7. Push, PR, merge
+
+### Refactoring
+1. POST to `/work-session/start`
+2. Run full test suite before changes
+3. Refactor incrementally
+4. Run tests after each change
+5. POST progress updates
+6. POST to `/work-session/complete`
+7. Update architectural decision log if needed
+
+---
+
+## Emergency Contacts
+
+If something breaks during a work session:
+
+- **Dave:** Notify via Telegram through Ellie Home
+- **System logs:** `journalctl --user -u claude-telegram-relay`
+- **Supabase status:** Check dashboard
+- **ESI status:** Check EVE Online server status
+
+---
+
+## Next Steps After Setup
+
+Once Plane is configured:
+
+1. Create EveLife project in Plane
+2. Set `PLANE_PROJECT_ID` in `.env`
+3. Create first work item: "Set up project structure"
+4. Test workflow: start Claude Code session, fetch work item, complete it
+5. Verify Telegram notification in Ellie Home
+
+---
+
+## Resources
+
+- **Plane Docs:** https://docs.plane.so
+- **ESI Docs:** https://esi.evetech.net/ui/
+- **Supabase Docs:** https://supabase.com/docs
+- **n8n Docs:** https://docs.n8n.io
+
+---
+
+*This CLAUDE.md is a living document. Update it as the project evolves, decisions are made, and patterns emerge.*

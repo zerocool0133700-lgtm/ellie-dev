@@ -13,7 +13,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Bot } from "grammy";
-import { updateWorkItemOnSessionStart } from "../plane.ts";
+import { updateWorkItemOnSessionStart, updateWorkItemOnSessionComplete } from "../plane.ts";
 
 const TELEGRAM_USER_ID = process.env.TELEGRAM_USER_ID!;
 
@@ -284,6 +284,13 @@ export async function completeWorkSession(req: any, res: any, supabase: Supabase
     if (completeError) {
       console.error('[work-session:complete] Failed to update session:', completeError);
       return res.status(500).json({ error: 'Failed to mark session complete' });
+    }
+
+    // Update Plane work item: set "Done" + add completion comment
+    try {
+      await updateWorkItemOnSessionComplete(work_item_id, summary, "completed");
+    } catch (planeError) {
+      console.warn('[work-session:complete] Plane update failed (non-fatal):', planeError);
     }
 
     // Send Telegram notification

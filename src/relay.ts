@@ -24,6 +24,19 @@ import {
 } from "./memory.ts";
 import { consolidateNow } from "./consolidate-inline.ts";
 import { indexMessage, searchElastic } from "./elasticsearch.ts";
+import {
+  initGoogleChat,
+  parseGoogleChatEvent,
+  sendGoogleChatMessage,
+  isAllowedSender,
+  isGoogleChatEnabled,
+  type GoogleChatEvent,
+} from "./google-chat.ts";
+import {
+  routeAndDispatch,
+  syncResponse,
+  type DispatchResult,
+} from "./agent-router.ts";
 
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
 
@@ -40,7 +53,7 @@ const RELAY_DIR = process.env.RELAY_DIR || join(process.env.HOME || "~", ".claud
 // Agent mode: gives Claude access to tools (Read, Write, Bash, etc.)
 const AGENT_MODE = process.env.AGENT_MODE !== "false"; // on by default
 const DEFAULT_TOOLS = "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch";
-const MCP_TOOLS = "mcp__google-workspace__*,mcp__github__*,mcp__memory__*,mcp__sequential-thinking__*";
+const MCP_TOOLS = "mcp__google-workspace__*,mcp__github__*,mcp__memory__*,mcp__sequential-thinking__*,mcp__plane__*,mcp__claude_ai_Miro__*";
 const ALLOWED_TOOLS = (process.env.ALLOWED_TOOLS || `${DEFAULT_TOOLS},${MCP_TOOLS}`).split(",").map(t => t.trim());
 
 // Voice call config
@@ -48,7 +61,7 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "EXAVITQu4vr4xnSDxMaL";
 const HTTP_PORT = parseInt(process.env.HTTP_PORT || "3000");
 const PUBLIC_URL = process.env.PUBLIC_URL || "";
-const SILENCE_THRESHOLD_MS = 1200; // ms of silence after speech to trigger processing
+const SILENCE_THRESHOLD_MS = 800; // ms of silence after speech to trigger processing
 const MIN_AUDIO_MS = 400;
 const TMP_DIR = process.env.TMPDIR || "/tmp";
 
@@ -101,6 +114,7 @@ async function getContextDocket(): Promise<string> {
 
 const TELEGRAM_IDLE_MS = 10 * 60_000; // 10 minutes of silence = conversation over
 let telegramIdleTimer: ReturnType<typeof setTimeout> | null = null;
+let gchatIdleTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * Run consolidation for a channel, then invalidate the context cache
@@ -133,6 +147,14 @@ function resetTelegramIdleTimer(): void {
   telegramIdleTimer = setTimeout(() => {
     console.log("[consolidate] Telegram idle for 10 minutes — consolidating...");
     triggerConsolidation("telegram");
+  }, TELEGRAM_IDLE_MS);
+}
+
+function resetGchatIdleTimer(): void {
+  if (gchatIdleTimer) clearTimeout(gchatIdleTimer);
+  gchatIdleTimer = setTimeout(() => {
+    console.log("[consolidate] Google Chat idle for 10 minutes — consolidating...");
+    triggerConsolidation("google-chat");
   }, TELEGRAM_IDLE_MS);
 }
 
@@ -263,7 +285,7 @@ if (!(await acquireLock())) {
   process.exit(1);
 }
 
-const bot = new Bot(BOT_TOKEN);
+export const bot = new Bot(BOT_TOKEN);
 
 // ============================================================
 // SECURITY: Only respond to authorized user
@@ -380,6 +402,31 @@ async function processQueue(): Promise<void> {
   busy = false;
 }
 
+/**
+ * Enqueue a task for the shared Claude pipeline.
+ * Used by non-Telegram channels (Google Chat) that don't have a grammY ctx.
+ * Returns a promise that resolves when the task completes.
+ */
+function enqueue(task: () => Promise<void>): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const wrapped = async () => {
+      try {
+        await task();
+        resolve();
+      } catch (err) {
+        reject(err);
+      }
+    };
+
+    if (busy) {
+      messageQueue.push(wrapped);
+      return;
+    }
+    busy = true;
+    wrapped().finally(() => processQueue());
+  });
+}
+
 function withQueue(handler: (ctx: Context) => Promise<void>) {
   return async (ctx: Context) => {
     if (busy) {
@@ -404,11 +451,15 @@ function withQueue(handler: (ctx: Context) => Promise<void>) {
 // Text messages
 bot.on("message:text", withQueue(async (ctx) => {
   const text = ctx.message.text;
+  const userId = ctx.from?.id.toString() || "";
   console.log(`Message: ${text.substring(0, 50)}...`);
 
   await ctx.replyWithChatAction("typing");
 
   await saveMessage("user", text);
+
+  // Route message to appropriate agent (falls back gracefully)
+  const agentResult = await routeAndDispatch(supabase, text, "telegram", userId);
 
   // Gather context: docket + semantic search + ES full-text search
   const [contextDocket, relevantContext, elasticContext] = await Promise.all([
@@ -417,13 +468,27 @@ bot.on("message:text", withQueue(async (ctx) => {
     searchElastic(text, { limit: 5, recencyBoost: true }),
   ]);
 
-  const enrichedPrompt = buildPrompt(text, contextDocket, relevantContext, elasticContext);
+  const enrichedPrompt = buildPrompt(
+    text, contextDocket, relevantContext, elasticContext, "telegram",
+    agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name } : undefined,
+  );
+
+  const startTime = Date.now();
   const rawResponse = await callClaudeWithTyping(ctx, enrichedPrompt, { resume: true });
+  const durationMs = Date.now() - startTime;
 
   // Parse and save any memory intents, strip tags from response
   const response = await processMemoryIntents(supabase, rawResponse);
 
   await saveMessage("assistant", response);
+
+  // Sync response to agent session (fire-and-forget)
+  if (agentResult) {
+    syncResponse(supabase, agentResult.dispatch.session_id, response, {
+      duration_ms: durationMs,
+    }).catch(() => {});
+  }
+
   await sendResponse(ctx, response);
   resetTelegramIdleTimer();
 }));
@@ -456,6 +521,9 @@ bot.on("message:voice", withQueue(async (ctx) => {
 
     await saveMessage("user", `[Voice ${voice.duration}s]: ${transcription}`);
 
+    const voiceUserId = ctx.from?.id.toString() || "";
+    const agentResult = await routeAndDispatch(supabase, transcription, "telegram", voiceUserId);
+
     const [contextDocket, relevantContext, elasticContext] = await Promise.all([
       getContextDocket(),
       getRelevantContext(supabase, transcription),
@@ -466,12 +534,24 @@ bot.on("message:voice", withQueue(async (ctx) => {
       `[Voice message transcribed]: ${transcription}`,
       contextDocket,
       relevantContext,
-      elasticContext
+      elasticContext,
+      "telegram",
+      agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name } : undefined,
     );
+
+    const startTime = Date.now();
     const rawResponse = await callClaudeWithTyping(ctx, enrichedPrompt, { resume: true });
+    const durationMs = Date.now() - startTime;
     const claudeResponse = await processMemoryIntents(supabase, rawResponse);
 
     await saveMessage("assistant", claudeResponse);
+
+    if (agentResult) {
+      syncResponse(supabase, agentResult.dispatch.session_id, claudeResponse, {
+        duration_ms: durationMs,
+      }).catch(() => {});
+    }
+
     await sendResponse(ctx, claudeResponse);
     resetTelegramIdleTimer();
   } catch (error) {
@@ -579,16 +659,23 @@ function buildPrompt(
   contextDocket?: string,
   relevantContext?: string,
   elasticContext?: string,
+  channel: string = "telegram",
+  agentConfig?: { system_prompt?: string | null; name?: string },
 ): string {
-  const parts = [
-    "You are a personal AI assistant responding via Telegram. Keep responses concise and conversational.",
-  ];
+  const channelLabel = channel === "google-chat" ? "Google Chat" : "Telegram";
+
+  // Use agent-specific system prompt if available, otherwise default
+  const basePrompt = agentConfig?.system_prompt
+    ? `${agentConfig.system_prompt}\nYou are responding via ${channelLabel}. Keep responses concise and conversational.`
+    : `You are a personal AI assistant responding via ${channelLabel}. Keep responses concise and conversational.`;
+
+  const parts = [basePrompt];
 
   if (AGENT_MODE) {
     parts.push(
       "You have full tool access: Read, Edit, Write, Bash, Glob, Grep, WebSearch, WebFetch. " +
       "You also have MCP tools: Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Tasks — user_google_email is zerocool0133700@gmail.com), " +
-      "GitHub, Memory, and Sequential Thinking. " +
+      "GitHub, Memory, Sequential Thinking, and Plane (project management — workspace: evelife at plane.ellie-labs.dev). " +
       "Use them freely to answer questions — read files, run commands, search code, browse the web, check email, manage calendar. " +
       "IMPORTANT: NEVER run sudo commands, NEVER install packages (apt, npm -g, brew), NEVER run commands that require interactive input or confirmation. " +
       "If a task would require sudo or installing software, tell the user what to run instead. " +
@@ -729,6 +816,85 @@ async function transcribeMulaw(mulawChunks: Buffer[]): Promise<string> {
 // VOICE: ElevenLabs TTS (text → mulaw base64 for Twilio)
 // ============================================================
 
+/**
+ * Stream TTS audio directly to Twilio WebSocket as chunks arrive from ElevenLabs.
+ * Returns true on success, false on failure.
+ * This avoids buffering the entire audio before playback — first audio plays
+ * while the rest is still being generated.
+ */
+async function streamTTSToTwilio(
+  text: string,
+  ws: WebSocket,
+  streamSid: string,
+): Promise<boolean> {
+  if (!ELEVENLABS_API_KEY) { console.error("[voice] No ElevenLabs API key"); return false; }
+
+  const start = Date.now();
+
+  const response = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream?output_format=ulaw_8000`,
+    {
+      method: "POST",
+      headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        model_id: "eleven_turbo_v2_5",
+        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+      }),
+    }
+  );
+
+  if (!response.ok || !response.body) {
+    console.error("[voice] ElevenLabs stream error:", response.status, await response.text());
+    return false;
+  }
+
+  // Stream chunks to Twilio as they arrive from ElevenLabs
+  const CHUNK_SIZE = 160 * 20; // ~400ms of mulaw audio per Twilio chunk
+  let buffer = Buffer.alloc(0);
+  let firstChunkSent = false;
+
+  const reader = response.body.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer = Buffer.concat([buffer, Buffer.from(value)]);
+
+    // Send complete chunks as they accumulate
+    while (buffer.length >= CHUNK_SIZE) {
+      const chunk = buffer.subarray(0, CHUNK_SIZE);
+      buffer = buffer.subarray(CHUNK_SIZE);
+
+      ws.send(JSON.stringify({
+        event: "media",
+        streamSid,
+        media: { payload: chunk.toString("base64") },
+      }));
+
+      if (!firstChunkSent) {
+        console.log(`[voice] First TTS chunk sent in ${Date.now() - start}ms`);
+        firstChunkSent = true;
+      }
+    }
+  }
+
+  // Send remaining audio
+  if (buffer.length > 0) {
+    ws.send(JSON.stringify({
+      event: "media",
+      streamSid,
+      media: { payload: buffer.toString("base64") },
+    }));
+  }
+
+  console.log(`[voice] TTS stream complete in ${Date.now() - start}ms`);
+  return true;
+}
+
+/**
+ * Non-streaming fallback for textToSpeechMulaw (used if streaming not possible).
+ */
 async function textToSpeechMulaw(text: string): Promise<string> {
   if (!ELEVENLABS_API_KEY) { console.error("[voice] No ElevenLabs API key"); return ""; }
 
@@ -847,8 +1013,15 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
   session.processing = true;
 
   const chunks = session.audioChunks.splice(0);
+  const pipelineStart = Date.now();
 
   try {
+    // --- OPTIMIZATION: Start context retrieval IN PARALLEL with transcription ---
+    // Context doesn't depend on the transcribed text (docket is cached, semantic search
+    // uses the text but we can start the docket fetch and fall back gracefully).
+    // We kick off the docket fetch now and do the text-dependent searches after transcription.
+    const contextDocketPromise = getContextDocket();
+
     console.log(`[voice] Transcribing ${chunks.length} chunks...`);
     const text = await transcribeMulaw(chunks);
 
@@ -858,18 +1031,21 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
       return;
     }
 
-    console.log(`[voice] User said: "${text}"`);
+    console.log(`[voice] User said: "${text}" (transcribed in ${Date.now() - pipelineStart}ms)`);
     session.conversationHistory.push({ role: "user", content: text });
-    await saveMessage("user", text, { callSid: session.callSid }, "voice");
+
+    // Fire-and-forget: save user message (don't block the pipeline)
+    saveMessage("user", text, { callSid: session.callSid }, "voice").catch(() => {});
 
     const conversationContext = session.conversationHistory
       .slice(-6)
       .map(m => `${m.role}: ${m.content}`)
       .join("\n");
 
-    // Pull context docket + semantic search + ES for this specific utterance
+    // Now that we have text, run text-dependent searches in parallel.
+    // contextDocketPromise was already started during transcription.
     const [contextDocket, relevantContext, elasticContext] = await Promise.all([
-      getContextDocket(),
+      contextDocketPromise,
       getRelevantContext(supabase, text),
       searchElastic(text, { limit: 3, recencyBoost: true }),
     ]);
@@ -898,14 +1074,14 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
       .replace(/\[DONE:.*?\]/g, "")
       .trim();
 
-    console.log(`[voice] Ellie says: "${cleanResponse}"`);
+    console.log(`[voice] Ellie says: "${cleanResponse}" (LLM done at ${Date.now() - pipelineStart}ms)`);
     session.conversationHistory.push({ role: "assistant", content: cleanResponse });
-    await saveMessage("assistant", cleanResponse, { callSid: session.callSid }, "voice");
 
-    const audioBase64 = await textToSpeechMulaw(cleanResponse);
+    // Fire-and-forget: save assistant message
+    saveMessage("assistant", cleanResponse, { callSid: session.callSid }, "voice").catch(() => {});
 
-    if (!audioBase64 || !session.streamSid) {
-      console.error("[voice] No audio or no stream SID");
+    if (!session.streamSid) {
+      console.error("[voice] No stream SID");
       session.processing = false;
       return;
     }
@@ -913,26 +1089,42 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
     // Mark as speaking — ignore inbound audio until playback finishes
     session.speaking = true;
 
-    // Clear buffered audio then send response
+    // Clear buffered audio then stream response
     session.ws.send(JSON.stringify({ event: "clear", streamSid: session.streamSid }));
 
-    const CHUNK_SIZE = 160 * 20;
-    const audioBuffer = Buffer.from(audioBase64, "base64");
+    // --- OPTIMIZATION: Stream TTS chunks to Twilio as they arrive from ElevenLabs ---
+    const streamed = await streamTTSToTwilio(cleanResponse, session.ws, session.streamSid);
 
-    for (let i = 0; i < audioBuffer.length; i += CHUNK_SIZE) {
-      const chunk = audioBuffer.subarray(i, i + CHUNK_SIZE);
-      session.ws.send(JSON.stringify({
-        event: "media",
-        streamSid: session.streamSid,
-        media: { payload: chunk.toString("base64") },
-      }));
+    if (!streamed) {
+      // Fallback to non-streaming TTS
+      console.log("[voice] Streaming failed, falling back to buffered TTS");
+      const audioBase64 = await textToSpeechMulaw(cleanResponse);
+      if (!audioBase64) {
+        console.error("[voice] No audio from fallback TTS");
+        session.speaking = false;
+        session.processing = false;
+        return;
+      }
+      const CHUNK_SIZE = 160 * 20;
+      const audioBuffer = Buffer.from(audioBase64, "base64");
+      for (let i = 0; i < audioBuffer.length; i += CHUNK_SIZE) {
+        const chunk = audioBuffer.subarray(i, i + CHUNK_SIZE);
+        session.ws.send(JSON.stringify({
+          event: "media",
+          streamSid: session.streamSid,
+          media: { payload: chunk.toString("base64") },
+        }));
+      }
     }
 
+    // Send mark to detect when playback finishes
     session.ws.send(JSON.stringify({
       event: "mark",
       streamSid: session.streamSid,
       mark: { name: `response_${Date.now()}` },
     }));
+
+    console.log(`[voice] Total pipeline: ${Date.now() - pipelineStart}ms`);
   } catch (error) {
     console.error("[voice] Processing error:", error);
   }
@@ -967,10 +1159,146 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     return;
   }
 
+  // Google Chat webhook
+  if (url.pathname === "/google-chat" && req.method === "POST") {
+    // Read body
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", () => {
+      // Return 200 immediately — async processing below
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+
+      // Process asynchronously
+      (async () => {
+        try {
+          const event: GoogleChatEvent = JSON.parse(body);
+          const parsed = parseGoogleChatEvent(event);
+          if (!parsed) return;
+
+          if (!isAllowedSender(parsed.senderEmail)) {
+            console.log(`[gchat] Unauthorized sender: ${parsed.senderEmail}`);
+            return;
+          }
+
+          console.log(`[gchat] ${parsed.senderName}: ${parsed.text.substring(0, 80)}...`);
+
+          // Enqueue into the shared pipeline
+          enqueue(async () => {
+            await saveMessage("user", parsed.text, {
+              sender: parsed.senderEmail,
+              space: parsed.spaceName,
+            }, "google-chat");
+
+            const gchatAgentResult = await routeAndDispatch(supabase, parsed.text, "google-chat", parsed.senderEmail);
+
+            const [contextDocket, relevantContext, elasticContext] = await Promise.all([
+              getContextDocket(),
+              getRelevantContext(supabase, parsed.text),
+              searchElastic(parsed.text, { limit: 5, recencyBoost: true }),
+            ]);
+
+            const enrichedPrompt = buildPrompt(
+              parsed.text, contextDocket, relevantContext, elasticContext, "google-chat",
+              gchatAgentResult?.dispatch.agent ? { system_prompt: gchatAgentResult.dispatch.agent.system_prompt, name: gchatAgentResult.dispatch.agent.name } : undefined,
+            );
+
+            const gchatStart = Date.now();
+            const rawResponse = await callClaude(enrichedPrompt, { resume: true });
+            const gchatDuration = Date.now() - gchatStart;
+            const response = await processMemoryIntents(supabase, rawResponse);
+
+            if (gchatAgentResult) {
+              syncResponse(supabase, gchatAgentResult.dispatch.session_id, response, {
+                duration_ms: gchatDuration,
+              }).catch(() => {});
+            }
+
+            await saveMessage("assistant", response, {
+              space: parsed.spaceName,
+            }, "google-chat");
+            await sendGoogleChatMessage(parsed.spaceName, response, parsed.threadName);
+            resetGchatIdleTimer();
+          }).catch(err => {
+            console.error("[gchat] Processing error:", err);
+          });
+        } catch (err) {
+          console.error("[gchat] Webhook parse error:", err);
+        }
+      })();
+    });
+    return;
+  }
+
   // Health check
   if (url.pathname === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", service: "ellie-relay", voice: !!ELEVENLABS_API_KEY }));
+    res.end(JSON.stringify({
+      status: "ok",
+      service: "ellie-relay",
+      voice: !!ELEVENLABS_API_KEY,
+      googleChat: isGoogleChatEnabled(),
+    }));
+    return;
+  }
+
+  // Work session endpoints
+  if (url.pathname.startsWith("/api/work-session/") && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body);
+        const endpoint = url.pathname.replace("/api/work-session/", "");
+
+        // Import work-session handlers
+        const { startWorkSession, updateWorkSession, logDecision, completeWorkSession } =
+          await import("./api/work-session.ts");
+
+        // Mock req/res objects that match Express signature
+        const mockReq = { body: data } as any;
+        const mockRes = {
+          status: (code: number) => ({
+            json: (data: any) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(data));
+            }
+          }),
+          json: (data: any) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(data));
+          }
+        } as any;
+
+        if (!supabase) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Database not configured" }));
+          return;
+        }
+
+        switch (endpoint) {
+          case "start":
+            await startWorkSession(mockReq, mockRes, supabase, bot);
+            break;
+          case "update":
+            await updateWorkSession(mockReq, mockRes, supabase, bot);
+            break;
+          case "decision":
+            await logDecision(mockReq, mockRes, supabase, bot);
+            break;
+          case "complete":
+            await completeWorkSession(mockReq, mockRes, supabase, bot);
+            break;
+          default:
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Unknown work-session endpoint" }));
+        }
+      } catch (err) {
+        console.error("[work-session] Error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
     return;
   }
 
@@ -1088,10 +1416,14 @@ voiceWss.on("connection", (ws: WebSocket) => {
 // START
 // ============================================================
 
+// Init Google Chat (optional — skips gracefully if not configured)
+const gchatEnabled = await initGoogleChat();
+
 console.log("Starting Claude Telegram Relay...");
 console.log(`Authorized user: ${ALLOWED_USER_ID || "ANY (not recommended)"}`);
 console.log(`Project directory: ${PROJECT_DIR || "(relay working directory)"}`);
 console.log(`Agent mode: ${AGENT_MODE ? "ON" : "OFF"}${AGENT_MODE ? ` (tools: ${ALLOWED_TOOLS.join(", ")})` : ""}`);
+console.log(`Google Chat: ${gchatEnabled ? "ON" : "OFF"}`);
 
 // Start HTTP + WebSocket server
 httpServer.listen(HTTP_PORT, () => {
@@ -1100,6 +1432,9 @@ httpServer.listen(HTTP_PORT, () => {
   console.log(`[voice] TwiML webhook: http://localhost:${HTTP_PORT}/voice`);
   if (PUBLIC_URL) {
     console.log(`[voice] Public URL: ${PUBLIC_URL}`);
+    if (gchatEnabled) {
+      console.log(`[gchat] Webhook URL: ${PUBLIC_URL}/google-chat`);
+    }
   } else {
     console.log(`[voice] Warning: PUBLIC_URL not set in .env`);
   }

@@ -150,7 +150,7 @@ export async function getRecentMessages(
     const { data, error } = await supabase
       .from("messages")
       .select("role, content, created_at")
-      .in("channel", ["telegram", "voice"])
+      .in("channel", ["telegram", "voice", "google-chat"])
       .order("created_at", { ascending: false })
       .limit(limit);
 

@@ -123,3 +123,43 @@ export async function updateWorkItemOnSessionStart(workItemId: string, sessionId
   await addIssueComment(projectId, issueId, comment);
   console.log(`[plane] Added session comment to ${workItemId}`);
 }
+
+/**
+ * High-level: update a Plane work item when a work session completes.
+ * - Sets state to "Done" (or "Cancelled" if failed)
+ * - Adds a comment with the session summary
+ *
+ * Fails silently (logs warning) if Plane is not configured or the item can't be found.
+ */
+export async function updateWorkItemOnSessionComplete(
+  workItemId: string,
+  summary: string,
+  status: "completed" | "blocked" | "paused" = "completed",
+) {
+  if (!isPlaneConfigured()) {
+    console.log("[plane] Skipping — PLANE_API_KEY not configured");
+    return;
+  }
+
+  const resolved = await resolveWorkItemId(workItemId);
+  if (!resolved) {
+    console.warn(`[plane] Could not resolve work item: ${workItemId}`);
+    return;
+  }
+
+  const { projectId, issueId } = resolved;
+
+  // Map session status to Plane state group
+  const stateGroup = status === "completed" ? "completed" : "started";
+  const stateId = await getStateIdByGroup(projectId, stateGroup);
+  if (stateId) {
+    await updateIssueState(projectId, issueId, stateId);
+    console.log(`[plane] ${workItemId} → ${status === "completed" ? "Done" : "In Progress (blocked/paused)"}`);
+  }
+
+  // Add completion comment
+  const label = status === "completed" ? "completed" : status;
+  const comment = `<p>Work session ${label}</p><p>${summary}</p>`;
+  await addIssueComment(projectId, issueId, comment);
+  console.log(`[plane] Added completion comment to ${workItemId}`);
+}
