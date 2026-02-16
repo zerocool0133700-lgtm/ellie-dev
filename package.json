@@ -14,7 +14,8 @@
     "setup:services": "bun run setup/configure-services.ts",
     "setup:verify": "bun run setup/verify.ts",
     "consolidate": "bun run src/consolidate-memory.ts",
-    "sync:es": "bun run src/sync-es.ts"
+    "sync:es": "bun run src/sync-es.ts",
+    "work:start": "bun run scripts/work-session-start.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.74.0",
