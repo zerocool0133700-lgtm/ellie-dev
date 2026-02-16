@@ -61,7 +61,7 @@ const SERVICES: Record<string, ServiceDef> = {
 };
 
 async function checkPm2(): Promise<boolean> {
-  const result = await run(["npx", "pm2", "--version"]);
+  const result = await run(["pm2", "--version"]);
   if (result.ok) {
     console.log(`  ${PASS} PM2: v${result.stdout}`);
     return true;
@@ -81,10 +81,10 @@ async function installService(config: ServiceDef): Promise<boolean> {
 
   // Always-on service — use PM2
   // Stop existing first
-  await run(["npx", "pm2", "delete", config.name]);
+  await run(["pm2", "delete", config.name]);
 
   const result = await run([
-    "npx", "pm2", "start", config.script,
+    "pm2", "start", config.script,
     "--interpreter", "bun",
     "--name", config.name,
     "--cwd", PROJECT_ROOT,
@@ -133,7 +133,7 @@ async function main() {
   }
 
   // Save PM2 config for auto-restart on reboot
-  await run(["npx", "pm2", "save"]);
+  await run(["pm2", "save"]);
   console.log("");
   console.log(`  ${dim("Auto-start on boot:")} npx pm2 startup`);
   console.log(`  ${dim("Check status:")}        npx pm2 status`);

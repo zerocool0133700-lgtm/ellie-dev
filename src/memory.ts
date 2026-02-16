@@ -115,6 +115,42 @@ export async function getMemoryContext(
 }
 
 /**
+ * Get the most recent messages for conversation continuity.
+ * This ensures Claude always has the immediate conversation thread,
+ * not just semantically similar messages.
+ */
+export async function getRecentMessages(
+  supabase: SupabaseClient | null,
+  limit: number = 10
+): Promise<string> {
+  if (!supabase) return "";
+
+  try {
+    const { data, error } = await supabase
+      .from("messages")
+      .select("role, content, created_at")
+      .in("channel", ["telegram", "voice"])
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (error || !data?.length) return "";
+
+    // Reverse so oldest is first (chronological order)
+    const messages = data.reverse();
+
+    return (
+      "RECENT CONVERSATION:\n" +
+      messages
+        .map((m: any) => `[${m.role}]: ${m.content}`)
+        .join("\n")
+    );
+  } catch (error) {
+    console.error("Recent messages error:", error);
+    return "";
+  }
+}
+
+/**
  * Semantic search for relevant past messages via the search Edge Function.
  * The Edge Function handles embedding generation (OpenAI key stays in Supabase).
  */

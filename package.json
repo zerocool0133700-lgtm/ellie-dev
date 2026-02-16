@@ -11,12 +11,20 @@
     "test:voice": "bun run setup/test-voice.ts",
     "setup:launchd": "bun run setup/configure-launchd.ts",
     "setup:services": "bun run setup/configure-services.ts",
-    "setup:verify": "bun run setup/verify.ts"
+    "setup:verify": "bun run setup/verify.ts",
+    "consolidate": "bun run src/consolidate-memory.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.74.0",
     "@supabase/supabase-js": "^2.45.0",
-    "grammy": "^1.21.1",
-    "groq-sdk": "^0.8.0"
+    "@types/ws": "^8.18.1",
+    "@upstash/context7-mcp": "^2.1.1",
+    "dotenv": "^17.3.1",
+    "elevenlabs": "^1.59.0",
+    "grammy": "^1.40.0",
+    "groq-sdk": "^0.8.0",
+    "twilio": "^5.12.1",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@types/bun": "latest"

@@ -10,6 +10,22 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_net;
 
 -- ============================================================
+-- CONVERSATIONS TABLE (Groups messages into sessions)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS conversations (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  channel TEXT NOT NULL DEFAULT 'telegram',
+  started_at TIMESTAMPTZ NOT NULL,
+  ended_at TIMESTAMPTZ NOT NULL,
+  summary TEXT,
+  message_count INTEGER DEFAULT 0,
+  metadata JSONB DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_conversations_started_at ON conversations(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel);
+
+-- ============================================================
 -- MESSAGES TABLE (Conversation History)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS messages (
@@ -19,11 +35,15 @@ CREATE TABLE IF NOT EXISTS messages (
   content TEXT NOT NULL,
   channel TEXT DEFAULT 'telegram',
   metadata JSONB DEFAULT '{}',
-  embedding VECTOR(1536) -- For semantic search (optional)
+  embedding VECTOR(1536), -- For semantic search (optional)
+  summarized BOOLEAN DEFAULT FALSE,
+  conversation_id UUID REFERENCES conversations(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel);
+CREATE INDEX IF NOT EXISTS idx_messages_summarized ON messages(summarized) WHERE summarized = FALSE;
+CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
 
 -- ============================================================
 -- MEMORY TABLE (Facts & Goals)
@@ -32,13 +52,14 @@ CREATE TABLE IF NOT EXISTS memory (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW(),
-  type TEXT NOT NULL CHECK (type IN ('fact', 'goal', 'completed_goal', 'preference')),
+  type TEXT NOT NULL CHECK (type IN ('fact', 'goal', 'completed_goal', 'preference', 'summary', 'action_item')),
   content TEXT NOT NULL,
   deadline TIMESTAMPTZ,
   completed_at TIMESTAMPTZ,
   priority INTEGER DEFAULT 0,
   metadata JSONB DEFAULT '{}',
-  embedding VECTOR(1536)
+  embedding VECTOR(1536),
+  conversation_id UUID REFERENCES conversations(id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_type ON memory(type);
@@ -64,11 +85,13 @@ CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level);
 -- ============================================================
 -- ROW LEVEL SECURITY
 -- ============================================================
+ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memory ENABLE ROW LEVEL SECURITY;
 ALTER TABLE logs ENABLE ROW LEVEL SECURITY;
 
 -- Allow all for service role (your bot uses service key)
+CREATE POLICY "Allow all for service role" ON conversations FOR ALL USING (true);
 CREATE POLICY "Allow all for service role" ON messages FOR ALL USING (true);
 CREATE POLICY "Allow all for service role" ON memory FOR ALL USING (true);
 CREATE POLICY "Allow all for service role" ON logs FOR ALL USING (true);
