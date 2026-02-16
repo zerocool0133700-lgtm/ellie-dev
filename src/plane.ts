@@ -6,8 +6,8 @@
  */
 
 const PLANE_API_KEY = process.env.PLANE_API_KEY;
-const PLANE_BASE_URL = process.env.PLANE_BASE_URL || "https://plane.ellie-labs.dev";
-const PLANE_WORKSPACE_SLUG = process.env.PLANE_WORKSPACE_SLUG || "evelife";
+const PLANE_BASE_URL = (process.env.PLANE_BASE_URL || "https://plane.ellie-labs.dev").replace(/\/api\/v1\/?$/, "");
+const PLANE_WORKSPACE_SLUG = process.env.PLANE_WORKSPACE_SLUG || process.env.PLANE_WORKSPACE || "evelife";
 
 export function isPlaneConfigured(): boolean {
   return !!PLANE_API_KEY;
