@@ -7,7 +7,7 @@
  * Run: bun run src/relay.ts
  */
 
-import { Bot, Context, InputFile } from "grammy";
+import { Bot, Context, InputFile, InlineKeyboard } from "grammy";
 import { spawn } from "bun";
 import { writeFile, mkdir, readFile, unlink } from "fs/promises";
 import { join, dirname } from "path";
@@ -37,6 +37,13 @@ import {
   syncResponse,
   type DispatchResult,
 } from "./agent-router.ts";
+import {
+  extractApprovalTags,
+  storePendingAction,
+  getPendingAction,
+  removePendingAction,
+  startExpiryCleanup,
+} from "./approval.ts";
 
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
 
@@ -287,6 +294,9 @@ if (!(await acquireLock())) {
 
 export const bot = new Bot(BOT_TOKEN);
 
+// Start approval expiry cleanup
+startExpiryCleanup();
+
 // ============================================================
 // SECURITY: Only respond to authorized user
 // ============================================================
@@ -480,16 +490,18 @@ bot.on("message:text", withQueue(async (ctx) => {
   // Parse and save any memory intents, strip tags from response
   const response = await processMemoryIntents(supabase, rawResponse);
 
-  await saveMessage("assistant", response);
+  // Send response (with approval buttons if [CONFIRM:] tags present)
+  const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId);
+
+  await saveMessage("assistant", cleanedResponse);
 
   // Sync response to agent session (fire-and-forget)
   if (agentResult) {
-    syncResponse(supabase, agentResult.dispatch.session_id, response, {
+    syncResponse(supabase, agentResult.dispatch.session_id, cleanedResponse, {
       duration_ms: durationMs,
     }).catch(() => {});
   }
 
-  await sendResponse(ctx, response);
   resetTelegramIdleTimer();
 }));
 
@@ -544,15 +556,16 @@ bot.on("message:voice", withQueue(async (ctx) => {
     const durationMs = Date.now() - startTime;
     const claudeResponse = await processMemoryIntents(supabase, rawResponse);
 
-    await saveMessage("assistant", claudeResponse);
+    const cleanedResponse = await sendWithApprovals(ctx, claudeResponse, session.sessionId);
+
+    await saveMessage("assistant", cleanedResponse);
 
     if (agentResult) {
-      syncResponse(supabase, agentResult.dispatch.session_id, claudeResponse, {
+      syncResponse(supabase, agentResult.dispatch.session_id, cleanedResponse, {
         duration_ms: durationMs,
       }).catch(() => {});
     }
 
-    await sendResponse(ctx, claudeResponse);
     resetTelegramIdleTimer();
   } catch (error) {
     console.error("Voice error:", error);
@@ -593,8 +606,8 @@ bot.on("message:photo", withQueue(async (ctx) => {
     await unlink(filePath).catch(() => {});
 
     const cleanResponse = await processMemoryIntents(supabase, claudeResponse);
-    await saveMessage("assistant", cleanResponse);
-    await sendResponse(ctx, cleanResponse);
+    const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId);
+    await saveMessage("assistant", finalResponse);
     resetTelegramIdleTimer();
   } catch (error) {
     console.error("Image error:", error);
@@ -630,13 +643,67 @@ bot.on("message:document", withQueue(async (ctx) => {
     await unlink(filePath).catch(() => {});
 
     const cleanResponse = await processMemoryIntents(supabase, claudeResponse);
-    await saveMessage("assistant", cleanResponse);
-    await sendResponse(ctx, cleanResponse);
+    const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId);
+    await saveMessage("assistant", finalResponse);
     resetTelegramIdleTimer();
   } catch (error) {
     console.error("Document error:", error);
     await ctx.reply("Could not process document.");
   }
+}));
+
+// ============================================================
+// APPROVAL CALLBACKS
+// ============================================================
+
+bot.callbackQuery(/^approve:(.+)$/, withQueue(async (ctx) => {
+  const actionId = ctx.match![1];
+  const action = getPendingAction(actionId);
+
+  if (!action) {
+    await ctx.answerCallbackQuery({ text: "This action has expired." });
+    return;
+  }
+
+  await ctx.editMessageText(`\u2705 Approved: ${action.description}`);
+  await ctx.answerCallbackQuery({ text: "Approved" });
+  removePendingAction(actionId);
+
+  await saveMessage("user", `[Approved action: ${action.description}]`);
+
+  const resumePrompt = `The user APPROVED the following action: "${action.description}". Proceed with executing it now.`;
+
+  await ctx.replyWithChatAction("typing");
+  const rawResponse = await callClaudeWithTyping(ctx, resumePrompt, { resume: true });
+  const response = await processMemoryIntents(supabase, rawResponse);
+  const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId);
+  await saveMessage("assistant", cleanedResponse);
+  resetTelegramIdleTimer();
+}));
+
+bot.callbackQuery(/^deny:(.+)$/, withQueue(async (ctx) => {
+  const actionId = ctx.match![1];
+  const action = getPendingAction(actionId);
+
+  if (!action) {
+    await ctx.answerCallbackQuery({ text: "This action has expired." });
+    return;
+  }
+
+  await ctx.editMessageText(`\u274c Denied: ${action.description}`);
+  await ctx.answerCallbackQuery({ text: "Denied" });
+  removePendingAction(actionId);
+
+  await saveMessage("user", `[Denied action: ${action.description}]`);
+
+  const resumePrompt = `The user DENIED the following action: "${action.description}". Do NOT proceed with this action. Acknowledge briefly.`;
+
+  await ctx.replyWithChatAction("typing");
+  const rawResponse = await callClaudeWithTyping(ctx, resumePrompt, { resume: true });
+  const response = await processMemoryIntents(supabase, rawResponse);
+  const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId);
+  await saveMessage("assistant", cleanedResponse);
+  resetTelegramIdleTimer();
 }));
 
 // ============================================================
@@ -699,6 +766,21 @@ function buildPrompt(
       "\n[DONE: search text for completed goal]"
   );
 
+  parts.push(
+    "\nACTION CONFIRMATIONS:" +
+      "\nWhen about to take a significant action affecting external systems " +
+      "(sending emails, creating calendar events, posting to channels, " +
+      "git push, modifying databases, or any difficult-to-undo action), " +
+      "include a [CONFIRM: description] tag in your response INSTEAD of executing the action." +
+      "\nThe user will see Approve/Deny buttons on Telegram. " +
+      "If approved, you will be resumed with instructions to proceed. " +
+      "If denied, you will be told not to proceed." +
+      "\nDo NOT use [CONFIRM:] for read-only actions like searching, reading files, or checking status." +
+      "\nDo NOT use [CONFIRM:] for trivial actions the user explicitly and directly asked you to do." +
+      '\nExample: "I\'ll send the report now. [CONFIRM: Send weekly report email to alice@example.com]"' +
+      "\nYou can include multiple [CONFIRM:] tags if multiple actions need approval."
+  );
+
   parts.push(`\nUser: ${userMessage}`);
 
   return parts.join("\n");
@@ -746,6 +828,49 @@ async function sendResponse(ctx: Context, response: string): Promise<void> {
   for (const chunk of chunks) {
     await ctx.reply(chunk);
   }
+}
+
+/**
+ * Send response with approval button handling.
+ * Extracts [CONFIRM: ...] tags, sends text first, then each confirmation
+ * as a separate message with Approve/Deny inline keyboard buttons.
+ */
+async function sendWithApprovals(
+  ctx: Context,
+  response: string,
+  currentSessionId: string | null,
+): Promise<string> {
+  const { cleanedText, confirmations } = extractApprovalTags(response);
+
+  if (confirmations.length > 0) {
+    if (cleanedText) {
+      await sendResponse(ctx, cleanedText);
+    }
+    for (const description of confirmations) {
+      const actionId = crypto.randomUUID();
+      const keyboard = new InlineKeyboard()
+        .text("\u2705 Approve", `approve:${actionId}`)
+        .text("\u274c Deny", `deny:${actionId}`);
+
+      const sent = await ctx.reply(
+        `\u26a0\ufe0f Confirm action:\n${description}`,
+        { reply_markup: keyboard },
+      );
+
+      storePendingAction(
+        actionId,
+        description,
+        currentSessionId,
+        sent.chat.id,
+        sent.message_id,
+      );
+      console.log(`[approval] Pending: ${description.substring(0, 60)}`);
+    }
+  } else {
+    await sendResponse(ctx, cleanedText);
+  }
+
+  return cleanedText;
 }
 
 // ============================================================
