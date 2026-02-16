@@ -556,6 +556,29 @@ bot.on("message:voice", withQueue(async (ctx) => {
     const durationMs = Date.now() - startTime;
     const claudeResponse = await processMemoryIntents(supabase, rawResponse);
 
+    // Try voice response for short replies without approval buttons
+    const TTS_MAX_CHARS = 1500;
+    const { cleanedText, confirmations } = extractApprovalTags(claudeResponse);
+
+    if (confirmations.length === 0 && cleanedText.length <= TTS_MAX_CHARS && ELEVENLABS_API_KEY) {
+      const audioBuffer = await textToSpeechOgg(cleanedText);
+      if (audioBuffer) {
+        await ctx.replyWithVoice(new InputFile(audioBuffer, "response.ogg"));
+        await sendResponse(ctx, cleanedText);
+        await saveMessage("assistant", cleanedText);
+
+        if (agentResult) {
+          syncResponse(supabase, agentResult.dispatch.session_id, cleanedText, {
+            duration_ms: durationMs,
+          }).catch(() => {});
+        }
+
+        resetTelegramIdleTimer();
+        return;
+      }
+    }
+
+    // Fall back to text (long response, TTS failure, or approval buttons)
     const cleanedResponse = await sendWithApprovals(ctx, claudeResponse, session.sessionId);
 
     await saveMessage("assistant", cleanedResponse);
@@ -1042,6 +1065,31 @@ async function textToSpeechMulaw(text: string): Promise<string> {
   }
 
   return Buffer.from(await response.arrayBuffer()).toString("base64");
+}
+
+/** Convert text to OGG/Opus audio via ElevenLabs (for Telegram voice messages). */
+async function textToSpeechOgg(text: string): Promise<Buffer | null> {
+  if (!ELEVENLABS_API_KEY) return null;
+
+  const response = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}?output_format=opus_48000_64`,
+    {
+      method: "POST",
+      headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        model_id: "eleven_turbo_v2_5",
+        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    console.error("[tts] ElevenLabs error:", response.status, await response.text());
+    return null;
+  }
+
+  return Buffer.from(await response.arrayBuffer());
 }
 
 // ============================================================
