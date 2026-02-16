@@ -44,6 +44,10 @@ import {
   removePendingAction,
   startExpiryCleanup,
 } from "./approval.ts";
+import {
+  isPlaneConfigured,
+  fetchWorkItemDetails,
+} from "./plane.ts";
 
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
 
@@ -478,9 +482,23 @@ bot.on("message:text", withQueue(async (ctx) => {
     searchElastic(text, { limit: 5, recencyBoost: true }),
   ]);
 
+  // Detect work item mentions (ELLIE-5, EVE-3, etc.)
+  let workItemContext = "";
+  const workItemMatch = text.match(/\b([A-Z]+-\d+)\b/);
+  if (workItemMatch && isPlaneConfigured()) {
+    const details = await fetchWorkItemDetails(workItemMatch[1]);
+    if (details) {
+      workItemContext = `\nACTIVE WORK ITEM: ${workItemMatch[1]}\n` +
+        `Title: ${details.name}\n` +
+        `Priority: ${details.priority}\n` +
+        `Description: ${details.description}\n`;
+    }
+  }
+
   const enrichedPrompt = buildPrompt(
     text, contextDocket, relevantContext, elasticContext, "telegram",
     agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name } : undefined,
+    workItemContext,
   );
 
   const startTime = Date.now();
@@ -490,7 +508,6 @@ bot.on("message:text", withQueue(async (ctx) => {
   // Parse and save any memory intents, strip tags from response
   const response = await processMemoryIntents(supabase, rawResponse);
 
-  // Send response (with approval buttons if [CONFIRM:] tags present)
   const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId);
 
   await saveMessage("assistant", cleanedResponse);
@@ -751,6 +768,7 @@ function buildPrompt(
   elasticContext?: string,
   channel: string = "telegram",
   agentConfig?: { system_prompt?: string | null; name?: string },
+  workItemContext?: string,
 ): string {
   const channelLabel = channel === "google-chat" ? "Google Chat" : "Telegram";
 
@@ -803,6 +821,29 @@ function buildPrompt(
       '\nExample: "I\'ll send the report now. [CONFIRM: Send weekly report email to alice@example.com]"' +
       "\nYou can include multiple [CONFIRM:] tags if multiple actions need approval."
   );
+
+  // Work item context and dispatch protocol
+  if (workItemContext) {
+    parts.push(workItemContext);
+    parts.push(
+      "\nWORK SESSION DISPATCH PROTOCOL:" +
+        "\nYou are working on the above work item. Follow these steps:" +
+        "\n1. Use Plane MCP tools to update issue state (mcp__plane__update_issue)" +
+        "\n2. POST progress updates to http://localhost:3001/api/work-session/* via curl" +
+        "\n3. Commit with [IDENTIFIER] prefix (e.g., [ELLIE-5] Brief description)" +
+        "\n4. When done, POST to /api/work-session/complete and update Plane to Done"
+    );
+  }
+
+  if (isPlaneConfigured()) {
+    parts.push(
+      "\nWORK ITEM COMMANDS:" +
+        "\nYou can manage Plane work items via MCP tools (workspace: evelife, project: ELLIE)." +
+        "\n- List open issues: mcp__plane__list_states, then query issues" +
+        "\n- Create new issues when asked" +
+        "\n- Use [ELLIE-N] prefix in commit messages when working on a tracked item"
+    );
+  }
 
   parts.push(`\nUser: ${userMessage}`);
 

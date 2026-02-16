@@ -43,11 +43,10 @@ async function getProjectByIdentifier(identifier: string): Promise<string | null
   return project?.id ?? null;
 }
 
-/** Find an issue UUID by sequence number within a project */
-async function getIssueBySequenceId(projectId: string, sequenceId: number): Promise<string | null> {
+/** Find an issue by sequence number within a project (returns full issue data) */
+async function getIssueBySequenceId(projectId: string, sequenceId: number): Promise<any | null> {
   const data = await planeRequest(`/projects/${projectId}/issues/?sequence_id=${sequenceId}`);
-  const issue = data.results?.find((i: any) => i.sequence_id === sequenceId);
-  return issue?.id ?? null;
+  return data.results?.find((i: any) => i.sequence_id === sequenceId) ?? null;
 }
 
 /** Get the state UUID for a given group (e.g. "started" for In Progress) */
@@ -68,10 +67,10 @@ export async function resolveWorkItemId(workItemId: string) {
   const projectId = await getProjectByIdentifier(parsed.projectIdentifier);
   if (!projectId) return null;
 
-  const issueId = await getIssueBySequenceId(projectId, parsed.sequenceId);
-  if (!issueId) return null;
+  const issue = await getIssueBySequenceId(projectId, parsed.sequenceId);
+  if (!issue) return null;
 
-  return { projectId, issueId };
+  return { projectId, issueId: issue.id };
 }
 
 /** Update a Plane issue's state */
@@ -162,4 +161,125 @@ export async function updateWorkItemOnSessionComplete(
   const comment = `<p>Work session ${label}</p><p>${summary}</p>`;
   await addIssueComment(projectId, issueId, comment);
   console.log(`[plane] Added completion comment to ${workItemId}`);
+}
+
+// ============================================================
+// WORK ITEM QUERIES
+// ============================================================
+
+export interface WorkItemDetails {
+  id: string;
+  name: string;
+  description: string;
+  priority: string;
+  state: string;
+  sequenceId: number;
+  projectIdentifier: string;
+}
+
+/** Strip HTML tags to plain text */
+function stripHtml(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Fetch full details for a work item (e.g. "ELLIE-5").
+ * Returns null if not found or Plane is not configured.
+ */
+export async function fetchWorkItemDetails(workItemId: string): Promise<WorkItemDetails | null> {
+  if (!isPlaneConfigured()) return null;
+
+  const parsed = parseWorkItemId(workItemId);
+  if (!parsed) return null;
+
+  try {
+    const projectId = await getProjectByIdentifier(parsed.projectIdentifier);
+    if (!projectId) return null;
+
+    const issue = await getIssueBySequenceId(projectId, parsed.sequenceId);
+    if (!issue) return null;
+
+    return {
+      id: issue.id,
+      name: issue.name,
+      description: stripHtml(issue.description_html || ""),
+      priority: issue.priority || "none",
+      state: issue.state,
+      sequenceId: issue.sequence_id,
+      projectIdentifier: parsed.projectIdentifier,
+    };
+  } catch (error) {
+    console.warn(`[plane] Failed to fetch work item ${workItemId}:`, error);
+    return null;
+  }
+}
+
+export interface WorkItemSummary {
+  sequenceId: number;
+  name: string;
+  priority: string;
+}
+
+/**
+ * List open (non-completed, non-cancelled) issues for a project.
+ */
+export async function listOpenIssues(projectIdentifier: string, limit: number = 20): Promise<WorkItemSummary[]> {
+  if (!isPlaneConfigured()) return [];
+
+  try {
+    const projectId = await getProjectByIdentifier(projectIdentifier);
+    if (!projectId) return [];
+
+    const data = await planeRequest(`/projects/${projectId}/issues/`);
+    const issues = (data.results || [])
+      .filter((i: any) => !["completed", "cancelled"].includes(i.state_detail?.group || ""))
+      .slice(0, limit)
+      .map((i: any) => ({
+        sequenceId: i.sequence_id,
+        name: i.name,
+        priority: i.priority || "none",
+      }));
+
+    return issues;
+  } catch (error) {
+    console.warn(`[plane] Failed to list issues for ${projectIdentifier}:`, error);
+    return [];
+  }
+}
+
+/**
+ * Create a new issue in a Plane project.
+ * Returns the created issue's ID and sequence number, or null on failure.
+ */
+export async function createPlaneIssue(
+  projectIdentifier: string,
+  name: string,
+  description?: string,
+  priority?: string,
+): Promise<{ id: string; sequenceId: number; identifier: string } | null> {
+  if (!isPlaneConfigured()) return null;
+
+  try {
+    const projectId = await getProjectByIdentifier(projectIdentifier);
+    if (!projectId) return null;
+
+    const body: Record<string, string> = { name };
+    if (description) body.description_html = `<p>${description}</p>`;
+    if (priority) body.priority = priority;
+
+    const issue = await planeRequest(`/projects/${projectId}/issues/`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+
+    const identifier = `${projectIdentifier}-${issue.sequence_id}`;
+    console.log(`[plane] Created issue: ${identifier} — ${name}`);
+    return { id: issue.id, sequenceId: issue.sequence_id, identifier };
+  } catch (error) {
+    console.warn(`[plane] Failed to create issue in ${projectIdentifier}:`, error);
+    return null;
+  }
 }
