@@ -324,7 +324,7 @@ bot.use(async (ctx, next) => {
 
 async function callClaude(
   prompt: string,
-  options?: { resume?: boolean; imagePath?: string }
+  options?: { resume?: boolean; imagePath?: string; allowedTools?: string[]; model?: string }
 ): Promise<string> {
   const args = [CLAUDE_PATH, "-p", prompt];
 
@@ -335,9 +335,15 @@ async function callClaude(
 
   args.push("--output-format", "text");
 
+  // Per-agent model override
+  if (options?.model) {
+    args.push("--model", options.model);
+  }
+
   // Agent mode: allow tools without interactive prompts
   if (AGENT_MODE) {
-    args.push("--allowedTools", ...ALLOWED_TOOLS);
+    const tools = options?.allowedTools?.length ? options.allowedTools : ALLOWED_TOOLS;
+    args.push("--allowedTools", ...tools);
   }
 
   console.log(`Calling Claude: ${prompt.substring(0, 50)}...`);
@@ -390,7 +396,7 @@ async function callClaude(
 async function callClaudeWithTyping(
   ctx: Context,
   prompt: string,
-  options?: { resume?: boolean; imagePath?: string }
+  options?: { resume?: boolean; imagePath?: string; allowedTools?: string[]; model?: string }
 ): Promise<string> {
   // Send typing indicator every 4 seconds while Claude works
   const interval = setInterval(() => {
@@ -497,16 +503,28 @@ bot.on("message:text", withQueue(async (ctx) => {
 
   const enrichedPrompt = buildPrompt(
     text, contextDocket, relevantContext, elasticContext, "telegram",
-    agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name } : undefined,
+    agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
     workItemContext,
   );
 
+  const agentTools = agentResult?.dispatch.agent.tools_enabled;
+  const agentModel = agentResult?.dispatch.agent.model;
+
   const startTime = Date.now();
-  const rawResponse = await callClaudeWithTyping(ctx, enrichedPrompt, { resume: true });
+  const rawResponse = await callClaudeWithTyping(ctx, enrichedPrompt, {
+    resume: true,
+    allowedTools: agentTools?.length ? agentTools : undefined,
+    model: agentModel || undefined,
+  });
   const durationMs = Date.now() - startTime;
 
   // Parse and save any memory intents, strip tags from response
   const response = await processMemoryIntents(supabase, rawResponse);
+
+  // Show agent indicator on new sessions (not "general")
+  if (agentResult && agentResult.dispatch.agent.name !== "general" && agentResult.dispatch.is_new) {
+    await ctx.reply(`\u{1F916} ${agentResult.dispatch.agent.name} agent`);
+  }
 
   const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId);
 
@@ -514,9 +532,12 @@ bot.on("message:text", withQueue(async (ctx) => {
 
   // Sync response to agent session (fire-and-forget)
   if (agentResult) {
-    syncResponse(supabase, agentResult.dispatch.session_id, cleanedResponse, {
+    const syncResult = await syncResponse(supabase, agentResult.dispatch.session_id, cleanedResponse, {
       duration_ms: durationMs,
-    }).catch(() => {});
+    });
+    if (syncResult?.new_session_id) {
+      await ctx.reply("\u21AA\uFE0F Handing off to another agent...");
+    }
   }
 
   resetTelegramIdleTimer();
@@ -565,11 +586,18 @@ bot.on("message:voice", withQueue(async (ctx) => {
       relevantContext,
       elasticContext,
       "telegram",
-      agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name } : undefined,
+      agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
     );
 
+    const agentTools = agentResult?.dispatch.agent.tools_enabled;
+    const agentModel = agentResult?.dispatch.agent.model;
+
     const startTime = Date.now();
-    const rawResponse = await callClaudeWithTyping(ctx, enrichedPrompt, { resume: true });
+    const rawResponse = await callClaudeWithTyping(ctx, enrichedPrompt, {
+      resume: true,
+      allowedTools: agentTools?.length ? agentTools : undefined,
+      model: agentModel || undefined,
+    });
     const durationMs = Date.now() - startTime;
     const claudeResponse = await processMemoryIntents(supabase, rawResponse);
 
@@ -767,7 +795,7 @@ function buildPrompt(
   relevantContext?: string,
   elasticContext?: string,
   channel: string = "telegram",
-  agentConfig?: { system_prompt?: string | null; name?: string },
+  agentConfig?: { system_prompt?: string | null; name?: string; tools_enabled?: string[] },
   workItemContext?: string,
 ): string {
   const channelLabel = channel === "google-chat" ? "Google Chat" : "Telegram";
@@ -780,16 +808,27 @@ function buildPrompt(
   const parts = [basePrompt];
 
   if (AGENT_MODE) {
-    parts.push(
-      "You have full tool access: Read, Edit, Write, Bash, Glob, Grep, WebSearch, WebFetch. " +
-      "You also have MCP tools: Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Tasks — user_google_email is zerocool0133700@gmail.com), " +
-      "GitHub, Memory, Sequential Thinking, and Plane (project management — workspace: evelife at plane.ellie-labs.dev). " +
-      "Use them freely to answer questions — read files, run commands, search code, browse the web, check email, manage calendar. " +
-      "IMPORTANT: NEVER run sudo commands, NEVER install packages (apt, npm -g, brew), NEVER run commands that require interactive input or confirmation. " +
-      "If a task would require sudo or installing software, tell the user what to run instead. " +
-      "The user is reading on a phone. After using tools, give a concise final answer (not the raw tool output). " +
-      "If a task requires multiple steps, just do them — don't ask for permission."
-    );
+    if (agentConfig?.tools_enabled?.length) {
+      parts.push(
+        `You have access to these tools: ${agentConfig.tools_enabled.join(", ")}. ` +
+        "Use them freely to answer questions. " +
+        "IMPORTANT: NEVER run sudo commands, NEVER install packages (apt, npm -g, brew), NEVER run commands that require interactive input or confirmation. " +
+        "If a task would require sudo or installing software, tell the user what to run instead. " +
+        "The user is reading on a phone. After using tools, give a concise final answer (not the raw tool output). " +
+        "If a task requires multiple steps, just do them — don't ask for permission."
+      );
+    } else {
+      parts.push(
+        "You have full tool access: Read, Edit, Write, Bash, Glob, Grep, WebSearch, WebFetch. " +
+        "You also have MCP tools: Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Tasks — user_google_email is zerocool0133700@gmail.com), " +
+        "GitHub, Memory, Sequential Thinking, and Plane (project management — workspace: evelife at plane.ellie-labs.dev). " +
+        "Use them freely to answer questions — read files, run commands, search code, browse the web, check email, manage calendar. " +
+        "IMPORTANT: NEVER run sudo commands, NEVER install packages (apt, npm -g, brew), NEVER run commands that require interactive input or confirmation. " +
+        "If a task would require sudo or installing software, tell the user what to run instead. " +
+        "The user is reading on a phone. After using tools, give a concise final answer (not the raw tool output). " +
+        "If a task requires multiple steps, just do them — don't ask for permission."
+      );
+    }
   }
 
   if (USER_NAME) parts.push(`You are speaking with ${USER_NAME}.`);
@@ -1414,11 +1453,18 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
 
             const enrichedPrompt = buildPrompt(
               parsed.text, contextDocket, relevantContext, elasticContext, "google-chat",
-              gchatAgentResult?.dispatch.agent ? { system_prompt: gchatAgentResult.dispatch.agent.system_prompt, name: gchatAgentResult.dispatch.agent.name } : undefined,
+              gchatAgentResult?.dispatch.agent ? { system_prompt: gchatAgentResult.dispatch.agent.system_prompt, name: gchatAgentResult.dispatch.agent.name, tools_enabled: gchatAgentResult.dispatch.agent.tools_enabled } : undefined,
             );
 
+            const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
+            const gchatAgentModel = gchatAgentResult?.dispatch.agent.model;
+
             const gchatStart = Date.now();
-            const rawResponse = await callClaude(enrichedPrompt, { resume: true });
+            const rawResponse = await callClaude(enrichedPrompt, {
+              resume: true,
+              allowedTools: gchatAgentTools?.length ? gchatAgentTools : undefined,
+              model: gchatAgentModel || undefined,
+            });
             const gchatDuration = Date.now() - gchatStart;
             const response = await processMemoryIntents(supabase, rawResponse);
 
