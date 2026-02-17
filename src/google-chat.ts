@@ -2,8 +2,13 @@
  * Google Chat Module
  *
  * Handles authentication, message sending, and webhook parsing
- * for Google Chat integration. Uses a service account for auth
- * (JWT signed with Node.js crypto — no extra dependencies).
+ * for Google Chat integration. Supports two auth methods:
+ *
+ * 1. OAuth 2.0 (preferred) — uses client credentials + refresh token
+ * 2. Service Account JWT — signs JWTs with a private key file
+ *
+ * Set GOOGLE_CHAT_OAUTH_CLIENT_ID / SECRET / REFRESH_TOKEN for OAuth,
+ * or GOOGLE_CHAT_SERVICE_ACCOUNT_KEY_PATH for service account.
  */
 
 import { readFile } from "fs/promises";
@@ -13,7 +18,8 @@ import { createSign } from "crypto";
 // TYPES
 // ============================================================
 
-export interface GoogleChatEvent {
+/** Legacy webhook format (type/message/space at top level) */
+export interface GoogleChatEventLegacy {
   type: string;
   eventTime: string;
   space: { name: string; type: string; displayName?: string };
@@ -26,6 +32,33 @@ export interface GoogleChatEvent {
   };
   user?: { name: string; displayName: string; email: string; type: string };
 }
+
+/** New Workspace Add-on webhook format (data nested under chat.messagePayload) */
+export interface GoogleChatEventNew {
+  commonEventObject?: { hostApp: string; platform: string };
+  chat: {
+    user?: { name: string; displayName: string; email: string; type: string };
+    eventTime: string;
+    messagePayload?: {
+      space: { name: string; type: string; displayName?: string };
+      message: {
+        name: string;
+        text: string;
+        argumentText?: string;
+        thread?: { name: string };
+        sender: { name: string; displayName: string; email: string; type: string };
+        createTime: string;
+        space?: { name: string };
+      };
+    };
+    addedToSpacePayload?: {
+      space: { name: string; type: string };
+    };
+  };
+}
+
+/** Union of both webhook formats */
+export type GoogleChatEvent = GoogleChatEventLegacy | GoogleChatEventNew;
 
 export interface ParsedGoogleChatMessage {
   text: string;
@@ -42,32 +75,56 @@ interface ServiceAccountKey {
   token_uri: string;
 }
 
+interface OAuthCredentials {
+  clientId: string;
+  clientSecret: string;
+  refreshToken: string;
+}
+
 interface CachedToken {
   accessToken: string;
   expiresAt: number;
 }
 
+type AuthMethod = "oauth" | "service_account";
+
 // ============================================================
-// AUTH — Service Account JWT → Access Token
+// AUTH — OAuth 2.0 or Service Account JWT → Access Token
 // ============================================================
 
+let authMethod: AuthMethod | null = null;
 let serviceAccount: ServiceAccountKey | null = null;
+let oauthCreds: OAuthCredentials | null = null;
 let cachedToken: CachedToken | null = null;
 
 /**
- * Load and cache the service account key from disk.
+ * Initialize Google Chat auth. Tries OAuth first, then service account.
  * Call at startup — returns false if not configured (graceful skip).
  */
 export async function initGoogleChat(): Promise<boolean> {
+  // Try OAuth 2.0 first
+  const clientId = process.env.GOOGLE_CHAT_OAUTH_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CHAT_OAUTH_CLIENT_SECRET;
+  const refreshToken = process.env.GOOGLE_CHAT_OAUTH_REFRESH_TOKEN;
+
+  if (clientId && clientSecret && refreshToken) {
+    oauthCreds = { clientId, clientSecret, refreshToken };
+    authMethod = "oauth";
+    console.log("[gchat] OAuth 2.0 credentials loaded (client:", clientId.substring(0, 20) + "...)");
+    return true;
+  }
+
+  // Fall back to service account
   const keyPath = process.env.GOOGLE_CHAT_SERVICE_ACCOUNT_KEY_PATH;
   if (!keyPath) {
-    console.log("[gchat] No GOOGLE_CHAT_SERVICE_ACCOUNT_KEY_PATH — Google Chat disabled");
+    console.log("[gchat] No OAuth or service account configured — Google Chat disabled");
     return false;
   }
 
   try {
     const raw = await readFile(keyPath, "utf-8");
     serviceAccount = JSON.parse(raw);
+    authMethod = "service_account";
     console.log("[gchat] Service account loaded:", serviceAccount!.client_email);
     return true;
   } catch (err) {
@@ -77,17 +134,57 @@ export async function initGoogleChat(): Promise<boolean> {
 }
 
 /**
- * Get a valid access token, refreshing if expired.
- * Signs a JWT with the service account private key and exchanges it
- * at Google's token endpoint. Caches for ~55 minutes.
+ * Get a valid access token using the configured auth method.
+ * Caches tokens and refreshes when expired (with 5-min buffer).
  */
 async function getAccessToken(): Promise<string> {
-  if (!serviceAccount) throw new Error("Google Chat not initialized");
+  if (!authMethod) throw new Error("Google Chat not initialized");
 
   // Return cached token if still valid (with 5-min buffer)
   if (cachedToken && Date.now() < cachedToken.expiresAt - 5 * 60_000) {
     return cachedToken.accessToken;
   }
+
+  if (authMethod === "oauth") {
+    return refreshOAuthToken();
+  } else {
+    return refreshServiceAccountToken();
+  }
+}
+
+/** Refresh using OAuth 2.0 client credentials + refresh token. */
+async function refreshOAuthToken(): Promise<string> {
+  if (!oauthCreds) throw new Error("OAuth credentials not loaded");
+
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: oauthCreds.clientId,
+      client_secret: oauthCreds.clientSecret,
+      refresh_token: oauthCreds.refreshToken,
+      grant_type: "refresh_token",
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`OAuth token refresh failed (${res.status}): ${body}`);
+  }
+
+  const data = await res.json();
+  cachedToken = {
+    accessToken: data.access_token,
+    expiresAt: Date.now() + (data.expires_in || 3600) * 1000,
+  };
+
+  console.log("[gchat] OAuth access token refreshed");
+  return cachedToken.accessToken;
+}
+
+/** Refresh using service account JWT assertion. */
+async function refreshServiceAccountToken(): Promise<string> {
+  if (!serviceAccount) throw new Error("Service account not loaded");
 
   const now = Math.floor(Date.now() / 1000);
   const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url");
@@ -123,7 +220,7 @@ async function getAccessToken(): Promise<string> {
     expiresAt: Date.now() + data.expires_in * 1000,
   };
 
-  console.log("[gchat] Access token refreshed");
+  console.log("[gchat] Service account access token refreshed");
   return cachedToken.accessToken;
 }
 
@@ -208,26 +305,52 @@ export async function sendGoogleChatMessage(
 
 /**
  * Parse an incoming Google Chat webhook event into a simple message structure.
+ * Supports both the legacy format (type/message at top level) and the new
+ * Workspace Add-on format (data nested under chat.messagePayload).
  * Returns null if the event isn't a user message (e.g., bot added to space).
  */
 export function parseGoogleChatEvent(event: GoogleChatEvent): ParsedGoogleChatMessage | null {
-  // Only process MESSAGE events with actual text
-  if (event.type !== "MESSAGE" || !event.message?.text) {
-    console.log(`[gchat] Ignoring event type: ${event.type}`);
+  // Detect new Workspace Add-on format (has chat.messagePayload)
+  if ("chat" in event && (event as GoogleChatEventNew).chat?.messagePayload) {
+    const newEvent = event as GoogleChatEventNew;
+    const payload = newEvent.chat.messagePayload!;
+    const msg = payload.message;
+
+    if (!msg?.text) {
+      console.log("[gchat] New format event has no message text — ignoring");
+      return null;
+    }
+
+    const text = msg.text.replace(/^@\S+\s*/, "").trim();
+    if (!text) return null;
+
+    return {
+      text,
+      spaceName: payload.space.name,
+      threadName: msg.thread?.name || null,
+      senderEmail: msg.sender.email,
+      senderName: msg.sender.displayName,
+      messageName: msg.name,
+    };
+  }
+
+  // Legacy format: type/message/space at top level
+  const legacy = event as GoogleChatEventLegacy;
+  if (legacy.type !== "MESSAGE" || !legacy.message?.text) {
+    console.log(`[gchat] Ignoring event type: ${legacy.type}`);
     return null;
   }
 
-  // Strip the bot @mention if present (Chat prepends it in spaces)
-  const text = event.message.text.replace(/^@\S+\s*/, "").trim();
+  const text = legacy.message.text.replace(/^@\S+\s*/, "").trim();
   if (!text) return null;
 
   return {
     text,
-    spaceName: event.space.name,
-    threadName: event.message.thread?.name || null,
-    senderEmail: event.message.sender.email,
-    senderName: event.message.sender.displayName,
-    messageName: event.message.name,
+    spaceName: legacy.space.name,
+    threadName: legacy.message.thread?.name || null,
+    senderEmail: legacy.message.sender.email,
+    senderName: legacy.message.sender.displayName,
+    messageName: legacy.message.name,
   };
 }
 
@@ -251,5 +374,5 @@ export function isAllowedSender(email: string): boolean {
  * Check if Google Chat is configured and ready.
  */
 export function isGoogleChatEnabled(): boolean {
-  return serviceAccount !== null;
+  return authMethod !== null;
 }

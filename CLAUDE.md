@@ -229,6 +229,54 @@ Lets the bot understand voice messages sent on Telegram.
 
 ---
 
+## Phase 8: Google Chat (Optional, ~10 min)
+
+Adds Google Chat as a second messaging channel alongside Telegram. The bot receives messages via webhook and responds in the same space/thread.
+
+### Step 1: Create a Google Chat App
+
+**What to tell the user:**
+1. Go to [Google Cloud Console](https://console.cloud.google.com)
+2. Create a project (or select an existing one)
+3. Enable the **Google Chat API** (APIs & Services > Library > search "Google Chat API")
+4. Go to **Google Chat API > Configuration**:
+   - App name: "Ellie" (or whatever they want)
+   - Avatar URL: optional
+   - Description: "Personal AI assistant"
+   - Functionality: check "Receive 1:1 messages"
+   - Connection settings: select **App URL**, set to `{PUBLIC_URL}/google-chat` (e.g., `https://ellie.ellie-labs.dev/google-chat`)
+   - Visibility: "Specific people and groups" — add themselves
+5. Save the configuration
+
+### Step 2: Create a Service Account
+
+**What to tell the user:**
+1. In Google Cloud Console, go to **IAM & Admin > Service Accounts**
+2. Click **Create Service Account**
+   - Name: "ellie-chat-bot" (or any name)
+   - Skip optional permissions
+3. Click the new service account, go to **Keys** tab
+4. Add Key > Create new key > JSON
+5. Save the JSON file somewhere safe (e.g., `~/ellie-gchat-sa.json`)
+
+**What you do:**
+1. Save `GOOGLE_CHAT_SERVICE_ACCOUNT_KEY_PATH=/path/to/sa-key.json` to `.env`
+2. Save `GOOGLE_CHAT_ALLOWED_EMAIL=user@gmail.com` to `.env`
+3. Optionally set `GOOGLE_CHAT_SPACE_NAME=spaces/XXXXXXXXX` for work session notifications
+   - The space name can be found after messaging the bot — check relay logs for `[gchat]` entries
+
+### Step 3: Verify
+
+1. Restart the relay: `systemctl --user restart claude-telegram-relay`
+2. Check logs: `journalctl --user -u claude-telegram-relay -f`
+3. Look for: `[gchat] Service account loaded: ...`
+4. Open Google Chat, find the bot, send a test message
+5. Confirm the bot responds
+
+**Done when:** Google Chat messages get responses and relay logs show `[gchat]` activity.
+
+---
+
 ## After Setup
 
 Run the full health check:
@@ -368,10 +416,11 @@ All endpoints at `http://localhost:3001`:
 
 ## Project Architecture
 
-- **Relay:** `src/relay.ts` — Telegram bot + HTTP server + voice calls
+- **Relay:** `src/relay.ts` — Telegram bot + HTTP server + voice calls + Google Chat webhook
+- **Google Chat:** `src/google-chat.ts` — Service account auth, message sending, webhook parsing
 - **Memory:** `src/memory.ts` — Supabase-backed conversation history + semantic search
 - **Agents:** `src/agent-router.ts` — multi-agent routing via Supabase edge functions
-- **Work Sessions:** `src/api/work-session.ts` — session lifecycle management
+- **Work Sessions:** `src/api/work-session.ts` — session lifecycle management (notifies Telegram + Google Chat)
 - **Plane:** `src/plane.ts` — work item state sync
 - **Voice:** Local Whisper transcription + ElevenLabs TTS streaming
 - **Database:** Supabase (messages, memory, logs, work_sessions, agents)

@@ -1441,75 +1441,95 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     // Read body
     let body = "";
     req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
-    req.on("end", () => {
-      // Return 200 immediately — async processing below
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true }));
+    req.on("end", async () => {
+      try {
+        const event: GoogleChatEvent = JSON.parse(body);
+        const parsed = parseGoogleChatEvent(event);
 
-      // Process asynchronously
-      (async () => {
-        try {
-          const event: GoogleChatEvent = JSON.parse(body);
-          const parsed = parseGoogleChatEvent(event);
-          if (!parsed) return;
-
-          if (!isAllowedSender(parsed.senderEmail)) {
-            console.log(`[gchat] Unauthorized sender: ${parsed.senderEmail}`);
-            return;
-          }
-
-          console.log(`[gchat] ${parsed.senderName}: ${parsed.text.substring(0, 80)}...`);
-
-          // Enqueue into the shared pipeline
-          enqueue(async () => {
-            await saveMessage("user", parsed.text, {
-              sender: parsed.senderEmail,
-              space: parsed.spaceName,
-            }, "google-chat");
-
-            const gchatAgentResult = await routeAndDispatch(supabase, parsed.text, "google-chat", parsed.senderEmail);
-
-            const [contextDocket, relevantContext, elasticContext] = await Promise.all([
-              getContextDocket(),
-              getRelevantContext(supabase, parsed.text),
-              searchElastic(parsed.text, { limit: 5, recencyBoost: true }),
-            ]);
-
-            const enrichedPrompt = buildPrompt(
-              parsed.text, contextDocket, relevantContext, elasticContext, "google-chat",
-              gchatAgentResult?.dispatch.agent ? { system_prompt: gchatAgentResult.dispatch.agent.system_prompt, name: gchatAgentResult.dispatch.agent.name, tools_enabled: gchatAgentResult.dispatch.agent.tools_enabled } : undefined,
-            );
-
-            const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
-            const gchatAgentModel = gchatAgentResult?.dispatch.agent.model;
-
-            const gchatStart = Date.now();
-            const rawResponse = await callClaude(enrichedPrompt, {
-              resume: true,
-              allowedTools: gchatAgentTools?.length ? gchatAgentTools : undefined,
-              model: gchatAgentModel || undefined,
-            });
-            const gchatDuration = Date.now() - gchatStart;
-            const response = await processMemoryIntents(supabase, rawResponse);
-
-            if (gchatAgentResult) {
-              syncResponse(supabase, gchatAgentResult.dispatch.session_id, response, {
-                duration_ms: gchatDuration,
-              }).catch(() => {});
-            }
-
-            await saveMessage("assistant", response, {
-              space: parsed.spaceName,
-            }, "google-chat");
-            await sendGoogleChatMessage(parsed.spaceName, response, parsed.threadName);
-            resetGchatIdleTimer();
-          }).catch(err => {
-            console.error("[gchat] Processing error:", err);
-          });
-        } catch (err) {
-          console.error("[gchat] Webhook parse error:", err);
+        if (!parsed) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end("{}");
+          return;
         }
-      })();
+
+        if (!isAllowedSender(parsed.senderEmail)) {
+          console.log(`[gchat] Unauthorized sender: ${parsed.senderEmail}`);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end("{}");
+          return;
+        }
+
+        console.log(`[gchat] ${parsed.senderName}: ${parsed.text.substring(0, 80)}...`);
+
+        // Process synchronously — Google Chat requires the response in the webhook body
+        // to appear as the bot (async API sends would appear as the user, not the bot)
+        await saveMessage("user", parsed.text, {
+          sender: parsed.senderEmail,
+          space: parsed.spaceName,
+        }, "google-chat");
+
+        const gchatAgentResult = await routeAndDispatch(supabase, parsed.text, "google-chat", parsed.senderEmail);
+
+        const [contextDocket, relevantContext, elasticContext] = await Promise.all([
+          getContextDocket(),
+          getRelevantContext(supabase, parsed.text),
+          searchElastic(parsed.text, { limit: 5, recencyBoost: true }),
+        ]);
+
+        const enrichedPrompt = buildPrompt(
+          parsed.text, contextDocket, relevantContext, elasticContext, "google-chat",
+          gchatAgentResult?.dispatch.agent ? { system_prompt: gchatAgentResult.dispatch.agent.system_prompt, name: gchatAgentResult.dispatch.agent.name, tools_enabled: gchatAgentResult.dispatch.agent.tools_enabled } : undefined,
+        );
+
+        const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
+        const gchatAgentModel = gchatAgentResult?.dispatch.agent.model;
+
+        const gchatStart = Date.now();
+        const rawResponse = await callClaude(enrichedPrompt, {
+          resume: true,
+          allowedTools: gchatAgentTools?.length ? gchatAgentTools : undefined,
+          model: gchatAgentModel || undefined,
+        });
+        const gchatDuration = Date.now() - gchatStart;
+        const response = await processMemoryIntents(supabase, rawResponse);
+
+        if (gchatAgentResult) {
+          syncResponse(supabase, gchatAgentResult.dispatch.session_id, response, {
+            duration_ms: gchatDuration,
+          }).catch(() => {});
+        }
+
+        await saveMessage("assistant", response, {
+          space: parsed.spaceName,
+        }, "google-chat");
+        resetGchatIdleTimer();
+
+        // Return response synchronously — Workspace Add-on format
+        console.log(`[gchat] Replying: ${response.substring(0, 80)}...`);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          hostAppDataAction: {
+            chatDataAction: {
+              createMessageAction: {
+                message: { text: response },
+              },
+            },
+          },
+        }));
+
+      } catch (err) {
+        console.error("[gchat] Webhook error:", err);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          hostAppDataAction: {
+            chatDataAction: {
+              createMessageAction: {
+                message: { text: "Sorry, I ran into an error. Please try again." },
+              },
+            },
+          },
+        }));
+      }
     });
     return;
   }
