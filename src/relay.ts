@@ -1546,6 +1546,27 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     return;
   }
 
+  // Manual consolidation (close conversation)
+  if (url.pathname === "/api/consolidate" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = body ? JSON.parse(body) : {};
+        const channel = data.channel || undefined;
+        console.log(`[consolidate] Manual trigger via API${channel ? ` (channel: ${channel})` : ""}`);
+        await triggerConsolidation(channel);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (err) {
+        console.error("[consolidate] API error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: String(err) }));
+      }
+    });
+    return;
+  }
+
   // Work session endpoints
   if (url.pathname.startsWith("/api/work-session/") && req.method === "POST") {
     let body = "";
