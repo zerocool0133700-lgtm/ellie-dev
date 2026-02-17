@@ -132,9 +132,9 @@ let gchatIdleTimer: ReturnType<typeof setTimeout> | null = null;
  * so the next interaction gets fresh data.
  */
 async function triggerConsolidation(channel?: string): Promise<void> {
-  if (!supabase || !process.env.ANTHROPIC_API_KEY) return;
+  if (!supabase) return;
   try {
-    const created = await consolidateNow(supabase, process.env.ANTHROPIC_API_KEY, {
+    const created = await consolidateNow(supabase, {
       channel,
       onComplete: () => {
         // Invalidate context cache so next message gets fresh docket
@@ -1543,6 +1543,38 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
       voice: !!ELEVENLABS_API_KEY,
       googleChat: isGoogleChatEnabled(),
     }));
+    return;
+  }
+
+  // Token health check — tests Anthropic API key validity
+  if (url.pathname === "/api/token-health") {
+    (async () => {
+      const result: Record<string, { status: string; latency_ms?: number; error?: string }> = {};
+
+      // Anthropic
+      if (!anthropic) {
+        result.anthropic = { status: "not_configured" };
+      } else {
+        const start = Date.now();
+        try {
+          await anthropic.messages.create({
+            model: "claude-haiku-4-5-20251001",
+            max_tokens: 1,
+            messages: [{ role: "user", content: "ok" }],
+          });
+          result.anthropic = { status: "ok", latency_ms: Date.now() - start };
+        } catch (err: any) {
+          const msg = err?.message || String(err);
+          let status = "error";
+          if (msg.includes("credit balance")) status = "low_credits";
+          else if (err?.status === 401) status = "invalid_key";
+          result.anthropic = { status, latency_ms: Date.now() - start, error: msg };
+        }
+      }
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result));
+    })();
     return;
   }
 

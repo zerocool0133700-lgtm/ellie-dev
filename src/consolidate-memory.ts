@@ -18,7 +18,7 @@ const supabase = createClient(
 
 async function run() {
   console.log("[batch] Starting scheduled consolidation...");
-  await consolidateNow(supabase, process.env.ANTHROPIC_API_KEY!);
+  await consolidateNow(supabase);
   console.log("[batch] Scheduled consolidation complete.");
 }
 

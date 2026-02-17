@@ -6,12 +6,12 @@
  *   - Telegram goes idle for 10+ minutes
  *
  * Processes unprocessed messages → creates conversation record →
- * extracts summary/facts/action_items via Haiku API.
+ * extracts summary/facts/action_items via Claude CLI (Max subscription).
  *
  * The batch consolidation timer (every 4h) stays as a safety net.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import { spawn } from "bun";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { indexConversation, indexMemory, classifyDomain } from "./elasticsearch.ts";
 
@@ -32,6 +32,7 @@ interface ConversationBlock {
 }
 
 const USER_TIMEZONE = process.env.USER_TIMEZONE || "UTC";
+const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
 
 /**
  * Consolidate all unprocessed messages into conversations.
@@ -39,11 +40,8 @@ const USER_TIMEZONE = process.env.USER_TIMEZONE || "UTC";
  */
 export async function consolidateNow(
   supabase: SupabaseClient,
-  anthropicKey: string,
   options?: { channel?: string; onComplete?: () => void }
 ): Promise<boolean> {
-  const anthropic = new Anthropic({ apiKey: anthropicKey });
-
   // Fetch unprocessed messages, optionally filtered by channel
   let query = supabase
     .from("messages")
@@ -74,7 +72,7 @@ export async function consolidateNow(
   console.log(`[consolidate] Grouped into ${blocks.length} conversation(s).`);
 
   for (const block of blocks) {
-    await processBlock(supabase, anthropic, block);
+    await processBlock(supabase, block);
   }
 
   console.log("[consolidate] Done.");
@@ -82,9 +80,48 @@ export async function consolidateNow(
   return true;
 }
 
+/**
+ * Call Claude CLI to extract memories from a transcript.
+ * Uses Max subscription (no API credits consumed).
+ */
+async function callClaudeCLI(prompt: string): Promise<string> {
+  const args = [CLAUDE_PATH, "-p", prompt, "--output-format", "text"];
+
+  const proc = spawn(args, {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    env: {
+      ...process.env,
+      CLAUDECODE: "",
+      ANTHROPIC_API_KEY: "",  // Don't override Max subscription with API key
+    },
+  });
+
+  const TIMEOUT_MS = 60_000;
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    console.error(`[consolidate] CLI timeout after ${TIMEOUT_MS / 1000}s — killing`);
+    proc.kill();
+  }, TIMEOUT_MS);
+
+  const output = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
+  clearTimeout(timeout);
+
+  const exitCode = await proc.exited;
+
+  if (exitCode !== 0) {
+    const msg = timedOut ? "timed out" : stderr || `exit code ${exitCode}`;
+    throw new Error(`Claude CLI failed: ${msg}`);
+  }
+
+  return output.trim();
+}
+
 async function processBlock(
   supabase: SupabaseClient,
-  anthropic: Anthropic,
   block: ConversationBlock
 ): Promise<void> {
   // 1. Create conversation record
@@ -107,10 +144,10 @@ async function processBlock(
 
   const conversationId = convo.id;
 
-  // 2. Link messages to this conversation
+  // 2. Link messages to this conversation (mark summarized AFTER successful extraction)
   await supabase
     .from("messages")
-    .update({ summarized: true, conversation_id: conversationId })
+    .update({ conversation_id: conversationId })
     .in("id", block.messageIds);
 
   // 3. Ask Claude to extract memories
@@ -120,10 +157,7 @@ async function processBlock(
 
   const timeRange = `${formatTime(block.startedAt)} – ${formatTime(block.endedAt)}`;
 
-  const response = await anthropic.messages.create({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 1500,
-    system: `You are a memory extraction system. You process a single conversation transcript and extract structured data.
+  const prompt = `You are a memory extraction system. You process a single conversation transcript and extract structured data.
 
 This conversation happened on the "${block.channel}" channel, ${timeRange}.
 
@@ -140,32 +174,56 @@ Guidelines:
 - Be concise. Each memory should be one clear sentence.
 - If nothing worth extracting, return: {"summary": "...", "memories": []}
 
-Return ONLY valid JSON. No markdown fences, no explanation.`,
-    messages: [{ role: "user", content: transcript }],
-  });
+Return ONLY valid JSON. No markdown fences, no explanation.
 
-  const responseText = response.content
-    .filter((b) => b.type === "text")
-    .map((b) => b.text)
-    .join("");
+TRANSCRIPT:
+${transcript}`;
+
+  let responseText: string;
+  try {
+    responseText = await callClaudeCLI(prompt);
+  } catch (err) {
+    console.error("[consolidate] CLI call failed:", err);
+    // Rollback: unlink messages and delete conversation so they can be retried
+    await supabase.from("messages").update({ conversation_id: null }).in("id", block.messageIds);
+    await supabase.from("conversations").delete().eq("id", conversationId);
+    return;
+  }
 
   let parsed: {
     summary?: string;
     memories?: Array<{ type: string; content: string }>;
   };
   try {
+    // CLI may include preamble text before JSON — extract the JSON object
     const cleaned = responseText
       .replace(/^```(?:json)?\s*/m, "")
       .replace(/\s*```\s*$/m, "")
       .trim();
-    parsed = JSON.parse(cleaned);
+    // Try direct parse first, then extract JSON from response
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      const jsonMatch = cleaned.match(/\{[\s\S]*"summary"[\s\S]*"memories"[\s\S]*\}/);
+      if (!jsonMatch) throw new Error("No JSON found in response");
+      parsed = JSON.parse(jsonMatch[0]);
+    }
   } catch {
     console.error(
       "[consolidate] Failed to parse response:",
       responseText.substring(0, 200)
     );
+    // Rollback: unlink messages and delete conversation so they can be retried
+    await supabase.from("messages").update({ conversation_id: null }).in("id", block.messageIds);
+    await supabase.from("conversations").delete().eq("id", conversationId);
     return;
   }
+
+  // Mark messages as summarized now that extraction succeeded
+  await supabase
+    .from("messages")
+    .update({ summarized: true })
+    .in("id", block.messageIds);
 
   // 4. Update conversation with summary
   if (parsed.summary) {

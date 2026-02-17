@@ -1,12 +1,48 @@
 /**
  * One-time: Generate summaries for backfilled conversations that have none.
+ * Uses Claude CLI (Max subscription) instead of direct API.
  */
 import "dotenv/config";
-import Anthropic from "@anthropic-ai/sdk";
+import { spawn } from "bun";
 import { createClient } from "@supabase/supabase-js";
 
 const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_ANON_KEY!);
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
+const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
+
+async function callClaudeCLI(prompt: string): Promise<string> {
+  const args = [CLAUDE_PATH, "-p", prompt, "--output-format", "text"];
+
+  const proc = spawn(args, {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+    env: {
+      ...process.env,
+      CLAUDECODE: "",
+      ANTHROPIC_API_KEY: "",
+    },
+  });
+
+  const TIMEOUT_MS = 60_000;
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    proc.kill();
+  }, TIMEOUT_MS);
+
+  const output = await new Response(proc.stdout).text();
+  const stderr = await new Response(proc.stderr).text();
+  clearTimeout(timeout);
+
+  const exitCode = await proc.exited;
+
+  if (exitCode !== 0) {
+    const msg = timedOut ? "timed out" : stderr || `exit code ${exitCode}`;
+    throw new Error(`Claude CLI failed: ${msg}`);
+  }
+
+  return output.trim();
+}
 
 async function run() {
   const { data: convos } = await supabase
@@ -36,25 +72,20 @@ async function run() {
 
     const transcript = msgs.map((m) => `[${m.role}]: ${m.content}`).join("\n");
 
-    const response = await anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 300,
-      system: "Summarize this conversation in 1-3 sentences. Be concise and standalone. Return ONLY the summary text, no JSON, no formatting.",
-      messages: [{ role: "user", content: transcript }],
-    });
+    const prompt = `Summarize this conversation in 1-3 sentences. Be concise and standalone. Return ONLY the summary text, no JSON, no formatting.\n\n${transcript}`;
 
-    const summary = response.content
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("")
-      .trim();
+    try {
+      const summary = await callClaudeCLI(prompt);
 
-    await supabase
-      .from("conversations")
-      .update({ summary })
-      .eq("id", convo.id);
+      await supabase
+        .from("conversations")
+        .update({ summary })
+        .eq("id", convo.id);
 
-    console.log(`  -> ${summary.substring(0, 100)}...`);
+      console.log(`  -> ${summary.substring(0, 100)}...`);
+    } catch (err) {
+      console.error(`  -> Failed: ${err}`);
+    }
   }
 
   console.log("\nDone.");
