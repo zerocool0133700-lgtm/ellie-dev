@@ -335,10 +335,9 @@ async function callClaude(
 
   args.push("--output-format", "text");
 
-  // Per-agent model override
-  if (options?.model) {
-    args.push("--model", options.model);
-  }
+  // Per-agent model override — disabled for now (specifying a model ID
+  // routes to API credits instead of the Max subscription default)
+  // if (options?.model) { args.push("--model", options.model); }
 
   // Agent mode: allow tools without interactive prompts
   if (AGENT_MODE) {
@@ -346,22 +345,38 @@ async function callClaude(
     args.push("--allowedTools", ...tools);
   }
 
-  console.log(`Calling Claude: ${prompt.substring(0, 50)}...`);
+  // Log CLI invocation details (redact prompt, show flags)
+  const flagArgs = args.slice(1).filter(a => a.startsWith("--"));
+  const resumeId = options?.resume && session.sessionId ? session.sessionId.slice(0, 8) : null;
+  const toolCount = options?.allowedTools?.length || ALLOWED_TOOLS.length;
+  console.log(
+    `[claude] Invoking: prompt=${prompt.length} chars` +
+    `${resumeId ? `, resume=${resumeId}` : ""}` +
+    `, tools=${toolCount}` +
+    `, flags=[${flagArgs.join(", ")}]`
+  );
 
   try {
     const proc = spawn(args, {
+      stdin: "ignore",   // Close stdin — prevents blocking on permission prompts
       stdout: "pipe",
       stderr: "pipe",
       cwd: PROJECT_DIR || undefined,
       env: {
         ...process.env,
-        CLAUDECODE: "", // Prevent nested session detection
+        CLAUDECODE: "",             // Prevent nested session detection
+        ANTHROPIC_API_KEY: "",      // Don't override Max subscription with API key
       },
     });
 
     // Agentic tasks can take 2+ minutes (tool use, multi-step reasoning)
     const TIMEOUT_MS = AGENT_MODE ? 180_000 : 60_000;
-    const timeout = setTimeout(() => proc.kill(), TIMEOUT_MS);
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      console.error(`[claude] Timeout after ${TIMEOUT_MS / 1000}s — killing process`);
+      proc.kill();
+    }, TIMEOUT_MS);
 
     const output = await new Response(proc.stdout).text();
     const stderr = await new Response(proc.stderr).text();
@@ -370,9 +385,16 @@ async function callClaude(
     const exitCode = await proc.exited;
 
     if (exitCode !== 0) {
-      console.error("Claude error:", stderr);
+      console.error(
+        `[claude] Exit code ${exitCode}` +
+        `${timedOut ? " (timed out)" : ""}` +
+        `${stderr ? ` — stderr: ${stderr.substring(0, 500)}` : " — no stderr"}` +
+        `${output ? ` — stdout preview: ${output.substring(0, 200)}` : ""}`
+      );
       return `Error: ${stderr || "Claude exited with code " + exitCode}`;
     }
+
+    console.log(`[claude] Success: ${output.length} chars, exit ${exitCode}`);
 
     // Extract session ID from output if present (for --resume)
     const sessionMatch = output.match(/Session ID: ([a-f0-9-]+)/i);
@@ -380,11 +402,12 @@ async function callClaude(
       session.sessionId = sessionMatch[1];
       session.lastActivity = new Date().toISOString();
       await saveSession(session);
+      console.log(`[claude] Session ID: ${session.sessionId.slice(0, 8)}`);
     }
 
     return output.trim();
   } catch (error) {
-    console.error("Spawn error:", error);
+    console.error(`[claude] Spawn error:`, error);
     return `Error: Could not run Claude CLI`;
   }
 }
@@ -1242,9 +1265,10 @@ async function callClaudeVoice(systemPrompt: string, userMessage: string): Promi
   console.log(`[voice] Claude CLI fallback: ${userMessage.substring(0, 80)}...`);
 
   const proc = spawn(args, {
+    stdin: "ignore",
     stdout: "pipe", stderr: "pipe",
     cwd: PROJECT_DIR || undefined,
-    env: { ...process.env, CLAUDECODE: "" },
+    env: { ...process.env, CLAUDECODE: "", ANTHROPIC_API_KEY: "" },
   });
 
   const timeout = setTimeout(() => proc.kill(), 60_000);
