@@ -64,7 +64,7 @@ const RELAY_DIR = process.env.RELAY_DIR || join(process.env.HOME || "~", ".claud
 // Agent mode: gives Claude access to tools (Read, Write, Bash, etc.)
 const AGENT_MODE = process.env.AGENT_MODE !== "false"; // on by default
 const DEFAULT_TOOLS = "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch";
-const MCP_TOOLS = "mcp__google-workspace__*,mcp__github__*,mcp__memory__*,mcp__sequential-thinking__*,mcp__plane__*,mcp__claude_ai_Miro__*";
+const MCP_TOOLS = "mcp__google-workspace__*,mcp__github__*,mcp__memory__*,mcp__sequential-thinking__*,mcp__plane__*,mcp__claude_ai_Miro__*,mcp__brave-search__*";
 const ALLOWED_TOOLS = (process.env.ALLOWED_TOOLS || `${DEFAULT_TOOLS},${MCP_TOOLS}`).split(",").map(t => t.trim());
 
 // Voice call config
@@ -369,8 +369,8 @@ async function callClaude(
       },
     });
 
-    // Agentic tasks can take 2+ minutes (tool use, multi-step reasoning)
-    const TIMEOUT_MS = AGENT_MODE ? 180_000 : 60_000;
+    // Agentic tasks can take several minutes (tool use, multi-step reasoning)
+    const TIMEOUT_MS = AGENT_MODE ? 420_000 : 60_000;
     let timedOut = false;
     const timeout = setTimeout(() => {
       timedOut = true;
