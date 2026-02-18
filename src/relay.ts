@@ -1610,8 +1610,6 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
 
         console.log(`[gchat] ${parsed.senderName}: ${parsed.text.substring(0, 80)}...`);
 
-        // Process synchronously — Google Chat requires the response in the webhook body
-        // to appear as the bot (async API sends would appear as the user, not the bot)
         await saveMessage("user", parsed.text, {
           sender: parsed.senderEmail,
           space: parsed.spaceName,
@@ -1636,99 +1634,124 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
         const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
         const gchatAgentModel = gchatAgentResult?.dispatch.agent.model;
 
-        const gchatStart = Date.now();
-        const rawResponse = await callClaude(enrichedPrompt, {
-          resume: true,
-          allowedTools: gchatAgentTools?.length ? gchatAgentTools : undefined,
-          model: gchatAgentModel || undefined,
-        });
-        const gchatDuration = Date.now() - gchatStart;
-        const response = await processMemoryIntents(supabase, rawResponse);
+        // Race Claude call against a 25s timer — Google Chat webhooks timeout at ~30s.
+        // If Claude finishes fast, respond synchronously (best UX).
+        // If it takes too long, send "working on it" synchronously, then post the
+        // real result async via the Chat API when Claude finishes.
+        const GCHAT_SYNC_TIMEOUT_MS = 25_000;
+        let respondedSync = false;
 
-        if (gchatAgentResult) {
-          syncResponse(supabase, gchatAgentResult.dispatch.session_id, response, {
-            duration_ms: gchatDuration,
-          }).catch(() => {});
+        function sendSyncResponse(text: string, cardsV2?: any[]) {
+          if (respondedSync) return;
+          respondedSync = true;
+          res.writeHead(200, { "Content-Type": "application/json" });
+          const message: Record<string, any> = { text };
+          if (cardsV2?.length) message.cardsV2 = cardsV2;
+          res.end(JSON.stringify({
+            hostAppDataAction: { chatDataAction: { createMessageAction: { message } } },
+          }));
         }
 
-        // Parse approval tags from response
-        const { cleanedText: gchatClean, confirmations: gchatConfirms } = extractApprovalTags(response);
-
-        await saveMessage("assistant", gchatClean, {
-          space: parsed.spaceName,
-        }, "google-chat");
-        resetGchatIdleTimer();
-
-        // Build response — include card buttons if there are approval requests
-        console.log(`[gchat] Replying: ${gchatClean.substring(0, 80)}...`);
-        res.writeHead(200, { "Content-Type": "application/json" });
-
-        if (gchatConfirms.length > 0) {
-          // Store pending actions for each confirmation
-          const cardSections = gchatConfirms.map((desc) => {
-            const actionId = crypto.randomUUID();
-            storePendingAction(actionId, desc, session.sessionId, 0, 0);
-            return {
-              widgets: [
-                { textParagraph: { text: `<b>Action:</b> ${desc}` } },
-                {
-                  buttonList: {
-                    buttons: [
-                      {
-                        text: "Approve",
-                        color: { red: 0.2, green: 0.7, blue: 0.3, alpha: 1 },
-                        onClick: {
-                          action: {
-                            function: "approve_action",
-                            parameters: [{ key: "action_id", value: actionId }],
-                          },
-                        },
-                      },
-                      {
-                        text: "Deny",
-                        color: { red: 0.7, green: 0.2, blue: 0.2, alpha: 1 },
-                        onClick: {
-                          action: {
-                            function: "deny_action",
-                            parameters: [{ key: "action_id", value: actionId }],
-                          },
-                        },
-                      },
-                    ],
-                  },
-                },
-              ],
-            };
+        // Start Claude call (runs in background if timeout fires first)
+        const claudePromise = (async () => {
+          const gchatStart = Date.now();
+          const rawResponse = await callClaude(enrichedPrompt, {
+            resume: true,
+            allowedTools: gchatAgentTools?.length ? gchatAgentTools : undefined,
+            model: gchatAgentModel || undefined,
           });
+          const gchatDuration = Date.now() - gchatStart;
+          const response = await processMemoryIntents(supabase, rawResponse);
 
-          res.end(JSON.stringify({
-            hostAppDataAction: {
-              chatDataAction: {
-                createMessageAction: {
-                  message: {
-                    text: gchatClean,
-                    cardsV2: [{
-                      cardId: "approval_card",
-                      card: {
-                        header: { title: "Action Confirmation Required" },
-                        sections: cardSections,
-                      },
-                    }],
-                  },
-                },
-              },
-            },
-          }));
+          if (gchatAgentResult) {
+            syncResponse(supabase, gchatAgentResult.dispatch.session_id, response, {
+              duration_ms: gchatDuration,
+            }).catch(() => {});
+          }
+
+          return { response, gchatDuration };
+        })();
+
+        // Start timeout timer
+        const timeoutPromise = new Promise<"timeout">((resolve) =>
+          setTimeout(() => resolve("timeout"), GCHAT_SYNC_TIMEOUT_MS)
+        );
+
+        const raceResult = await Promise.race([
+          claudePromise.then((r) => ({ type: "done" as const, ...r })),
+          timeoutPromise.then(() => ({ type: "timeout" as const })),
+        ]);
+
+        if (raceResult.type === "timeout") {
+          // Claude is still working — send interim response, continue in background
+          const agentLabel = gchatAgentResult?.dispatch.agent.name || "general";
+          const preview = parsed.text.length > 60 ? parsed.text.substring(0, 57) + "..." : parsed.text;
+          console.log(`[gchat] Timeout — sending interim response, continuing async`);
+          sendSyncResponse(`Working on it... (${agentLabel} agent is processing your request)`);
+
+          // Wait for Claude to finish, then send result async
+          claudePromise
+            .then(async ({ response }) => {
+              const { cleanedText: gchatClean } = extractApprovalTags(response);
+              await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
+              resetGchatIdleTimer();
+              console.log(`[gchat] Async reply: ${gchatClean.substring(0, 80)}...`);
+              await sendGoogleChatMessage(parsed.spaceName, gchatClean, parsed.threadName);
+            })
+            .catch((err) => {
+              console.error("[gchat] Async Claude error:", err);
+              sendGoogleChatMessage(
+                parsed.spaceName,
+                "Sorry, I ran into an error while processing your request. Please try again.",
+                parsed.threadName,
+              ).catch(() => {});
+            });
         } else {
-          res.end(JSON.stringify({
-            hostAppDataAction: {
-              chatDataAction: {
-                createMessageAction: {
-                  message: { text: gchatClean },
-                },
+          // Claude finished within timeout — respond synchronously (best UX)
+          const { response } = raceResult;
+          const { cleanedText: gchatClean, confirmations: gchatConfirms } = extractApprovalTags(response);
+
+          await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
+          resetGchatIdleTimer();
+          console.log(`[gchat] Replying: ${gchatClean.substring(0, 80)}...`);
+
+          if (gchatConfirms.length > 0) {
+            const cardSections = gchatConfirms.map((desc) => {
+              const actionId = crypto.randomUUID();
+              storePendingAction(actionId, desc, session.sessionId, 0, 0);
+              return {
+                widgets: [
+                  { textParagraph: { text: `<b>Action:</b> ${desc}` } },
+                  {
+                    buttonList: {
+                      buttons: [
+                        {
+                          text: "Approve",
+                          color: { red: 0.2, green: 0.7, blue: 0.3, alpha: 1 },
+                          onClick: { action: { function: "approve_action", parameters: [{ key: "action_id", value: actionId }] } },
+                        },
+                        {
+                          text: "Deny",
+                          color: { red: 0.7, green: 0.2, blue: 0.2, alpha: 1 },
+                          onClick: { action: { function: "deny_action", parameters: [{ key: "action_id", value: actionId }] } },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              };
+            });
+
+            sendSyncResponse(gchatClean, [{
+              cardId: "approval_card",
+              card: {
+                header: { title: "Action Confirmation Required" },
+                sections: cardSections,
               },
-            },
-          }));
+            }]);
+          } else {
+            sendSyncResponse(gchatClean);
+          }
         }
 
       } catch (err) {
