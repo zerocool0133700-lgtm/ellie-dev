@@ -3,7 +3,8 @@
  *
  * These endpoints back the CLAUDE.md dispatch protocol.
  * Claude Code sessions call these to send session lifecycle events
- * back to the relay for routing to Telegram, Plane, and logs.
+ * back to the relay for routing to Telegram (status notifications), Plane, and logs.
+ * Rich content (idea extraction, reports) routes to Google Chat separately.
  */
 
 /**
@@ -14,20 +15,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Bot } from "grammy";
 import { updateWorkItemOnSessionStart, updateWorkItemOnSessionComplete } from "../plane.ts";
-import { sendGoogleChatMessage, isGoogleChatEnabled } from "../google-chat.ts";
 
 const TELEGRAM_USER_ID = process.env.TELEGRAM_USER_ID!;
-const GCHAT_SPACE = process.env.GOOGLE_CHAT_SPACE_NAME || "";
-
-/** Send a notification to Google Chat (non-fatal — logs warning on failure). */
-async function notifyGoogleChat(text: string): Promise<void> {
-  if (!isGoogleChatEnabled() || !GCHAT_SPACE) return;
-  try {
-    await sendGoogleChatMessage(GCHAT_SPACE, text);
-  } catch (err) {
-    console.warn("[work-session] Google Chat notification failed (non-fatal):", err);
-  }
-}
 
 /**
  * POST /api/work-session/start
@@ -84,19 +73,6 @@ export async function startWorkSession(req: any, res: any, supabase: SupabaseCli
     ].filter(Boolean).join('\n');
 
     await bot.api.sendMessage(TELEGRAM_USER_ID, message, { parse_mode: 'Markdown' });
-
-    // Google Chat notification
-    const gchatMessage = [
-      `🚀 *Work Session Started*`,
-      ``,
-      `*Work Item:* ${work_item_id}`,
-      `*Title:* ${title}`,
-      `*Project:* ${project}`,
-      agent ? `*Agent:* ${agent}` : '',
-      ``,
-      `Session ID: ${session.id}`,
-    ].filter(Boolean).join('\n');
-    await notifyGoogleChat(gchatMessage);
 
     // Update Plane work item: set "In Progress" + add session comment
     try {
@@ -178,16 +154,6 @@ export async function updateWorkSession(req: any, res: any, supabase: SupabaseCl
 
     await bot.api.sendMessage(TELEGRAM_USER_ID, telegramMessage, { parse_mode: 'Markdown' });
 
-    // Google Chat notification
-    const gchatMsg = [
-      `📝 *Progress Update*`,
-      ``,
-      `*${work_item_id}:* ${session.work_item_title}`,
-      ``,
-      message,
-    ].join('\n');
-    await notifyGoogleChat(gchatMsg);
-
     return res.json({
       success: true,
       session_id: session.id,
@@ -259,16 +225,6 @@ export async function logDecision(req: any, res: any, supabase: SupabaseClient, 
     ].join('\n');
 
     await bot.api.sendMessage(TELEGRAM_USER_ID, telegramMessage, { parse_mode: 'Markdown' });
-
-    // Google Chat notification
-    const gchatMsg = [
-      `⚡ *Decision Point*`,
-      ``,
-      `*${work_item_id}:* ${session.work_item_title}`,
-      ``,
-      message,
-    ].join('\n');
-    await notifyGoogleChat(gchatMsg);
 
     return res.json({
       success: true,
@@ -355,18 +311,6 @@ export async function completeWorkSession(req: any, res: any, supabase: Supabase
     ].join('\n');
 
     await bot.api.sendMessage(TELEGRAM_USER_ID, telegramMessage, { parse_mode: 'Markdown' });
-
-    // Google Chat notification
-    const gchatMsg = [
-      `✅ *Work Session Complete*`,
-      ``,
-      `*${work_item_id}:* ${session.work_item_title}`,
-      `*Duration:* ${duration} minutes`,
-      ``,
-      `*Summary:*`,
-      summary,
-    ].join('\n');
-    await notifyGoogleChat(gchatMsg);
 
     return res.json({
       success: true,

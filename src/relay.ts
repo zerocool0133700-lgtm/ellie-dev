@@ -47,6 +47,7 @@ import {
 import {
   isPlaneConfigured,
   fetchWorkItemDetails,
+  listOpenIssues,
 } from "./plane.ts";
 
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
@@ -1599,13 +1600,165 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     return;
   }
 
+  // Extract ideas from recent conversations
+  if (url.pathname === "/api/extract-ideas" && req.method === "POST") {
+    (async () => {
+      try {
+        if (!supabase) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Supabase not configured" }));
+          return;
+        }
+
+        console.log("[extract-ideas] Starting idea extraction from last 3 conversations");
+
+        // Fetch last 3 conversations with their messages
+        const { data: convos, error: convoErr } = await supabase
+          .from("conversations")
+          .select("id, summary, started_at, ended_at, channel")
+          .order("started_at", { ascending: false })
+          .limit(3);
+
+        if (convoErr || !convos?.length) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, ideas: [], message: "No conversations found" }));
+          return;
+        }
+
+        // Fetch messages for each conversation
+        const convoTranscripts: string[] = [];
+        for (const convo of convos) {
+          const { data: msgs } = await supabase
+            .from("messages")
+            .select("role, content, created_at")
+            .eq("conversation_id", convo.id)
+            .order("created_at", { ascending: true });
+
+          const transcript = (msgs || [])
+            .map((m: any) => `${m.role === "user" ? "Dave" : "Ellie"}: ${m.content}`)
+            .join("\n");
+
+          convoTranscripts.push(
+            `### Conversation (${convo.channel || "unknown"}, ${convo.started_at})\n` +
+            `Summary: ${convo.summary || "No summary"}\n\n` +
+            `${transcript || "No messages"}`
+          );
+        }
+
+        // Fetch open Plane items
+        const openItems = await listOpenIssues("ELLIE", 50);
+        const openItemsList = openItems.length
+          ? openItems.map(i => `- ELLIE-${i.sequenceId}: ${i.name}`).join("\n")
+          : "No open items";
+
+        // Build prompt
+        const prompt = `You are analyzing recent conversations between Dave and Ellie (an AI assistant) to extract potential work items for the ELLIE project.
+
+## Recent Conversations
+
+${convoTranscripts.join("\n\n---\n\n")}
+
+## Currently Open Work Items
+
+${openItemsList}
+
+Extract actionable ideas (features, bugs, improvements, tasks) mentioned or implied in these conversations. For each idea, check if it matches or overlaps with an existing open item.
+
+Return ONLY valid JSON (no markdown, no explanation) in this format:
+{
+  "ideas": [
+    {
+      "title": "Short title for the work item",
+      "description": "1-2 sentence description of what needs to be done",
+      "existing": "ELLIE-XX" or null
+    }
+  ]
+}
+
+If no actionable ideas are found, return: { "ideas": [] }`;
+
+        // Call Claude CLI
+        const cliArgs = [CLAUDE_PATH, "-p", prompt, "--output-format", "text"];
+        const proc = spawn(cliArgs, {
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+          env: { ...process.env, CLAUDECODE: "", ANTHROPIC_API_KEY: "" },
+        });
+
+        const TIMEOUT_MS = 90_000;
+        let timedOut = false;
+        const timeout = setTimeout(() => {
+          timedOut = true;
+          console.error("[extract-ideas] CLI timeout — killing");
+          proc.kill();
+        }, TIMEOUT_MS);
+
+        const output = await new Response(proc.stdout).text();
+        const stderr = await new Response(proc.stderr).text();
+        clearTimeout(timeout);
+
+        const exitCode = await proc.exited;
+        if (exitCode !== 0) {
+          const msg = timedOut ? "timed out" : stderr || `exit code ${exitCode}`;
+          throw new Error(`Claude CLI failed: ${msg}`);
+        }
+
+        const cleaned = output.trim();
+
+        // Parse JSON (with fallback for CLI preamble)
+        let parsed: { ideas: Array<{ title: string; description: string; existing: string | null }> };
+        try {
+          parsed = JSON.parse(cleaned);
+        } catch {
+          const jsonMatch = cleaned.match(/\{[\s\S]*"ideas"[\s\S]*\}/);
+          if (!jsonMatch) throw new Error("No JSON found in CLI response");
+          parsed = JSON.parse(jsonMatch[0]);
+        }
+
+        const ideas = parsed.ideas || [];
+        console.log(`[extract-ideas] Extracted ${ideas.length} ideas`);
+
+        // Format and send to Google Chat
+        const gchatSpace = process.env.GOOGLE_CHAT_SPACE_NAME;
+        if (gchatSpace && ideas.length > 0) {
+          let chatMsg = `*Idea Extraction — ${ideas.length} potential work items*\n\n`;
+          for (const idea of ideas) {
+            const tag = idea.existing ? `[EXISTS: ${idea.existing}]` : "[NEW]";
+            chatMsg += `${tag} *${idea.title}*\n${idea.description}\n\n`;
+          }
+          await sendGoogleChatMessage(gchatSpace, chatMsg.trim());
+          console.log("[extract-ideas] Sent to Google Chat");
+        } else if (!gchatSpace) {
+          console.warn("[extract-ideas] GOOGLE_CHAT_SPACE_NAME not set — skipping chat notification");
+        }
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, ideas }));
+      } catch (err) {
+        console.error("[extract-ideas] Error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: String(err) }));
+      }
+    })();
+    return;
+  }
+
   // Work session endpoints
   if (url.pathname.startsWith("/api/work-session/") && req.method === "POST") {
     let body = "";
     req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
     req.on("end", async () => {
       try {
-        const data = JSON.parse(body);
+        let data: any;
+        try {
+          data = JSON.parse(body);
+        } catch (parseErr) {
+          console.error("[work-session] JSON parse error:", parseErr, "body:", body.substring(0, 200));
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid JSON body" }));
+          return;
+        }
         const endpoint = url.pathname.replace("/api/work-session/", "");
 
         // Import work-session handlers
