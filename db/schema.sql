@@ -259,3 +259,69 @@ ALTER TABLE work_session_updates ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "Allow all for service role" ON work_sessions FOR ALL USING (true);
 CREATE POLICY "Allow all for service role" ON work_session_updates FOR ALL USING (true);
+
+-- ============================================================
+-- PEOPLE TABLE (Global entities — shared across chains)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS people (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  name TEXT NOT NULL,
+  relationship_type TEXT NOT NULL DEFAULT 'other',
+  notes TEXT,
+  contact_methods JSONB DEFAULT '{}',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_people_name ON people(name);
+CREATE INDEX IF NOT EXISTS idx_people_relationship_type ON people(relationship_type);
+
+-- ============================================================
+-- GROUPS TABLE (Chain-scoped by owner_id)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS groups (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  icon TEXT,
+  default_model TEXT,
+  metadata JSONB DEFAULT '{}',
+  owner_id UUID NOT NULL REFERENCES people(id),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_groups_owner_id ON groups(owner_id);
+CREATE INDEX IF NOT EXISTS idx_groups_name ON groups(name);
+
+-- ============================================================
+-- GROUP MEMBERSHIPS TABLE (Chain-scoped by owner_id)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS group_memberships (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  group_id UUID NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  person_id UUID NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+  owner_id UUID NOT NULL REFERENCES people(id),
+  role TEXT DEFAULT 'member',
+  access_level TEXT DEFAULT 'full',
+  joined_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(group_id, person_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_group_memberships_group_id ON group_memberships(group_id);
+CREATE INDEX IF NOT EXISTS idx_group_memberships_person_id ON group_memberships(person_id);
+CREATE INDEX IF NOT EXISTS idx_group_memberships_owner_id ON group_memberships(owner_id);
+
+-- RLS for groups/people/memberships
+ALTER TABLE people ENABLE ROW LEVEL SECURITY;
+ALTER TABLE groups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE group_memberships ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow all for service role" ON people FOR ALL USING (true);
+CREATE POLICY "Allow all for service role" ON groups FOR ALL USING (true);
+CREATE POLICY "Allow all for service role" ON group_memberships FOR ALL USING (true);
+
+-- Enable realtime for groups/people
+ALTER PUBLICATION supabase_realtime ADD TABLE groups;
+ALTER PUBLICATION supabase_realtime ADD TABLE people;
+ALTER PUBLICATION supabase_realtime ADD TABLE group_memberships;
