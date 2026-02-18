@@ -9,6 +9,7 @@
 
 import { Bot, Context, InputFile, InlineKeyboard } from "grammy";
 import { spawn } from "bun";
+import { createHmac } from "crypto";
 import { writeFile, mkdir, readFile, unlink } from "fs/promises";
 import { join, dirname } from "path";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
@@ -37,6 +38,7 @@ import {
   syncResponse,
   type DispatchResult,
 } from "./agent-router.ts";
+import { getStructuredContext } from "./context-sources.ts";
 import {
   extractApprovalTags,
   storePendingAction,
@@ -64,6 +66,8 @@ const RELAY_DIR = process.env.RELAY_DIR || join(process.env.HOME || "~", ".claud
 
 // Agent mode: gives Claude access to tools (Read, Write, Bash, etc.)
 const AGENT_MODE = process.env.AGENT_MODE !== "false"; // on by default
+// Agent model override: when true, per-agent model settings are passed to CLI (uses API credits instead of Max subscription)
+const AGENT_MODEL_OVERRIDE = process.env.AGENT_MODEL_OVERRIDE === "true"; // off by default
 const DEFAULT_TOOLS = "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch";
 const MCP_TOOLS = "mcp__google-workspace__*,mcp__github__*,mcp__memory__*,mcp__sequential-thinking__*,mcp__plane__*,mcp__claude_ai_Miro__*,mcp__brave-search__*";
 const ALLOWED_TOOLS = (process.env.ALLOWED_TOOLS || `${DEFAULT_TOOLS},${MCP_TOOLS}`).split(",").map(t => t.trim());
@@ -73,9 +77,41 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "EXAVITQu4vr4xnSDxMaL";
 const HTTP_PORT = parseInt(process.env.HTTP_PORT || "3000");
 const PUBLIC_URL = process.env.PUBLIC_URL || "";
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
 const SILENCE_THRESHOLD_MS = 800; // ms of silence after speech to trigger processing
 const MIN_AUDIO_MS = 400;
 const TMP_DIR = process.env.TMPDIR || "/tmp";
+
+/**
+ * Validate Twilio webhook signature (X-Twilio-Signature).
+ * Uses HMAC-SHA1 with the auth token over the full URL + sorted POST params.
+ */
+function validateTwilioSignature(
+  req: IncomingMessage,
+  body: string,
+): boolean {
+  if (!TWILIO_AUTH_TOKEN) return true; // Skip validation if not configured
+  const signature = req.headers["x-twilio-signature"] as string;
+  if (!signature) return false;
+
+  const protocol = req.headers["x-forwarded-proto"] || "http";
+  const host = req.headers["x-forwarded-host"] || req.headers.host || "";
+  const url = `${protocol}://${host}${req.url}`;
+
+  // Parse form-encoded body and sort params alphabetically
+  const params = new URLSearchParams(body);
+  const sortedKeys = [...params.keys()].sort();
+  let dataString = url;
+  for (const key of sortedKeys) {
+    dataString += key + params.get(key);
+  }
+
+  const expected = createHmac("sha1", TWILIO_AUTH_TOKEN)
+    .update(dataString)
+    .digest("base64");
+
+  return signature === expected;
+}
 
 // Mulaw energy threshold — Twilio sends continuous packets even during silence.
 // Mulaw silence center is 0xFF (positive) / 0x7F (negative). Values near these are quiet.
@@ -336,9 +372,9 @@ async function callClaude(
 
   args.push("--output-format", "text");
 
-  // Per-agent model override — disabled for now (specifying a model ID
-  // routes to API credits instead of the Max subscription default)
-  // if (options?.model) { args.push("--model", options.model); }
+  // Per-agent model override — opt-in via AGENT_MODEL_OVERRIDE=true env var
+  // (specifying a model ID routes to API credits instead of the Max subscription default)
+  if (AGENT_MODEL_OVERRIDE && options?.model) { args.push("--model", options.model); }
 
   // Agent mode: allow tools without interactive prompts
   if (AGENT_MODE) {
@@ -435,14 +471,24 @@ async function callClaudeWithTyping(
 }
 
 // Concurrency guard: queue messages while Claude is working
+interface QueueItem {
+  task: () => Promise<void>;
+  channel: string;
+  preview: string;
+  enqueuedAt: number;
+}
+
 let busy = false;
-const messageQueue: Array<() => Promise<void>> = [];
+let currentItem: { channel: string; preview: string; startedAt: number } | null = null;
+const messageQueue: QueueItem[] = [];
 
 async function processQueue(): Promise<void> {
   while (messageQueue.length > 0) {
     const next = messageQueue.shift()!;
-    await next();
+    currentItem = { channel: next.channel, preview: next.preview, startedAt: Date.now() };
+    await next.task();
   }
+  currentItem = null;
   busy = false;
 }
 
@@ -451,35 +497,58 @@ async function processQueue(): Promise<void> {
  * Used by non-Telegram channels (Google Chat) that don't have a grammY ctx.
  * Returns a promise that resolves when the task completes.
  */
-function enqueue(task: () => Promise<void>): Promise<void> {
+function enqueue(
+  task: () => Promise<void>,
+  channel: string = "google-chat",
+  preview: string = "(message)",
+): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const wrapped = async () => {
-      try {
-        await task();
-        resolve();
-      } catch (err) {
-        reject(err);
-      }
+    const item: QueueItem = {
+      task: async () => {
+        try {
+          await task();
+          resolve();
+        } catch (err) {
+          reject(err);
+        }
+      },
+      channel,
+      preview,
+      enqueuedAt: Date.now(),
     };
 
     if (busy) {
-      messageQueue.push(wrapped);
+      messageQueue.push(item);
       return;
     }
     busy = true;
-    wrapped().finally(() => processQueue());
+    currentItem = { channel: item.channel, preview: item.preview, startedAt: Date.now() };
+    item.task().finally(() => processQueue());
   });
 }
 
-function withQueue(handler: (ctx: Context) => Promise<void>) {
+function withQueue(
+  handler: (ctx: Context) => Promise<void>,
+  previewExtractor?: (ctx: Context) => string,
+) {
   return async (ctx: Context) => {
+    const preview = previewExtractor
+      ? previewExtractor(ctx)
+      : (ctx.message?.text?.substring(0, 50) ?? "(no text)");
+
     if (busy) {
       const position = messageQueue.length + 1;
       await ctx.reply(`I'm working on something — I'll get to this next. (Queue position: ${position})`);
-      messageQueue.push(() => handler(ctx));
+      messageQueue.push({
+        task: () => handler(ctx),
+        channel: "telegram",
+        preview,
+        enqueuedAt: Date.now(),
+      });
       return;
     }
     busy = true;
+    currentItem = { channel: "telegram", preview, startedAt: Date.now() };
     try {
       await handler(ctx);
     } finally {
@@ -505,11 +574,13 @@ bot.on("message:text", withQueue(async (ctx) => {
   // Route message to appropriate agent (falls back gracefully)
   const agentResult = await routeAndDispatch(supabase, text, "telegram", userId);
 
-  // Gather context: docket + semantic search + ES full-text search
-  const [contextDocket, relevantContext, elasticContext] = await Promise.all([
+  // Gather context: docket + semantic search + ES full-text search + structured sources + recent messages
+  const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
     getContextDocket(),
     getRelevantContext(supabase, text),
     searchElastic(text, { limit: 5, recencyBoost: true }),
+    getStructuredContext(supabase),
+    getRecentMessages(supabase),
   ]);
 
   // Detect work item mentions (ELLIE-5, EVE-3, etc.)
@@ -528,7 +599,7 @@ bot.on("message:text", withQueue(async (ctx) => {
   const enrichedPrompt = buildPrompt(
     text, contextDocket, relevantContext, elasticContext, "telegram",
     agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
-    workItemContext,
+    workItemContext, structuredContext, recentMessages,
   );
 
   const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -598,10 +669,12 @@ bot.on("message:voice", withQueue(async (ctx) => {
     const voiceUserId = ctx.from?.id.toString() || "";
     const agentResult = await routeAndDispatch(supabase, transcription, "telegram", voiceUserId);
 
-    const [contextDocket, relevantContext, elasticContext] = await Promise.all([
+    const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
       getContextDocket(),
       getRelevantContext(supabase, transcription),
       searchElastic(transcription, { limit: 5, recencyBoost: true }),
+      getStructuredContext(supabase),
+      getRecentMessages(supabase),
     ]);
 
     const enrichedPrompt = buildPrompt(
@@ -611,6 +684,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
       elasticContext,
       "telegram",
       agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
+      undefined, structuredContext, recentMessages,
     );
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -663,7 +737,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
     console.error("Voice error:", error);
     await ctx.reply("Could not process voice message. Check logs for details.");
   }
-}));
+}, (ctx) => `[Voice ${ctx.message?.voice?.duration ?? 0}s]`));
 
 // Photos/Images
 bot.on("message:photo", withQueue(async (ctx) => {
@@ -705,7 +779,7 @@ bot.on("message:photo", withQueue(async (ctx) => {
     console.error("Image error:", error);
     await ctx.reply("Could not process image.");
   }
-}));
+}, (ctx) => ctx.message?.caption?.substring(0, 50) ?? "[Photo]"));
 
 // Documents
 bot.on("message:document", withQueue(async (ctx) => {
@@ -742,7 +816,7 @@ bot.on("message:document", withQueue(async (ctx) => {
     console.error("Document error:", error);
     await ctx.reply("Could not process document.");
   }
-}));
+}, (ctx) => ctx.message?.document?.file_name ?? "[Document]"));
 
 // ============================================================
 // APPROVAL CALLBACKS
@@ -771,7 +845,7 @@ bot.callbackQuery(/^approve:(.+)$/, withQueue(async (ctx) => {
   const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId);
   await saveMessage("assistant", cleanedResponse);
   resetTelegramIdleTimer();
-}));
+}, () => "[Approval]"));
 
 bot.callbackQuery(/^deny:(.+)$/, withQueue(async (ctx) => {
   const actionId = ctx.match![1];
@@ -796,7 +870,7 @@ bot.callbackQuery(/^deny:(.+)$/, withQueue(async (ctx) => {
   const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId);
   await saveMessage("assistant", cleanedResponse);
   resetTelegramIdleTimer();
-}));
+}, () => "[Denial]"));
 
 // ============================================================
 // HELPERS
@@ -821,6 +895,8 @@ function buildPrompt(
   channel: string = "telegram",
   agentConfig?: { system_prompt?: string | null; name?: string; tools_enabled?: string[] },
   workItemContext?: string,
+  structuredContext?: string,
+  recentMessages?: string,
 ): string {
   const channelLabel = channel === "google-chat" ? "Google Chat" : "Telegram";
 
@@ -857,7 +933,9 @@ function buildPrompt(
 
   if (USER_NAME) parts.push(`You are speaking with ${USER_NAME}.`);
   if (profileContext) parts.push(`\nProfile:\n${profileContext}`);
+  if (structuredContext) parts.push(`\n${structuredContext}`);
   if (contextDocket) parts.push(`\nCONTEXT:\n${contextDocket}`);
+  if (recentMessages) parts.push(`\n${recentMessages}`);
   if (relevantContext) parts.push(`\n${relevantContext}`);
   if (elasticContext) parts.push(`\n${elasticContext}`);
 
@@ -1419,6 +1497,17 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
 
   // Twilio TwiML webhook — tells Twilio to open a media stream
   if (url.pathname === "/voice" && req.method === "POST") {
+    // Validate Twilio signature
+    let voiceBody = "";
+    req.on("data", (chunk: Buffer) => { voiceBody += chunk.toString(); });
+    req.on("end", () => {
+      if (!validateTwilioSignature(req, voiceBody)) {
+        console.warn("[voice] Invalid Twilio signature — rejecting request");
+        res.writeHead(403);
+        res.end("Forbidden");
+        return;
+      }
+
     const wsUrl = PUBLIC_URL
       ? PUBLIC_URL.replace(/^https?/, "wss") + "/media-stream"
       : `wss://${req.headers.host}/media-stream`;
@@ -1434,6 +1523,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     res.writeHead(200, { "Content-Type": "application/xml" });
     res.end(twiml);
     console.log("[voice] TwiML served, connecting media stream...");
+    }); // end req.on("end")
     return;
   }
 
@@ -1445,6 +1535,62 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     req.on("end", async () => {
       try {
         const event: GoogleChatEvent = JSON.parse(body);
+
+        // Handle card button clicks (approval actions)
+        const cardAction = (event as any)?.chat?.cardClickedPayload ||
+          ((event as any)?.type === "CARD_CLICKED" ? event : null);
+        if (cardAction) {
+          const actionFn = cardAction?.chat?.cardClickedPayload?.action?.actionMethodName ||
+            (cardAction as any)?.action?.actionMethodName || "";
+          const params = cardAction?.chat?.cardClickedPayload?.action?.parameters ||
+            (cardAction as any)?.action?.parameters || [];
+          const actionId = params.find((p: any) => p.key === "action_id")?.value;
+
+          if (actionId && (actionFn === "approve_action" || actionFn === "deny_action")) {
+            const pending = getPendingAction(actionId);
+            if (pending) {
+              const approved = actionFn === "approve_action";
+              removePendingAction(actionId);
+              console.log(`[gchat] Action ${approved ? "approved" : "denied"}: ${pending.description.substring(0, 60)}`);
+
+              // Resume Claude with the decision
+              const decision = approved
+                ? `The user APPROVED the action: "${pending.description}". Proceed with the action now.`
+                : `The user DENIED the action: "${pending.description}". Do NOT proceed. Acknowledge and move on.`;
+              const followUp = await callClaude(decision, {
+                resume: true,
+              });
+              const cleanFollowUp = await processMemoryIntents(supabase, followUp);
+              await saveMessage("assistant", cleanFollowUp, {}, "google-chat");
+
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({
+                hostAppDataAction: {
+                  chatDataAction: {
+                    createMessageAction: {
+                      message: { text: `${approved ? "\u2705" : "\u274C"} ${pending.description}\n\n${cleanFollowUp}` },
+                    },
+                  },
+                },
+              }));
+              return;
+            }
+
+            // Expired action
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              hostAppDataAction: {
+                chatDataAction: {
+                  createMessageAction: {
+                    message: { text: "This action has expired. Please try again." },
+                  },
+                },
+              },
+            }));
+            return;
+          }
+        }
+
         const parsed = parseGoogleChatEvent(event);
 
         if (!parsed) {
@@ -1471,15 +1617,18 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
 
         const gchatAgentResult = await routeAndDispatch(supabase, parsed.text, "google-chat", parsed.senderEmail);
 
-        const [contextDocket, relevantContext, elasticContext] = await Promise.all([
+        const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
           getContextDocket(),
           getRelevantContext(supabase, parsed.text),
           searchElastic(parsed.text, { limit: 5, recencyBoost: true }),
+          getStructuredContext(supabase),
+          getRecentMessages(supabase),
         ]);
 
         const enrichedPrompt = buildPrompt(
           parsed.text, contextDocket, relevantContext, elasticContext, "google-chat",
           gchatAgentResult?.dispatch.agent ? { system_prompt: gchatAgentResult.dispatch.agent.system_prompt, name: gchatAgentResult.dispatch.agent.name, tools_enabled: gchatAgentResult.dispatch.agent.tools_enabled } : undefined,
+          undefined, structuredContext, recentMessages,
         );
 
         const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
@@ -1500,23 +1649,85 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           }).catch(() => {});
         }
 
-        await saveMessage("assistant", response, {
+        // Parse approval tags from response
+        const { cleanedText: gchatClean, confirmations: gchatConfirms } = extractApprovalTags(response);
+
+        await saveMessage("assistant", gchatClean, {
           space: parsed.spaceName,
         }, "google-chat");
         resetGchatIdleTimer();
 
-        // Return response synchronously — Workspace Add-on format
-        console.log(`[gchat] Replying: ${response.substring(0, 80)}...`);
+        // Build response — include card buttons if there are approval requests
+        console.log(`[gchat] Replying: ${gchatClean.substring(0, 80)}...`);
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({
-          hostAppDataAction: {
-            chatDataAction: {
-              createMessageAction: {
-                message: { text: response },
+
+        if (gchatConfirms.length > 0) {
+          // Store pending actions for each confirmation
+          const cardSections = gchatConfirms.map((desc) => {
+            const actionId = crypto.randomUUID();
+            storePendingAction(actionId, desc, session.sessionId, 0, 0);
+            return {
+              widgets: [
+                { textParagraph: { text: `<b>Action:</b> ${desc}` } },
+                {
+                  buttonList: {
+                    buttons: [
+                      {
+                        text: "Approve",
+                        color: { red: 0.2, green: 0.7, blue: 0.3, alpha: 1 },
+                        onClick: {
+                          action: {
+                            function: "approve_action",
+                            parameters: [{ key: "action_id", value: actionId }],
+                          },
+                        },
+                      },
+                      {
+                        text: "Deny",
+                        color: { red: 0.7, green: 0.2, blue: 0.2, alpha: 1 },
+                        onClick: {
+                          action: {
+                            function: "deny_action",
+                            parameters: [{ key: "action_id", value: actionId }],
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            };
+          });
+
+          res.end(JSON.stringify({
+            hostAppDataAction: {
+              chatDataAction: {
+                createMessageAction: {
+                  message: {
+                    text: gchatClean,
+                    cardsV2: [{
+                      cardId: "approval_card",
+                      card: {
+                        header: { title: "Action Confirmation Required" },
+                        sections: cardSections,
+                      },
+                    }],
+                  },
+                },
               },
             },
-          },
-        }));
+          }));
+        } else {
+          res.end(JSON.stringify({
+            hostAppDataAction: {
+              chatDataAction: {
+                createMessageAction: {
+                  message: { text: gchatClean },
+                },
+              },
+            },
+          }));
+        }
 
       } catch (err) {
         console.error("[gchat] Webhook error:", err);
@@ -1543,6 +1754,29 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
       service: "ellie-relay",
       voice: !!ELEVENLABS_API_KEY,
       googleChat: isGoogleChatEnabled(),
+    }));
+    return;
+  }
+
+  // Queue status — returns current processing state and queued items
+  if (url.pathname === "/queue-status") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      busy,
+      queueLength: messageQueue.length,
+      current: currentItem
+        ? {
+            channel: currentItem.channel,
+            preview: currentItem.preview,
+            durationMs: Date.now() - currentItem.startedAt,
+          }
+        : null,
+      queued: messageQueue.map((item, index) => ({
+        position: index + 1,
+        channel: item.channel,
+        preview: item.preview,
+        waitingMs: Date.now() - item.enqueuedAt,
+      })),
     }));
     return;
   }
@@ -1809,6 +2043,111 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
     });
+    return;
+  }
+
+  // Rollup endpoints
+  if (url.pathname.startsWith("/api/rollup/") && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = body ? JSON.parse(body) : {};
+        const endpoint = url.pathname.replace("/api/rollup/", "");
+
+        const { generateRollup } = await import("./api/rollup.ts");
+
+        const mockReq = { body: data } as any;
+        const mockRes = {
+          status: (code: number) => ({
+            json: (data: any) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(data));
+            }
+          }),
+          json: (data: any) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(data));
+          }
+        } as any;
+
+        if (!supabase) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Database not configured" }));
+          return;
+        }
+
+        switch (endpoint) {
+          case "generate":
+            await generateRollup(mockReq, mockRes, supabase, bot);
+            break;
+          case "latest": {
+            const { getLatestRollup } = await import("./api/rollup.ts");
+            await getLatestRollup(mockReq, mockRes, supabase);
+            break;
+          }
+          default: {
+            // Check for /api/rollup/YYYY-MM-DD
+            if (/^\d{4}-\d{2}-\d{2}$/.test(endpoint)) {
+              const { getRollupByDate } = await import("./api/rollup.ts");
+              const dateReq = { body: data, params: { date: endpoint } } as any;
+              await getRollupByDate(dateReq, mockRes, supabase);
+            } else {
+              res.writeHead(404, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "Unknown rollup endpoint" }));
+            }
+          }
+        }
+      } catch (err) {
+        console.error("[rollup] Error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
+    return;
+  }
+
+  // Rollup GET endpoints
+  if (url.pathname.startsWith("/api/rollup/") && req.method === "GET") {
+    (async () => {
+      try {
+        const endpoint = url.pathname.replace("/api/rollup/", "");
+
+        const mockRes = {
+          status: (code: number) => ({
+            json: (data: any) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(data));
+            }
+          }),
+          json: (data: any) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(data));
+          }
+        } as any;
+
+        if (!supabase) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Database not configured" }));
+          return;
+        }
+
+        if (endpoint === "latest") {
+          const { getLatestRollup } = await import("./api/rollup.ts");
+          await getLatestRollup({} as any, mockRes, supabase);
+        } else if (/^\d{4}-\d{2}-\d{2}$/.test(endpoint)) {
+          const { getRollupByDate } = await import("./api/rollup.ts");
+          await getRollupByDate({ params: { date: endpoint } } as any, mockRes, supabase);
+        } else {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Unknown rollup endpoint" }));
+        }
+      } catch (err) {
+        console.error("[rollup] Error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    })();
     return;
   }
 
