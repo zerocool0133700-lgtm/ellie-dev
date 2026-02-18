@@ -2248,6 +2248,45 @@ If no actionable ideas are found, return: { "ideas": [] }`;
     return;
   }
 
+  // Weekly review endpoint
+  if (url.pathname === "/api/weekly-review/generate" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = body ? JSON.parse(body) : {};
+        const { generateWeeklyReview } = await import("./api/weekly-review.ts");
+
+        const mockReq = { body: data } as any;
+        const mockRes = {
+          status: (code: number) => ({
+            json: (data: any) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(data));
+            }
+          }),
+          json: (data: any) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(data));
+          }
+        } as any;
+
+        if (!supabase) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Database not configured" }));
+          return;
+        }
+
+        await generateWeeklyReview(mockReq, mockRes, supabase, bot);
+      } catch (err) {
+        console.error("[weekly-review] Error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
+    return;
+  }
+
   // Security sweep
   if (url.pathname === "/api/security-sweep" && req.method === "GET") {
     (async () => {
