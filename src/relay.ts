@@ -2151,6 +2151,23 @@ If no actionable ideas are found, return: { "ideas": [] }`;
     return;
   }
 
+  // Security sweep
+  if (url.pathname === "/api/security-sweep" && req.method === "GET") {
+    (async () => {
+      try {
+        const { runSecuritySweep } = await import("../scripts/security-sweep.ts");
+        const result = await runSecuritySweep();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        console.error("[security-sweep] Error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(err) }));
+      }
+    })();
+    return;
+  }
+
   res.writeHead(404);
   res.end("Not found");
 });
