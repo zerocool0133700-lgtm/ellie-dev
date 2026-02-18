@@ -296,6 +296,9 @@ export async function sendGoogleChatMessage(
       console.error(`[gchat] Send failed (${res.status}):`, errBody);
       throw new Error(`Google Chat send failed: ${res.status}`);
     }
+
+    const resBody = await res.json();
+    console.log(`[gchat] Message sent to ${spaceName} (${chunk.length} chars${threadName ? ", in-thread" : ""}) -> ${resBody.name || "unknown"} thread=${resBody.thread?.name || "none"}`);
   }
 }
 

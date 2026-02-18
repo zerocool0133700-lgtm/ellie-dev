@@ -1695,11 +1695,12 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               const { cleanedText: gchatClean } = extractApprovalTags(response);
               await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
               resetGchatIdleTimer();
-              console.log(`[gchat] Async reply: ${gchatClean.substring(0, 80)}...`);
+              console.log(`[gchat] Async reply (${gchatClean.length} chars) to ${parsed.spaceName} thread=${parsed.threadName || "none"}: ${gchatClean.substring(0, 80)}...`);
               await sendGoogleChatMessage(parsed.spaceName, gchatClean, parsed.threadName);
+              console.log(`[gchat] Async send complete`);
             })
             .catch((err) => {
-              console.error("[gchat] Async Claude error:", err);
+              console.error("[gchat] Async send error:", err);
               sendGoogleChatMessage(
                 parsed.spaceName,
                 "Sorry, I ran into an error while processing your request. Please try again.",
