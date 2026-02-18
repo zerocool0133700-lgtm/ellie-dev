@@ -112,11 +112,11 @@ This document audits the two Miro architecture diagrams against the actual imple
 
 5. ~~**No auth on Twilio webhook**~~ — **FIXED.** Added `validateTwilioSignature()` function that validates `X-Twilio-Signature` header using HMAC-SHA1 with `TWILIO_AUTH_TOKEN`. Applied to the `/voice` POST endpoint. Skips validation gracefully if auth token is not configured.
 
-### Remaining
+6. ~~**Context Docket not in diagram**~~ — **FIXED.** Updated Miro System Overview diagram to include "Context Docket" as a context enrichment source with "5-min cache" label alongside Semantic Search, Elasticsearch, and Recent Messages.
 
-6. **Context Docket not in diagram** — The relay fetches from `localhost:3000/api/context` (5-minute cache) as an additional context source. This is production functionality not represented in either diagram.
+7. ~~**Auth is per-channel, not centralized**~~ — **FIXED.** Updated Miro System Overview diagram to replace the single "Auth Check" node with a "Per-Channel Auth" cluster showing three separate decision nodes: Telegram Auth (user ID check), Google Chat Auth (email allowlist), and Twilio Auth (HMAC signature validation).
 
-7. **Auth is per-channel, not centralized** — The diagram shows a single "Auth Check" node. In practice, each channel implements its own auth independently.
+All 7 gaps have been resolved.
 
 ---
 
@@ -186,7 +186,6 @@ Browser  --fetch-->  Nuxt API routes
 
 ### Medium Priority
 1. **Create ellie-home Miro diagram** — The dashboard is complex enough to warrant its own architecture diagram
-2. **Update Miro diagrams** — Add context docket, clarify per-channel auth, document `AGENT_MODEL_OVERRIDE` flag
 
 ### Low Priority
-3. **Add Cloudflare Access** — Dashboard currently has no auth beyond the tunnel
+2. **Add Cloudflare Access** — Dashboard currently has no auth beyond the tunnel
