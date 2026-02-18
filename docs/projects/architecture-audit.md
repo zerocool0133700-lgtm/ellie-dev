@@ -68,7 +68,20 @@ This document audits the two Miro architecture diagrams against the actual imple
 | Supabase DB | Implemented | `relay.ts` `saveMessage()`, schema in `db/schema.sql` | Tables: messages, memory, conversations, agents, agent_sessions, agent_messages, routing_rules, agent_handoffs, work_sessions, work_session_updates. Optional. |
 | Plane PM | Implemented | `src/plane.ts` (286 lines) | REST client for `plane.ellie-labs.dev`. CRUD on issues, work session tracking. `ELLIE-XX` mentions auto-inject context into prompts. |
 | ElevenLabs TTS | Implemented | `relay.ts` `streamTTSToTwilio()`, `textToSpeechMulaw()`, `textToSpeechOgg()` | Used for voice calls (mulaw streaming) and Telegram voice replies (OGG). Model: `eleven_turbo_v2_5`. |
-| Approval Buttons | Implemented | `src/approval.ts`, `relay.ts` callback handlers | Telegram InlineKeyboard. Approve resumes Claude session. Deny tells Claude not to proceed. **Telegram-only.** |
+| Approval Buttons | Implemented | `src/approval.ts`, `relay.ts` callback handlers | Telegram InlineKeyboard + Google Chat Cards v2. Approve resumes Claude session. Deny tells Claude not to proceed. |
+
+### MCP Tool Servers
+
+| Server | Status | Transport | Notes |
+|--------|--------|-----------|-------|
+| Google Workspace | Implemented | stdio (uvx) | Gmail, Calendar, Drive, Docs, Contacts, Tasks. OAuth 2.0 single-user mode. |
+| GitHub | Implemented | stdio (bunx) | Repo operations, issues, PRs via `@modelcontextprotocol/server-github`. |
+| Miro | Implemented | HTTP (remote) | `mcp.miro.com` — diagram creation, board exploration, docs, tables. |
+| Excalidraw | Implemented | HTTP (remote) | `mcp.excalidraw.com/mcp` — hand-drawn style diagram generation. |
+| Brave Search | Implemented | stdio (bunx) | Web search via Brave Search API. |
+| Plane | Implemented | stdio (bunx) | `@makeplane/plane-mcp-server` — issue CRUD, state management. |
+| Memory | Implemented | stdio (bunx) | `@modelcontextprotocol/server-memory` — persistent memory store. |
+| Sequential Thinking | Implemented | stdio (bunx) | `@modelcontextprotocol/server-sequential-thinking` — structured reasoning. |
 
 ---
 
