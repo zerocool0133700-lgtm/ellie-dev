@@ -57,6 +57,15 @@ import {
   fetchWorkItemDetails,
   listOpenIssues,
 } from "./plane.ts";
+import {
+  getOrCreateConversation,
+  attachMessage,
+  maybeGenerateSummary,
+  closeActiveConversation,
+  closeConversation,
+  expireIdleConversations,
+  getConversationContext,
+} from "./conversations.ts";
 
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
 
@@ -171,16 +180,27 @@ let telegramIdleTimer: ReturnType<typeof setTimeout> | null = null;
 let gchatIdleTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
- * Run consolidation for a channel, then invalidate the context cache
- * so the next interaction gets fresh data.
+ * Close the active conversation for a channel, extract memories,
+ * then invalidate the context cache so the next interaction gets fresh data.
+ * Falls back to legacy consolidation if conversation tracking isn't active.
  */
 async function triggerConsolidation(channel?: string): Promise<void> {
   if (!supabase) return;
   try {
+    if (channel) {
+      // Try new conversation-based close first
+      const closed = await closeActiveConversation(supabase, channel);
+      if (closed) {
+        cachedContext = null;
+        console.log(`[conversation] Conversation closed (${channel}) — context cache cleared`);
+        return;
+      }
+    }
+
+    // Fallback to legacy consolidation for untracked messages
     const created = await consolidateNow(supabase, {
       channel,
       onComplete: () => {
-        // Invalidate context cache so next message gets fresh docket
         cachedContext = null;
       },
     });
@@ -188,7 +208,7 @@ async function triggerConsolidation(channel?: string): Promise<void> {
       console.log(`[consolidate] Conversation ended (${channel || "all"}) — context cache cleared`);
     }
   } catch (err) {
-    console.error("[consolidate] Inline consolidation error:", err);
+    console.error("[consolidate] Consolidation error:", err);
   }
 }
 
@@ -313,11 +333,15 @@ async function saveMessage(
 ): Promise<string | null> {
   if (!supabase) return null;
   try {
+    // Get or create active conversation for this channel
+    const conversationId = await getOrCreateConversation(supabase, channel);
+
     const { data } = await supabase.from("messages").insert({
       role,
       content,
       channel,
       metadata: metadata || {},
+      conversation_id: conversationId,
     }).select("id").single();
 
     // Index to ES (fire-and-forget)
@@ -327,6 +351,12 @@ async function saveMessage(
         content, role, channel,
         created_at: new Date().toISOString(),
       }).catch(() => {});
+
+      // Update conversation stats + maybe generate rolling summary (fire-and-forget)
+      if (conversationId) {
+        attachMessage(supabase, data.id, conversationId).catch(() => {});
+        maybeGenerateSummary(supabase, conversationId).catch(() => {});
+      }
     }
 
     return data?.id || null;
@@ -346,6 +376,13 @@ export const bot = new Bot(BOT_TOKEN);
 
 // Start approval expiry cleanup
 startExpiryCleanup();
+
+// Periodic idle conversation expiry (every 5 minutes)
+setInterval(() => {
+  if (supabase) {
+    expireIdleConversations(supabase).catch(() => {});
+  }
+}, 5 * 60_000);
 
 // ============================================================
 // SECURITY: Only respond to authorized user
@@ -2099,6 +2136,61 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
         res.end(JSON.stringify({ ok: false, error: String(err) }));
       }
     });
+    return;
+  }
+
+  // Close a specific conversation by ID
+  if (url.pathname === "/api/conversation/close" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        if (!supabase) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Supabase not configured" }));
+          return;
+        }
+        const data = body ? JSON.parse(body) : {};
+        if (data.conversation_id) {
+          await closeConversation(supabase, data.conversation_id);
+        } else if (data.channel) {
+          await closeActiveConversation(supabase, data.channel);
+        } else {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Provide conversation_id or channel" }));
+          return;
+        }
+        cachedContext = null;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (err) {
+        console.error("[conversation] Close API error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: String(err) }));
+      }
+    });
+    return;
+  }
+
+  // Get active conversation context for a channel (used by ELLIE-50 classifier)
+  if (url.pathname === "/api/conversation/context" && req.method === "GET") {
+    (async () => {
+      try {
+        if (!supabase) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Supabase not configured" }));
+          return;
+        }
+        const channel = url.searchParams.get("channel") || "telegram";
+        const context = await getConversationContext(supabase, channel);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, context }));
+      } catch (err) {
+        console.error("[conversation] Context API error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: String(err) }));
+      }
+    })();
     return;
   }
 

@@ -210,7 +210,7 @@ export async function getRecentConversations(
 
     const { data: convos, error } = await supabase
       .from("conversations")
-      .select("channel, started_at, summary, message_count")
+      .select("channel, started_at, summary, message_count, status, agent")
       .gte("started_at", threeDaysAgo)
       .order("started_at", { ascending: false })
       .limit(8);
@@ -226,13 +226,15 @@ export async function getRecentConversations(
         timeZone: "America/Chicago",
       });
       const channel = c.channel || "telegram";
+      const status = c.status || "closed";
+      const agentLabel = c.agent && c.agent !== "general" ? `, ${c.agent}` : "";
       const msgs = c.message_count ? `, ${c.message_count} msgs` : "";
       const summary = c.summary
         ? c.summary.length > 150
           ? c.summary.substring(0, 150) + "..."
           : c.summary
         : "No summary";
-      return `- [${channel}, ${time}${msgs}] ${summary}`;
+      return `- [${channel}, ${status}${agentLabel}, ${time}${msgs}] ${summary}`;
     });
 
     return "RECENT CONVERSATIONS:\n" + lines.join("\n");

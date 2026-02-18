@@ -15,8 +15,11 @@ CREATE EXTENSION IF NOT EXISTS pg_net;
 CREATE TABLE IF NOT EXISTS conversations (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   channel TEXT NOT NULL DEFAULT 'telegram',
-  started_at TIMESTAMPTZ NOT NULL,
-  ended_at TIMESTAMPTZ NOT NULL,
+  status TEXT DEFAULT 'active' CHECK (status IN ('active', 'closed', 'expired')),
+  agent TEXT DEFAULT 'general',
+  started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  ended_at TIMESTAMPTZ,
+  last_message_at TIMESTAMPTZ,
   summary TEXT,
   message_count INTEGER DEFAULT 0,
   metadata JSONB DEFAULT '{}'
@@ -24,6 +27,9 @@ CREATE TABLE IF NOT EXISTS conversations (
 
 CREATE INDEX IF NOT EXISTS idx_conversations_started_at ON conversations(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel);
+CREATE INDEX IF NOT EXISTS idx_conversations_status ON conversations(status) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_conversations_channel_status ON conversations(channel, status);
+CREATE INDEX IF NOT EXISTS idx_conversations_last_message_at ON conversations(last_message_at DESC);
 
 -- ============================================================
 -- MESSAGES TABLE (Conversation History)
@@ -151,6 +157,95 @@ BEGIN
   FROM memory m
   WHERE m.type = 'fact'
   ORDER BY m.created_at DESC;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Get or create active conversation for a channel
+CREATE OR REPLACE FUNCTION get_or_create_conversation(
+  p_channel TEXT,
+  p_agent TEXT DEFAULT 'general',
+  p_idle_minutes INTEGER DEFAULT 30
+)
+RETURNS UUID AS $$
+DECLARE
+  v_conversation_id UUID;
+  v_last_message_at TIMESTAMPTZ;
+BEGIN
+  SELECT id, last_message_at INTO v_conversation_id, v_last_message_at
+  FROM conversations
+  WHERE channel = p_channel AND status = 'active'
+  ORDER BY started_at DESC
+  LIMIT 1;
+
+  IF v_conversation_id IS NOT NULL AND v_last_message_at IS NOT NULL
+     AND (NOW() - v_last_message_at) > (p_idle_minutes || ' minutes')::INTERVAL THEN
+    UPDATE conversations
+    SET status = 'expired', ended_at = v_last_message_at, closed_at = NOW()
+    WHERE id = v_conversation_id;
+    v_conversation_id := NULL;
+  END IF;
+
+  IF v_conversation_id IS NULL THEN
+    INSERT INTO conversations (channel, agent, status, started_at, last_message_at, message_count)
+    VALUES (p_channel, p_agent, 'active', NOW(), NOW(), 0)
+    RETURNING id INTO v_conversation_id;
+  END IF;
+
+  RETURN v_conversation_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Close a conversation
+CREATE OR REPLACE FUNCTION close_conversation(
+  p_conversation_id UUID,
+  p_summary TEXT DEFAULT NULL
+)
+RETURNS VOID AS $$
+BEGIN
+  UPDATE conversations
+  SET status = 'closed',
+      ended_at = last_message_at,
+      closed_at = NOW(),
+      summary = COALESCE(p_summary, summary)
+  WHERE id = p_conversation_id AND status = 'active';
+END;
+$$ LANGUAGE plpgsql;
+
+-- Expire idle conversations
+CREATE OR REPLACE FUNCTION expire_idle_conversations(
+  p_idle_minutes INTEGER DEFAULT 30
+)
+RETURNS INTEGER AS $$
+DECLARE
+  v_count INTEGER;
+BEGIN
+  UPDATE conversations
+  SET status = 'expired', ended_at = last_message_at, closed_at = NOW()
+  WHERE status = 'active'
+    AND last_message_at < NOW() - (p_idle_minutes || ' minutes')::INTERVAL;
+
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RETURN v_count;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Get conversation context for classifier
+CREATE OR REPLACE FUNCTION get_conversation_context(p_channel TEXT)
+RETURNS TABLE (
+  conversation_id UUID,
+  agent TEXT,
+  summary TEXT,
+  message_count INTEGER,
+  started_at TIMESTAMPTZ,
+  last_message_at TIMESTAMPTZ
+) AS $$
+BEGIN
+  RETURN QUERY
+  SELECT c.id, c.agent, c.summary, c.message_count, c.started_at, c.last_message_at
+  FROM conversations c
+  WHERE c.channel = p_channel AND c.status = 'active'
+  ORDER BY c.started_at DESC
+  LIMIT 1;
 END;
 $$ LANGUAGE plpgsql;
 
