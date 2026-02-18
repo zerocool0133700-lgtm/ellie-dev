@@ -140,7 +140,7 @@ The dashboard has no dedicated Miro diagram. Here is the current architecture fo
 ### Stack
 - **Framework:** Nuxt 4 (Vue 3) with Tailwind CSS v4
 - **Local DB:** PostgreSQL via Drizzle ORM (Unix socket)
-- **Remote DB:** Supabase (conversations, messages, memory, agents, work sessions)
+- **Remote DB:** Supabase `ellie-home-db` (project: `tzugbqcbuxbzjgnufell`) — conversations, messages, memory, agents, work sessions
 - **Realtime:** SSE via EventEmitter -> `/api/events`
 - **Hosting:** Port 3000, Cloudflare tunnel, no authentication
 

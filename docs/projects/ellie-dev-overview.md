@@ -76,7 +76,7 @@ Full tool access to:
 
 - **Runtime:** Bun (fast JavaScript/TypeScript runtime)
 - **Language:** TypeScript
-- **Database:** PostgreSQL via Supabase
+- **Database:** PostgreSQL via Supabase (`ellie-home-db`, project: `tzugbqcbuxbzjgnufell`)
 - **Search:** Elasticsearch (full-text + semantic)
 - **Voice:** Groq Whisper API (transcription), ElevenLabs (TTS)
 - **LLM:** Claude (via Claude Code CLI)
