@@ -286,29 +286,45 @@ export async function getActivitySnapshot(
 }
 
 // ============================================================
-// GOOGLE CALENDAR: Upcoming events
+// GOOGLE API: Shared OAuth for Calendar, Gmail, Tasks
+// Supports two accounts (personal + workspace)
 // ============================================================
 
-const GCAL_CLIENT_ID = process.env.GOOGLE_CALENDAR_CLIENT_ID || process.env.GOOGLE_CHAT_OAUTH_CLIENT_ID || "";
-const GCAL_CLIENT_SECRET = process.env.GOOGLE_CALENDAR_CLIENT_SECRET || process.env.GOOGLE_CHAT_OAUTH_CLIENT_SECRET || "";
-const GCAL_REFRESH_TOKEN = process.env.GOOGLE_CALENDAR_REFRESH_TOKEN || "";
+const GAPI_CLIENT_ID = process.env.GOOGLE_CALENDAR_CLIENT_ID || process.env.GOOGLE_CHAT_OAUTH_CLIENT_ID || "";
+const GAPI_CLIENT_SECRET = process.env.GOOGLE_CALENDAR_CLIENT_SECRET || process.env.GOOGLE_CHAT_OAUTH_CLIENT_SECRET || "";
 
-let gcalTokenCache: { accessToken: string; expiresAt: number } | null = null;
+interface GoogleAccount {
+  label: string;
+  refreshToken: string;
+  tokenCache: { accessToken: string; expiresAt: number } | null;
+}
 
-async function getGcalAccessToken(): Promise<string | null> {
-  if (!GCAL_CLIENT_ID || !GCAL_CLIENT_SECRET || !GCAL_REFRESH_TOKEN) return null;
+const googleAccounts: GoogleAccount[] = [];
 
-  if (gcalTokenCache && Date.now() < gcalTokenCache.expiresAt - 60_000) {
-    return gcalTokenCache.accessToken;
+const personalToken = process.env.GOOGLE_API_REFRESH_TOKEN || process.env.GOOGLE_CALENDAR_REFRESH_TOKEN || "";
+if (personalToken) {
+  googleAccounts.push({ label: "personal", refreshToken: personalToken, tokenCache: null });
+}
+
+const workspaceToken = process.env.GOOGLE_API_REFRESH_TOKEN_WORKSPACE || "";
+if (workspaceToken) {
+  googleAccounts.push({ label: "workspace", refreshToken: workspaceToken, tokenCache: null });
+}
+
+async function getAccessTokenForAccount(account: GoogleAccount): Promise<string | null> {
+  if (!GAPI_CLIENT_ID || !GAPI_CLIENT_SECRET) return null;
+
+  if (account.tokenCache && Date.now() < account.tokenCache.expiresAt - 60_000) {
+    return account.tokenCache.accessToken;
   }
 
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
-      client_id: GCAL_CLIENT_ID,
-      client_secret: GCAL_CLIENT_SECRET,
-      refresh_token: GCAL_REFRESH_TOKEN,
+      client_id: GAPI_CLIENT_ID,
+      client_secret: GAPI_CLIENT_SECRET,
+      refresh_token: account.refreshToken,
       grant_type: "refresh_token",
     }),
   });
@@ -316,68 +332,223 @@ async function getGcalAccessToken(): Promise<string | null> {
   if (!res.ok) return null;
 
   const data = await res.json();
-  gcalTokenCache = {
+  account.tokenCache = {
     accessToken: data.access_token,
     expiresAt: Date.now() + (data.expires_in || 3600) * 1000,
   };
-  return gcalTokenCache.accessToken;
+  return account.tokenCache.accessToken;
+}
+
+/** Get access token for the first configured account (backwards compat) */
+async function getGoogleApiAccessToken(): Promise<string | null> {
+  if (!googleAccounts.length) return null;
+  return getAccessTokenForAccount(googleAccounts[0]);
+}
+
+// ============================================================
+// GOOGLE CALENDAR: Upcoming events
+// ============================================================
+
+/**
+ * Fetch calendar events for a single account.
+ */
+async function getCalendarForAccount(account: GoogleAccount): Promise<{ label: string; lines: string[] }> {
+  const token = await getAccessTokenForAccount(account);
+  if (!token) return { label: account.label, lines: [] };
+
+  const now = new Date();
+  const threeDaysOut = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
+
+  const params = new URLSearchParams({
+    timeMin: now.toISOString(),
+    timeMax: threeDaysOut.toISOString(),
+    maxResults: "10",
+    singleEvents: "true",
+    orderBy: "startTime",
+  });
+
+  const res = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+
+  if (!res.ok) return { label: account.label, lines: [] };
+
+  const data = await res.json();
+  const events = data.items || [];
+
+  const lines = events.map((e: any) => {
+    const start = e.start?.dateTime || e.start?.date || "";
+    const isAllDay = !e.start?.dateTime;
+    const time = isAllDay
+      ? new Date(start).toLocaleDateString("en-US", {
+          weekday: "short", month: "short", day: "numeric",
+          timeZone: "America/Chicago",
+        })
+      : new Date(start).toLocaleString("en-US", {
+          weekday: "short", month: "short", day: "numeric",
+          hour: "numeric", minute: "2-digit",
+          timeZone: "America/Chicago",
+        });
+    const location = e.location ? ` @ ${e.location}` : "";
+    return `- ${time}: ${e.summary || "(no title)"}${location}`;
+  });
+
+  return { label: account.label, lines };
 }
 
 /**
- * Fetch upcoming Google Calendar events (next 3 days).
- * Requires GOOGLE_CALENDAR_REFRESH_TOKEN in .env with calendar.readonly scope.
- * Falls back to using GOOGLE_CHAT_OAUTH_CLIENT_ID/SECRET for the OAuth client.
+ * Fetch upcoming Google Calendar events (next 3 days) across all configured accounts.
  */
 export async function getUpcomingCalendarEvents(): Promise<string> {
+  if (!googleAccounts.length) return "";
   try {
-    const token = await getGcalAccessToken();
-    if (!token) return "";
-
-    const now = new Date();
-    const threeDaysOut = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
-
-    const params = new URLSearchParams({
-      timeMin: now.toISOString(),
-      timeMax: threeDaysOut.toISOString(),
-      maxResults: "10",
-      singleEvents: "true",
-      orderBy: "startTime",
-    });
-
-    const res = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`,
-      { headers: { Authorization: `Bearer ${token}` } },
-    );
-
-    if (!res.ok) {
-      console.error("[context] Calendar API error:", res.status);
-      return "";
+    const results = await Promise.all(googleAccounts.map(getCalendarForAccount));
+    // Merge all events, tag with account label if multiple accounts
+    const multi = googleAccounts.length > 1;
+    const allLines: string[] = [];
+    for (const r of results) {
+      if (!r.lines.length) continue;
+      if (multi) allLines.push(`[${r.label}]`);
+      allLines.push(...r.lines);
     }
-
-    const data = await res.json();
-    const events = data.items || [];
-    if (!events.length) return "";
-
-    const lines = events.map((e: any) => {
-      const start = e.start?.dateTime || e.start?.date || "";
-      const isAllDay = !e.start?.dateTime;
-      const time = isAllDay
-        ? new Date(start).toLocaleDateString("en-US", {
-            weekday: "short", month: "short", day: "numeric",
-            timeZone: "America/Chicago",
-          })
-        : new Date(start).toLocaleString("en-US", {
-            weekday: "short", month: "short", day: "numeric",
-            hour: "numeric", minute: "2-digit",
-            timeZone: "America/Chicago",
-          });
-      const location = e.location ? ` @ ${e.location}` : "";
-      return `- ${time}: ${e.summary || "(no title)"}${location}`;
-    });
-
-    return "UPCOMING CALENDAR (next 3 days):\n" + lines.join("\n");
+    if (!allLines.length) return "";
+    return "UPCOMING CALENDAR (next 3 days):\n" + allLines.join("\n");
   } catch (error) {
     console.error("[context] Failed to fetch calendar events:", error);
+    return "";
+  }
+}
+
+// ============================================================
+// GMAIL: Unread email signal
+// ============================================================
+
+/**
+ * Fetch Gmail signal for a single account.
+ */
+async function getGmailSignalForAccount(account: GoogleAccount): Promise<string> {
+  const token = await getAccessTokenForAccount(account);
+  if (!token) return "";
+
+  const labelRes = await fetch(
+    "https://gmail.googleapis.com/gmail/v1/users/me/labels/INBOX",
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!labelRes.ok) return "";
+  const labelData = await labelRes.json();
+  const unreadCount = labelData.messagesUnread || 0;
+
+  if (unreadCount === 0) return "";
+
+  // Fetch recent unread message headers (up to 5)
+  const listRes = await fetch(
+    "https://gmail.googleapis.com/gmail/v1/users/me/messages?" +
+      new URLSearchParams({
+        q: "is:unread in:inbox",
+        maxResults: "5",
+      }),
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!listRes.ok) return `${account.label}: ${unreadCount} unread`;
+  const listData = await listRes.json();
+  const messageIds = (listData.messages || []).map((m: any) => m.id);
+
+  // Fetch metadata for each (in parallel)
+  const headerPromises = messageIds.map(async (id: string) => {
+    const msgRes = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!msgRes.ok) return null;
+    return msgRes.json();
+  });
+
+  const messages = (await Promise.all(headerPromises)).filter(Boolean);
+
+  const lines = messages.map((msg: any) => {
+    const headers = msg.payload?.headers || [];
+    const from = headers.find((h: any) => h.name === "From")?.value || "Unknown";
+    const subject = headers.find((h: any) => h.name === "Subject")?.value || "(no subject)";
+    const fromName = from.replace(/<.*>/, "").trim() || from;
+    const shortSubject = subject.length > 60 ? subject.substring(0, 57) + "..." : subject;
+    return `- ${fromName}: ${shortSubject}`;
+  });
+
+  return `${account.label} (${unreadCount} unread):\n${lines.join("\n")}`;
+}
+
+/**
+ * Fetch Gmail signal across all configured accounts.
+ * Keeps payload small — Claude uses MCP tools for full email content.
+ */
+export async function getGmailSignal(): Promise<string> {
+  if (!googleAccounts.length) return "";
+  try {
+    const results = await Promise.all(googleAccounts.map(getGmailSignalForAccount));
+    const parts = results.filter(Boolean);
+    if (!parts.length) return "GMAIL: No unread messages.";
+    return "GMAIL:\n" + parts.join("\n") + "\n(Use mcp__google-workspace tools for full email content)";
+  } catch (error) {
+    console.error("[context] Failed to fetch Gmail signal:", error);
+    return "";
+  }
+}
+
+// ============================================================
+// GOOGLE TASKS: Pending tasks
+// ============================================================
+
+/**
+ * Fetch pending Google Tasks for a single account.
+ */
+async function getGoogleTasksForAccount(account: GoogleAccount): Promise<string> {
+  const token = await getAccessTokenForAccount(account);
+  if (!token) return "";
+
+  const res = await fetch(
+    "https://tasks.googleapis.com/tasks/v1/lists/@default/tasks?" +
+      new URLSearchParams({
+        showCompleted: "false",
+        showHidden: "false",
+        maxResults: "15",
+      }),
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+
+  if (!res.ok) return "";
+
+  const data = await res.json();
+  const tasks = data.items || [];
+  if (!tasks.length) return "";
+
+  const lines = tasks.map((t: any) => {
+    const due = t.due
+      ? ` (due ${new Date(t.due).toLocaleDateString("en-US", {
+          month: "short",
+          day: "numeric",
+          timeZone: "America/Chicago",
+        })})`
+      : "";
+    const notes = t.notes ? ` — ${t.notes.substring(0, 50)}` : "";
+    return `- ${t.title}${due}${notes}`;
+  });
+
+  return `${account.label}:\n${lines.join("\n")}`;
+}
+
+/**
+ * Fetch pending Google Tasks across all configured accounts.
+ */
+export async function getGoogleTasks(): Promise<string> {
+  if (!googleAccounts.length) return "";
+  try {
+    const results = await Promise.all(googleAccounts.map(getGoogleTasksForAccount));
+    const parts = results.filter(Boolean);
+    if (!parts.length) return "";
+    return "GOOGLE TASKS (pending):\n" + parts.join("\n");
+  } catch (error) {
+    console.error("[context] Failed to fetch Google Tasks:", error);
     return "";
   }
 }
@@ -459,7 +630,7 @@ export async function getPendingActionItems(
 export async function getStructuredContext(
   supabase: SupabaseClient | null,
 ): Promise<string> {
-  const [workItems, workSessions, goalsAndFacts, recentConvos, activity, calendar, actionItems] = await Promise.all([
+  const [workItems, workSessions, goalsAndFacts, recentConvos, activity, calendar, actionItems, gmailSignal, googleTasks] = await Promise.all([
     getOpenWorkItems(),
     getRecentWorkSessions(supabase),
     getGoalsAndFacts(supabase),
@@ -467,8 +638,10 @@ export async function getStructuredContext(
     getActivitySnapshot(supabase),
     getUpcomingCalendarEvents(),
     getPendingActionItems(supabase),
+    getGmailSignal(),
+    getGoogleTasks(),
   ]);
 
-  const parts = [workItems, workSessions, goalsAndFacts, recentConvos, activity, calendar, actionItems].filter(Boolean);
+  const parts = [workItems, workSessions, goalsAndFacts, recentConvos, activity, calendar, actionItems, gmailSignal, googleTasks].filter(Boolean);
   return parts.join("\n\n");
 }

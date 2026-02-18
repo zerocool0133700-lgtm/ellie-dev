@@ -932,10 +932,18 @@ function buildPrompt(
     } else {
       parts.push(
         "You have full tool access: Read, Edit, Write, Bash, Glob, Grep, WebSearch, WebFetch. " +
-        "You also have MCP tools: Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Tasks — user_google_email is zerocool0133700@gmail.com), " +
-        "GitHub, Memory, Sequential Thinking, Plane (project management — workspace: evelife at plane.ellie-labs.dev), " +
-        "Brave Search (web search via mcp__brave-search__brave_web_search and mcp__brave-search__brave_local_search), " +
-        "Miro (diagrams, docs, tables), and Excalidraw (drawings, diagrams). " +
+        "You also have MCP tools:\n" +
+        "- Google Workspace (user_google_email: zerocool0133700@gmail.com):\n" +
+        "  Gmail: search_gmail_messages, get_gmail_message_content, send_gmail_message (send requires [CONFIRM])\n" +
+        "  Calendar: get_events, create_event (create/modify requires [CONFIRM])\n" +
+        "  Tasks: list_tasks, create_task, update_task, get_task\n" +
+        "  Also: Drive, Docs, Sheets, Forms, Contacts\n" +
+        "  Your system context already includes an unread email signal and pending Google Tasks.\n" +
+        "  Use Gmail MCP tools to read full email content, reply to threads, or draft messages.\n" +
+        "- GitHub, Memory, Sequential Thinking\n" +
+        "- Plane (project management — workspace: evelife at plane.ellie-labs.dev)\n" +
+        "- Brave Search (mcp__brave-search__brave_web_search, mcp__brave-search__brave_local_search)\n" +
+        "- Miro (diagrams, docs, tables), Excalidraw (drawings, diagrams)\n" +
         "Use them freely to answer questions — read files, run commands, search code, browse the web, check email, manage calendar. " +
         "IMPORTANT: NEVER run sudo commands, NEVER install packages (apt, npm -g, brew), NEVER run commands that require interactive input or confirmation. " +
         "If a task would require sudo or installing software, tell the user what to run instead. " +
@@ -964,15 +972,16 @@ function buildPrompt(
 
   parts.push(
     "\nACTION CONFIRMATIONS:" +
-      "\nWhen about to take a significant action affecting external systems " +
-      "(sending emails, creating calendar events, posting to channels, " +
-      "git push, modifying databases, or any difficult-to-undo action), " +
-      "include a [CONFIRM: description] tag in your response INSTEAD of executing the action." +
-      "\nThe user will see Approve/Deny buttons on Telegram. " +
-      "If approved, you will be resumed with instructions to proceed. " +
-      "If denied, you will be told not to proceed." +
-      "\nDo NOT use [CONFIRM:] for read-only actions like searching, reading files, or checking status." +
-      "\nDo NOT use [CONFIRM:] for trivial actions the user explicitly and directly asked you to do." +
+      "\nUse [CONFIRM: description] for these actions INSTEAD of executing:" +
+      "\n- Sending or replying to emails (send_gmail_message)" +
+      "\n- Creating or modifying calendar events (create_event, modify_event)" +
+      "\n- Git push, posting to channels, modifying databases" +
+      "\n- Any difficult-to-undo external action" +
+      "\nDo NOT use [CONFIRM:] for:" +
+      "\n- Read-only: searching email, reading messages, checking calendar, listing tasks" +
+      "\n- Google Tasks management: creating/completing/updating tasks (low-stakes, easily reversible)" +
+      "\n- Actions the user explicitly and directly asked you to do in simple terms" +
+      "\nThe user will see Approve/Deny buttons. If approved, you will be resumed with instructions to proceed." +
       '\nExample: "I\'ll send the report now. [CONFIRM: Send weekly report email to alice@example.com]"' +
       "\nYou can include multiple [CONFIRM:] tags if multiple actions need approval."
   );
