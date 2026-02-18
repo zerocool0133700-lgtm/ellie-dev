@@ -1,7 +1,8 @@
 /**
  * Approval Module
  *
- * Human-in-the-loop confirmations via Telegram inline keyboards.
+ * Human-in-the-loop confirmations via Telegram inline keyboards
+ * and Google Chat card buttons.
  * Claude requests approval by including [CONFIRM: description] tags
  * in its response. The relay parses these, shows buttons, and
  * resumes the session with the user's decision.
@@ -16,6 +17,8 @@ export interface PendingAction {
   chatId: number;
   messageId: number;
   createdAt: number;
+  channel?: "telegram" | "google-chat";
+  spaceName?: string;
 }
 
 const EXPIRY_MS = 15 * 60_000; // 15 minutes
@@ -51,6 +54,7 @@ export function storePendingAction(
   sessionId: string | null,
   chatId: number,
   messageId: number,
+  extra?: { channel?: "telegram" | "google-chat"; spaceName?: string },
 ): void {
   pendingActions.set(id, {
     id,
@@ -59,6 +63,8 @@ export function storePendingAction(
     chatId,
     messageId,
     createdAt: Date.now(),
+    channel: extra?.channel,
+    spaceName: extra?.spaceName,
   });
 }
 

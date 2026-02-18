@@ -370,13 +370,15 @@ bot.use(async (ctx, next) => {
 
 async function callClaude(
   prompt: string,
-  options?: { resume?: boolean; imagePath?: string; allowedTools?: string[]; model?: string }
+  options?: { resume?: boolean; imagePath?: string; allowedTools?: string[]; model?: string; sessionId?: string }
 ): Promise<string> {
   const args = [CLAUDE_PATH, "-p", prompt];
 
   // Resume previous session if available and requested
-  if (options?.resume && session.sessionId) {
-    args.push("--resume", session.sessionId);
+  // Explicit sessionId override takes priority (used by approval handlers)
+  const resumeSessionId = options?.sessionId || session.sessionId;
+  if (options?.resume && resumeSessionId) {
+    args.push("--resume", resumeSessionId);
   }
 
   args.push("--output-format", "text");
@@ -393,7 +395,7 @@ async function callClaude(
 
   // Log CLI invocation details (redact prompt, show flags)
   const flagArgs = args.slice(1).filter(a => a.startsWith("--"));
-  const resumeId = options?.resume && session.sessionId ? session.sessionId.slice(0, 8) : null;
+  const resumeId = options?.resume && resumeSessionId ? resumeSessionId.slice(0, 8) : null;
   const toolCount = options?.allowedTools?.length || ALLOWED_TOOLS.length;
   console.log(
     `[claude] Invoking: prompt=${prompt.length} chars` +
@@ -1565,39 +1567,65 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               removePendingAction(actionId);
               console.log(`[gchat] Action ${approved ? "approved" : "denied"}: ${pending.description.substring(0, 60)}`);
 
-              // Resume Claude with the decision
+              // Immediately acknowledge the button click with card update
+              const ackText = `${approved ? "\u2705 Approved" : "\u274C Denied"}: ${pending.description}`;
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({
+                actionResponse: { type: "UPDATE_MESSAGE" },
+                cardsV2: [{
+                  cardId: "approval_card",
+                  card: {
+                    header: { title: approved ? "Action Approved" : "Action Denied" },
+                    sections: [{
+                      widgets: [{ textParagraph: { text: ackText } }],
+                    }],
+                  },
+                }],
+              }));
+
+              // Resume Claude with the decision asynchronously (don't block webhook)
               const decision = approved
                 ? `The user APPROVED the action: "${pending.description}". Proceed with the action now.`
                 : `The user DENIED the action: "${pending.description}". Do NOT proceed. Acknowledge and move on.`;
-              const followUp = await callClaude(decision, {
-                resume: true,
-              });
-              const cleanFollowUp = await processMemoryIntents(supabase, followUp);
-              await saveMessage("assistant", cleanFollowUp, {}, "google-chat");
 
-              res.writeHead(200, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({
-                hostAppDataAction: {
-                  chatDataAction: {
-                    createMessageAction: {
-                      message: { text: `${approved ? "\u2705" : "\u274C"} ${pending.description}\n\n${cleanFollowUp}` },
-                    },
-                  },
-                },
-              }));
+              // Use stored session ID from when the approval was created
+              callClaude(decision, {
+                resume: true,
+                sessionId: pending.sessionId || undefined,
+              }).then(async (followUp) => {
+                const cleanFollowUp = await processMemoryIntents(supabase, followUp);
+                await saveMessage("assistant", cleanFollowUp, {}, "google-chat");
+
+                // Send follow-up via REST API to the correct space
+                if (pending.spaceName) {
+                  await sendGoogleChatMessage(pending.spaceName, cleanFollowUp).catch((err) => {
+                    console.error(`[gchat] Failed to send approval follow-up:`, err);
+                  });
+                }
+                console.log(`[gchat] Approval follow-up sent: ${cleanFollowUp.substring(0, 80)}...`);
+              }).catch((err) => {
+                console.error(`[gchat] Approval Claude call failed:`, err);
+                // Try to notify the user about the error
+                if (pending.spaceName) {
+                  sendGoogleChatMessage(pending.spaceName, "Sorry, I ran into an error processing that approval. Please try again.").catch(() => {});
+                }
+              });
               return;
             }
 
-            // Expired action
+            // Expired action — update the card to show expiry
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({
-              hostAppDataAction: {
-                chatDataAction: {
-                  createMessageAction: {
-                    message: { text: "This action has expired. Please try again." },
-                  },
+              actionResponse: { type: "UPDATE_MESSAGE" },
+              cardsV2: [{
+                cardId: "approval_card",
+                card: {
+                  header: { title: "Action Expired" },
+                  sections: [{
+                    widgets: [{ textParagraph: { text: "This action has expired. Please try again." } }],
+                  }],
                 },
-              },
+              }],
             }));
             return;
           }
@@ -1708,11 +1736,13 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               resetGchatIdleTimer();
               console.log(`[gchat] Async reply (${gchatClean.length} chars) to ${parsed.spaceName} thread=${parsed.threadName || "none"}: ${gchatClean.substring(0, 80)}...`);
 
+              // Don't use thread for async replies — thread replies in DMs get buried
+              // and users don't see them. Send as top-level message instead.
               const result = await deliverMessage(supabase, gchatClean, {
                 channel: "google-chat",
                 messageId: msgId || undefined,
                 spaceName: parsed.spaceName,
-                threadName: parsed.threadName,
+                threadName: null,
                 telegramBot: bot,
                 telegramChatId: ALLOWED_USER_ID,
                 fallback: true,
@@ -1751,7 +1781,10 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           if (gchatConfirms.length > 0) {
             const cardSections = gchatConfirms.map((desc) => {
               const actionId = crypto.randomUUID();
-              storePendingAction(actionId, desc, session.sessionId, 0, 0);
+              storePendingAction(actionId, desc, session.sessionId, 0, 0, {
+                channel: "google-chat",
+                spaceName: parsed.spaceName,
+              });
               return {
                 widgets: [
                   { textParagraph: { text: `<b>Action:</b> ${desc}` } },
