@@ -1837,6 +1837,173 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     return;
   }
 
+  // Alexa Custom Skill webhook
+  if (url.pathname === "/alexa" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        // Verify Alexa request signature (skip in dev if headers missing)
+        const certUrl = req.headers["signaturecertchainurl"] as string;
+        const signature = req.headers["signature-256"] as string;
+
+        if (certUrl && signature) {
+          const { verifyAlexaRequest } = await import("./alexa.ts");
+          const valid = await verifyAlexaRequest(certUrl, signature, body);
+          if (!valid) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Invalid signature" }));
+            return;
+          }
+        }
+
+        const {
+          parseAlexaRequest, handleAddTodo, handleGetTodos, handleGetBriefing,
+          buildAlexaResponse, buildAlexaErrorResponse, textToSsml,
+        } = await import("./alexa.ts");
+
+        const alexaBody = JSON.parse(body);
+        const parsed = parseAlexaRequest(alexaBody);
+
+        console.log(`[alexa] ${parsed.type} ${parsed.intentName || ""}: ${parsed.text.substring(0, 80)}`);
+
+        // Save user message
+        await saveMessage("user", parsed.text, {
+          userId: parsed.userId,
+          sessionId: parsed.sessionId,
+          intent: parsed.intentName,
+        }, "alexa");
+
+        // Handle request types
+        if (parsed.type === "LaunchRequest") {
+          const resp = buildAlexaResponse(
+            "Hi! I'm Ellie. You can ask me anything, say add a todo, or ask for your briefing. What would you like?",
+            false, // Keep session open
+            "Ellie",
+            "Ask me anything, add a todo, or get your briefing.",
+          );
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(resp));
+          return;
+        }
+
+        if (parsed.type === "SessionEndedRequest") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ version: "1.0", response: {} }));
+          return;
+        }
+
+        // IntentRequest
+        const intent = parsed.intentName;
+        let speechText: string;
+        let shouldEndSession = true;
+
+        switch (intent) {
+          case "AddTodoIntent": {
+            speechText = await handleAddTodo(parsed.slots);
+            break;
+          }
+          case "GetTodosIntent": {
+            speechText = await handleGetTodos();
+            break;
+          }
+          case "GetBriefingIntent": {
+            speechText = await handleGetBriefing();
+            break;
+          }
+          case "AskEllieIntent": {
+            const query = parsed.slots.query || parsed.text;
+
+            // Gather context + call Claude with 6s timeout
+            const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
+              getContextDocket(),
+              getRelevantContext(supabase, query),
+              searchElastic(query, { limit: 5, recencyBoost: true }),
+              getStructuredContext(supabase),
+              getRecentMessages(supabase),
+            ]);
+
+            const agentResult = await routeAndDispatch(supabase, query, "alexa", parsed.userId);
+            const enrichedPrompt = buildPrompt(
+              query, contextDocket, relevantContext, elasticContext, "alexa",
+              agentResult?.dispatch.agent ? {
+                system_prompt: agentResult.dispatch.agent.system_prompt,
+                name: agentResult.dispatch.agent.name,
+                tools_enabled: agentResult.dispatch.agent.tools_enabled,
+              } : undefined,
+              undefined, structuredContext, recentMessages,
+            );
+
+            const ALEXA_TIMEOUT_MS = 6_000;
+            const claudePromise = (async () => {
+              const raw = await callClaude(enrichedPrompt, {
+                resume: true,
+                allowedTools: agentResult?.dispatch.agent.tools_enabled?.length
+                  ? agentResult.dispatch.agent.tools_enabled : undefined,
+                model: agentResult?.dispatch.agent.model || undefined,
+              });
+              return await processMemoryIntents(supabase, raw);
+            })();
+
+            const timeoutPromise = new Promise<"timeout">((resolve) =>
+              setTimeout(() => resolve("timeout"), ALEXA_TIMEOUT_MS)
+            );
+
+            const raceResult = await Promise.race([
+              claudePromise.then((r) => ({ type: "done" as const, response: r })),
+              timeoutPromise.then(() => ({ type: "timeout" as const })),
+            ]);
+
+            if (raceResult.type === "timeout") {
+              // Claude still working — tell user, deliver via Telegram
+              speechText = "I'm still thinking about that. I'll send the full answer to your Telegram.";
+              claudePromise
+                .then(async (response) => {
+                  const clean = response.replace(/<[^>]+>/g, "").substring(0, 4000);
+                  await saveMessage("assistant", clean, { source: "alexa-async" }, "alexa");
+                  try {
+                    await bot.api.sendMessage(ALLOWED_USER_ID, `[From Alexa] ${clean}`);
+                  } catch (tgErr) {
+                    console.error("[alexa] Telegram fallback failed:", tgErr);
+                  }
+                })
+                .catch((err) => console.error("[alexa] Async Claude error:", err));
+            } else {
+              const clean = raceResult.response.replace(/<[^>]+>/g, "").substring(0, 6000);
+              await saveMessage("assistant", clean, {}, "alexa");
+              speechText = clean;
+            }
+            break;
+          }
+          case "AMAZON.HelpIntent": {
+            speechText = "You can ask me anything, say add a todo followed by your task, say what's on my todo list, or ask for your briefing. What would you like?";
+            shouldEndSession = false;
+            break;
+          }
+          case "AMAZON.StopIntent":
+          case "AMAZON.CancelIntent": {
+            speechText = "Goodbye!";
+            break;
+          }
+          default: {
+            speechText = "I'm not sure how to help with that. Try asking me a question, or say help for options.";
+            shouldEndSession = false;
+          }
+        }
+
+        const resp = buildAlexaResponse(speechText, shouldEndSession, "Ellie");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(resp));
+      } catch (err) {
+        console.error("[alexa] Webhook error:", err);
+        const { buildAlexaErrorResponse } = await import("./alexa.ts");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(buildAlexaErrorResponse()));
+      }
+    });
+    return;
+  }
+
   // Health check
   if (url.pathname === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
@@ -1845,6 +2012,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
       service: "ellie-relay",
       voice: !!ELEVENLABS_API_KEY,
       googleChat: isGoogleChatEnabled(),
+      alexa: true,
     }));
     return;
   }
