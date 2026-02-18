@@ -921,7 +921,9 @@ function buildPrompt(
       parts.push(
         "You have full tool access: Read, Edit, Write, Bash, Glob, Grep, WebSearch, WebFetch. " +
         "You also have MCP tools: Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Tasks — user_google_email is zerocool0133700@gmail.com), " +
-        "GitHub, Memory, Sequential Thinking, and Plane (project management — workspace: evelife at plane.ellie-labs.dev). " +
+        "GitHub, Memory, Sequential Thinking, Plane (project management — workspace: evelife at plane.ellie-labs.dev), " +
+        "Brave Search (web search via mcp__brave-search__brave_web_search and mcp__brave-search__brave_local_search), " +
+        "Miro (diagrams, docs, tables), and Excalidraw (drawings, diagrams). " +
         "Use them freely to answer questions — read files, run commands, search code, browse the web, check email, manage calendar. " +
         "IMPORTANT: NEVER run sudo commands, NEVER install packages (apt, npm -g, brew), NEVER run commands that require interactive input or confirmation. " +
         "If a task would require sudo or installing software, tell the user what to run instead. " +
