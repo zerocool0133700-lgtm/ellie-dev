@@ -2311,6 +2311,90 @@ If no actionable ideas are found, return: { "ideas": [] }`;
     return;
   }
 
+  // Vault credential endpoints (ELLIE-32)
+  if (url.pathname.startsWith("/api/vault/")) {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        let data: any = {};
+        if (body) {
+          try {
+            data = JSON.parse(body);
+          } catch (parseErr) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Invalid JSON body" }));
+            return;
+          }
+        }
+
+        const {
+          createVaultCredential, listVaultCredentials, getVaultCredential,
+          updateVaultCredential, deleteVaultCredential,
+          resolveVaultCredential, authenticatedFetch,
+        } = await import("./api/vault.ts");
+
+        // Parse query params for GET requests
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+
+        // Extract ID from path: /api/vault/credentials/:id
+        const pathParts = url.pathname.replace("/api/vault/", "").split("/");
+        const segment = pathParts[0]; // "credentials", "resolve", or "fetch"
+        const id = pathParts[1] || null;
+
+        const mockReq = { body: data, params: { id }, query: queryParams } as any;
+        const mockRes = {
+          status: (code: number) => ({
+            json: (data: any) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(data));
+            }
+          }),
+          json: (data: any) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(data));
+          }
+        } as any;
+
+        if (!supabase) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Database not configured" }));
+          return;
+        }
+
+        if (segment === "credentials") {
+          if (req.method === "POST" && !id) {
+            await createVaultCredential(mockReq, mockRes, supabase);
+          } else if (req.method === "GET" && !id) {
+            await listVaultCredentials(mockReq, mockRes, supabase);
+          } else if (req.method === "GET" && id) {
+            await getVaultCredential(mockReq, mockRes, supabase);
+          } else if (req.method === "PATCH" && id) {
+            await updateVaultCredential(mockReq, mockRes, supabase);
+          } else if (req.method === "DELETE" && id) {
+            await deleteVaultCredential(mockReq, mockRes, supabase);
+          } else {
+            res.writeHead(405, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Method not allowed" }));
+          }
+        } else if (segment === "resolve" && req.method === "POST") {
+          await resolveVaultCredential(mockReq, mockRes, supabase);
+        } else if (segment === "fetch" && req.method === "POST") {
+          await authenticatedFetch(mockReq, mockRes, supabase);
+        } else {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Unknown vault endpoint" }));
+        }
+      } catch (err) {
+        console.error("[vault] Error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
+    return;
+  }
+
   // Rollup endpoints
   if (url.pathname.startsWith("/api/rollup/") && req.method === "POST") {
     let body = "";
