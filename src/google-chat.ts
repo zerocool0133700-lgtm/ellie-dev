@@ -258,17 +258,23 @@ function splitMessage(text: string): string[] {
   return chunks;
 }
 
+export interface GchatSendResult {
+  externalId: string; // Google Chat message resource name
+  threadName: string | null;
+}
+
 /**
  * Send a message to a Google Chat space, optionally in a thread.
- * Automatically splits long messages.
+ * Automatically splits long messages. Returns the external ID of the last chunk.
  */
 export async function sendGoogleChatMessage(
   spaceName: string,
   text: string,
   threadName?: string | null,
-): Promise<void> {
+): Promise<GchatSendResult> {
   const token = await getAccessToken();
   const chunks = splitMessage(text);
+  let lastResult: GchatSendResult = { externalId: "", threadName: null };
 
   for (const chunk of chunks) {
     const body: Record<string, unknown> = { text: chunk };
@@ -282,24 +288,38 @@ export async function sendGoogleChatMessage(
       url += "?messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD";
     }
 
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15_000);
 
-    if (!res.ok) {
-      const errBody = await res.text();
-      console.error(`[gchat] Send failed (${res.status}):`, errBody);
-      throw new Error(`Google Chat send failed: ${res.status}`);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const errBody = await res.text();
+        console.error(`[gchat] Send failed (${res.status}):`, errBody);
+        throw new Error(`Google Chat send failed: ${res.status}`);
+      }
+
+      const resBody = await res.json();
+      lastResult = {
+        externalId: resBody.name || "",
+        threadName: resBody.thread?.name || null,
+      };
+      console.log(`[gchat] Message sent to ${spaceName} (${chunk.length} chars${threadName ? ", in-thread" : ""}) -> ${lastResult.externalId} thread=${lastResult.threadName || "none"}`);
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const resBody = await res.json();
-    console.log(`[gchat] Message sent to ${spaceName} (${chunk.length} chars${threadName ? ", in-thread" : ""}) -> ${resBody.name || "unknown"} thread=${resBody.thread?.name || "none"}`);
   }
+
+  return lastResult;
 }
 
 // ============================================================

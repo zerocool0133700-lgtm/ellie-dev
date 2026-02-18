@@ -34,6 +34,12 @@ import {
   type GoogleChatEvent,
 } from "./google-chat.ts";
 import {
+  deliverMessage,
+  acknowledgeChannel,
+  startNudgeChecker,
+  type DeliveryResult,
+} from "./delivery.ts";
+import {
   routeAndDispatch,
   syncResponse,
   type DispatchResult,
@@ -304,8 +310,8 @@ async function saveMessage(
   content: string,
   metadata?: Record<string, unknown>,
   channel: string = "telegram"
-): Promise<void> {
-  if (!supabase) return;
+): Promise<string | null> {
+  if (!supabase) return null;
   try {
     const { data } = await supabase.from("messages").insert({
       role,
@@ -322,8 +328,11 @@ async function saveMessage(
         created_at: new Date().toISOString(),
       }).catch(() => {});
     }
+
+    return data?.id || null;
   } catch (error) {
     console.error("Supabase save error:", error);
+    return null;
   }
 }
 
@@ -568,6 +577,7 @@ bot.on("message:text", withQueue(async (ctx) => {
   console.log(`Message: ${text.substring(0, 50)}...`);
 
   await ctx.replyWithChatAction("typing");
+  acknowledgeChannel("telegram"); // User responded — clear pending responses
 
   await saveMessage("user", text);
 
@@ -1609,6 +1619,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
         }
 
         console.log(`[gchat] ${parsed.senderName}: ${parsed.text.substring(0, 80)}...`);
+        acknowledgeChannel("google-chat"); // User responded — clear pending responses
 
         await saveMessage("user", parsed.text, {
           sender: parsed.senderEmail,
@@ -1689,23 +1700,44 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           console.log(`[gchat] Timeout — sending interim response, continuing async`);
           sendSyncResponse(`Working on it... (${agentLabel} agent is processing your request)`);
 
-          // Wait for Claude to finish, then send result async
+          // Wait for Claude to finish, then deliver result with retry + fallback
           claudePromise
             .then(async ({ response }) => {
               const { cleanedText: gchatClean } = extractApprovalTags(response);
-              await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
+              const msgId = await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
               resetGchatIdleTimer();
               console.log(`[gchat] Async reply (${gchatClean.length} chars) to ${parsed.spaceName} thread=${parsed.threadName || "none"}: ${gchatClean.substring(0, 80)}...`);
-              await sendGoogleChatMessage(parsed.spaceName, gchatClean, parsed.threadName);
-              console.log(`[gchat] Async send complete`);
+
+              const result = await deliverMessage(supabase, gchatClean, {
+                channel: "google-chat",
+                messageId: msgId || undefined,
+                spaceName: parsed.spaceName,
+                threadName: parsed.threadName,
+                telegramBot: bot,
+                telegramChatId: ALLOWED_USER_ID,
+                fallback: true,
+              });
+
+              if (result.status === "sent") {
+                console.log(`[gchat] Async delivery complete → ${result.externalId}`);
+              } else if (result.status === "fallback") {
+                console.log(`[gchat] Async delivery via fallback (${result.channel}) → ${result.externalId}`);
+              } else {
+                console.error(`[gchat] Async delivery FAILED: ${result.error}`);
+              }
             })
             .catch((err) => {
-              console.error("[gchat] Async send error:", err);
-              sendGoogleChatMessage(
-                parsed.spaceName,
-                "Sorry, I ran into an error while processing your request. Please try again.",
-                parsed.threadName,
-              ).catch(() => {});
+              console.error("[gchat] Async Claude/delivery error:", err);
+              // Last resort — try to notify user something went wrong
+              deliverMessage(supabase, "Sorry, I ran into an error while processing your request. Please try again.", {
+                channel: "google-chat",
+                spaceName: parsed.spaceName,
+                threadName: parsed.threadName,
+                telegramBot: bot,
+                telegramChatId: ALLOWED_USER_ID,
+                fallback: true,
+                maxRetries: 1,
+              }).catch(() => {});
             });
         } else {
           // Claude finished within timeout — respond synchronously (best UX)
@@ -1987,8 +2019,14 @@ If no actionable ideas are found, return: { "ideas": [] }`;
             const tag = idea.existing ? `[EXISTS: ${idea.existing}]` : "[NEW]";
             chatMsg += `${tag} *${idea.title}*\n${idea.description}\n\n`;
           }
-          await sendGoogleChatMessage(gchatSpace, chatMsg.trim());
-          console.log("[extract-ideas] Sent to Google Chat");
+          const ideaResult = await deliverMessage(supabase, chatMsg.trim(), {
+            channel: "google-chat",
+            spaceName: gchatSpace,
+            telegramBot: bot,
+            telegramChatId: ALLOWED_USER_ID,
+            fallback: true,
+          });
+          console.log(`[extract-ideas] Sent to ${ideaResult.channel} (${ideaResult.status})`);
         } else if (!gchatSpace) {
           console.warn("[extract-ideas] GOOGLE_CHAT_SPACE_NAME not set — skipping chat notification");
         }
@@ -2310,6 +2348,22 @@ voiceWss.on("connection", (ws: WebSocket) => {
 
 // Init Google Chat (optional — skips gracefully if not configured)
 const gchatEnabled = await initGoogleChat();
+
+// Start delivery nudge checker — sends reminder if response wasn't acknowledged
+startNudgeChecker(async (channel, count) => {
+  const nudgeText = `Hey Dave — I sent you a response${count > 1 ? ` (${count} messages)` : ""} a few minutes ago. Did it come through?`;
+  console.log(`[delivery] Nudging on ${channel} (${count} pending responses)`);
+  try {
+    if (channel === "google-chat" && gchatEnabled) {
+      const gchatSpace = process.env.GOOGLE_CHAT_SPACE_NAME;
+      if (gchatSpace) await sendGoogleChatMessage(gchatSpace, nudgeText);
+    } else if (channel === "telegram" && ALLOWED_USER_ID) {
+      await bot.api.sendMessage(ALLOWED_USER_ID, nudgeText);
+    }
+  } catch (err) {
+    console.error(`[delivery] Nudge failed on ${channel}:`, err);
+  }
+});
 
 console.log("Starting Claude Telegram Relay...");
 console.log(`Authorized user: ${ALLOWED_USER_ID || "ANY (not recommended)"}`);

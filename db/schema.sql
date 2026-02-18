@@ -37,13 +37,18 @@ CREATE TABLE IF NOT EXISTS messages (
   metadata JSONB DEFAULT '{}',
   embedding VECTOR(1536), -- For semantic search (optional)
   summarized BOOLEAN DEFAULT FALSE,
-  conversation_id UUID REFERENCES conversations(id)
+  conversation_id UUID REFERENCES conversations(id),
+  delivery_status TEXT DEFAULT 'pending' CHECK (delivery_status IN ('pending', 'sent', 'failed', 'fallback')),
+  external_id TEXT, -- Platform message ID (gchat resource name or telegram message_id)
+  sent_at TIMESTAMPTZ,
+  delivery_channel TEXT -- Actual channel delivered on (may differ from channel if fallback used)
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel);
 CREATE INDEX IF NOT EXISTS idx_messages_summarized ON messages(summarized) WHERE summarized = FALSE;
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_messages_delivery_status ON messages(delivery_status) WHERE delivery_status != 'sent';
 
 -- ============================================================
 -- MEMORY TABLE (Facts & Goals)
