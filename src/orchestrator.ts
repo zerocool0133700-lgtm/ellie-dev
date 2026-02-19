@@ -162,6 +162,10 @@ export async function executeOrchestrated(
 ): Promise<ExecutionResult> {
   const effectiveSteps = steps.slice(0, MAX_PIPELINE_DEPTH);
 
+  if (effectiveSteps.length === 0) {
+    throw new Error(`Orchestrator received empty steps array for mode "${mode}"`);
+  }
+
   // Create execution plan record
   const planId = await createExecutionPlan(options.supabase, {
     conversation_id: options.conversationId,
@@ -286,11 +290,18 @@ async function executePipeline(
     }
   }
 
+  if (!finalDispatch) {
+    throw new PipelineStepError(
+      steps.length - 1, steps[steps.length - 1] || steps[0],
+      "dispatch_failed", previousOutput,
+    );
+  }
+
   return {
     finalResponse: previousOutput || "",
     artifacts,
     stepResults: artifacts.steps,
-    finalDispatch: finalDispatch!,
+    finalDispatch,
     mode: "pipeline",
   };
 }
@@ -307,17 +318,18 @@ async function executeFanOut(
 ): Promise<ExecutionResult> {
   console.log(`[orchestrator] Fan-out: ${steps.length} parallel steps`);
 
-  // Run all steps in parallel
+  // Run all steps in parallel — track original index for correct step mapping
   const results = await Promise.all(
     steps.map(async (step, i) => {
       try {
         const { stepResult, dispatch } = await executeStep(
           step, i, steps.length, originalMessage, null, options, "parallel",
         );
-        return { stepResult, dispatch, error: null };
+        return { stepIndex: i, stepResult, dispatch, error: null };
       } catch (err) {
         console.error(`[orchestrator] Fan-out step ${i} failed:`, err);
         return {
+          stepIndex: i,
           stepResult: null,
           dispatch: null,
           error: err instanceof Error ? err.message : String(err),
@@ -345,9 +357,9 @@ async function executeFanOut(
     if (r.dispatch) finalDispatch = r.dispatch;
   }
 
-  // Synthesize results via LLM
-  const stepOutputs = successfulResults.map((r, i) => {
-    const step = steps[results.indexOf(r)];
+  // Synthesize results via LLM — use tracked stepIndex for correct mapping
+  const stepOutputs = successfulResults.map((r) => {
+    const step = steps[r.stepIndex];
     return `[${step.agent_name}/${step.skill_name || "none"} — ${step.instruction}]:\n${r.stepResult!.output}`;
   }).join("\n\n---\n\n");
 
@@ -380,11 +392,15 @@ async function executeFanOut(
 
   if (options.onHeartbeat) options.onHeartbeat();
 
+  if (!finalDispatch) {
+    throw new PipelineStepError(0, steps[0], "dispatch_failed", null);
+  }
+
   return {
     finalResponse: synthesisText,
     artifacts,
     stepResults: artifacts.steps,
-    finalDispatch: finalDispatch!,
+    finalDispatch,
     mode: "fan-out",
   };
 }
@@ -481,11 +497,15 @@ async function executeCriticLoop(
     feedback = verdict.feedback;
   }
 
+  if (!finalDispatch) {
+    throw new PipelineStepError(0, producer, "dispatch_failed", producerOutput || null);
+  }
+
   return {
     finalResponse: producerOutput,
     artifacts,
     stepResults: artifacts.steps,
-    finalDispatch: finalDispatch!,
+    finalDispatch,
     mode: "critic-loop",
   };
 }
