@@ -44,6 +44,7 @@ import {
   syncResponse,
   type DispatchResult,
 } from "./agent-router.ts";
+import { initClassifier } from "./intent-classifier.ts";
 import { getStructuredContext } from "./context-sources.ts";
 import {
   extractApprovalTags,
@@ -620,21 +621,22 @@ bot.on("message:text", withQueue(async (ctx) => {
 
   await saveMessage("user", text);
 
-  // Route message to appropriate agent (falls back gracefully)
+  // Route message to appropriate agent via LLM classifier (falls back gracefully)
   const agentResult = await routeAndDispatch(supabase, text, "telegram", userId);
+  const effectiveText = agentResult?.route.strippedMessage || text;
 
   // Gather context: docket + semantic search + ES full-text search + structured sources + recent messages
   const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
     getContextDocket(),
-    getRelevantContext(supabase, text),
-    searchElastic(text, { limit: 5, recencyBoost: true }),
+    getRelevantContext(supabase, effectiveText),
+    searchElastic(effectiveText, { limit: 5, recencyBoost: true }),
     getStructuredContext(supabase),
     getRecentMessages(supabase),
   ]);
 
   // Detect work item mentions (ELLIE-5, EVE-3, etc.)
   let workItemContext = "";
-  const workItemMatch = text.match(/\b([A-Z]+-\d+)\b/);
+  const workItemMatch = effectiveText.match(/\b([A-Z]+-\d+)\b/);
   if (workItemMatch && isPlaneConfigured()) {
     const details = await fetchWorkItemDetails(workItemMatch[1]);
     if (details) {
@@ -646,7 +648,7 @@ bot.on("message:text", withQueue(async (ctx) => {
   }
 
   const enrichedPrompt = buildPrompt(
-    text, contextDocket, relevantContext, elasticContext, "telegram",
+    effectiveText, contextDocket, relevantContext, elasticContext, "telegram",
     agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
     workItemContext, structuredContext, recentMessages,
   );
@@ -717,17 +719,18 @@ bot.on("message:voice", withQueue(async (ctx) => {
 
     const voiceUserId = ctx.from?.id.toString() || "";
     const agentResult = await routeAndDispatch(supabase, transcription, "telegram", voiceUserId);
+    const effectiveTranscription = agentResult?.route.strippedMessage || transcription;
 
     const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
       getContextDocket(),
-      getRelevantContext(supabase, transcription),
-      searchElastic(transcription, { limit: 5, recencyBoost: true }),
+      getRelevantContext(supabase, effectiveTranscription),
+      searchElastic(effectiveTranscription, { limit: 5, recencyBoost: true }),
       getStructuredContext(supabase),
       getRecentMessages(supabase),
     ]);
 
     const enrichedPrompt = buildPrompt(
-      `[Voice message transcribed]: ${transcription}`,
+      `[Voice message transcribed]: ${effectiveTranscription}`,
       contextDocket,
       relevantContext,
       elasticContext,
@@ -1369,10 +1372,15 @@ interface VoiceCallSession {
   conversationHistory: Array<{ role: string; content: string }>;
 }
 
-// Direct Anthropic API client for voice (much faster than CLI spawn)
+// Direct Anthropic API client for voice + intent classification
 const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   : null;
+
+// Initialize intent classifier (ELLIE-50) with shared clients
+if (anthropic && supabase) {
+  initClassifier(anthropic, supabase);
+}
 
 async function callClaudeVoice(systemPrompt: string, userMessage: string): Promise<string> {
   const start = Date.now();
@@ -1701,17 +1709,18 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
         }, "google-chat");
 
         const gchatAgentResult = await routeAndDispatch(supabase, parsed.text, "google-chat", parsed.senderEmail);
+        const effectiveGchatText = gchatAgentResult?.route.strippedMessage || parsed.text;
 
         const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
           getContextDocket(),
-          getRelevantContext(supabase, parsed.text),
-          searchElastic(parsed.text, { limit: 5, recencyBoost: true }),
+          getRelevantContext(supabase, effectiveGchatText),
+          searchElastic(effectiveGchatText, { limit: 5, recencyBoost: true }),
           getStructuredContext(supabase),
           getRecentMessages(supabase),
         ]);
 
         const enrichedPrompt = buildPrompt(
-          parsed.text, contextDocket, relevantContext, elasticContext, "google-chat",
+          effectiveGchatText, contextDocket, relevantContext, elasticContext, "google-chat",
           gchatAgentResult?.dispatch.agent ? { system_prompt: gchatAgentResult.dispatch.agent.system_prompt, name: gchatAgentResult.dispatch.agent.name, tools_enabled: gchatAgentResult.dispatch.agent.tools_enabled } : undefined,
           undefined, structuredContext, recentMessages,
         );
@@ -1970,8 +1979,9 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
             ]);
 
             const agentResult = await routeAndDispatch(supabase, query, "alexa", parsed.userId);
+            const effectiveQuery = agentResult?.route.strippedMessage || query;
             const enrichedPrompt = buildPrompt(
-              query, contextDocket, relevantContext, elasticContext, "alexa",
+              effectiveQuery, contextDocket, relevantContext, elasticContext, "alexa",
               agentResult?.dispatch.agent ? {
                 system_prompt: agentResult.dispatch.agent.system_prompt,
                 name: agentResult.dispatch.agent.name,

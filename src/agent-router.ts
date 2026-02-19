@@ -7,6 +7,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { classifyIntent } from "./intent-classifier.ts";
 
 export interface AgentConfig {
   name: string;
@@ -18,9 +19,12 @@ export interface AgentConfig {
 }
 
 export interface RouteResult {
-  agent_id: string;
+  agent_id?: string;
   agent_name: string;
   rule_name: string;
+  confidence: number;
+  reasoning?: string;
+  strippedMessage?: string;
   session_id?: string;
 }
 
@@ -166,15 +170,26 @@ export async function routeAndDispatch(
   route: RouteResult;
   dispatch: DispatchResult;
 } | null> {
-  const route = await routeMessage(supabase, message, channel, userId);
-  if (!route) return null;
+  // Use LLM-based classifier (ELLIE-50), fall back to edge function on failure
+  let route: RouteResult;
+  try {
+    const classification = await classifyIntent(message, channel, userId);
+    route = { ...classification };
+  } catch (err) {
+    console.error("[agent-router] classifyIntent failed, trying edge function fallback:", err);
+    const edgeRoute = await routeMessage(supabase, message, channel, userId);
+    if (!edgeRoute) return null;
+    route = { ...edgeRoute, confidence: 0.5 };
+  }
+
+  const dispatchMessage = route.strippedMessage || message;
 
   const dispatch = await dispatchAgent(
     supabase,
     route.agent_name,
     userId,
     channel,
-    message,
+    dispatchMessage,
   );
   if (!dispatch) return null;
 
