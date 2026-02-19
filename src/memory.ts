@@ -20,7 +20,8 @@ import { indexMemory, classifyDomain } from "./elasticsearch.ts";
  */
 export async function processMemoryIntents(
   supabase: SupabaseClient | null,
-  response: string
+  response: string,
+  sourceAgent: string = "general",
 ): Promise<string> {
   if (!supabase) return response;
 
@@ -31,6 +32,8 @@ export async function processMemoryIntents(
     const { data } = await supabase.from("memory").insert({
       type: "fact",
       content: match[1],
+      source_agent: sourceAgent,
+      visibility: "shared",
     }).select("id").single();
 
     if (data?.id) {
@@ -53,6 +56,8 @@ export async function processMemoryIntents(
       type: "goal",
       content: match[1],
       deadline: match[2] || null,
+      source_agent: sourceAgent,
+      visibility: "shared",
     }).select("id").single();
 
     if (data?.id) {

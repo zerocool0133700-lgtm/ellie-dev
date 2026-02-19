@@ -70,7 +70,9 @@ CREATE TABLE IF NOT EXISTS memory (
   priority INTEGER DEFAULT 0,
   metadata JSONB DEFAULT '{}',
   embedding VECTOR(1536),
-  conversation_id UUID REFERENCES conversations(id)
+  conversation_id UUID REFERENCES conversations(id),
+  source_agent TEXT,
+  visibility TEXT DEFAULT 'shared' CHECK (visibility IN ('private', 'shared', 'global'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_type ON memory(type);
@@ -149,11 +151,12 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION get_facts()
 RETURNS TABLE (
   id UUID,
-  content TEXT
+  content TEXT,
+  source_agent TEXT
 ) AS $$
 BEGIN
   RETURN QUERY
-  SELECT m.id, m.content
+  SELECT m.id, m.content, m.source_agent
   FROM memory m
   WHERE m.type = 'fact'
   ORDER BY m.created_at DESC;
