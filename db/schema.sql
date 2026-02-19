@@ -136,11 +136,12 @@ RETURNS TABLE (
   id UUID,
   content TEXT,
   deadline TIMESTAMPTZ,
-  priority INTEGER
+  priority INTEGER,
+  source_agent TEXT
 ) AS $$
 BEGIN
   RETURN QUERY
-  SELECT m.id, m.content, m.deadline, m.priority
+  SELECT m.id, m.content, m.deadline, m.priority, m.source_agent
   FROM memory m
   WHERE m.type = 'goal'
   ORDER BY m.priority DESC, m.created_at DESC;
@@ -262,7 +263,8 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION match_messages(
   query_embedding VECTOR(1536),
   match_threshold FLOAT DEFAULT 0.7,
-  match_count INT DEFAULT 10
+  match_count INT DEFAULT 10,
+  p_source_agent TEXT DEFAULT NULL
 )
 RETURNS TABLE (
   id UUID,
@@ -287,17 +289,20 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Match memory entries by embedding similarity
+-- Match memory entries by embedding similarity with visibility filtering and source-agent weighting
 CREATE OR REPLACE FUNCTION match_memory(
   query_embedding VECTOR(1536),
   match_threshold FLOAT DEFAULT 0.7,
-  match_count INT DEFAULT 10
+  match_count INT DEFAULT 10,
+  p_source_agent TEXT DEFAULT NULL
 )
 RETURNS TABLE (
   id UUID,
   content TEXT,
   type TEXT,
   created_at TIMESTAMPTZ,
+  source_agent TEXT,
+  visibility TEXT,
   similarity FLOAT
 ) AS $$
 BEGIN
@@ -307,11 +312,24 @@ BEGIN
     m.content,
     m.type,
     m.created_at,
-    1 - (m.embedding <=> query_embedding) AS similarity
+    m.source_agent,
+    m.visibility,
+    -- Apply source-agent weighting: 1.0x for own memory, 0.8x for shared memory
+    (1 - (m.embedding <=> query_embedding)) *
+      CASE
+        WHEN p_source_agent IS NOT NULL AND m.source_agent = p_source_agent THEN 1.0
+        ELSE 0.8
+      END AS similarity
   FROM memory m
   WHERE m.embedding IS NOT NULL
     AND 1 - (m.embedding <=> query_embedding) > match_threshold
-  ORDER BY m.embedding <=> query_embedding
+    -- Visibility filtering: show shared/global memory OR own private memory
+    AND (
+      p_source_agent IS NULL
+      OR m.visibility IN ('shared', 'global')
+      OR m.source_agent = p_source_agent
+    )
+  ORDER BY similarity DESC
   LIMIT match_count;
 END;
 $$ LANGUAGE plpgsql;
