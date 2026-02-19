@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS memory (
 
 CREATE INDEX IF NOT EXISTS idx_memory_type ON memory(type);
 CREATE INDEX IF NOT EXISTS idx_memory_created_at ON memory(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_visibility_source_agent ON memory(visibility, source_agent);
 
 -- ============================================================
 -- LOGS TABLE (Observability - Optional)
@@ -486,7 +487,7 @@ CREATE TABLE IF NOT EXISTS execution_plans (
   original_message TEXT,
   steps JSONB NOT NULL DEFAULT '[]',
   total_tokens INTEGER DEFAULT 0,
-  total_cost_usd NUMERIC(10,6) DEFAULT 0,
+  total_cost_usd NUMERIC(12,6) DEFAULT 0,
   status TEXT DEFAULT 'running' CHECK (status IN ('running', 'completed', 'failed', 'partial')),
   error_message TEXT,
   created_at TIMESTAMPTZ DEFAULT now(),
@@ -495,6 +496,7 @@ CREATE TABLE IF NOT EXISTS execution_plans (
 
 CREATE INDEX IF NOT EXISTS idx_execution_plans_conversation_id ON execution_plans(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_execution_plans_status ON execution_plans(status);
+CREATE INDEX IF NOT EXISTS idx_execution_plans_mode ON execution_plans(mode);
 CREATE INDEX IF NOT EXISTS idx_execution_plans_created_at ON execution_plans(created_at DESC);
 
 ALTER TABLE execution_plans ENABLE ROW LEVEL SECURITY;

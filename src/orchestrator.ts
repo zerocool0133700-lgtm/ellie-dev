@@ -548,14 +548,21 @@ export function parseCriticVerdict(output: string, round: number): CriticVerdict
       issues,
     };
   } catch {
-    // On final round, accept to prevent infinite loops. Otherwise reject for another try.
+    // Log the raw output so malformed critic responses are debuggable
+    const truncatedRaw = output.length > 500 ? output.substring(0, 500) + "..." : output;
     const isFinalRound = round >= MAX_CRITIC_ROUNDS - 1;
-    console.warn(`[orchestrator] Could not parse critic verdict (round ${round + 1}), ${isFinalRound ? "accepting (final round)" : "rejecting"}`);
+    console.warn(
+      `[orchestrator] Could not parse critic verdict (round ${round + 1}/${MAX_CRITIC_ROUNDS}), ` +
+      `${isFinalRound ? "accepting (final round)" : "rejecting for retry"}. ` +
+      `Raw output: ${truncatedRaw}`,
+    );
     return {
       accepted: isFinalRound,
       score: isFinalRound ? 5 : 3,
-      feedback: isFinalRound ? "Parse error on final round — accepted." : "Unable to parse feedback. Please revise.",
-      issues: [],
+      feedback: isFinalRound
+        ? "Critic returned malformed response on final round — accepted with caveats. Review output manually."
+        : "Unable to parse critic feedback. Please revise and provide clearer output.",
+      issues: isFinalRound ? ["critic-parse-error: malformed JSON on final round"] : [],
     };
   }
 }
@@ -806,18 +813,28 @@ async function getSkillComplexity(
   const now = Date.now();
   if (!_skillComplexityCache || now - _skillComplexityCacheTime > SKILL_CACHE_TTL_MS) {
     try {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("skills")
         .select("name, complexity")
         .eq("enabled", true);
+
+      if (error) {
+        console.warn(`[orchestrator] Skill cache refresh failed: ${error.message ?? error.code ?? "unknown"}. Using fallback.`);
+        // Return cached value if available, otherwise default to heavy
+        return _skillComplexityCache?.get(skillName) || "heavy";
+      }
 
       _skillComplexityCache = new Map();
       for (const s of data || []) {
         _skillComplexityCache.set(s.name, s.complexity || "heavy");
       }
       _skillComplexityCacheTime = now;
-    } catch {
-      return "heavy";
+    } catch (err) {
+      // Table may not exist on first run, or network error — log and fallback gracefully
+      console.warn(
+        `[orchestrator] Skill cache query error (table may not exist): ${err instanceof Error ? err.message : String(err)}. Defaulting to heavy.`,
+      );
+      return _skillComplexityCache?.get(skillName) || "heavy";
     }
   }
 

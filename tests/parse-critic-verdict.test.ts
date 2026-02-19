@@ -123,12 +123,14 @@ describe("parseCriticVerdict", () => {
     expect(verdict.accepted).toBe(false);
     expect(verdict.score).toBe(3);
     expect(verdict.feedback).toContain("Unable to parse");
+    expect(verdict.issues).toEqual([]);
   });
 
   test("rejects on invalid JSON for non-final round (round 1)", () => {
     const verdict = parseCriticVerdict("{{broken json}}", 1);
     expect(verdict.accepted).toBe(false);
     expect(verdict.score).toBe(3);
+    expect(verdict.issues).toEqual([]);
   });
 
   test("accepts on invalid JSON for final round (round 2, MAX_CRITIC_ROUNDS-1)", () => {
@@ -136,6 +138,15 @@ describe("parseCriticVerdict", () => {
     expect(verdict.accepted).toBe(true);
     expect(verdict.score).toBe(5);
     expect(verdict.feedback).toContain("final round");
+    // ELLIE-72: should include a parse-error marker in issues
+    expect(verdict.issues).toContain("critic-parse-error: malformed JSON on final round");
+  });
+
+  test("final-round parse error includes caveats in feedback", () => {
+    const verdict = parseCriticVerdict("totally not json {{{", 2);
+    expect(verdict.accepted).toBe(true);
+    expect(verdict.feedback).toContain("malformed response");
+    expect(verdict.feedback).toContain("Review output manually");
   });
 
   // ── Combined Feedback Formatting ──────────────────────────────
