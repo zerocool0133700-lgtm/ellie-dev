@@ -1,5 +1,5 @@
 /**
- * Intent Classifier — ELLIE-50 + ELLIE-53
+ * Intent Classifier — ELLIE-50 + ELLIE-53 + ELLIE-58
  *
  * Replaces keyword/regex routing (route-message edge function) with
  * a three-tier classification system:
@@ -10,14 +10,18 @@
  * ELLIE-53 adds skill-level matching: the classifier now routes to
  * specific skills (which map to agents) instead of just agents.
  *
- * ELLIE-54 adds pipeline detection: the classifier returns a complexity
- * hint ('single' | 'pipeline') and optional pipeline_steps array for
- * multi-step requests that span multiple skills/agents.
+ * ELLIE-58 adds execution_mode with four modes:
+ *   - single: One skill handles the request (default)
+ *   - pipeline: Sequential steps, output feeds next
+ *   - fan-out: Independent tasks in parallel, merged at end
+ *   - critic-loop: Iterative producer + critic refinement
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type Anthropic from "@anthropic-ai/sdk";
 import { getConversationContext } from "./conversations.ts";
+
+export type ExecutionMode = "single" | "pipeline" | "fan-out" | "critic-loop";
 
 export interface ClassificationResult {
   agent_name: string;
@@ -27,8 +31,8 @@ export interface ClassificationResult {
   strippedMessage?: string;
   skill_name?: string;
   skill_description?: string;
-  complexity: "single" | "pipeline";
-  pipeline_steps?: Array<{
+  execution_mode: ExecutionMode;
+  skills?: Array<{
     agent: string;
     skill: string;
     instruction: string;
@@ -104,7 +108,7 @@ export async function classifyIntent(
       agent_name: slash.agent,
       rule_name: "slash_command",
       confidence: 1.0,
-      complexity: "single",
+      execution_mode: "single",
       strippedMessage: slash.strippedMessage,
     };
   }
@@ -119,7 +123,7 @@ export async function classifyIntent(
   // Tier 3: Haiku LLM classification (200-400ms)
   if (!_anthropic) {
     console.warn("[classifier] No Anthropic client — falling back to general");
-    return { agent_name: "general", rule_name: "no_anthropic_fallback", confidence: 0, complexity: "single" };
+    return { agent_name: "general", rule_name: "no_anthropic_fallback", confidence: 0, execution_mode: "single" };
   }
 
   return classifyWithHaiku(message, channel);
@@ -170,7 +174,7 @@ async function checkSessionContinuity(
       agent_name: agentName,
       rule_name: "session_continuity",
       confidence: 1.0,
-      complexity: "single",
+      execution_mode: "single",
     };
   } catch {
     return null;
@@ -235,17 +239,22 @@ async function classifyWithHaiku(
     const confidence = typeof parsed.confidence === "number" ? parsed.confidence : 0;
     const reasoning = parsed.reasoning || "";
 
-    // Parse pipeline fields (ELLIE-54)
-    const complexity = parsed.complexity === "pipeline" ? "pipeline" as const : "single" as const;
-    const pipelineSteps = complexity === "pipeline" && Array.isArray(parsed.pipeline_steps)
-      ? parsed.pipeline_steps as Array<{ agent: string; skill: string; instruction: string }>
-      : undefined;
+    // Parse execution mode (ELLIE-58)
+    const validModes: ExecutionMode[] = ["single", "pipeline", "fan-out", "critic-loop"];
+    const executionMode: ExecutionMode = validModes.includes(parsed.execution_mode)
+      ? parsed.execution_mode
+      : (parsed.complexity === "pipeline" ? "pipeline" : "single");
+    const parsedSkills = executionMode !== "single" && Array.isArray(parsed.skills)
+      ? parsed.skills as Array<{ agent: string; skill: string; instruction: string }>
+      : (executionMode !== "single" && Array.isArray(parsed.pipeline_steps)
+        ? parsed.pipeline_steps as Array<{ agent: string; skill: string; instruction: string }>
+        : undefined);
 
     // Validate agent name
     const valid = agents.find((a) => a.name === agentName);
     if (!valid) {
       console.warn(`[classifier] Unknown agent "${agentName}" — falling back`);
-      return { agent_name: "general", rule_name: "unknown_agent_fallback", confidence: 0, complexity: "single" };
+      return { agent_name: "general", rule_name: "unknown_agent_fallback", confidence: 0, execution_mode: "single" };
     }
 
     // Resolve skill — if skill maps to a different agent, the skill's agent wins
@@ -262,11 +271,11 @@ async function classifyWithHaiku(
     // Confidence threshold
     if (confidence < CONFIDENCE_THRESHOLD) {
       console.log(`[classifier] Low confidence (${confidence}) for "${resolvedAgent}": ${reasoning}`);
-      return { agent_name: "general", rule_name: "low_confidence_fallback", confidence, reasoning, complexity: "single" };
+      return { agent_name: "general", rule_name: "low_confidence_fallback", confidence, reasoning, execution_mode: "single" };
     }
 
-    const pipelineLabel = complexity === "pipeline" ? ` [pipeline: ${pipelineSteps?.length} steps]` : "";
-    console.log(`[classifier] LLM → "${resolvedAgent}"${skillName ? ` [${skillName}]` : ""}${pipelineLabel} (${confidence}): ${reasoning}`);
+    const modeLabel = executionMode !== "single" ? ` [${executionMode}: ${parsedSkills?.length} steps]` : "";
+    console.log(`[classifier] LLM → "${resolvedAgent}"${skillName ? ` [${skillName}]` : ""}${modeLabel} (${confidence}): ${reasoning}`);
     return {
       agent_name: resolvedAgent,
       rule_name: "llm_classification",
@@ -274,12 +283,12 @@ async function classifyWithHaiku(
       reasoning,
       skill_name: skillName,
       skill_description: skillDescription,
-      complexity,
-      pipeline_steps: pipelineSteps,
+      execution_mode: executionMode,
+      skills: parsedSkills,
     };
   } catch (err) {
     console.error("[classifier] Haiku classification failed:", err);
-    return { agent_name: "general", rule_name: "error_fallback", confidence: 0, complexity: "single" };
+    return { agent_name: "general", rule_name: "error_fallback", confidence: 0, execution_mode: "single" };
   }
 }
 
@@ -335,20 +344,22 @@ ${contextBlock}
 User message: "${message}"
 
 Instructions:
-- Determine if this message requires a SINGLE skill or a PIPELINE of multiple sequential skills.
-- A pipeline is needed when the message contains two or more distinct tasks that must happen in order (e.g., "research X and summarize it", "check my calendar and draft an email about it").
-- Most messages are "single". Only use "pipeline" when the message clearly requires multiple sequential steps. Max 5 steps.
+- Choose an execution_mode: "single", "pipeline", "fan-out", or "critic-loop".
+- **single**: One skill handles the request. Most messages use this.
+- **pipeline**: Sequential steps where output feeds into the next (e.g., "research X then summarize it"). Max 5 steps.
+- **fan-out**: Independent tasks run in parallel, results merged (e.g., "check my email, calendar, and tasks").
+- **critic-loop**: Iterative refinement — producer creates, critic evaluates (e.g., "write a proposal and make it really good"). Exactly 2 skills: [producer, critic].
 - For single: choose the best skill and agent.
-- For pipeline: list the steps in execution order, each with agent, skill, and a brief instruction.
+- For multi-step modes: list the skills array in execution order, each with agent, skill, and a brief instruction.
 - If no skill is a clear match, set skill to "none" and pick the best agent.
-- If ambiguous or conversational, choose agent "general" with skill "none" and complexity "single".
+- If ambiguous or conversational, choose agent "general" with skill "none" and execution_mode "single".
 - Consider conversation context — if the user is mid-topic, the current agent may still be best.
 
 Respond with ONLY a JSON object (no markdown fences):
-{"skill": "<primary_skill_or_none>", "agent": "<primary_agent>", "confidence": <0.0-1.0>, "reasoning": "<one sentence>", "complexity": "single", "pipeline_steps": null}
+{"skill": "<primary_skill_or_none>", "agent": "<primary_agent>", "confidence": <0.0-1.0>, "reasoning": "<one sentence>", "execution_mode": "single", "skills": null}
 
-For pipeline requests, use:
-{"skill": "<first_skill>", "agent": "<first_agent>", "confidence": <0.0-1.0>, "reasoning": "<one sentence>", "complexity": "pipeline", "pipeline_steps": [{"agent": "<agent>", "skill": "<skill_or_none>", "instruction": "<what this step does>"}]}`;
+For multi-step requests:
+{"skill": "<first_skill>", "agent": "<first_agent>", "confidence": <0.0-1.0>, "reasoning": "<one sentence>", "execution_mode": "pipeline", "skills": [{"agent": "<agent>", "skill": "<skill_or_none>", "instruction": "<what this step does>"}]}`;
 }
 
 // ────────────────────────────────────────────────────────────────

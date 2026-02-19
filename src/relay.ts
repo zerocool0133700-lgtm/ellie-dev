@@ -48,10 +48,12 @@ import {
 import { initClassifier } from "./intent-classifier.ts";
 import { getStructuredContext } from "./context-sources.ts";
 import {
-  executePipeline,
+  executeOrchestrated,
   PipelineStepError,
   type PipelineStep,
+  type ExecutionResult,
 } from "./orchestrator.ts";
+import type { ExecutionMode } from "./intent-classifier.ts";
 import {
   extractApprovalTags,
   storePendingAction,
@@ -653,26 +655,29 @@ bot.on("message:text", withQueue(async (ctx) => {
     }
   }
 
-  // ── Pipeline branch (ELLIE-54) ──
-  if (agentResult?.route.complexity === "pipeline" && agentResult.route.pipeline_steps?.length) {
-    const steps: PipelineStep[] = agentResult.route.pipeline_steps.map((s) => ({
+  // ── Multi-step execution branch (ELLIE-58) ──
+  if (agentResult?.route.execution_mode !== "single" && agentResult?.route.skills?.length) {
+    const execMode = agentResult.route.execution_mode;
+    const steps: PipelineStep[] = agentResult.route.skills.map((s) => ({
       agent_name: s.agent,
       skill_name: s.skill !== "none" ? s.skill : undefined,
       instruction: s.instruction,
     }));
 
+    const modeLabels: Record<string, string> = { pipeline: "Pipeline", "fan-out": "Fan-out", "critic-loop": "Critic loop" };
     const agentNames = [...new Set(steps.map((s) => s.agent_name))].join(" \u2192 ");
-    await ctx.reply(`\u{1F504} Pipeline: ${agentNames} (${steps.length} steps)`);
+    await ctx.reply(`\u{1F504} ${modeLabels[execMode] || execMode}: ${agentNames} (${steps.length} steps)`);
 
     const typingInterval = setInterval(() => {
       ctx.replyWithChatAction("typing").catch(() => {});
     }, 4_000);
 
     try {
-      const result = await executePipeline(steps, effectiveText, {
+      const result = await executeOrchestrated(execMode, steps, effectiveText, {
         supabase,
         channel: "telegram",
         userId,
+        anthropicClient: anthropic,
         onHeartbeat: () => { ctx.replyWithChatAction("typing").catch(() => {}); },
         contextDocket, relevantContext, elasticContext,
         structuredContext, recentMessages, workItemContext,
@@ -693,19 +698,18 @@ bot.on("message:text", withQueue(async (ctx) => {
       }
 
       console.log(
-        `[pipeline] Completed ${result.stepResults.length} steps in ${result.artifacts.total_duration_ms}ms, ` +
-        `~${result.artifacts.total_approx_tokens} tokens`,
+        `[orchestrator] ${execMode}: ${result.stepResults.length} steps in ${result.artifacts.total_duration_ms}ms, ` +
+        `$${result.artifacts.total_cost_usd.toFixed(4)}`,
       );
     } catch (err) {
       clearInterval(typingInterval);
       if (err instanceof PipelineStepError && err.partialOutput) {
-        console.error(`[pipeline] Step ${err.stepIndex} failed (${err.errorType}), sending partial results`);
+        console.error(`[orchestrator] Step ${err.stepIndex} failed (${err.errorType}), sending partial results`);
         const partialResponse = await processMemoryIntents(supabase, err.partialOutput);
-        await sendResponse(ctx, partialResponse + "\n\n(Pipeline incomplete \u2014 showing partial results.)");
+        await sendResponse(ctx, partialResponse + "\n\n(Execution incomplete \u2014 showing partial results.)");
         await saveMessage("assistant", partialResponse);
       } else {
-        console.error("[pipeline] Pipeline failed, falling back to single agent:", err);
-        // Fall through to single-agent path below
+        console.error("[orchestrator] Multi-step failed, falling back to single agent:", err);
         const fallbackPrompt = buildPrompt(
           effectiveText, contextDocket, relevantContext, elasticContext, "telegram",
           agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
@@ -807,26 +811,29 @@ bot.on("message:voice", withQueue(async (ctx) => {
       getRecentMessages(supabase),
     ]);
 
-    // ── Voice pipeline branch (ELLIE-54) ──
-    if (agentResult?.route.complexity === "pipeline" && agentResult.route.pipeline_steps?.length) {
-      const steps: PipelineStep[] = agentResult.route.pipeline_steps.map((s) => ({
+    // ── Voice multi-step branch (ELLIE-58) ──
+    if (agentResult?.route.execution_mode !== "single" && agentResult?.route.skills?.length) {
+      const execMode = agentResult.route.execution_mode;
+      const steps: PipelineStep[] = agentResult.route.skills.map((s) => ({
         agent_name: s.agent,
         skill_name: s.skill !== "none" ? s.skill : undefined,
         instruction: s.instruction,
       }));
 
+      const modeLabels: Record<string, string> = { pipeline: "Pipeline", "fan-out": "Fan-out", "critic-loop": "Critic loop" };
       const agentNames = [...new Set(steps.map((s) => s.agent_name))].join(" \u2192 ");
-      await ctx.reply(`\u{1F504} Pipeline: ${agentNames} (${steps.length} steps)`);
+      await ctx.reply(`\u{1F504} ${modeLabels[execMode] || execMode}: ${agentNames} (${steps.length} steps)`);
 
       const typingInterval = setInterval(() => {
         ctx.replyWithChatAction("typing").catch(() => {});
       }, 4_000);
 
       try {
-        const result = await executePipeline(steps, effectiveTranscription, {
+        const result = await executeOrchestrated(execMode, steps, effectiveTranscription, {
           supabase,
           channel: "telegram",
           userId: voiceUserId,
+          anthropicClient: anthropic,
           onHeartbeat: () => { ctx.replyWithChatAction("typing").catch(() => {}); },
           contextDocket, relevantContext, elasticContext,
           structuredContext, recentMessages,
@@ -846,19 +853,17 @@ bot.on("message:voice", withQueue(async (ctx) => {
         }
 
         console.log(
-          `[pipeline] Voice: ${result.stepResults.length} steps in ${result.artifacts.total_duration_ms}ms`,
+          `[orchestrator] Voice ${execMode}: ${result.stepResults.length} steps in ${result.artifacts.total_duration_ms}ms, $${result.artifacts.total_cost_usd.toFixed(4)}`,
         );
       } catch (err) {
         clearInterval(typingInterval);
         if (err instanceof PipelineStepError && err.partialOutput) {
           const partialResponse = await processMemoryIntents(supabase, err.partialOutput);
-          await sendResponse(ctx, partialResponse + "\n\n(Pipeline incomplete \u2014 showing partial results.)");
+          await sendResponse(ctx, partialResponse + "\n\n(Execution incomplete \u2014 showing partial results.)");
           await saveMessage("assistant", partialResponse);
         } else {
-          console.error("[pipeline] Voice pipeline failed:", err);
-          await ctx.reply("Pipeline failed \u2014 processing as single request.");
-          // Fall through to single-agent below won't work since we're in an if-block,
-          // so just do a basic single-agent call
+          console.error("[orchestrator] Voice multi-step failed:", err);
+          await ctx.reply("Multi-step execution failed \u2014 processing as single request.");
           const fallbackPrompt = buildPrompt(
             `[Voice message transcribed]: ${effectiveTranscription}`,
             contextDocket, relevantContext, elasticContext, "telegram",
@@ -1879,23 +1884,26 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           getRecentMessages(supabase),
         ]);
 
-        // ── Google Chat pipeline branch (ELLIE-54) ──
-        if (gchatAgentResult?.route.complexity === "pipeline" && gchatAgentResult.route.pipeline_steps?.length) {
-          const gchatSteps: PipelineStep[] = gchatAgentResult.route.pipeline_steps.map((s) => ({
+        // ── Google Chat multi-step branch (ELLIE-58) ──
+        if (gchatAgentResult?.route.execution_mode !== "single" && gchatAgentResult?.route.skills?.length) {
+          const gchatExecMode = gchatAgentResult.route.execution_mode;
+          const gchatSteps: PipelineStep[] = gchatAgentResult.route.skills.map((s) => ({
             agent_name: s.agent,
             skill_name: s.skill !== "none" ? s.skill : undefined,
             instruction: s.instruction,
           }));
 
+          const modeLabels: Record<string, string> = { pipeline: "Pipeline", "fan-out": "Fan-out", "critic-loop": "Critic loop" };
           const gchatAgentNames = [...new Set(gchatSteps.map((s) => s.agent_name))].join(" \u2192 ");
 
-          // Pipeline will always exceed 25s — send sync response immediately, run async
-          sendSyncResponse(`Working on it... (pipeline: ${gchatAgentNames}, ${gchatSteps.length} steps)`);
+          // Multi-step will always exceed 25s — send sync response immediately, run async
+          sendSyncResponse(`Working on it... (${modeLabels[gchatExecMode] || gchatExecMode}: ${gchatAgentNames}, ${gchatSteps.length} steps)`);
 
-          executePipeline(gchatSteps, effectiveGchatText, {
+          executeOrchestrated(gchatExecMode, gchatSteps, effectiveGchatText, {
             supabase,
             channel: "google-chat",
             userId: parsed.senderEmail,
+            anthropicClient: anthropic,
             contextDocket, relevantContext, elasticContext,
             structuredContext, recentMessages,
             buildPromptFn: buildPrompt,
@@ -1912,7 +1920,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               }).catch(() => {});
             }
 
-            console.log(`[gchat] Pipeline: ${result.stepResults.length} steps in ${result.artifacts.total_duration_ms}ms`);
+            console.log(`[gchat] ${gchatExecMode}: ${result.stepResults.length} steps in ${result.artifacts.total_duration_ms}ms, $${result.artifacts.total_cost_usd.toFixed(4)}`);
 
             await deliverMessage(supabase, gchatClean, {
               channel: "google-chat",
@@ -1923,9 +1931,9 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               fallback: true,
             });
           }).catch((err) => {
-            console.error("[gchat] Pipeline failed:", err);
+            console.error("[gchat] Multi-step failed:", err);
             const errMsg = err instanceof PipelineStepError && err.partialOutput
-              ? err.partialOutput + "\n\n(Pipeline incomplete.)"
+              ? err.partialOutput + "\n\n(Execution incomplete.)"
               : "Sorry, I ran into an error processing your multi-step request.";
             deliverMessage(supabase, errMsg, {
               channel: "google-chat",
@@ -2369,6 +2377,63 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
         res.end(JSON.stringify({ ok: false, error: String(err) }));
       }
     });
+    return;
+  }
+
+  // Execution plans — list or get details (ELLIE-58)
+  if (url.pathname === "/api/execution-plans" && req.method === "GET") {
+    (async () => {
+      if (!supabase) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Supabase not configured" }));
+        return;
+      }
+      const limit = parseInt(url.searchParams.get("limit") || "20", 10);
+      const offset = parseInt(url.searchParams.get("offset") || "0", 10);
+      const status = url.searchParams.get("status");
+
+      let query = supabase
+        .from("execution_plans")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .range(offset, offset + limit - 1);
+
+      if (status) query = query.eq("status", status);
+
+      const { data, error } = await query;
+      if (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: error.message }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(data || []));
+    })();
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/execution-plans/") && req.method === "GET") {
+    (async () => {
+      if (!supabase) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Supabase not configured" }));
+        return;
+      }
+      const planId = url.pathname.split("/api/execution-plans/")[1];
+      const { data, error } = await supabase
+        .from("execution_plans")
+        .select("*")
+        .eq("id", planId)
+        .single();
+
+      if (error || !data) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Not found" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(data));
+    })();
     return;
   }
 

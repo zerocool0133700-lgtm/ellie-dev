@@ -7,7 +7,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { classifyIntent } from "./intent-classifier.ts";
+import { classifyIntent, type ExecutionMode } from "./intent-classifier.ts";
 
 export interface AgentConfig {
   name: string;
@@ -28,8 +28,8 @@ export interface RouteResult {
   session_id?: string;
   skill_name?: string;
   skill_description?: string;
-  complexity: "single" | "pipeline";
-  pipeline_steps?: Array<{
+  execution_mode: ExecutionMode;
+  skills?: Array<{
     agent: string;
     skill: string;
     instruction: string;
@@ -193,7 +193,7 @@ export async function routeAndDispatch(
     console.error("[agent-router] classifyIntent failed, trying edge function fallback:", err);
     const edgeRoute = await routeMessage(supabase, message, channel, userId);
     if (!edgeRoute) return null;
-    route = { ...edgeRoute, confidence: 0.5, complexity: "single" as const };
+    route = { ...edgeRoute, confidence: 0.5, execution_mode: "single" as const };
   }
 
   const dispatchMessage = route.strippedMessage || message;

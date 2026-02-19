@@ -440,6 +440,7 @@ CREATE TABLE IF NOT EXISTS skills (
   -- Configuration
   parameters JSONB DEFAULT '{}',
   output_schema JSONB DEFAULT NULL,
+  complexity TEXT DEFAULT 'heavy' CHECK (complexity IN ('light', 'heavy')),
   enabled BOOLEAN DEFAULT TRUE,
   priority INTEGER DEFAULT 0,
 
@@ -453,6 +454,30 @@ CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
 
 ALTER TABLE skills ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Allow all for service role" ON skills FOR ALL USING (true);
+
+-- ============================================================
+-- EXECUTION PLANS TABLE (Multi-step execution tracking)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS execution_plans (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id UUID REFERENCES conversations(id),
+  mode TEXT NOT NULL CHECK (mode IN ('single', 'pipeline', 'fan-out', 'critic-loop')),
+  original_message TEXT,
+  steps JSONB NOT NULL DEFAULT '[]',
+  total_tokens INTEGER DEFAULT 0,
+  total_cost_usd NUMERIC(10,6) DEFAULT 0,
+  status TEXT DEFAULT 'running' CHECK (status IN ('running', 'completed', 'failed', 'partial')),
+  error_message TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  completed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_execution_plans_conversation_id ON execution_plans(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_execution_plans_status ON execution_plans(status);
+CREATE INDEX IF NOT EXISTS idx_execution_plans_created_at ON execution_plans(created_at DESC);
+
+ALTER TABLE execution_plans ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow all for service role" ON execution_plans FOR ALL USING (true);
 
 -- Enable realtime for groups/people
 ALTER PUBLICATION supabase_realtime ADD TABLE groups;
