@@ -65,6 +65,7 @@ import {
   isPlaneConfigured,
   fetchWorkItemDetails,
   listOpenIssues,
+  setTimeoutRecoveryLock,
 } from "./plane.ts";
 import {
   getOrCreateConversation,
@@ -466,15 +467,32 @@ async function callClaude(
     // Agentic tasks can take several minutes (tool use, multi-step reasoning)
     const TIMEOUT_MS = AGENT_MODE ? 420_000 : 60_000;
     let timedOut = false;
+    let forceKilled = false;
+    let killTimer: ReturnType<typeof setTimeout> | null = null;
+
     const timeout = setTimeout(() => {
       timedOut = true;
-      console.error(`[claude] Timeout after ${TIMEOUT_MS / 1000}s — killing process`);
-      proc.kill();
+      const timeoutSec = TIMEOUT_MS / 1000;
+      console.error(`[claude] Timeout after ${timeoutSec}s — sending SIGTERM (pid ${proc.pid})`);
+      proc.kill(); // SIGTERM
+
+      // Escalate to SIGKILL if process doesn't exit within 5s
+      killTimer = setTimeout(() => {
+        try {
+          process.kill(proc.pid, 0); // Throws if process is dead
+          console.error(`[claude] Process ${proc.pid} survived SIGTERM — sending SIGKILL`);
+          proc.kill(9); // SIGKILL
+          forceKilled = true;
+        } catch {
+          // Process already exited from SIGTERM — no action needed
+        }
+      }, 5_000);
     }, TIMEOUT_MS);
 
     const output = await new Response(proc.stdout).text();
     const stderr = await new Response(proc.stderr).text();
     clearTimeout(timeout);
+    if (killTimer) clearTimeout(killTimer);
 
     const exitCode = await proc.exited;
 
@@ -482,6 +500,7 @@ async function callClaude(
       console.error(
         `[claude] Exit code ${exitCode}` +
         `${timedOut ? " (timed out)" : ""}` +
+        `${forceKilled ? " (force-killed)" : ""}` +
         `${stderr ? ` — stderr: ${stderr.substring(0, 500)}` : " — no stderr"}` +
         `${output ? ` — stdout preview: ${output.substring(0, 200)}` : ""}`
       );
@@ -492,6 +511,31 @@ async function callClaude(
       if (options?.resume && resumeSessionId && combined.includes("tool_use.name")) {
         console.warn("[claude] Corrupted session history — retrying without --resume");
         return callClaude(prompt, { ...options, resume: false, sessionId: undefined });
+      }
+
+      // Timeout: return actionable message instead of generic error
+      if (timedOut) {
+        // Lock Plane state changes during recovery to prevent churn
+        setTimeoutRecoveryLock(60_000);
+
+        const timeoutSec = TIMEOUT_MS / 1000;
+        const processStatus = forceKilled
+          ? "The process did not respond to termination and was force-killed."
+          : "The process was terminated.";
+
+        const partialOutput = output?.trim();
+        let message = `Task timed out after ${timeoutSec}s. ${processStatus}`;
+
+        if (partialOutput) {
+          const preview = partialOutput.length > 500
+            ? partialOutput.substring(0, 500) + "..."
+            : partialOutput;
+          message += `\n\nPartial output before timeout:\n${preview}`;
+        }
+
+        message += `\n\nYou can retry the request, or ask "what did you get done?" to check if work was partially completed.`;
+
+        return message;
       }
 
       return `Error: ${stderr || "Claude exited with code " + exitCode}`;

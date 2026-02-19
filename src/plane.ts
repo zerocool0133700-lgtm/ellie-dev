@@ -13,6 +13,39 @@ export function isPlaneConfigured(): boolean {
   return !!PLANE_API_KEY;
 }
 
+// ============================================================
+// TIMEOUT RECOVERY STATE LOCK
+// ============================================================
+// Prevents Plane state churn (Done→Progress→Done) during timeout
+// recovery windows. When a Claude process times out, we lock state
+// changes for a cooldown period so retries/restarts don't flip states.
+
+let timeoutRecoveryUntil = 0;
+
+export function setTimeoutRecoveryLock(durationMs: number = 60_000) {
+  timeoutRecoveryUntil = Date.now() + durationMs;
+  console.log(`[plane] State lock set for ${durationMs / 1000}s — suppressing state changes during timeout recovery`);
+}
+
+export function clearTimeoutRecoveryLock() {
+  timeoutRecoveryUntil = 0;
+  console.log(`[plane] State lock cleared`);
+}
+
+export function isInTimeoutRecovery(): boolean {
+  if (timeoutRecoveryUntil === 0) return false;
+  if (Date.now() > timeoutRecoveryUntil) {
+    timeoutRecoveryUntil = 0; // Auto-expire
+    return false;
+  }
+  return true;
+}
+
+/** Expose for testing */
+export function _resetTimeoutRecoveryForTesting() {
+  timeoutRecoveryUntil = 0;
+}
+
 async function planeRequest(path: string, options?: RequestInit) {
   const res = await fetch(`${PLANE_BASE_URL}/api/v1/workspaces/${PLANE_WORKSPACE_SLUG}${path}`, {
     ...options,
@@ -102,6 +135,11 @@ export async function updateWorkItemOnSessionStart(workItemId: string, sessionId
     return;
   }
 
+  if (isInTimeoutRecovery()) {
+    console.log(`[plane] Skipping state update for ${workItemId} — timeout recovery window active`);
+    return;
+  }
+
   const resolved = await resolveWorkItemId(workItemId);
   if (!resolved) {
     console.warn(`[plane] Could not resolve work item: ${workItemId}`);
@@ -137,6 +175,11 @@ export async function updateWorkItemOnSessionComplete(
 ) {
   if (!isPlaneConfigured()) {
     console.log("[plane] Skipping — PLANE_API_KEY not configured");
+    return;
+  }
+
+  if (isInTimeoutRecovery()) {
+    console.log(`[plane] Skipping state update for ${workItemId} — timeout recovery window active`);
     return;
   }
 
