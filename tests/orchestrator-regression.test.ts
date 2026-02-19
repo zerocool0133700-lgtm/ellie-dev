@@ -217,6 +217,32 @@ describe("Regression: Existing Modes", () => {
         executeOrchestrated("pipeline", steps, "Expensive pipeline", options),
       ).rejects.toThrow();
     });
+
+    test("pipeline cost overrun throws error type 'cost_exceeded'", async () => {
+      const anthropic = {
+        messages: {
+          create: mock(async () => ({
+            content: [{ type: "text", text: "Expensive output" }],
+            usage: { input_tokens: 500_000, output_tokens: 200_000 },
+          })),
+        },
+      } as any;
+
+      const options = createMockOptions({ anthropicClient: anthropic });
+      const steps = [
+        createStep({ instruction: "Expensive 1", skill_name: "writing" }),
+        createStep({ instruction: "Expensive 2", skill_name: "writing" }),
+        createStep({ instruction: "Expensive 3", skill_name: "writing" }),
+      ];
+
+      try {
+        await executeOrchestrated("pipeline", steps, "Expensive pipeline", options);
+        expect(true).toBe(false); // should not reach here
+      } catch (err) {
+        expect(err).toBeInstanceOf(PipelineStepError);
+        expect((err as PipelineStepError).errorType).toBe("cost_exceeded");
+      }
+    });
   });
 
   // ── Dispatch Failure ────────────────────────────────────────

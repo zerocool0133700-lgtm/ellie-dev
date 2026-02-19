@@ -8,7 +8,7 @@
  *   - single:      Passthrough (handled by relay, not here)
  *
  * Light skills use direct Anthropic API (Haiku, ~300ms, no tools).
- * Heavy skills use CLI spawn (full tool access, 30-420s).
+ * Heavy skills use CLI spawn (full tool access, variable duration).
  *
  * Receives relay functions (buildPrompt, callClaude) as callbacks
  * to avoid circular imports with relay.ts.
@@ -61,6 +61,8 @@ export interface ExecutionResult {
   finalDispatch: DispatchResult;
   mode: ExecutionMode;
   planId?: string;
+  /** Set to true when the response was truncated due to cost limits. */
+  cost_truncated?: boolean;
 }
 
 interface CriticVerdict {
@@ -107,7 +109,7 @@ export class PipelineStepError extends Error {
   constructor(
     public stepIndex: number,
     public step: PipelineStep,
-    public errorType: "dispatch_failed" | "claude_error" | "timeout",
+    public errorType: "dispatch_failed" | "claude_error" | "timeout" | "cost_exceeded",
     public partialOutput: string | null,
   ) {
     super(`Pipeline step ${stepIndex} (${step.agent_name}/${step.skill_name || "none"}) failed: ${errorType}`);
@@ -123,11 +125,22 @@ const MAX_PIPELINE_DEPTH = 5;
 const MAX_PIPELINE_TIMEOUT_MS = 120_000; // 2 minutes total
 const MAX_PREVIOUS_OUTPUT_CHARS = 8_000;
 const MAX_INSTRUCTION_CHARS = 500;
-const LIGHT_STEP_TIMEOUT_MS = 30_000;
-const HEAVY_STEP_TIMEOUT_MS = 420_000;
 const MAX_CRITIC_ROUNDS = 3;
 const COST_WARN_THRESHOLD = 0.50; // warn at $0.50
 const MAX_COST_PER_EXECUTION = 2.00; // hard limit per execution
+
+/**
+ * Fallback model pricing (USD per million tokens) used when the Supabase
+ * `models` table is unavailable. These are estimates based on Anthropic's
+ * published pricing as of 2025-05-01 and may drift over time. The
+ * authoritative source is the `models` table; these values are only used
+ * when the DB lookup fails or Supabase is not configured.
+ */
+const FALLBACK_MODEL_COSTS = new Map<string, { input: number; output: number }>([
+  ["claude-haiku-4-5-20251001", { input: 0.80, output: 4.0 }],
+  ["claude-sonnet-4-5-20250929", { input: 3.0, output: 15.0 }],
+  ["claude-opus-4-6", { input: 15.0, output: 75.0 }],
+]);
 
 // Skill complexity cache
 let _skillComplexityCache: Map<string, "light" | "heavy"> | null = null;
@@ -272,7 +285,7 @@ async function executePipeline(
     // Cost guard — abort if running total exceeds hard limit
     if (artifacts.total_cost_usd > MAX_COST_PER_EXECUTION) {
       console.error(`[orchestrator] Pipeline aborted: cost $${artifacts.total_cost_usd.toFixed(4)} exceeds limit $${MAX_COST_PER_EXECUTION.toFixed(2)}`);
-      throw new PipelineStepError(i, step, "timeout", previousOutput || stepResult.output);
+      throw new PipelineStepError(i, step, "cost_exceeded", previousOutput || stepResult.output);
     }
 
     // Clean intermediate output for next step
@@ -427,6 +440,7 @@ async function executeCriticLoop(
   let feedback: string | null = null;
   let finalDispatch: DispatchResult | null = null;
   let round = 0;
+  let costTruncated = false;
 
   for (round = 0; round < MAX_CRITIC_ROUNDS; round++) {
     // 1. Producer generates
@@ -449,9 +463,10 @@ async function executeCriticLoop(
     artifacts.total_output_tokens += producerResult.output_tokens;
     artifacts.total_cost_usd += producerResult.cost_usd;
 
-    // Cost guard
+    // Cost guard — flag partial result so the caller knows refinement was cut short
     if (artifacts.total_cost_usd > MAX_COST_PER_EXECUTION) {
       console.error(`[orchestrator] Critic-loop aborted: cost $${artifacts.total_cost_usd.toFixed(4)} exceeds limit`);
+      costTruncated = true;
       break;
     }
 
@@ -507,6 +522,7 @@ async function executeCriticLoop(
     stepResults: artifacts.steps,
     finalDispatch,
     mode: "critic-loop",
+    ...(costTruncated ? { cost_truncated: true } : {}),
   };
 }
 
@@ -604,7 +620,8 @@ async function executeStep(
         : undefined,
       model: dispatch.agent.model || undefined,
     });
-    // Approximate tokens for CLI calls
+    // Approximate tokens for CLI calls: ~4 chars per token is a rough heuristic
+    // with ~20-30% variance. Suitable for cost guardrails, not for billing.
     inputTokens = Math.ceil(stepPrompt.length / 4);
     outputTokens = Math.ceil(rawOutput.length / 4);
   }
@@ -653,7 +670,8 @@ async function callLightSkill(
   config?: { systemPrompt?: string },
 ): Promise<{ text: string; input_tokens: number; output_tokens: number }> {
   if (!options.anthropicClient) {
-    // Fallback to heavy — approximate tokens
+    // Fallback to heavy — approximate tokens: ~4 chars per token is a rough
+    // heuristic with ~20-30% variance. Suitable for cost guardrails, not billing.
     const text = await options.callClaudeFn(prompt, { resume: false });
     return {
       text,
@@ -817,13 +835,7 @@ async function getModelCosts(
     return _modelCostCache;
   }
 
-  const fallback = new Map([
-    ["claude-haiku-4-5-20251001", { input: 0.80, output: 4.0 }],
-    ["claude-sonnet-4-5-20250929", { input: 3.0, output: 15.0 }],
-    ["claude-opus-4-6", { input: 15.0, output: 75.0 }],
-  ]);
-
-  if (!supabase) return fallback;
+  if (!supabase) return FALLBACK_MODEL_COSTS;
 
   try {
     const { data } = await supabase
@@ -841,7 +853,7 @@ async function getModelCosts(
     _modelCostCacheTime = Date.now();
     return _modelCostCache;
   } catch {
-    return fallback;
+    return FALLBACK_MODEL_COSTS;
   }
 }
 

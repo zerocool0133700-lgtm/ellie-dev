@@ -358,6 +358,8 @@ describe("ELLIE-56: Critic Loop Execution", () => {
 
       // Loop should have stopped early (cost guard in critic-loop checks after producer)
       expect(result.stepResults.length).toBeLessThan(6);
+      // Response should be flagged as truncated due to cost
+      expect(result.cost_truncated).toBe(true);
     });
   });
 });
