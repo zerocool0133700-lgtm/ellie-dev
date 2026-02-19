@@ -67,6 +67,7 @@ interface CriticVerdict {
   accepted: boolean;
   feedback: string;
   score: number;
+  issues: string[];
 }
 
 export interface OrchestratorOptions {
@@ -441,7 +442,7 @@ async function executeCriticLoop(
       `Evaluate the following output for the request: "${originalMessage}"\n\n` +
       `Output to review:\n---\n${producerOutput.substring(0, MAX_PREVIOUS_OUTPUT_CHARS)}\n---\n\n` +
       `Respond with ONLY a JSON object (no markdown fences):\n` +
-      `{"accepted": true/false, "score": 1-10, "feedback": "specific, actionable feedback"}`;
+      `{"accepted": true/false, "score": 1-10, "feedback": "overall assessment", "issues": ["specific issue 1", "specific issue 2"]}`;
 
     const criticStep: PipelineStep = { ...critic, instruction: criticInstruction };
 
@@ -488,10 +489,19 @@ function parseCriticVerdict(output: string, round: number): CriticVerdict {
       .replace(/^```(?:json)?\s*/m, "")
       .replace(/\s*```\s*$/m, "");
     const parsed = JSON.parse(cleaned);
+    const issues: string[] = Array.isArray(parsed.issues)
+      ? parsed.issues.map((i: unknown) => String(i).slice(0, 500)).slice(0, 10)
+      : [];
+    // Combine feedback + issues for actionable revision guidance
+    const feedback = String(parsed.feedback || "No specific feedback provided.").slice(0, 2000);
+    const fullFeedback = issues.length > 0
+      ? `${feedback}\n\nSpecific issues:\n${issues.map((i, idx) => `${idx + 1}. ${i}`).join("\n")}`
+      : feedback;
     return {
       accepted: Boolean(parsed.accepted),
       score: Math.min(Math.max(typeof parsed.score === "number" ? parsed.score : 5, 1), 10),
-      feedback: String(parsed.feedback || "No specific feedback provided.").slice(0, 2000),
+      feedback: fullFeedback,
+      issues,
     };
   } catch {
     // On final round, accept to prevent infinite loops. Otherwise reject for another try.
@@ -501,6 +511,7 @@ function parseCriticVerdict(output: string, round: number): CriticVerdict {
       accepted: isFinalRound,
       score: isFinalRound ? 5 : 3,
       feedback: isFinalRound ? "Parse error on final round — accepted." : "Unable to parse feedback. Please revise.",
+      issues: [],
     };
   }
 }
