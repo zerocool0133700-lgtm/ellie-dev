@@ -696,7 +696,8 @@ bot.on("message:text", withQueue(async (ctx) => {
 
       clearInterval(typingInterval);
 
-      const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse);
+      const agentName = result.finalDispatch?.agent?.name || agentResult?.dispatch.agent.name || "general";
+      const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, agentName);
       const cleanedPipelineResponse = await sendWithApprovals(ctx, pipelineResponse, session.sessionId);
       await saveMessage("assistant", cleanedPipelineResponse);
 
@@ -714,7 +715,7 @@ bot.on("message:text", withQueue(async (ctx) => {
       clearInterval(typingInterval);
       if (err instanceof PipelineStepError && err.partialOutput) {
         console.error(`[orchestrator] Step ${err.stepIndex} failed (${err.errorType}), sending partial results`);
-        const partialResponse = await processMemoryIntents(supabase, err.partialOutput);
+        const partialResponse = await processMemoryIntents(supabase, err.partialOutput, agentResult?.dispatch.agent.name || "general");
         await sendResponse(ctx, partialResponse + "\n\n(Execution incomplete \u2014 showing partial results.)");
         await saveMessage("assistant", partialResponse);
       } else {
@@ -726,7 +727,7 @@ bot.on("message:text", withQueue(async (ctx) => {
           agentResult?.dispatch.skill_context,
         );
         const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
-        const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw);
+        const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw, agentResult?.dispatch.agent.name || "general");
         const cleaned = await sendWithApprovals(ctx, fallbackResponse, session.sessionId);
         await saveMessage("assistant", cleaned);
       }
@@ -756,7 +757,7 @@ bot.on("message:text", withQueue(async (ctx) => {
   const durationMs = Date.now() - startTime;
 
   // Parse and save any memory intents, strip tags from response
-  const response = await processMemoryIntents(supabase, rawResponse);
+  const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general");
 
   // Show agent indicator on new sessions (not "general")
   if (agentResult && agentResult.dispatch.agent.name !== "general" && agentResult.dispatch.is_new) {
@@ -851,7 +852,8 @@ bot.on("message:voice", withQueue(async (ctx) => {
         });
 
         clearInterval(typingInterval);
-        const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse);
+        const voiceAgentName = result.finalDispatch?.agent?.name || agentResult?.dispatch.agent.name || "general";
+        const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, voiceAgentName);
         const cleaned = await sendWithApprovals(ctx, pipelineResponse, session.sessionId);
         await saveMessage("assistant", cleaned);
 
@@ -867,7 +869,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
       } catch (err) {
         clearInterval(typingInterval);
         if (err instanceof PipelineStepError && err.partialOutput) {
-          const partialResponse = await processMemoryIntents(supabase, err.partialOutput);
+          const partialResponse = await processMemoryIntents(supabase, err.partialOutput, agentResult?.dispatch.agent.name || "general");
           await sendResponse(ctx, partialResponse + "\n\n(Execution incomplete \u2014 showing partial results.)");
           await saveMessage("assistant", partialResponse);
         } else {
@@ -881,7 +883,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
             agentResult?.dispatch.skill_context,
           );
           const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
-          const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw);
+          const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw, agentResult?.dispatch.agent.name || "general");
           const cleaned = await sendWithApprovals(ctx, fallbackResponse, session.sessionId);
           await saveMessage("assistant", cleaned);
         }
@@ -913,7 +915,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
       model: agentModel || undefined,
     });
     const durationMs = Date.now() - startTime;
-    const claudeResponse = await processMemoryIntents(supabase, rawResponse);
+    const claudeResponse = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general");
 
     // Try voice response for short replies without approval buttons
     const TTS_MAX_CHARS = 1500;
@@ -987,7 +989,7 @@ bot.on("message:photo", withQueue(async (ctx) => {
     // Cleanup after processing
     await unlink(filePath).catch(() => {});
 
-    const cleanResponse = await processMemoryIntents(supabase, claudeResponse);
+    const cleanResponse = await processMemoryIntents(supabase, claudeResponse, "general");
     const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId);
     await saveMessage("assistant", finalResponse);
     resetTelegramIdleTimer();
@@ -1024,7 +1026,7 @@ bot.on("message:document", withQueue(async (ctx) => {
 
     await unlink(filePath).catch(() => {});
 
-    const cleanResponse = await processMemoryIntents(supabase, claudeResponse);
+    const cleanResponse = await processMemoryIntents(supabase, claudeResponse, "general");
     const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId);
     await saveMessage("assistant", finalResponse);
     resetTelegramIdleTimer();
@@ -1057,7 +1059,7 @@ bot.callbackQuery(/^approve:(.+)$/, withQueue(async (ctx) => {
 
   await ctx.replyWithChatAction("typing");
   const rawResponse = await callClaudeWithTyping(ctx, resumePrompt, { resume: true });
-  const response = await processMemoryIntents(supabase, rawResponse);
+  const response = await processMemoryIntents(supabase, rawResponse, "general");
   const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId);
   await saveMessage("assistant", cleanedResponse);
   resetTelegramIdleTimer();
@@ -1082,7 +1084,7 @@ bot.callbackQuery(/^deny:(.+)$/, withQueue(async (ctx) => {
 
   await ctx.replyWithChatAction("typing");
   const rawResponse = await callClaudeWithTyping(ctx, resumePrompt, { resume: true });
-  const response = await processMemoryIntents(supabase, rawResponse);
+  const response = await processMemoryIntents(supabase, rawResponse, "general");
   const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId);
   await saveMessage("assistant", cleanedResponse);
   resetTelegramIdleTimer();
@@ -1821,7 +1823,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
                 resume: true,
                 sessionId: pending.sessionId || undefined,
               }).then(async (followUp) => {
-                const cleanFollowUp = await processMemoryIntents(supabase, followUp);
+                const cleanFollowUp = await processMemoryIntents(supabase, followUp, "general");
                 await saveMessage("assistant", cleanFollowUp, {}, "google-chat");
 
                 // Send follow-up via REST API to the correct space
@@ -1924,7 +1926,8 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               setTimeout(() => reject(new Error("Orchestration timeout (5m)")), GCHAT_ORCHESTRATION_TIMEOUT_MS),
             ),
           ]).then(async (result) => {
-            const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse);
+            const gchatOrcAgent = result.finalDispatch?.agent?.name || gchatAgentResult?.dispatch.agent.name || "general";
+            const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, gchatOrcAgent);
             const { cleanedText: gchatClean } = extractApprovalTags(pipelineResponse);
             await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
             resetGchatIdleTimer();
@@ -2000,7 +2003,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
             model: gchatAgentModel || undefined,
           });
           const gchatDuration = Date.now() - gchatStart;
-          const response = await processMemoryIntents(supabase, rawResponse);
+          const response = await processMemoryIntents(supabase, rawResponse, gchatAgentResult?.dispatch.agent.name || "general");
 
           if (gchatAgentResult) {
             syncResponse(supabase, gchatAgentResult.dispatch.session_id, response, {
@@ -2244,7 +2247,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
                   ? agentResult.dispatch.agent.tools_enabled : undefined,
                 model: agentResult?.dispatch.agent.model || undefined,
               });
-              return await processMemoryIntents(supabase, raw);
+              return await processMemoryIntents(supabase, raw, agentResult?.dispatch.agent.name || "general");
             })();
 
             const timeoutPromise = new Promise<"timeout">((resolve) =>

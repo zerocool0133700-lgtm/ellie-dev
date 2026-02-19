@@ -265,7 +265,7 @@ async function executePipeline(
 
     // Clean intermediate output for next step
     if (!isLast) {
-      let cleanedOutput = await processMemoryIntents(options.supabase, stepResult.output);
+      let cleanedOutput = await processMemoryIntents(options.supabase, stepResult.output, step.agent_name);
       const { cleanedText } = extractApprovalTags(cleanedOutput);
       previousOutput = cleanedText;
     } else {
@@ -431,7 +431,7 @@ async function executeCriticLoop(
       break;
     }
 
-    producerOutput = await processMemoryIntents(options.supabase, producerResult.output);
+    producerOutput = await processMemoryIntents(options.supabase, producerResult.output, producerStep.agent_name);
     const { cleanedText } = extractApprovalTags(producerOutput);
     producerOutput = cleanedText;
 
