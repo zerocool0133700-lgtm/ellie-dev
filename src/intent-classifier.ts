@@ -1,11 +1,11 @@
 /**
- * Intent Classifier — ELLIE-50 + ELLIE-53 + ELLIE-58
+ * Intent Classifier — ELLIE-50 + ELLIE-53 + ELLIE-58 + ELLIE-59
  *
  * Replaces keyword/regex routing (route-message edge function) with
- * a three-tier classification system:
+ * a classification system:
  *   1. Slash command fast-path (0ms)
- *   2. Session continuity check (10-50ms)
- *   3. Haiku LLM classification (200-400ms)
+ *   2. Session continuity + Haiku LLM in parallel (200-400ms)
+ *   3. Decision: LLM overrides session continuity for cross-domain switches
  *
  * ELLIE-53 adds skill-level matching: the classifier now routes to
  * specific skills (which map to agents) instead of just agents.
@@ -15,6 +15,11 @@
  *   - pipeline: Sequential steps, output feeds next
  *   - fan-out: Independent tasks in parallel, merged at end
  *   - critic-loop: Iterative producer + critic refinement
+ *
+ * ELLIE-59 fixes session continuity overriding the classifier for
+ * cross-domain messages. Session continuity and LLM now run in parallel;
+ * if the LLM detects a different domain with high confidence (≥0.85),
+ * it overrides session continuity.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -67,6 +72,7 @@ let _skillCacheTime = 0;
 
 const CACHE_TTL_MS = 5 * 60_000;
 const CONFIDENCE_THRESHOLD = 0.7;
+const CROSS_DOMAIN_OVERRIDE_THRESHOLD = 0.85;
 
 const SLASH_COMMANDS: Record<string, string> = {
   "/dev": "dev",
@@ -93,7 +99,12 @@ export function initClassifier(
 
 /**
  * Main entry point — classifies a message to determine which skill/agent handles it.
- * Tries slash commands → session continuity → Haiku LLM, in order.
+ *
+ * Flow: Slash commands → [Session continuity ‖ Haiku LLM] → Decision
+ *
+ * Session continuity and the LLM classifier run in parallel. If the LLM
+ * detects a different domain with high confidence, it overrides session
+ * continuity (ELLIE-59).
  */
 export async function classifyIntent(
   message: string,
@@ -113,20 +124,51 @@ export async function classifyIntent(
     };
   }
 
-  // Tier 2: Session continuity (10-50ms)
-  const continuity = await checkSessionContinuity(userId, channel);
-  if (continuity) {
-    console.log(`[classifier] Session continuity → "${continuity.agent_name}"`);
-    return continuity;
-  }
-
-  // Tier 3: Haiku LLM classification (200-400ms)
+  // Tier 2+3: Run session continuity and LLM classification in parallel
   if (!_anthropic) {
+    // No LLM available — fall back to session continuity or general
+    const continuity = await checkSessionContinuity(userId, channel);
+    if (continuity) {
+      console.log(`[classifier] Session continuity (no LLM) → "${continuity.agent_name}"`);
+      return continuity;
+    }
     console.warn("[classifier] No Anthropic client — falling back to general");
     return { agent_name: "general", rule_name: "no_anthropic_fallback", confidence: 0, execution_mode: "single" };
   }
 
-  return classifyWithHaiku(message, channel);
+  const [continuity, llmResult] = await Promise.all([
+    checkSessionContinuity(userId, channel),
+    classifyWithHaiku(message, channel),
+  ]);
+
+  // No active session → use LLM result directly
+  if (!continuity) {
+    return llmResult;
+  }
+
+  // Active session exists — decide whether LLM should override
+  if (
+    llmResult.agent_name !== continuity.agent_name &&
+    llmResult.confidence >= CROSS_DOMAIN_OVERRIDE_THRESHOLD
+  ) {
+    // Cross-domain breakout: LLM is highly confident about a different domain
+    console.log(
+      `[classifier] Cross-domain override: ${continuity.agent_name} → ${llmResult.agent_name}` +
+      ` (${llmResult.confidence}): ${llmResult.reasoning}`,
+    );
+    return llmResult;
+  }
+
+  // Session continuity holds — same agent or low LLM confidence for switch
+  if (llmResult.agent_name !== continuity.agent_name) {
+    console.log(
+      `[classifier] Session continuity held: ${continuity.agent_name}` +
+      ` (LLM suggested ${llmResult.agent_name} at ${llmResult.confidence})`,
+    );
+  } else {
+    console.log(`[classifier] Session continuity confirmed by LLM → "${continuity.agent_name}"`);
+  }
+  return continuity;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -173,7 +215,7 @@ async function checkSessionContinuity(
     return {
       agent_name: agentName,
       rule_name: "session_continuity",
-      confidence: 1.0,
+      confidence: 0.85,
       execution_mode: "single",
     };
   } catch {
@@ -341,6 +383,10 @@ Current agent: ${conversationContext.agent}
 Summary: ${conversationContext.summary || "No summary yet"}
 Recent messages:
 ${recentLines}
+
+NOTE: The user has an active session with the "${conversationContext.agent}" agent.
+If this message is clearly for a different domain, recommend the appropriate agent with high confidence (>=0.85).
+If ambiguous or a continuation of the current topic, recommend the current agent.
 `;
   }
 
