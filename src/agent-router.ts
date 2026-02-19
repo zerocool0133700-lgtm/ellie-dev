@@ -26,6 +26,8 @@ export interface RouteResult {
   reasoning?: string;
   strippedMessage?: string;
   session_id?: string;
+  skill_name?: string;
+  skill_description?: string;
 }
 
 export interface DispatchResult {
@@ -33,6 +35,10 @@ export interface DispatchResult {
   agent: AgentConfig;
   is_new: boolean;
   context_summary?: string;
+  skill_context?: {
+    name: string;
+    description: string;
+  };
 }
 
 export interface SyncResult {
@@ -84,6 +90,7 @@ export async function dispatchAgent(
   channel: string,
   message: string,
   workItemId?: string,
+  skillName?: string,
 ): Promise<DispatchResult | null> {
   if (!supabase) return null;
 
@@ -95,6 +102,7 @@ export async function dispatchAgent(
         channel,
         message,
         work_item_id: workItemId,
+        skill_name: skillName,
       },
     });
 
@@ -190,8 +198,18 @@ export async function routeAndDispatch(
     userId,
     channel,
     dispatchMessage,
+    undefined,
+    route.skill_name,
   );
   if (!dispatch) return null;
+
+  // Attach skill context from classifier (edge function may also return it)
+  if (route.skill_name && route.skill_description && !dispatch.skill_context) {
+    dispatch.skill_context = {
+      name: route.skill_name,
+      description: route.skill_description,
+    };
+  }
 
   return { route, dispatch };
 }

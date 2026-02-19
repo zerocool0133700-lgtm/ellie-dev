@@ -651,6 +651,7 @@ bot.on("message:text", withQueue(async (ctx) => {
     effectiveText, contextDocket, relevantContext, elasticContext, "telegram",
     agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
     workItemContext, structuredContext, recentMessages,
+    agentResult?.dispatch.skill_context,
   );
 
   const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -737,6 +738,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
       "telegram",
       agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
       undefined, structuredContext, recentMessages,
+      agentResult?.dispatch.skill_context,
     );
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -949,6 +951,7 @@ function buildPrompt(
   workItemContext?: string,
   structuredContext?: string,
   recentMessages?: string,
+  skillContext?: { name: string; description: string },
 ): string {
   const channelLabel = channel === "google-chat" ? "Google Chat" : "Telegram";
 
@@ -958,6 +961,15 @@ function buildPrompt(
     : `You are a personal AI assistant responding via ${channelLabel}. Keep responses concise and conversational.`;
 
   const parts = [basePrompt];
+
+  // Inject matched skill context (ELLIE-53)
+  if (skillContext) {
+    parts.push(
+      `\nACTIVE SKILL: ${skillContext.name}` +
+      `\nTask: ${skillContext.description}` +
+      `\nFocus your response on this specific capability. Use the appropriate tools to fulfill this request.`
+    );
+  }
 
   if (AGENT_MODE) {
     if (agentConfig?.tools_enabled?.length) {
@@ -1723,6 +1735,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           effectiveGchatText, contextDocket, relevantContext, elasticContext, "google-chat",
           gchatAgentResult?.dispatch.agent ? { system_prompt: gchatAgentResult.dispatch.agent.system_prompt, name: gchatAgentResult.dispatch.agent.name, tools_enabled: gchatAgentResult.dispatch.agent.tools_enabled } : undefined,
           undefined, structuredContext, recentMessages,
+          gchatAgentResult?.dispatch.skill_context,
         );
 
         const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
@@ -1988,6 +2001,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
                 tools_enabled: agentResult.dispatch.agent.tools_enabled,
               } : undefined,
               undefined, structuredContext, recentMessages,
+              agentResult?.dispatch.skill_context,
             );
 
             const ALEXA_TIMEOUT_MS = 6_000;

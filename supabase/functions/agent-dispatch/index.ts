@@ -4,17 +4,17 @@
  * Creates or resumes an agent session and returns the agent's config.
  *
  * POST body:
- *   { agent_name: string, user_id: string, channel: string, message: string, work_item_id?: string }
+ *   { agent_name: string, user_id: string, channel: string, message: string, work_item_id?: string, skill_name?: string }
  *
  * Returns:
- *   { session_id, agent: { name, system_prompt, model, tools_enabled, capabilities }, is_new, context_summary? }
+ *   { session_id, agent: { name, system_prompt, model, tools_enabled, capabilities }, is_new, context_summary?, skill_context? }
  */
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 Deno.serve(async (req) => {
   try {
-    const { agent_name, user_id, channel, message, work_item_id } =
+    const { agent_name, user_id, channel, message, work_item_id, skill_name } =
       await req.json();
 
     if (!agent_name || !message) {
@@ -42,6 +42,30 @@ Deno.serve(async (req) => {
         JSON.stringify({ error: `Agent not found: ${agent_name}` }),
         { status: 404, headers: { "Content-Type": "application/json" } },
       );
+    }
+
+    // 1b. Look up matched skill (if provided)
+    let skillContext = null;
+    if (skill_name) {
+      const { data: skill } = await supabase
+        .from("skills")
+        .select(
+          "id, name, description, parameters, requires_tools, requires_confirm",
+        )
+        .eq("agent_id", agent.id)
+        .eq("name", skill_name)
+        .eq("enabled", true)
+        .single();
+
+      if (skill) {
+        skillContext = {
+          name: skill.name,
+          description: skill.description,
+          parameters: skill.parameters,
+          requires_tools: skill.requires_tools,
+          requires_confirm: skill.requires_confirm,
+        };
+      }
     }
 
     // 2. Check for existing active session
@@ -124,6 +148,7 @@ Deno.serve(async (req) => {
         },
         is_new: isNew,
         context_summary: contextSummary,
+        skill_context: skillContext,
       }),
       { headers: { "Content-Type": "application/json" } },
     );

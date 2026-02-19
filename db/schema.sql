@@ -416,6 +416,43 @@ CREATE POLICY "Allow all for service role" ON people FOR ALL USING (true);
 CREATE POLICY "Allow all for service role" ON groups FOR ALL USING (true);
 CREATE POLICY "Allow all for service role" ON group_memberships FOR ALL USING (true);
 
+-- ============================================================
+-- SKILLS TABLE (Agent skill registry for intent routing)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS skills (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+  -- Ownership
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  owner_id UUID NOT NULL REFERENCES people(id),
+
+  -- Identity
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+
+  -- Matching
+  triggers TEXT[] DEFAULT '{}',
+  requires_tools TEXT[] DEFAULT '{}',
+  requires_confirm BOOLEAN DEFAULT FALSE,
+
+  -- Configuration
+  parameters JSONB DEFAULT '{}',
+  enabled BOOLEAN DEFAULT TRUE,
+  priority INTEGER DEFAULT 0,
+
+  UNIQUE(owner_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_skills_agent_id ON skills(agent_id);
+CREATE INDEX IF NOT EXISTS idx_skills_owner_id ON skills(owner_id);
+CREATE INDEX IF NOT EXISTS idx_skills_enabled ON skills(enabled) WHERE enabled = TRUE;
+CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
+
+ALTER TABLE skills ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Allow all for service role" ON skills FOR ALL USING (true);
+
 -- Enable realtime for groups/people
 ALTER PUBLICATION supabase_realtime ADD TABLE groups;
 ALTER PUBLICATION supabase_realtime ADD TABLE people;

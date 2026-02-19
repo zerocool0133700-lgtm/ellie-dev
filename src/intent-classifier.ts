@@ -1,5 +1,5 @@
 /**
- * Intent Classifier — ELLIE-50
+ * Intent Classifier — ELLIE-50 + ELLIE-53
  *
  * Replaces keyword/regex routing (route-message edge function) with
  * a three-tier classification system:
@@ -7,8 +7,8 @@
  *   2. Session continuity check (10-50ms)
  *   3. Haiku LLM classification (200-400ms)
  *
- * Runs relay-side where the Anthropic SDK and conversation context
- * are already available.
+ * ELLIE-53 adds skill-level matching: the classifier now routes to
+ * specific skills (which map to agents) instead of just agents.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -21,12 +21,22 @@ export interface ClassificationResult {
   confidence: number;
   reasoning?: string;
   strippedMessage?: string;
+  skill_name?: string;
+  skill_description?: string;
 }
 
 interface AgentDescription {
   name: string;
   type: string;
   capabilities: string[];
+}
+
+interface SkillDescription {
+  name: string;
+  description: string;
+  agent_name: string;
+  triggers: string[];
+  priority: number;
 }
 
 // Module-level state, initialized via initClassifier()
@@ -36,8 +46,12 @@ let _supabase: SupabaseClient | null = null;
 // Agent description cache
 let _agentCache: AgentDescription[] | null = null;
 let _agentCacheTime = 0;
-const AGENT_CACHE_TTL_MS = 5 * 60_000;
 
+// Skill description cache
+let _skillCache: SkillDescription[] | null = null;
+let _skillCacheTime = 0;
+
+const CACHE_TTL_MS = 5 * 60_000;
 const CONFIDENCE_THRESHOLD = 0.7;
 
 const SLASH_COMMANDS: Record<string, string> = {
@@ -64,7 +78,7 @@ export function initClassifier(
 }
 
 /**
- * Main entry point — classifies a message to determine which agent handles it.
+ * Main entry point — classifies a message to determine which skill/agent handles it.
  * Tries slash commands → session continuity → Haiku LLM, in order.
  */
 export async function classifyIntent(
@@ -152,14 +166,17 @@ async function checkSessionContinuity(
 }
 
 // ────────────────────────────────────────────────────────────────
-// Tier 3: Haiku LLM classification
+// Tier 3: Haiku LLM classification with skill matching
 // ────────────────────────────────────────────────────────────────
 
 async function classifyWithHaiku(
   message: string,
   channel: string,
 ): Promise<ClassificationResult> {
-  const agents = await getAgentDescriptions();
+  const [agents, skills] = await Promise.all([
+    getAgentDescriptions(),
+    getSkillDescriptions(),
+  ]);
 
   // Get conversation context from ELLIE-51 (non-fatal if unavailable)
   let conversationContext: {
@@ -181,7 +198,7 @@ async function classifyWithHaiku(
     // Non-fatal — classify without context
   }
 
-  const prompt = buildClassifierPrompt(message, agents, conversationContext);
+  const prompt = buildClassifierPrompt(message, agents, skills, conversationContext);
 
   try {
     const response = await _anthropic!.messages.create({
@@ -202,6 +219,7 @@ async function classifyWithHaiku(
 
     const parsed = JSON.parse(cleaned);
     const agentName = parsed.agent || "general";
+    const skillName = parsed.skill && parsed.skill !== "none" ? parsed.skill : undefined;
     const confidence = typeof parsed.confidence === "number" ? parsed.confidence : 0;
     const reasoning = parsed.reasoning || "";
 
@@ -212,14 +230,32 @@ async function classifyWithHaiku(
       return { agent_name: "general", rule_name: "unknown_agent_fallback", confidence: 0 };
     }
 
+    // Resolve skill — if skill maps to a different agent, the skill's agent wins
+    let resolvedAgent = agentName;
+    let skillDescription: string | undefined;
+    if (skillName) {
+      const matchedSkill = skills.find((s) => s.name === skillName);
+      if (matchedSkill) {
+        skillDescription = matchedSkill.description;
+        resolvedAgent = matchedSkill.agent_name;
+      }
+    }
+
     // Confidence threshold
     if (confidence < CONFIDENCE_THRESHOLD) {
-      console.log(`[classifier] Low confidence (${confidence}) for "${agentName}": ${reasoning}`);
+      console.log(`[classifier] Low confidence (${confidence}) for "${resolvedAgent}": ${reasoning}`);
       return { agent_name: "general", rule_name: "low_confidence_fallback", confidence, reasoning };
     }
 
-    console.log(`[classifier] LLM → "${agentName}" (${confidence}): ${reasoning}`);
-    return { agent_name: agentName, rule_name: "llm_classification", confidence, reasoning };
+    console.log(`[classifier] LLM → "${resolvedAgent}"${skillName ? ` [${skillName}]` : ""} (${confidence}): ${reasoning}`);
+    return {
+      agent_name: resolvedAgent,
+      rule_name: "llm_classification",
+      confidence,
+      reasoning,
+      skill_name: skillName,
+      skill_description: skillDescription,
+    };
   } catch (err) {
     console.error("[classifier] Haiku classification failed:", err);
     return { agent_name: "general", rule_name: "error_fallback", confidence: 0 };
@@ -229,15 +265,32 @@ async function classifyWithHaiku(
 function buildClassifierPrompt(
   message: string,
   agents: AgentDescription[],
+  skills: SkillDescription[],
   conversationContext?: {
     agent: string;
     summary: string | null;
     recentMessages: Array<{ role: string; content: string }>;
   },
 ): string {
-  const agentList = agents
-    .map((a) => `- ${a.name} (${a.type}): [${a.capabilities.join(", ")}]`)
-    .join("\n");
+  // Group skills by agent
+  const skillsByAgent: Record<string, SkillDescription[]> = {};
+  for (const skill of skills) {
+    if (!skillsByAgent[skill.agent_name]) skillsByAgent[skill.agent_name] = [];
+    skillsByAgent[skill.agent_name].push(skill);
+  }
+
+  const lines: string[] = [];
+  for (const agent of agents) {
+    const agentSkills = skillsByAgent[agent.name] || [];
+    if (agentSkills.length > 0) {
+      const skillList = agentSkills
+        .map((s) => `  - ${s.name}: ${s.description}`)
+        .join("\n");
+      lines.push(`${agent.name} (${agent.type}):\n${skillList}`);
+    } else {
+      lines.push(`${agent.name} (${agent.type}): [${agent.capabilities.join(", ")}]`);
+    }
+  }
 
   let contextBlock = "";
   if (conversationContext) {
@@ -253,29 +306,30 @@ ${recentLines}
 `;
   }
 
-  return `You are a message router. Classify which agent should handle this message.
+  return `You are a message router. Classify which skill should handle this message.
 
-Available agents:
-${agentList}
+Available skills by agent:
+${lines.join("\n")}
 ${contextBlock}
 User message: "${message}"
 
 Instructions:
-- Choose the single best agent for this message.
-- If ambiguous, conversational, or doesn't clearly fit a specialist, choose "general".
+- Choose the single best skill for this message.
+- If no skill is a clear match, set skill to "none" and pick the best agent.
+- If ambiguous or conversational, choose agent "general" with skill "none".
 - Consider conversation context — if the user is mid-topic, the current agent may still be best.
 
 Respond with ONLY a JSON object (no markdown fences):
-{"agent": "<agent_name>", "confidence": <0.0-1.0>, "reasoning": "<one sentence>"}`;
+{"skill": "<skill_name_or_none>", "agent": "<agent_name>", "confidence": <0.0-1.0>, "reasoning": "<one sentence>"}`;
 }
 
 // ────────────────────────────────────────────────────────────────
-// Agent description cache
+// Caches
 // ────────────────────────────────────────────────────────────────
 
 async function getAgentDescriptions(): Promise<AgentDescription[]> {
   const now = Date.now();
-  if (_agentCache && now - _agentCacheTime < AGENT_CACHE_TTL_MS) {
+  if (_agentCache && now - _agentCacheTime < CACHE_TTL_MS) {
     return _agentCache;
   }
 
@@ -295,4 +349,31 @@ async function getAgentDescriptions(): Promise<AgentDescription[]> {
 
   console.log(`[classifier] Agent cache refreshed: ${_agentCache.length} agents`);
   return _agentCache;
+}
+
+async function getSkillDescriptions(): Promise<SkillDescription[]> {
+  const now = Date.now();
+  if (_skillCache && now - _skillCacheTime < CACHE_TTL_MS) {
+    return _skillCache;
+  }
+
+  if (!_supabase) return [];
+
+  const { data: skills } = await _supabase
+    .from("skills")
+    .select("name, description, triggers, priority, agents(name)")
+    .eq("enabled", true)
+    .order("priority", { ascending: false });
+
+  _skillCache = (skills || []).map((s: any) => ({
+    name: s.name,
+    description: s.description,
+    agent_name: s.agents?.name || "general",
+    triggers: s.triggers || [],
+    priority: s.priority || 0,
+  }));
+  _skillCacheTime = now;
+
+  console.log(`[classifier] Skill cache refreshed: ${_skillCache.length} skills`);
+  return _skillCache;
 }
