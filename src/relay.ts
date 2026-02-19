@@ -42,10 +42,16 @@ import {
 import {
   routeAndDispatch,
   syncResponse,
+  dispatchAgent,
   type DispatchResult,
 } from "./agent-router.ts";
 import { initClassifier } from "./intent-classifier.ts";
 import { getStructuredContext } from "./context-sources.ts";
+import {
+  executePipeline,
+  PipelineStepError,
+  type PipelineStep,
+} from "./orchestrator.ts";
 import {
   extractApprovalTags,
   storePendingAction,
@@ -647,6 +653,77 @@ bot.on("message:text", withQueue(async (ctx) => {
     }
   }
 
+  // ── Pipeline branch (ELLIE-54) ──
+  if (agentResult?.route.complexity === "pipeline" && agentResult.route.pipeline_steps?.length) {
+    const steps: PipelineStep[] = agentResult.route.pipeline_steps.map((s) => ({
+      agent_name: s.agent,
+      skill_name: s.skill !== "none" ? s.skill : undefined,
+      instruction: s.instruction,
+    }));
+
+    const agentNames = [...new Set(steps.map((s) => s.agent_name))].join(" \u2192 ");
+    await ctx.reply(`\u{1F504} Pipeline: ${agentNames} (${steps.length} steps)`);
+
+    const typingInterval = setInterval(() => {
+      ctx.replyWithChatAction("typing").catch(() => {});
+    }, 4_000);
+
+    try {
+      const result = await executePipeline(steps, effectiveText, {
+        supabase,
+        channel: "telegram",
+        userId,
+        onHeartbeat: () => { ctx.replyWithChatAction("typing").catch(() => {}); },
+        contextDocket, relevantContext, elasticContext,
+        structuredContext, recentMessages, workItemContext,
+        buildPromptFn: buildPrompt,
+        callClaudeFn: callClaude,
+      });
+
+      clearInterval(typingInterval);
+
+      const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse);
+      const cleanedPipelineResponse = await sendWithApprovals(ctx, pipelineResponse, session.sessionId);
+      await saveMessage("assistant", cleanedPipelineResponse);
+
+      if (result.finalDispatch) {
+        await syncResponse(supabase, result.finalDispatch.session_id, cleanedPipelineResponse, {
+          duration_ms: result.artifacts.total_duration_ms,
+        });
+      }
+
+      console.log(
+        `[pipeline] Completed ${result.stepResults.length} steps in ${result.artifacts.total_duration_ms}ms, ` +
+        `~${result.artifacts.total_approx_tokens} tokens`,
+      );
+    } catch (err) {
+      clearInterval(typingInterval);
+      if (err instanceof PipelineStepError && err.partialOutput) {
+        console.error(`[pipeline] Step ${err.stepIndex} failed (${err.errorType}), sending partial results`);
+        const partialResponse = await processMemoryIntents(supabase, err.partialOutput);
+        await sendResponse(ctx, partialResponse + "\n\n(Pipeline incomplete \u2014 showing partial results.)");
+        await saveMessage("assistant", partialResponse);
+      } else {
+        console.error("[pipeline] Pipeline failed, falling back to single agent:", err);
+        // Fall through to single-agent path below
+        const fallbackPrompt = buildPrompt(
+          effectiveText, contextDocket, relevantContext, elasticContext, "telegram",
+          agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
+          workItemContext, structuredContext, recentMessages,
+          agentResult?.dispatch.skill_context,
+        );
+        const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
+        const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw);
+        const cleaned = await sendWithApprovals(ctx, fallbackResponse, session.sessionId);
+        await saveMessage("assistant", cleaned);
+      }
+    }
+
+    resetTelegramIdleTimer();
+    return;
+  }
+
+  // ── Single-agent path (default) ──
   const enrichedPrompt = buildPrompt(
     effectiveText, contextDocket, relevantContext, elasticContext, "telegram",
     agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
@@ -730,6 +807,77 @@ bot.on("message:voice", withQueue(async (ctx) => {
       getRecentMessages(supabase),
     ]);
 
+    // ── Voice pipeline branch (ELLIE-54) ──
+    if (agentResult?.route.complexity === "pipeline" && agentResult.route.pipeline_steps?.length) {
+      const steps: PipelineStep[] = agentResult.route.pipeline_steps.map((s) => ({
+        agent_name: s.agent,
+        skill_name: s.skill !== "none" ? s.skill : undefined,
+        instruction: s.instruction,
+      }));
+
+      const agentNames = [...new Set(steps.map((s) => s.agent_name))].join(" \u2192 ");
+      await ctx.reply(`\u{1F504} Pipeline: ${agentNames} (${steps.length} steps)`);
+
+      const typingInterval = setInterval(() => {
+        ctx.replyWithChatAction("typing").catch(() => {});
+      }, 4_000);
+
+      try {
+        const result = await executePipeline(steps, effectiveTranscription, {
+          supabase,
+          channel: "telegram",
+          userId: voiceUserId,
+          onHeartbeat: () => { ctx.replyWithChatAction("typing").catch(() => {}); },
+          contextDocket, relevantContext, elasticContext,
+          structuredContext, recentMessages,
+          buildPromptFn: buildPrompt,
+          callClaudeFn: callClaude,
+        });
+
+        clearInterval(typingInterval);
+        const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse);
+        const cleaned = await sendWithApprovals(ctx, pipelineResponse, session.sessionId);
+        await saveMessage("assistant", cleaned);
+
+        if (result.finalDispatch) {
+          await syncResponse(supabase, result.finalDispatch.session_id, cleaned, {
+            duration_ms: result.artifacts.total_duration_ms,
+          });
+        }
+
+        console.log(
+          `[pipeline] Voice: ${result.stepResults.length} steps in ${result.artifacts.total_duration_ms}ms`,
+        );
+      } catch (err) {
+        clearInterval(typingInterval);
+        if (err instanceof PipelineStepError && err.partialOutput) {
+          const partialResponse = await processMemoryIntents(supabase, err.partialOutput);
+          await sendResponse(ctx, partialResponse + "\n\n(Pipeline incomplete \u2014 showing partial results.)");
+          await saveMessage("assistant", partialResponse);
+        } else {
+          console.error("[pipeline] Voice pipeline failed:", err);
+          await ctx.reply("Pipeline failed \u2014 processing as single request.");
+          // Fall through to single-agent below won't work since we're in an if-block,
+          // so just do a basic single-agent call
+          const fallbackPrompt = buildPrompt(
+            `[Voice message transcribed]: ${effectiveTranscription}`,
+            contextDocket, relevantContext, elasticContext, "telegram",
+            agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
+            undefined, structuredContext, recentMessages,
+            agentResult?.dispatch.skill_context,
+          );
+          const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
+          const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw);
+          const cleaned = await sendWithApprovals(ctx, fallbackResponse, session.sessionId);
+          await saveMessage("assistant", cleaned);
+        }
+      }
+
+      resetTelegramIdleTimer();
+      return;
+    }
+
+    // ── Voice single-agent path (default) ──
     const enrichedPrompt = buildPrompt(
       `[Voice message transcribed]: ${effectiveTranscription}`,
       contextDocket,
@@ -941,7 +1089,7 @@ try {
 const USER_NAME = process.env.USER_NAME || "";
 const USER_TIMEZONE = process.env.USER_TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-function buildPrompt(
+export function buildPrompt(
   userMessage: string,
   contextDocket?: string,
   relevantContext?: string,
@@ -1731,6 +1879,67 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           getRecentMessages(supabase),
         ]);
 
+        // ── Google Chat pipeline branch (ELLIE-54) ──
+        if (gchatAgentResult?.route.complexity === "pipeline" && gchatAgentResult.route.pipeline_steps?.length) {
+          const gchatSteps: PipelineStep[] = gchatAgentResult.route.pipeline_steps.map((s) => ({
+            agent_name: s.agent,
+            skill_name: s.skill !== "none" ? s.skill : undefined,
+            instruction: s.instruction,
+          }));
+
+          const gchatAgentNames = [...new Set(gchatSteps.map((s) => s.agent_name))].join(" \u2192 ");
+
+          // Pipeline will always exceed 25s — send sync response immediately, run async
+          sendSyncResponse(`Working on it... (pipeline: ${gchatAgentNames}, ${gchatSteps.length} steps)`);
+
+          executePipeline(gchatSteps, effectiveGchatText, {
+            supabase,
+            channel: "google-chat",
+            userId: parsed.senderEmail,
+            contextDocket, relevantContext, elasticContext,
+            structuredContext, recentMessages,
+            buildPromptFn: buildPrompt,
+            callClaudeFn: callClaude,
+          }).then(async (result) => {
+            const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse);
+            const { cleanedText: gchatClean } = extractApprovalTags(pipelineResponse);
+            await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
+            resetGchatIdleTimer();
+
+            if (result.finalDispatch) {
+              syncResponse(supabase, result.finalDispatch.session_id, gchatClean, {
+                duration_ms: result.artifacts.total_duration_ms,
+              }).catch(() => {});
+            }
+
+            console.log(`[gchat] Pipeline: ${result.stepResults.length} steps in ${result.artifacts.total_duration_ms}ms`);
+
+            await deliverMessage(supabase, gchatClean, {
+              channel: "google-chat",
+              spaceName: parsed.spaceName,
+              threadName: null,
+              telegramBot: bot,
+              telegramChatId: ALLOWED_USER_ID,
+              fallback: true,
+            });
+          }).catch((err) => {
+            console.error("[gchat] Pipeline failed:", err);
+            const errMsg = err instanceof PipelineStepError && err.partialOutput
+              ? err.partialOutput + "\n\n(Pipeline incomplete.)"
+              : "Sorry, I ran into an error processing your multi-step request.";
+            deliverMessage(supabase, errMsg, {
+              channel: "google-chat",
+              spaceName: parsed.spaceName,
+              threadName: null,
+              telegramBot: bot,
+              telegramChatId: ALLOWED_USER_ID,
+              fallback: true,
+            }).catch(() => {});
+          });
+          return;
+        }
+
+        // ── Google Chat single-agent path (default) ──
         const enrichedPrompt = buildPrompt(
           effectiveGchatText, contextDocket, relevantContext, elasticContext, "google-chat",
           gchatAgentResult?.dispatch.agent ? { system_prompt: gchatAgentResult.dispatch.agent.system_prompt, name: gchatAgentResult.dispatch.agent.name, tools_enabled: gchatAgentResult.dispatch.agent.tools_enabled } : undefined,

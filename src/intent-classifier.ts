@@ -9,6 +9,10 @@
  *
  * ELLIE-53 adds skill-level matching: the classifier now routes to
  * specific skills (which map to agents) instead of just agents.
+ *
+ * ELLIE-54 adds pipeline detection: the classifier returns a complexity
+ * hint ('single' | 'pipeline') and optional pipeline_steps array for
+ * multi-step requests that span multiple skills/agents.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -23,6 +27,12 @@ export interface ClassificationResult {
   strippedMessage?: string;
   skill_name?: string;
   skill_description?: string;
+  complexity: "single" | "pipeline";
+  pipeline_steps?: Array<{
+    agent: string;
+    skill: string;
+    instruction: string;
+  }>;
 }
 
 interface AgentDescription {
@@ -94,6 +104,7 @@ export async function classifyIntent(
       agent_name: slash.agent,
       rule_name: "slash_command",
       confidence: 1.0,
+      complexity: "single",
       strippedMessage: slash.strippedMessage,
     };
   }
@@ -108,7 +119,7 @@ export async function classifyIntent(
   // Tier 3: Haiku LLM classification (200-400ms)
   if (!_anthropic) {
     console.warn("[classifier] No Anthropic client — falling back to general");
-    return { agent_name: "general", rule_name: "no_anthropic_fallback", confidence: 0 };
+    return { agent_name: "general", rule_name: "no_anthropic_fallback", confidence: 0, complexity: "single" };
   }
 
   return classifyWithHaiku(message, channel);
@@ -159,6 +170,7 @@ async function checkSessionContinuity(
       agent_name: agentName,
       rule_name: "session_continuity",
       confidence: 1.0,
+      complexity: "single",
     };
   } catch {
     return null;
@@ -203,7 +215,7 @@ async function classifyWithHaiku(
   try {
     const response = await _anthropic!.messages.create({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 100,
+      max_tokens: 250,
       messages: [{ role: "user", content: prompt }],
     });
 
@@ -223,11 +235,17 @@ async function classifyWithHaiku(
     const confidence = typeof parsed.confidence === "number" ? parsed.confidence : 0;
     const reasoning = parsed.reasoning || "";
 
+    // Parse pipeline fields (ELLIE-54)
+    const complexity = parsed.complexity === "pipeline" ? "pipeline" as const : "single" as const;
+    const pipelineSteps = complexity === "pipeline" && Array.isArray(parsed.pipeline_steps)
+      ? parsed.pipeline_steps as Array<{ agent: string; skill: string; instruction: string }>
+      : undefined;
+
     // Validate agent name
     const valid = agents.find((a) => a.name === agentName);
     if (!valid) {
       console.warn(`[classifier] Unknown agent "${agentName}" — falling back`);
-      return { agent_name: "general", rule_name: "unknown_agent_fallback", confidence: 0 };
+      return { agent_name: "general", rule_name: "unknown_agent_fallback", confidence: 0, complexity: "single" };
     }
 
     // Resolve skill — if skill maps to a different agent, the skill's agent wins
@@ -244,10 +262,11 @@ async function classifyWithHaiku(
     // Confidence threshold
     if (confidence < CONFIDENCE_THRESHOLD) {
       console.log(`[classifier] Low confidence (${confidence}) for "${resolvedAgent}": ${reasoning}`);
-      return { agent_name: "general", rule_name: "low_confidence_fallback", confidence, reasoning };
+      return { agent_name: "general", rule_name: "low_confidence_fallback", confidence, reasoning, complexity: "single" };
     }
 
-    console.log(`[classifier] LLM → "${resolvedAgent}"${skillName ? ` [${skillName}]` : ""} (${confidence}): ${reasoning}`);
+    const pipelineLabel = complexity === "pipeline" ? ` [pipeline: ${pipelineSteps?.length} steps]` : "";
+    console.log(`[classifier] LLM → "${resolvedAgent}"${skillName ? ` [${skillName}]` : ""}${pipelineLabel} (${confidence}): ${reasoning}`);
     return {
       agent_name: resolvedAgent,
       rule_name: "llm_classification",
@@ -255,10 +274,12 @@ async function classifyWithHaiku(
       reasoning,
       skill_name: skillName,
       skill_description: skillDescription,
+      complexity,
+      pipeline_steps: pipelineSteps,
     };
   } catch (err) {
     console.error("[classifier] Haiku classification failed:", err);
-    return { agent_name: "general", rule_name: "error_fallback", confidence: 0 };
+    return { agent_name: "general", rule_name: "error_fallback", confidence: 0, complexity: "single" };
   }
 }
 
@@ -314,13 +335,20 @@ ${contextBlock}
 User message: "${message}"
 
 Instructions:
-- Choose the single best skill for this message.
+- Determine if this message requires a SINGLE skill or a PIPELINE of multiple sequential skills.
+- A pipeline is needed when the message contains two or more distinct tasks that must happen in order (e.g., "research X and summarize it", "check my calendar and draft an email about it").
+- Most messages are "single". Only use "pipeline" when the message clearly requires multiple sequential steps. Max 5 steps.
+- For single: choose the best skill and agent.
+- For pipeline: list the steps in execution order, each with agent, skill, and a brief instruction.
 - If no skill is a clear match, set skill to "none" and pick the best agent.
-- If ambiguous or conversational, choose agent "general" with skill "none".
+- If ambiguous or conversational, choose agent "general" with skill "none" and complexity "single".
 - Consider conversation context — if the user is mid-topic, the current agent may still be best.
 
 Respond with ONLY a JSON object (no markdown fences):
-{"skill": "<skill_name_or_none>", "agent": "<agent_name>", "confidence": <0.0-1.0>, "reasoning": "<one sentence>"}`;
+{"skill": "<primary_skill_or_none>", "agent": "<primary_agent>", "confidence": <0.0-1.0>, "reasoning": "<one sentence>", "complexity": "single", "pipeline_steps": null}
+
+For pipeline requests, use:
+{"skill": "<first_skill>", "agent": "<first_agent>", "confidence": <0.0-1.0>, "reasoning": "<one sentence>", "complexity": "pipeline", "pipeline_steps": [{"agent": "<agent>", "skill": "<skill_or_none>", "instruction": "<what this step does>"}]}`;
 }
 
 // ────────────────────────────────────────────────────────────────

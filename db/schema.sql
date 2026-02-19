@@ -439,6 +439,7 @@ CREATE TABLE IF NOT EXISTS skills (
 
   -- Configuration
   parameters JSONB DEFAULT '{}',
+  output_schema JSONB DEFAULT NULL,
   enabled BOOLEAN DEFAULT TRUE,
   priority INTEGER DEFAULT 0,
 

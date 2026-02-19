@@ -28,6 +28,12 @@ export interface RouteResult {
   session_id?: string;
   skill_name?: string;
   skill_description?: string;
+  complexity: "single" | "pipeline";
+  pipeline_steps?: Array<{
+    agent: string;
+    skill: string;
+    instruction: string;
+  }>;
 }
 
 export interface DispatchResult {
@@ -187,7 +193,7 @@ export async function routeAndDispatch(
     console.error("[agent-router] classifyIntent failed, trying edge function fallback:", err);
     const edgeRoute = await routeMessage(supabase, message, channel, userId);
     if (!edgeRoute) return null;
-    route = { ...edgeRoute, confidence: 0.5 };
+    route = { ...edgeRoute, confidence: 0.5, complexity: "single" as const };
   }
 
   const dispatchMessage = route.strippedMessage || message;
