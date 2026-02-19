@@ -14,6 +14,7 @@
 import { spawn } from "bun";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { indexConversation, indexMemory, classifyDomain } from "./elasticsearch.ts";
+import { insertMemoryWithDedup } from "./memory.ts";
 
 interface RawMessage {
   id: string;
@@ -120,15 +121,43 @@ async function callClaudeCLI(prompt: string): Promise<string> {
   return output.trim();
 }
 
+async function resolveAgentForBlock(
+  supabase: SupabaseClient,
+  block: ConversationBlock,
+): Promise<string> {
+  try {
+    // Look up the most recent agent session active during this block's time window
+    const { data } = await supabase
+      .from("agent_sessions")
+      .select("agents(name)")
+      .eq("channel", block.channel)
+      .lte("created_at", block.endedAt)
+      .gte("last_activity", block.startedAt)
+      .order("last_activity", { ascending: false })
+      .limit(1)
+      .single();
+
+    const agentName = (data as any)?.agents?.name;
+    if (agentName) return agentName;
+  } catch {
+    // Query failed or no match — fall through
+  }
+  return "general";
+}
+
 async function processBlock(
   supabase: SupabaseClient,
   block: ConversationBlock
 ): Promise<void> {
+  // Resolve which agent handled this conversation block
+  const blockAgent = await resolveAgentForBlock(supabase, block);
+
   // 1. Create conversation record
   const { data: convo, error: convoErr } = await supabase
     .from("conversations")
     .insert({
       channel: block.channel,
+      agent: blockAgent,
       started_at: block.startedAt,
       ended_at: block.endedAt,
       message_count: block.messages.length,
@@ -253,31 +282,17 @@ ${transcript}`;
   );
 
   if (validMemories.length > 0) {
-    const { data: insertedMemories } = await supabase.from("memory").insert(
-      validMemories.map((m) => ({
-        type: m.type,
-        content: m.content,
+    for (const mem of validMemories) {
+      const result = await insertMemoryWithDedup(supabase, {
+        type: mem.type,
+        content: mem.content,
+        source_agent: blockAgent,
+        visibility: "shared",
         conversation_id: conversationId,
         metadata: { source: "consolidation" },
-      }))
-    ).select("id, type, content");
-
-    for (const mem of validMemories) {
-      console.log(`  [${mem.type}] ${mem.content}`);
-    }
-
-    // Index memories to Elasticsearch
-    if (insertedMemories) {
-      for (const mem of insertedMemories) {
-        indexMemory({
-          id: mem.id,
-          content: mem.content,
-          type: mem.type,
-          domain: classifyDomain(mem.content),
-          created_at: new Date().toISOString(),
-          conversation_id: conversationId,
-        }).catch(() => {});
-      }
+      });
+      console.log(`  [${mem.type}] ${mem.content} → ${result.action}` +
+        (result.resolution ? ` (${result.resolution.reason})` : ""));
     }
   }
 
@@ -287,6 +302,8 @@ ${transcript}`;
       type: "summary",
       content: parsed.summary,
       conversation_id: conversationId,
+      source_agent: blockAgent,
+      visibility: "shared",
       metadata: { source: "consolidation", channel: block.channel },
     }).select("id").single();
 
