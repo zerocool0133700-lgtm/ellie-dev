@@ -22,18 +22,61 @@ export async function processMemoryIntents(
   supabase: SupabaseClient | null,
   response: string,
   sourceAgent: string = "general",
+  defaultVisibility: "private" | "shared" | "global" = "shared",
 ): Promise<string> {
   if (!supabase) return response;
 
   let clean = response;
 
-  // [REMEMBER: fact to store]
+  // [REMEMBER: fact to store] - uses default visibility
   for (const match of response.matchAll(/\[REMEMBER:\s*(.+?)\]/gi)) {
     const { data } = await supabase.from("memory").insert({
       type: "fact",
       content: match[1],
       source_agent: sourceAgent,
-      visibility: "shared",
+      visibility: defaultVisibility,
+    }).select("id").single();
+
+    if (data?.id) {
+      indexMemory({
+        id: data.id,
+        content: match[1],
+        type: "fact",
+        domain: classifyDomain(match[1]),
+        created_at: new Date().toISOString(),
+      }).catch(() => {});
+    }
+    clean = clean.replace(match[0], "");
+  }
+
+  // [REMEMBER-PRIVATE: fact to store] - explicit private visibility
+  for (const match of response.matchAll(/\[REMEMBER-PRIVATE:\s*(.+?)\]/gi)) {
+    const { data } = await supabase.from("memory").insert({
+      type: "fact",
+      content: match[1],
+      source_agent: sourceAgent,
+      visibility: "private",
+    }).select("id").single();
+
+    if (data?.id) {
+      indexMemory({
+        id: data.id,
+        content: match[1],
+        type: "fact",
+        domain: classifyDomain(match[1]),
+        created_at: new Date().toISOString(),
+      }).catch(() => {});
+    }
+    clean = clean.replace(match[0], "");
+  }
+
+  // [REMEMBER-GLOBAL: fact to store] - explicit global visibility
+  for (const match of response.matchAll(/\[REMEMBER-GLOBAL:\s*(.+?)\]/gi)) {
+    const { data } = await supabase.from("memory").insert({
+      type: "fact",
+      content: match[1],
+      source_agent: sourceAgent,
+      visibility: "global",
     }).select("id").single();
 
     if (data?.id) {
@@ -57,7 +100,7 @@ export async function processMemoryIntents(
       content: match[1],
       deadline: match[2] || null,
       source_agent: sourceAgent,
-      visibility: "shared",
+      visibility: defaultVisibility,
     }).select("id").single();
 
     if (data?.id) {
@@ -74,12 +117,19 @@ export async function processMemoryIntents(
 
   // [DONE: search text for completed goal]
   for (const match of response.matchAll(/\[DONE:\s*(.+?)\]/gi)) {
-    const { data } = await supabase
+    // Build query to find matching goal
+    let query = supabase
       .from("memory")
       .select("id")
       .eq("type", "goal")
-      .ilike("content", `%${match[1]}%`)
-      .limit(1);
+      .ilike("content", `%${match[1]}%`);
+
+    // Filter by source_agent if available to avoid closing other agents' goals
+    if (sourceAgent) {
+      query = query.eq("source_agent", sourceAgent);
+    }
+
+    const { data } = await query.limit(1);
 
     if (data?.[0]) {
       await supabase
