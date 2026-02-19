@@ -278,7 +278,7 @@ async function extractMemories(
   try {
     const { data: convo } = await supabase
       .from("conversations")
-      .select("channel, summary, started_at, last_message_at")
+      .select("channel, agent, summary, started_at, last_message_at")
       .eq("id", conversationId)
       .single();
 
@@ -385,6 +385,8 @@ ${transcript}`;
           type: m.type,
           content: m.content,
           conversation_id: conversationId,
+          source_agent: convo.agent || "general",
+          visibility: "shared",
           metadata: { source: "conversation_close" },
         })),
       ).select("id, type, content");
@@ -414,6 +416,8 @@ ${transcript}`;
         type: "summary",
         content: parsed.summary,
         conversation_id: conversationId,
+        source_agent: convo.agent || "general",
+        visibility: "shared",
         metadata: { source: "conversation_close", channel: convo.channel },
       }).select("id").single();
 

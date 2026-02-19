@@ -155,6 +155,9 @@ interface SessionState {
   lastActivity: string;
 }
 
+// Track the last active agent name for handlers that don't route (images, docs, approvals)
+let lastActiveAgent = "general";
+
 // ============================================================
 // CONTEXT DOCKET
 // ============================================================
@@ -391,8 +394,48 @@ startExpiryCleanup();
 setInterval(() => {
   if (supabase) {
     expireIdleConversations(supabase).catch(() => {});
+    expireStaleWorkSessions(supabase).catch(() => {});
+    expireStaleAgentSessions(supabase).catch(() => {});
   }
 }, 5 * 60_000);
+
+/** Expire work sessions that have been active for > 4 hours without updates */
+async function expireStaleWorkSessions(sb: SupabaseClient): Promise<void> {
+  const cutoff = new Date(Date.now() - 4 * 60 * 60_000).toISOString();
+  const { data, error } = await sb
+    .from("work_sessions")
+    .update({ state: "completed", completed_at: new Date().toISOString() })
+    .eq("state", "active")
+    .lt("updated_at", cutoff)
+    .select("id, work_item_id");
+
+  if (error) {
+    console.error("[session-cleanup] work_sessions expire error:", error);
+    return;
+  }
+  if (data && data.length > 0) {
+    console.log(`[session-cleanup] Expired ${data.length} stale work session(s): ${data.map((s: any) => s.work_item_id).join(", ")}`);
+  }
+}
+
+/** Expire agent sessions that have been active for > 2 hours without activity */
+async function expireStaleAgentSessions(sb: SupabaseClient): Promise<void> {
+  const cutoff = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+  const { data, error } = await sb
+    .from("agent_sessions")
+    .update({ state: "completed", completed_at: new Date().toISOString() })
+    .eq("state", "active")
+    .lt("last_activity", cutoff)
+    .select("id");
+
+  if (error) {
+    console.error("[session-cleanup] agent_sessions expire error:", error);
+    return;
+  }
+  if (data && data.length > 0) {
+    console.log(`[session-cleanup] Expired ${data.length} stale agent session(s)`);
+  }
+}
 
 // ============================================================
 // SECURITY: Only respond to authorized user
@@ -535,6 +578,20 @@ async function callClaude(
 
         message += `\n\nYou can retry the request, or ask "what did you get done?" to check if work was partially completed.`;
 
+        return message;
+      }
+
+      // Exit 143 = SIGTERM (128+15) from external signal (e.g. service restart)
+      if (exitCode === 143) {
+        const partialOutput = output?.trim();
+        let message = "I got interrupted while working on this (the service was restarted or the process was terminated externally).";
+        if (partialOutput) {
+          const preview = partialOutput.length > 500
+            ? partialOutput.substring(0, 500) + "..."
+            : partialOutput;
+          message += `\n\nHere's what I had so far:\n${preview}`;
+        }
+        message += "\n\nWant me to try again?";
         return message;
       }
 
@@ -685,6 +742,7 @@ bot.on("message:text", withQueue(async (ctx) => {
   // Route message to appropriate agent via LLM classifier (falls back gracefully)
   const agentResult = await routeAndDispatch(supabase, text, "telegram", userId);
   const effectiveText = agentResult?.route.strippedMessage || text;
+  if (agentResult) lastActiveAgent = agentResult.dispatch.agent.name;
 
   // Gather context: docket + semantic search + ES full-text search + structured sources + recent messages
   const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
@@ -742,7 +800,7 @@ bot.on("message:text", withQueue(async (ctx) => {
 
       const agentName = result.finalDispatch?.agent?.name || agentResult?.dispatch.agent.name || "general";
       const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, agentName);
-      const cleanedPipelineResponse = await sendWithApprovals(ctx, pipelineResponse, session.sessionId);
+      const cleanedPipelineResponse = await sendWithApprovals(ctx, pipelineResponse, session.sessionId, agentName);
       await saveMessage("assistant", cleanedPipelineResponse);
 
       if (result.finalDispatch) {
@@ -771,8 +829,9 @@ bot.on("message:text", withQueue(async (ctx) => {
           agentResult?.dispatch.skill_context,
         );
         const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
-        const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw, agentResult?.dispatch.agent.name || "general");
-        const cleaned = await sendWithApprovals(ctx, fallbackResponse, session.sessionId);
+        const fallbackAgentName = agentResult?.dispatch.agent.name || "general";
+        const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw, fallbackAgentName);
+        const cleaned = await sendWithApprovals(ctx, fallbackResponse, session.sessionId, fallbackAgentName);
         await saveMessage("assistant", cleaned);
       }
     }
@@ -808,7 +867,7 @@ bot.on("message:text", withQueue(async (ctx) => {
     await ctx.reply(`\u{1F916} ${agentResult.dispatch.agent.name} agent`);
   }
 
-  const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId);
+  const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId, agentResult?.dispatch.agent.name);
 
   await saveMessage("assistant", cleanedResponse);
 
@@ -856,6 +915,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
     const voiceUserId = ctx.from?.id.toString() || "";
     const agentResult = await routeAndDispatch(supabase, transcription, "telegram", voiceUserId);
     const effectiveTranscription = agentResult?.route.strippedMessage || transcription;
+    if (agentResult) lastActiveAgent = agentResult.dispatch.agent.name;
 
     const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
       getContextDocket(),
@@ -898,7 +958,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
         clearInterval(typingInterval);
         const voiceAgentName = result.finalDispatch?.agent?.name || agentResult?.dispatch.agent.name || "general";
         const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, voiceAgentName);
-        const cleaned = await sendWithApprovals(ctx, pipelineResponse, session.sessionId);
+        const cleaned = await sendWithApprovals(ctx, pipelineResponse, session.sessionId, voiceAgentName);
         await saveMessage("assistant", cleaned);
 
         if (result.finalDispatch) {
@@ -927,8 +987,9 @@ bot.on("message:voice", withQueue(async (ctx) => {
             agentResult?.dispatch.skill_context,
           );
           const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
-          const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw, agentResult?.dispatch.agent.name || "general");
-          const cleaned = await sendWithApprovals(ctx, fallbackResponse, session.sessionId);
+          const voiceFallbackAgent = agentResult?.dispatch.agent.name || "general";
+          const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw, voiceFallbackAgent);
+          const cleaned = await sendWithApprovals(ctx, fallbackResponse, session.sessionId, voiceFallbackAgent);
           await saveMessage("assistant", cleaned);
         }
       }
@@ -984,7 +1045,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
     }
 
     // Fall back to text (long response, TTS failure, or approval buttons)
-    const cleanedResponse = await sendWithApprovals(ctx, claudeResponse, session.sessionId);
+    const cleanedResponse = await sendWithApprovals(ctx, claudeResponse, session.sessionId, agentResult?.dispatch.agent.name);
 
     await saveMessage("assistant", cleanedResponse);
 
@@ -1033,8 +1094,8 @@ bot.on("message:photo", withQueue(async (ctx) => {
     // Cleanup after processing
     await unlink(filePath).catch(() => {});
 
-    const cleanResponse = await processMemoryIntents(supabase, claudeResponse, "general");
-    const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId);
+    const cleanResponse = await processMemoryIntents(supabase, claudeResponse, lastActiveAgent);
+    const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId, lastActiveAgent);
     await saveMessage("assistant", finalResponse);
     resetTelegramIdleTimer();
   } catch (error) {
@@ -1070,8 +1131,8 @@ bot.on("message:document", withQueue(async (ctx) => {
 
     await unlink(filePath).catch(() => {});
 
-    const cleanResponse = await processMemoryIntents(supabase, claudeResponse, "general");
-    const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId);
+    const cleanResponse = await processMemoryIntents(supabase, claudeResponse, lastActiveAgent);
+    const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId, lastActiveAgent);
     await saveMessage("assistant", finalResponse);
     resetTelegramIdleTimer();
   } catch (error) {
@@ -1103,8 +1164,9 @@ bot.callbackQuery(/^approve:(.+)$/, withQueue(async (ctx) => {
 
   await ctx.replyWithChatAction("typing");
   const rawResponse = await callClaudeWithTyping(ctx, resumePrompt, { resume: true });
-  const response = await processMemoryIntents(supabase, rawResponse, "general");
-  const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId);
+  const approveAgent = action.agentName || lastActiveAgent;
+  const response = await processMemoryIntents(supabase, rawResponse, approveAgent);
+  const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId, approveAgent);
   await saveMessage("assistant", cleanedResponse);
   resetTelegramIdleTimer();
 }, () => "[Approval]"));
@@ -1128,8 +1190,9 @@ bot.callbackQuery(/^deny:(.+)$/, withQueue(async (ctx) => {
 
   await ctx.replyWithChatAction("typing");
   const rawResponse = await callClaudeWithTyping(ctx, resumePrompt, { resume: true });
-  const response = await processMemoryIntents(supabase, rawResponse, "general");
-  const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId);
+  const denyAgent = action.agentName || lastActiveAgent;
+  const response = await processMemoryIntents(supabase, rawResponse, denyAgent);
+  const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId, denyAgent);
   await saveMessage("assistant", cleanedResponse);
   resetTelegramIdleTimer();
 }, () => "[Denial]"));
@@ -1223,11 +1286,14 @@ export function buildPrompt(
 
   parts.push(
     "\nMEMORY MANAGEMENT:" +
-      "\nWhen the user shares something worth remembering, sets goals, or completes goals, " +
-      "include these tags in your response (they are processed automatically and hidden from the user):" +
+      "\nYou MUST actively log memories during conversations. Include these tags in your response " +
+      "(they are processed automatically and hidden from the user):" +
       "\n[REMEMBER: fact to store]" +
       "\n[GOAL: goal text | DEADLINE: optional date]" +
-      "\n[DONE: search text for completed goal]"
+      "\n[DONE: search text for completed goal]" +
+      "\nUse [REMEMBER:] for: preferences, decisions, project details, personal info, " +
+      "technical choices, things the user researched or asked about, and any context that " +
+      "would be useful in future conversations. When in doubt, remember it."
   );
 
   parts.push(
@@ -1327,6 +1393,7 @@ async function sendWithApprovals(
   ctx: Context,
   response: string,
   currentSessionId: string | null,
+  agentName?: string,
 ): Promise<string> {
   const { cleanedText, confirmations } = extractApprovalTags(response);
 
@@ -1351,6 +1418,7 @@ async function sendWithApprovals(
         currentSessionId,
         sent.chat.id,
         sent.message_id,
+        { agentName: agentName || lastActiveAgent },
       );
       console.log(`[approval] Pending: ${description.substring(0, 60)}`);
     }
@@ -1867,7 +1935,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
                 resume: true,
                 sessionId: pending.sessionId || undefined,
               }).then(async (followUp) => {
-                const cleanFollowUp = await processMemoryIntents(supabase, followUp, "general");
+                const cleanFollowUp = await processMemoryIntents(supabase, followUp, pending.agentName || lastActiveAgent);
                 await saveMessage("assistant", cleanFollowUp, {}, "google-chat");
 
                 // Send follow-up via REST API to the correct space
@@ -1930,6 +1998,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
 
         const gchatAgentResult = await routeAndDispatch(supabase, parsed.text, "google-chat", parsed.senderEmail);
         const effectiveGchatText = gchatAgentResult?.route.strippedMessage || parsed.text;
+        if (gchatAgentResult) lastActiveAgent = gchatAgentResult.dispatch.agent.name;
 
         const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
           getContextDocket(),
@@ -1938,6 +2007,21 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           getStructuredContext(supabase),
           getRecentMessages(supabase),
         ]);
+
+        // ── Sync response gate (shared by multi-step and single-agent paths) ──
+        const GCHAT_SYNC_TIMEOUT_MS = 25_000;
+        let respondedSync = false;
+
+        function sendSyncResponse(text: string, cardsV2?: any[]) {
+          if (respondedSync) return;
+          respondedSync = true;
+          res.writeHead(200, { "Content-Type": "application/json" });
+          const message: Record<string, any> = { text };
+          if (cardsV2?.length) message.cardsV2 = cardsV2;
+          res.end(JSON.stringify({
+            hostAppDataAction: { chatDataAction: { createMessageAction: { message } } },
+          }));
+        }
 
         // ── Google Chat multi-step branch (ELLIE-58) ──
         if (gchatAgentResult?.route.execution_mode !== "single" && gchatAgentResult?.route.skills?.length) {
@@ -2020,23 +2104,10 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
         const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
         const gchatAgentModel = gchatAgentResult?.dispatch.agent.model;
 
-        // Race Claude call against a 25s timer — Google Chat webhooks timeout at ~30s.
+        // Race Claude call against the sync timeout.
         // If Claude finishes fast, respond synchronously (best UX).
         // If it takes too long, send "working on it" synchronously, then post the
         // real result async via the Chat API when Claude finishes.
-        const GCHAT_SYNC_TIMEOUT_MS = 25_000;
-        let respondedSync = false;
-
-        function sendSyncResponse(text: string, cardsV2?: any[]) {
-          if (respondedSync) return;
-          respondedSync = true;
-          res.writeHead(200, { "Content-Type": "application/json" });
-          const message: Record<string, any> = { text };
-          if (cardsV2?.length) message.cardsV2 = cardsV2;
-          res.end(JSON.stringify({
-            hostAppDataAction: { chatDataAction: { createMessageAction: { message } } },
-          }));
-        }
 
         // Start Claude call (runs in background if timeout fires first)
         const claudePromise = (async () => {
@@ -2131,6 +2202,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               storePendingAction(actionId, desc, session.sessionId, 0, 0, {
                 channel: "google-chat",
                 spaceName: parsed.spaceName,
+                agentName: gchatAgentResult?.dispatch.agent.name || lastActiveAgent,
               });
               return {
                 widgets: [

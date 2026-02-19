@@ -19,6 +19,7 @@ export interface PendingAction {
   createdAt: number;
   channel?: "telegram" | "google-chat";
   spaceName?: string;
+  agentName?: string;
 }
 
 const EXPIRY_MS = 15 * 60_000; // 15 minutes
@@ -54,7 +55,7 @@ export function storePendingAction(
   sessionId: string | null,
   chatId: number,
   messageId: number,
-  extra?: { channel?: "telegram" | "google-chat"; spaceName?: string },
+  extra?: { channel?: "telegram" | "google-chat"; spaceName?: string; agentName?: string },
 ): void {
   pendingActions.set(id, {
     id,
@@ -65,6 +66,7 @@ export function storePendingAction(
     createdAt: Date.now(),
     channel: extra?.channel,
     spaceName: extra?.spaceName,
+    agentName: extra?.agentName,
   });
 }
 
