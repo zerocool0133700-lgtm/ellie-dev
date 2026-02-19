@@ -244,11 +244,19 @@ async function classifyWithHaiku(
     const executionMode: ExecutionMode = validModes.includes(parsed.execution_mode)
       ? parsed.execution_mode
       : (parsed.complexity === "pipeline" ? "pipeline" : "single");
-    const parsedSkills = executionMode !== "single" && Array.isArray(parsed.skills)
-      ? parsed.skills as Array<{ agent: string; skill: string; instruction: string }>
+    const rawSkills = executionMode !== "single" && Array.isArray(parsed.skills)
+      ? parsed.skills
       : (executionMode !== "single" && Array.isArray(parsed.pipeline_steps)
-        ? parsed.pipeline_steps as Array<{ agent: string; skill: string; instruction: string }>
+        ? parsed.pipeline_steps
         : undefined);
+    // Validate and truncate parsed skill fields
+    const parsedSkills = rawSkills
+      ? (rawSkills as any[]).map((s) => ({
+          agent: String(s.agent || "general").slice(0, 100),
+          skill: String(s.skill || "none").slice(0, 100),
+          instruction: String(s.instruction || "").slice(0, 2000),
+        }))
+      : undefined;
 
     // Validate agent name
     const valid = agents.find((a) => a.name === agentName);

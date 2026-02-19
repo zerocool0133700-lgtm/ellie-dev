@@ -121,10 +121,12 @@ export class PipelineStepError extends Error {
 const MAX_PIPELINE_DEPTH = 5;
 const MAX_PIPELINE_TIMEOUT_MS = 120_000; // 2 minutes total
 const MAX_PREVIOUS_OUTPUT_CHARS = 8_000;
+const MAX_INSTRUCTION_CHARS = 500;
 const LIGHT_STEP_TIMEOUT_MS = 30_000;
 const HEAVY_STEP_TIMEOUT_MS = 420_000;
 const MAX_CRITIC_ROUNDS = 3;
 const COST_WARN_THRESHOLD = 0.50; // warn at $0.50
+const MAX_COST_PER_EXECUTION = 2.00; // hard limit per execution
 
 // Skill complexity cache
 let _skillComplexityCache: Map<string, "light" | "heavy"> | null = null;
@@ -190,8 +192,10 @@ export async function executeOrchestrated(
     // Complete execution plan
     await completeExecutionPlan(options.supabase, planId, artifacts, "completed");
 
-    // Cost warning
-    if (artifacts.total_cost_usd > COST_WARN_THRESHOLD) {
+    // Cost enforcement
+    if (artifacts.total_cost_usd > MAX_COST_PER_EXECUTION) {
+      console.error(`[orchestrator] Cost limit exceeded: $${artifacts.total_cost_usd.toFixed(4)} > $${MAX_COST_PER_EXECUTION.toFixed(2)}`);
+    } else if (artifacts.total_cost_usd > COST_WARN_THRESHOLD) {
       console.warn(`[orchestrator] High cost: $${artifacts.total_cost_usd.toFixed(4)} for ${mode} (${effectiveSteps.length} steps)`);
     }
 
@@ -238,7 +242,7 @@ async function executePipeline(
       throw new PipelineStepError(i, step, "timeout", previousOutput);
     }
 
-    console.log(`[orchestrator] Pipeline ${i + 1}/${steps.length}: ${step.agent_name}/${step.skill_name || "none"} — "${step.instruction.substring(0, 60)}"`);
+    console.log(`[orchestrator] Pipeline ${i + 1}/${steps.length}: ${step.agent_name}/${step.skill_name || "none"} — "${sanitizeInstruction(step.instruction).substring(0, 60)}"`);
 
     const { stepResult, dispatch } = await executeStep(
       step, i, steps.length, originalMessage, previousOutput, options,
@@ -251,6 +255,12 @@ async function executePipeline(
     artifacts.total_input_tokens += stepResult.input_tokens;
     artifacts.total_output_tokens += stepResult.output_tokens;
     artifacts.total_cost_usd += stepResult.cost_usd;
+
+    // Cost guard — abort if running total exceeds hard limit
+    if (artifacts.total_cost_usd > MAX_COST_PER_EXECUTION) {
+      console.error(`[orchestrator] Pipeline aborted: cost $${artifacts.total_cost_usd.toFixed(4)} exceeds limit $${MAX_COST_PER_EXECUTION.toFixed(2)}`);
+      throw new PipelineStepError(i, step, "timeout", previousOutput || stepResult.output);
+    }
 
     // Clean intermediate output for next step
     if (!isLast) {
@@ -414,6 +424,12 @@ async function executeCriticLoop(
     artifacts.total_output_tokens += producerResult.output_tokens;
     artifacts.total_cost_usd += producerResult.cost_usd;
 
+    // Cost guard
+    if (artifacts.total_cost_usd > MAX_COST_PER_EXECUTION) {
+      console.error(`[orchestrator] Critic-loop aborted: cost $${artifacts.total_cost_usd.toFixed(4)} exceeds limit`);
+      break;
+    }
+
     producerOutput = await processMemoryIntents(options.supabase, producerResult.output);
     const { cleanedText } = extractApprovalTags(producerOutput);
     producerOutput = cleanedText;
@@ -445,7 +461,7 @@ async function executeCriticLoop(
     if (options.onHeartbeat) options.onHeartbeat();
 
     // 3. Parse critic verdict
-    const verdict = parseCriticVerdict(criticResult.output);
+    const verdict = parseCriticVerdict(criticResult.output, round);
 
     console.log(`[orchestrator] Critic round ${round + 1}: score=${verdict.score}, accepted=${verdict.accepted}`);
 
@@ -465,7 +481,7 @@ async function executeCriticLoop(
   };
 }
 
-function parseCriticVerdict(output: string): CriticVerdict {
+function parseCriticVerdict(output: string, round: number): CriticVerdict {
   try {
     const cleaned = output
       .trim()
@@ -474,13 +490,18 @@ function parseCriticVerdict(output: string): CriticVerdict {
     const parsed = JSON.parse(cleaned);
     return {
       accepted: Boolean(parsed.accepted),
-      score: typeof parsed.score === "number" ? parsed.score : 5,
-      feedback: parsed.feedback || "No specific feedback provided.",
+      score: Math.min(Math.max(typeof parsed.score === "number" ? parsed.score : 5, 1), 10),
+      feedback: String(parsed.feedback || "No specific feedback provided.").slice(0, 2000),
     };
   } catch {
-    // Default to accepted on parse failure — prevents infinite loops
-    console.warn("[orchestrator] Could not parse critic verdict, defaulting to accepted");
-    return { accepted: true, score: 5, feedback: "Parse error — accepted by default." };
+    // On final round, accept to prevent infinite loops. Otherwise reject for another try.
+    const isFinalRound = round >= MAX_CRITIC_ROUNDS - 1;
+    console.warn(`[orchestrator] Could not parse critic verdict (round ${round + 1}), ${isFinalRound ? "accepting (final round)" : "rejecting"}`);
+    return {
+      accepted: isFinalRound,
+      score: isFinalRound ? 5 : 3,
+      feedback: isFinalRound ? "Parse error on final round — accepted." : "Unable to parse feedback. Please revise.",
+    };
   }
 }
 
@@ -626,6 +647,18 @@ async function callLightSkill(
 }
 
 // ────────────────────────────────────────────────────────────────
+// Instruction Sanitization
+// ────────────────────────────────────────────────────────────────
+
+function sanitizeInstruction(instruction: string): string {
+  return instruction
+    .replace(/[\x00-\x1F\x7F]/g, " ")         // strip control chars
+    .replace(/\[CONFIRM:/gi, "[_CONFIRM_:")     // neutralize approval tags
+    .replace(/\[REMEMBER:/gi, "[_REMEMBER_:")   // neutralize memory tags
+    .slice(0, MAX_INSTRUCTION_CHARS);
+}
+
+// ────────────────────────────────────────────────────────────────
 // Step Prompt Builder
 // ────────────────────────────────────────────────────────────────
 
@@ -657,11 +690,12 @@ function buildStepPrompt(
     dispatch.skill_context,
   );
 
-  // Prepend execution context
+  // Prepend execution context (sanitize instruction to prevent tag injection)
+  const safeInstruction = sanitizeInstruction(step.instruction);
   const context: string[] = [
     `EXECUTION CONTEXT (Step ${stepIndex + 1} of ${totalSteps}):`,
     `Original user request: "${originalMessage}"`,
-    `Your task in this step: ${step.instruction}`,
+    `Your task in this step: ${safeInstruction}`,
   ];
 
   if (previousOutput) {

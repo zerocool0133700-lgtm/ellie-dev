@@ -1899,16 +1899,22 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           // Multi-step will always exceed 25s — send sync response immediately, run async
           sendSyncResponse(`Working on it... (${modeLabels[gchatExecMode] || gchatExecMode}: ${gchatAgentNames}, ${gchatSteps.length} steps)`);
 
-          executeOrchestrated(gchatExecMode, gchatSteps, effectiveGchatText, {
-            supabase,
-            channel: "google-chat",
-            userId: parsed.senderEmail,
-            anthropicClient: anthropic,
-            contextDocket, relevantContext, elasticContext,
-            structuredContext, recentMessages,
-            buildPromptFn: buildPrompt,
-            callClaudeFn: callClaude,
-          }).then(async (result) => {
+          const GCHAT_ORCHESTRATION_TIMEOUT_MS = 300_000; // 5 minutes max
+          Promise.race([
+            executeOrchestrated(gchatExecMode, gchatSteps, effectiveGchatText, {
+              supabase,
+              channel: "google-chat",
+              userId: parsed.senderEmail,
+              anthropicClient: anthropic,
+              contextDocket, relevantContext, elasticContext,
+              structuredContext, recentMessages,
+              buildPromptFn: buildPrompt,
+              callClaudeFn: callClaude,
+            }),
+            new Promise<never>((_, reject) =>
+              setTimeout(() => reject(new Error("Orchestration timeout (5m)")), GCHAT_ORCHESTRATION_TIMEOUT_MS),
+            ),
+          ]).then(async (result) => {
             const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse);
             const { cleanedText: gchatClean } = extractApprovalTags(pipelineResponse);
             await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
@@ -2388,8 +2394,15 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
         res.end(JSON.stringify({ error: "Supabase not configured" }));
         return;
       }
-      const limit = parseInt(url.searchParams.get("limit") || "20", 10);
-      const offset = parseInt(url.searchParams.get("offset") || "0", 10);
+      const rawLimit = parseInt(url.searchParams.get("limit") || "20", 10);
+      const rawOffset = parseInt(url.searchParams.get("offset") || "0", 10);
+      if (isNaN(rawLimit) || isNaN(rawOffset)) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid pagination parameters" }));
+        return;
+      }
+      const limit = Math.min(Math.max(rawLimit, 1), 100);
+      const offset = Math.max(rawOffset, 0);
       const status = url.searchParams.get("status");
 
       let query = supabase
@@ -2402,8 +2415,9 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
 
       const { data, error } = await query;
       if (error) {
+        console.error("[relay] execution-plans query error:", error);
         res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: error.message }));
+        res.end(JSON.stringify({ error: "Internal server error" }));
         return;
       }
       res.writeHead(200, { "Content-Type": "application/json" });

@@ -77,23 +77,7 @@ export async function attachMessage(
       .update({ conversation_id: conversationId })
       .eq("id", messageId);
 
-    // Update conversation stats
-    await supabase.rpc("update_conversation_stats", {
-      p_conversation_id: conversationId,
-    }).catch(() => {
-      // Fallback: manual update if the RPC doesn't exist yet
-      supabase
-        .from("conversations")
-        .update({
-          last_message_at: new Date().toISOString(),
-          message_count: supabase.rpc ? undefined : 0, // can't increment without RPC
-        })
-        .eq("id", conversationId)
-        .then(() => {});
-    });
-
-    // Increment message_count via raw update
-    // (Using a simple approach since we don't have an increment RPC)
+    // Update conversation stats (increment message_count, update last_message_at)
     const { data: convo } = await supabase
       .from("conversations")
       .select("message_count")
