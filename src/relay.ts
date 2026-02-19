@@ -485,6 +485,15 @@ async function callClaude(
         `${stderr ? ` — stderr: ${stderr.substring(0, 500)}` : " — no stderr"}` +
         `${output ? ` — stdout preview: ${output.substring(0, 200)}` : ""}`
       );
+
+      // Retry without --resume if the session history is corrupted
+      // (e.g., tool_use.name exceeding API limits from a previous turn)
+      const combined = (stderr + output).toLowerCase();
+      if (options?.resume && resumeSessionId && combined.includes("tool_use.name")) {
+        console.warn("[claude] Corrupted session history — retrying without --resume");
+        return callClaude(prompt, { ...options, resume: false, sessionId: undefined });
+      }
+
       return `Error: ${stderr || "Claude exited with code " + exitCode}`;
     }
 
