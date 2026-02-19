@@ -138,6 +138,14 @@ const SKILL_CACHE_TTL_MS = 5 * 60_000;
 let _modelCostCache: Map<string, { input: number; output: number }> | null = null;
 let _modelCostCacheTime = 0;
 
+/** Reset internal caches — test-only. */
+export function _resetCachesForTesting(): void {
+  _skillComplexityCache = null;
+  _skillComplexityCacheTime = 0;
+  _modelCostCache = null;
+  _modelCostCacheTime = 0;
+}
+
 // ────────────────────────────────────────────────────────────────
 // Main Entry Point
 // ────────────────────────────────────────────────────────────────
@@ -482,7 +490,7 @@ async function executeCriticLoop(
   };
 }
 
-function parseCriticVerdict(output: string, round: number): CriticVerdict {
+export function parseCriticVerdict(output: string, round: number): CriticVerdict {
   try {
     const cleaned = output
       .trim()
@@ -661,7 +669,7 @@ async function callLightSkill(
 // Instruction Sanitization
 // ────────────────────────────────────────────────────────────────
 
-function sanitizeInstruction(instruction: string): string {
+export function sanitizeInstruction(instruction: string): string {
   return instruction
     .replace(/[\x00-\x1F\x7F]/g, " ")         // strip control chars
     .replace(/\[CONFIRM:/gi, "[_CONFIRM_:")     // neutralize approval tags
