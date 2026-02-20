@@ -46,7 +46,7 @@ import {
   type DispatchResult,
 } from "./agent-router.ts";
 import { initClassifier } from "./intent-classifier.ts";
-import { getStructuredContext } from "./context-sources.ts";
+import { getStructuredContext, getAgentStructuredContext } from "./context-sources.ts";
 import {
   initOutlook,
   isOutlookConfigured,
@@ -168,8 +168,14 @@ interface SessionState {
   lastActivity: string;
 }
 
-// Track the last active agent name for handlers that don't route (images, docs, approvals)
-let lastActiveAgent = "general";
+// Track active agent per channel (Telegram, GChat, etc.)
+const activeAgentByChannel = new Map<string, string>();
+function getActiveAgent(channel = "telegram"): string {
+  return activeAgentByChannel.get(channel) ?? "general";
+}
+function setActiveAgent(channel: string, agentName: string): void {
+  activeAgentByChannel.set(channel, agentName);
+}
 
 // ============================================================
 // CONTEXT DOCKET
@@ -744,7 +750,7 @@ bot.on("message:text", withQueue(async (ctx) => {
   const agentResult = await routeAndDispatch(supabase, text, "telegram", userId);
   const effectiveText = agentResult?.route.strippedMessage || text;
   if (agentResult) {
-    lastActiveAgent = agentResult.dispatch.agent.name;
+    setActiveAgent("telegram", agentResult.dispatch.agent.name);
     broadcastExtension({ type: "route", channel: "telegram", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode, confidence: agentResult.route.confidence });
 
     // Dispatch confirmation — fire BEFORE Claude call (ELLIE-80)
@@ -758,7 +764,7 @@ bot.on("message:text", withQueue(async (ctx) => {
     getContextDocket(),
     getRelevantContext(supabase, effectiveText),
     searchElastic(effectiveText, { limit: 5, recencyBoost: true }),
-    getStructuredContext(supabase),
+    getAgentStructuredContext(supabase, getActiveAgent("telegram")),
     getRecentMessages(supabase),
   ]);
 
@@ -924,7 +930,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
     const agentResult = await routeAndDispatch(supabase, transcription, "telegram", voiceUserId);
     const effectiveTranscription = agentResult?.route.strippedMessage || transcription;
     if (agentResult) {
-      lastActiveAgent = agentResult.dispatch.agent.name;
+      setActiveAgent("telegram", agentResult.dispatch.agent.name);
       broadcastExtension({ type: "route", channel: "telegram", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode });
     }
 
@@ -932,7 +938,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
       getContextDocket(),
       getRelevantContext(supabase, effectiveTranscription),
       searchElastic(effectiveTranscription, { limit: 5, recencyBoost: true }),
-      getStructuredContext(supabase),
+      getAgentStructuredContext(supabase, getActiveAgent("telegram")),
       getRecentMessages(supabase),
     ]);
 
@@ -1105,8 +1111,8 @@ bot.on("message:photo", withQueue(async (ctx) => {
     // Cleanup after processing
     await unlink(filePath).catch(() => {});
 
-    const cleanResponse = await processMemoryIntents(supabase, claudeResponse, lastActiveAgent);
-    const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId, lastActiveAgent);
+    const cleanResponse = await processMemoryIntents(supabase, claudeResponse, getActiveAgent("telegram"));
+    const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId, getActiveAgent("telegram"));
     await saveMessage("assistant", finalResponse);
     resetTelegramIdleTimer();
   } catch (error) {
@@ -1142,8 +1148,8 @@ bot.on("message:document", withQueue(async (ctx) => {
 
     await unlink(filePath).catch(() => {});
 
-    const cleanResponse = await processMemoryIntents(supabase, claudeResponse, lastActiveAgent);
-    const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId, lastActiveAgent);
+    const cleanResponse = await processMemoryIntents(supabase, claudeResponse, getActiveAgent("telegram"));
+    const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId, getActiveAgent("telegram"));
     await saveMessage("assistant", finalResponse);
     resetTelegramIdleTimer();
   } catch (error) {
@@ -1175,7 +1181,7 @@ bot.callbackQuery(/^approve:(.+)$/, withQueue(async (ctx) => {
 
   await ctx.replyWithChatAction("typing");
   const rawResponse = await callClaudeWithTyping(ctx, resumePrompt, { resume: true });
-  const approveAgent = action.agentName || lastActiveAgent;
+  const approveAgent = action.agentName || getActiveAgent("telegram");
   const response = await processMemoryIntents(supabase, rawResponse, approveAgent);
   const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId, approveAgent);
   await saveMessage("assistant", cleanedResponse);
@@ -1201,7 +1207,7 @@ bot.callbackQuery(/^deny:(.+)$/, withQueue(async (ctx) => {
 
   await ctx.replyWithChatAction("typing");
   const rawResponse = await callClaudeWithTyping(ctx, resumePrompt, { resume: true });
-  const denyAgent = action.agentName || lastActiveAgent;
+  const denyAgent = action.agentName || getActiveAgent("telegram");
   const response = await processMemoryIntents(supabase, rawResponse, denyAgent);
   const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId, denyAgent);
   await saveMessage("assistant", cleanedResponse);
@@ -1439,7 +1445,7 @@ async function sendWithApprovals(
         currentSessionId,
         sent.chat.id,
         sent.message_id,
-        { agentName: agentName || lastActiveAgent },
+        { agentName: agentName || getActiveAgent("telegram") },
       );
       console.log(`[approval] Pending: ${description.substring(0, 60)}`);
     }
@@ -1958,7 +1964,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
                 resume: true,
                 sessionId: pending.sessionId || undefined,
               }).then(async (followUp) => {
-                const cleanFollowUp = await processMemoryIntents(supabase, followUp, pending.agentName || lastActiveAgent);
+                const cleanFollowUp = await processMemoryIntents(supabase, followUp, pending.agentName || getActiveAgent("google-chat"));
                 await saveMessage("assistant", cleanFollowUp, {}, "google-chat");
 
                 // Send follow-up via REST API to the correct space
@@ -2023,7 +2029,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
         const gchatAgentResult = await routeAndDispatch(supabase, parsed.text, "google-chat", parsed.senderEmail);
         const effectiveGchatText = gchatAgentResult?.route.strippedMessage || parsed.text;
         if (gchatAgentResult) {
-          lastActiveAgent = gchatAgentResult.dispatch.agent.name;
+          setActiveAgent("google-chat", gchatAgentResult.dispatch.agent.name);
           broadcastExtension({ type: "route", channel: "google-chat", agent: gchatAgentResult.dispatch.agent.name, mode: gchatAgentResult.route.execution_mode });
         }
 
@@ -2031,7 +2037,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           getContextDocket(),
           getRelevantContext(supabase, effectiveGchatText),
           searchElastic(effectiveGchatText, { limit: 5, recencyBoost: true }),
-          getStructuredContext(supabase),
+          getAgentStructuredContext(supabase, getActiveAgent("google-chat")),
           getRecentMessages(supabase),
         ]);
 
@@ -2233,7 +2239,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               storePendingAction(actionId, desc, session.sessionId, 0, 0, {
                 channel: "google-chat",
                 spaceName: parsed.spaceName,
-                agentName: gchatAgentResult?.dispatch.agent.name || lastActiveAgent,
+                agentName: gchatAgentResult?.dispatch.agent.name || getActiveAgent("google-chat"),
               });
               return {
                 widgets: [
@@ -2370,7 +2376,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               getContextDocket(),
               getRelevantContext(supabase, query),
               searchElastic(query, { limit: 5, recencyBoost: true }),
-              getStructuredContext(supabase),
+              getAgentStructuredContext(supabase, getActiveAgent("google-chat")),
               getRecentMessages(supabase),
             ]);
 
@@ -3063,6 +3069,56 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
     });
+    return;
+  }
+
+  // Agent registry endpoints (ELLIE-91)
+  if (url.pathname.startsWith("/api/agents") || url.pathname === "/api/capabilities") {
+    (async () => {
+      const queryParams: Record<string, string> = {};
+      for (const [k, v] of url.searchParams.entries()) queryParams[k] = v;
+
+      // Extract :name from path: /api/agents/:name or /api/agents/:name/skills
+      const pathParts = url.pathname.replace("/api/agents", "").split("/").filter(Boolean);
+      const agentName = pathParts[0] || undefined;
+      const subResource = pathParts[1] || undefined;
+
+      const mockReq: any = { query: { ...queryParams, name: agentName }, params: { name: agentName } };
+      const mockRes: any = {
+        statusCode: 200,
+        status(code: number) { this.statusCode = code; return this; },
+        json(data: any) {
+          res.writeHead(this.statusCode, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(data));
+        },
+      };
+
+      try {
+        const { listAgentsEndpoint, getAgentEndpoint, getAgentSkillsEndpoint, findCapabilityEndpoint } =
+          await import("./api/agents.ts");
+
+        if (url.pathname === "/api/capabilities") {
+          await findCapabilityEndpoint(mockReq, mockRes, supabase, bot);
+        } else if (url.pathname === "/api/agents" || url.pathname === "/api/agents/") {
+          if (queryParams.q) {
+            await findCapabilityEndpoint(mockReq, mockRes, supabase, bot);
+          } else {
+            await listAgentsEndpoint(mockReq, mockRes, supabase, bot);
+          }
+        } else if (subResource === "skills") {
+          await getAgentSkillsEndpoint(mockReq, mockRes, supabase, bot);
+        } else if (agentName) {
+          await getAgentEndpoint(mockReq, mockRes, supabase, bot);
+        } else {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Unknown agents endpoint" }));
+        }
+      } catch (err) {
+        console.error("[agents-api] Error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    })();
     return;
   }
 

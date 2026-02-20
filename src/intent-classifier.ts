@@ -48,6 +48,7 @@ interface AgentDescription {
   name: string;
   type: string;
   capabilities: string[];
+  anti_patterns: string[];
 }
 
 interface SkillDescription {
@@ -362,13 +363,16 @@ function buildClassifierPrompt(
   const lines: string[] = [];
   for (const agent of agents) {
     const agentSkills = skillsByAgent[agent.name] || [];
+    const antiStr = agent.anti_patterns?.length
+      ? ` (NOT for: ${agent.anti_patterns.join(", ")})`
+      : "";
     if (agentSkills.length > 0) {
       const skillList = agentSkills
         .map((s) => `  - ${s.name}: ${s.description}`)
         .join("\n");
-      lines.push(`${agent.name} (${agent.type}):\n${skillList}`);
+      lines.push(`${agent.name} (${agent.type})${antiStr}:\n${skillList}`);
     } else {
-      lines.push(`${agent.name} (${agent.type}): [${agent.capabilities.join(", ")}]`);
+      lines.push(`${agent.name} (${agent.type}): [${agent.capabilities.join(", ")}]${antiStr}`);
     }
   }
 
@@ -426,6 +430,24 @@ async function getAgentDescriptions(): Promise<AgentDescription[]> {
     return _agentCache;
   }
 
+  // Primary: fetch from forest DB (canonical agent registry)
+  try {
+    const { listAgents } = await import('../../../ellie-forest/src/index');
+    const agents = await listAgents({ status: 'active' });
+    _agentCache = agents.map((a) => ({
+      name: a.name,
+      type: a.type,
+      capabilities: a.capabilities || [],
+      anti_patterns: a.anti_patterns || [],
+    }));
+    _agentCacheTime = now;
+    console.log(`[classifier] Agent cache refreshed from forest: ${_agentCache.length} agents`);
+    return _agentCache;
+  } catch (err) {
+    console.warn(`[classifier] Forest agent lookup failed, falling back to Supabase:`, err);
+  }
+
+  // Fallback: Supabase agents table (operational)
   if (!_supabase) return [];
 
   const { data: agents } = await _supabase
@@ -437,10 +459,11 @@ async function getAgentDescriptions(): Promise<AgentDescription[]> {
     name: a.name,
     type: a.type,
     capabilities: a.capabilities || [],
+    anti_patterns: [],
   }));
   _agentCacheTime = now;
 
-  console.log(`[classifier] Agent cache refreshed: ${_agentCache.length} agents`);
+  console.log(`[classifier] Agent cache refreshed from Supabase: ${_agentCache.length} agents`);
   return _agentCache;
 }
 

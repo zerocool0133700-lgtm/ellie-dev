@@ -498,6 +498,48 @@ export async function getGmailSignal(): Promise<string> {
 }
 
 // ============================================================
+// OUTLOOK: Unread email signal (Microsoft Graph)
+// ============================================================
+
+import {
+  isOutlookConfigured,
+  getOutlookEmail,
+  listUnread as outlookListUnread,
+  getUnreadCount as outlookGetUnreadCount,
+} from "./outlook.ts";
+
+/**
+ * Fetch Outlook signal — unread count + recent message headers.
+ * Mirrors getGmailSignal() structure.
+ */
+export async function getOutlookSignal(): Promise<string> {
+  if (!isOutlookConfigured()) return "";
+
+  try {
+    const [unreadCount, recentMessages] = await Promise.all([
+      outlookGetUnreadCount(),
+      outlookListUnread(5),
+    ]);
+
+    if (unreadCount === 0) return "OUTLOOK: No unread messages.";
+
+    const lines = recentMessages.map((msg) => {
+      const fromName = msg.from?.emailAddress?.name || msg.from?.emailAddress?.address || "Unknown";
+      const subject = msg.subject || "(no subject)";
+      const shortSubject = subject.length > 60 ? subject.substring(0, 57) + "..." : subject;
+      return `- ${fromName}: ${shortSubject}`;
+    });
+
+    const email = getOutlookEmail();
+    const label = email || "outlook";
+    return `OUTLOOK (${label}, ${unreadCount} unread):\n${lines.join("\n")}\n(Use /api/outlook/* endpoints via curl for full email content)`;
+  } catch (error) {
+    console.error("[context] Failed to fetch Outlook signal:", error);
+    return "";
+  }
+}
+
+// ============================================================
 // GOOGLE TASKS: Pending tasks
 // ============================================================
 
@@ -625,25 +667,87 @@ export async function getPendingActionItems(
 // COMBINED: Fetch all context sources in parallel
 // ============================================================
 
+// Source registry: maps source names to fetch functions
+type SourceFetcher = (supabase: SupabaseClient | null) => Promise<string>;
+
+const SOURCE_REGISTRY: Record<string, SourceFetcher> = {
+  work_items:    (_sb) => getOpenWorkItems(),
+  work_sessions: (sb) => getRecentWorkSessions(sb),
+  goals:         (sb) => getGoalsAndFacts(sb),
+  conversations: (sb) => getRecentConversations(sb),
+  activity:      (sb) => getActivitySnapshot(sb),
+  calendar:      (_sb) => getUpcomingCalendarEvents(),
+  action_items:  (sb) => getPendingActionItems(sb),
+  gmail:         (_sb) => getGmailSignal(),
+  outlook:       (_sb) => getOutlookSignal(),
+  google_tasks:  (_sb) => getGoogleTasks(),
+};
+
+const ALL_SOURCE_NAMES = Object.keys(SOURCE_REGISTRY);
+
+/**
+ * Fetch structured context filtered by an agent's context profile.
+ * Profile controls which sources to fetch, priority ordering, and exclusions.
+ */
+export async function getAgentStructuredContext(
+  supabase: SupabaseClient | null,
+  agentName: string,
+): Promise<string> {
+  // Load agent profile from forest DB
+  let profile: { sources?: string[] | 'all'; priority?: string[]; exclude?: string[] } = {};
+  try {
+    const { getAgent } = await import('../../../ellie-forest/src/index');
+    const agent = await getAgent(agentName);
+    if (agent?.context_profile) {
+      profile = agent.context_profile as typeof profile;
+    }
+  } catch {
+    // If forest DB unavailable, use all sources (graceful degradation)
+  }
+
+  // Determine which sources to fetch
+  let sourceNames: string[];
+  if (Array.isArray(profile.sources)) {
+    sourceNames = profile.sources.filter(s => s in SOURCE_REGISTRY);
+  } else {
+    sourceNames = [...ALL_SOURCE_NAMES];
+  }
+
+  // Apply exclusions
+  if (profile.exclude?.length) {
+    sourceNames = sourceNames.filter(s => !profile.exclude!.includes(s));
+  }
+
+  // Fetch all selected sources in parallel
+  const entries = await Promise.all(
+    sourceNames.map(async (name) => ({
+      name,
+      content: await SOURCE_REGISTRY[name](supabase),
+    }))
+  );
+
+  // Apply priority ordering: priority sources first, then the rest
+  if (profile.priority?.length) {
+    const prioritySet = new Set(profile.priority);
+    entries.sort((a, b) => {
+      const aP = prioritySet.has(a.name) ? 0 : 1;
+      const bP = prioritySet.has(b.name) ? 0 : 1;
+      if (aP !== bP) return aP - bP;
+      // Within same priority tier, maintain original order
+      return sourceNames.indexOf(a.name) - sourceNames.indexOf(b.name);
+    });
+  }
+
+  return entries.map(e => e.content).filter(Boolean).join("\n\n");
+}
+
 /**
  * Fetch all structured context sources in parallel.
  * Returns a single formatted string for prompt injection.
+ * Backward-compatible wrapper — uses the general agent's profile (all sources).
  */
 export async function getStructuredContext(
   supabase: SupabaseClient | null,
 ): Promise<string> {
-  const [workItems, workSessions, goalsAndFacts, recentConvos, activity, calendar, actionItems, gmailSignal, googleTasks] = await Promise.all([
-    getOpenWorkItems(),
-    getRecentWorkSessions(supabase),
-    getGoalsAndFacts(supabase),
-    getRecentConversations(supabase),
-    getActivitySnapshot(supabase),
-    getUpcomingCalendarEvents(),
-    getPendingActionItems(supabase),
-    getGmailSignal(),
-    getGoogleTasks(),
-  ]);
-
-  const parts = [workItems, workSessions, goalsAndFacts, recentConvos, activity, calendar, actionItems, gmailSignal, googleTasks].filter(Boolean);
-  return parts.join("\n\n");
+  return getAgentStructuredContext(supabase, 'general');
 }
