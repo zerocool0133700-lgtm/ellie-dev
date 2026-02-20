@@ -48,6 +48,17 @@ import {
 import { initClassifier } from "./intent-classifier.ts";
 import { getStructuredContext } from "./context-sources.ts";
 import {
+  initOutlook,
+  isOutlookConfigured,
+  getOutlookEmail,
+  listUnread as outlookListUnread,
+  searchMessages as outlookSearchMessages,
+  getMessage as outlookGetMessage,
+  sendEmail as outlookSendEmail,
+  replyToMessage as outlookReplyToMessage,
+  markAsRead as outlookMarkAsRead,
+} from "./outlook.ts";
+import {
   executeOrchestrated,
   PipelineStepError,
   type PipelineStep,
@@ -67,6 +78,7 @@ import {
   listOpenIssues,
   setTimeoutRecoveryLock,
 } from "./plane.ts";
+import { notify, type NotifyContext } from "./notification-policy.ts";
 import {
   getOrCreateConversation,
   attachMessage,
@@ -103,6 +115,7 @@ const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "EXAVITQu4vr4xnSD
 const HTTP_PORT = parseInt(process.env.HTTP_PORT || "3000");
 const PUBLIC_URL = process.env.PUBLIC_URL || "";
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
+const EXTENSION_API_KEY = process.env.EXTENSION_API_KEY || "";
 const SILENCE_THRESHOLD_MS = 800; // ms of silence after speech to trigger processing
 const MIN_AUDIO_MS = 400;
 const TMP_DIR = process.env.TMPDIR || "/tmp";
@@ -394,29 +407,12 @@ startExpiryCleanup();
 setInterval(() => {
   if (supabase) {
     expireIdleConversations(supabase).catch(() => {});
-    expireStaleWorkSessions(supabase).catch(() => {});
     expireStaleAgentSessions(supabase).catch(() => {});
   }
 }, 5 * 60_000);
 
-/** Expire work sessions that have been active for > 4 hours without updates */
-async function expireStaleWorkSessions(sb: SupabaseClient): Promise<void> {
-  const cutoff = new Date(Date.now() - 4 * 60 * 60_000).toISOString();
-  const { data, error } = await sb
-    .from("work_sessions")
-    .update({ state: "completed", completed_at: new Date().toISOString() })
-    .eq("state", "active")
-    .lt("updated_at", cutoff)
-    .select("id, work_item_id");
-
-  if (error) {
-    console.error("[session-cleanup] work_sessions expire error:", error);
-    return;
-  }
-  if (data && data.length > 0) {
-    console.log(`[session-cleanup] Expired ${data.length} stale work session(s): ${data.map((s: any) => s.work_item_id).join(", ")}`);
-  }
-}
+// Note: expireStaleWorkSessions (old Supabase work_sessions table) removed in ELLIE-88.
+// Forest is now the source of truth for work sessions. See ellie-forest/src/work-sessions.ts.
 
 /** Expire agent sessions that have been active for > 2 hours without activity */
 async function expireStaleAgentSessions(sb: SupabaseClient): Promise<void> {
@@ -558,6 +554,7 @@ async function callClaude(
 
       // Timeout: return actionable message instead of generic error
       if (timedOut) {
+        broadcastExtension({ type: "error", source: "callClaude", message: `Timeout after ${TIMEOUT_MS / 1000}s${forceKilled ? " (force-killed)" : ""}` });
         // Lock Plane state changes during recovery to prevent churn
         setTimeoutRecoveryLock(60_000);
 
@@ -583,6 +580,7 @@ async function callClaude(
 
       // Exit 143 = SIGTERM (128+15) from external signal (e.g. service restart)
       if (exitCode === 143) {
+        broadcastExtension({ type: "error", source: "callClaude", message: "SIGTERM (exit 143) — service restart or external kill" });
         const partialOutput = output?.trim();
         let message = "I got interrupted while working on this (the service was restarted or the process was terminated externally).";
         if (partialOutput) {
@@ -653,10 +651,12 @@ async function processQueue(): Promise<void> {
   while (messageQueue.length > 0) {
     const next = messageQueue.shift()!;
     currentItem = { channel: next.channel, preview: next.preview, startedAt: Date.now() };
+    broadcastExtension({ type: "queue_status", busy: true, queueLength: messageQueue.length, current: currentItem });
     await next.task();
   }
   currentItem = null;
   busy = false;
+  broadcastExtension({ type: "queue_status", busy: false, queueLength: 0, current: null });
 }
 
 /**
@@ -738,11 +738,20 @@ bot.on("message:text", withQueue(async (ctx) => {
   acknowledgeChannel("telegram"); // User responded — clear pending responses
 
   await saveMessage("user", text);
+  broadcastExtension({ type: "message_in", channel: "telegram", preview: text.substring(0, 200) });
 
   // Route message to appropriate agent via LLM classifier (falls back gracefully)
   const agentResult = await routeAndDispatch(supabase, text, "telegram", userId);
   const effectiveText = agentResult?.route.strippedMessage || text;
-  if (agentResult) lastActiveAgent = agentResult.dispatch.agent.name;
+  if (agentResult) {
+    lastActiveAgent = agentResult.dispatch.agent.name;
+    broadcastExtension({ type: "route", channel: "telegram", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode, confidence: agentResult.route.confidence });
+
+    // Dispatch confirmation — fire BEFORE Claude call (ELLIE-80)
+    if (agentResult.dispatch.agent.name !== "general" && agentResult.dispatch.is_new) {
+      await ctx.reply(`\u{1F916} ${agentResult.dispatch.agent.name} agent`);
+    }
+  }
 
   // Gather context: docket + semantic search + ES full-text search + structured sources + recent messages
   const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
@@ -783,6 +792,7 @@ bot.on("message:text", withQueue(async (ctx) => {
       ctx.replyWithChatAction("typing").catch(() => {});
     }, 4_000);
 
+    broadcastExtension({ type: "pipeline_start", channel: "telegram", mode: execMode, steps: steps.length });
     try {
       const result = await executeOrchestrated(execMode, steps, effectiveText, {
         supabase,
@@ -802,6 +812,7 @@ bot.on("message:text", withQueue(async (ctx) => {
       const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, agentName);
       const cleanedPipelineResponse = await sendWithApprovals(ctx, pipelineResponse, session.sessionId, agentName);
       await saveMessage("assistant", cleanedPipelineResponse);
+      broadcastExtension({ type: "pipeline_complete", channel: "telegram", mode: execMode, steps: result.stepResults.length, duration_ms: result.artifacts.total_duration_ms, cost_usd: result.artifacts.total_cost_usd });
 
       if (result.finalDispatch) {
         await syncResponse(supabase, result.finalDispatch.session_id, cleanedPipelineResponse, {
@@ -862,14 +873,10 @@ bot.on("message:text", withQueue(async (ctx) => {
   // Parse and save any memory intents, strip tags from response
   const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general");
 
-  // Show agent indicator on new sessions (not "general")
-  if (agentResult && agentResult.dispatch.agent.name !== "general" && agentResult.dispatch.is_new) {
-    await ctx.reply(`\u{1F916} ${agentResult.dispatch.agent.name} agent`);
-  }
-
   const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId, agentResult?.dispatch.agent.name);
 
   await saveMessage("assistant", cleanedResponse);
+  broadcastExtension({ type: "message_out", channel: "telegram", agent: agentResult?.dispatch.agent.name || "general", preview: cleanedResponse.substring(0, 200) });
 
   // Sync response to agent session (fire-and-forget)
   if (agentResult) {
@@ -911,11 +918,15 @@ bot.on("message:voice", withQueue(async (ctx) => {
     }
 
     await saveMessage("user", `[Voice ${voice.duration}s]: ${transcription}`);
+    broadcastExtension({ type: "message_in", channel: "telegram", preview: `[Voice ${voice.duration}s]: ${transcription.substring(0, 150)}` });
 
     const voiceUserId = ctx.from?.id.toString() || "";
     const agentResult = await routeAndDispatch(supabase, transcription, "telegram", voiceUserId);
     const effectiveTranscription = agentResult?.route.strippedMessage || transcription;
-    if (agentResult) lastActiveAgent = agentResult.dispatch.agent.name;
+    if (agentResult) {
+      lastActiveAgent = agentResult.dispatch.agent.name;
+      broadcastExtension({ type: "route", channel: "telegram", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode });
+    }
 
     const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
       getContextDocket(),
@@ -1267,6 +1278,16 @@ export function buildPrompt(
         "- Plane (project management — workspace: evelife at plane.ellie-labs.dev)\n" +
         "- Brave Search (mcp__brave-search__brave_web_search, mcp__brave-search__brave_local_search)\n" +
         "- Miro (diagrams, docs, tables), Excalidraw (drawings, diagrams)\n" +
+        (isOutlookConfigured()
+          ? "- Microsoft Outlook (" + getOutlookEmail() + "):\n" +
+            "  Available via HTTP API (use curl from Bash):\n" +
+            "  - GET http://localhost:3001/api/outlook/unread — list unread messages\n" +
+            "  - GET http://localhost:3001/api/outlook/search?q=QUERY — search messages\n" +
+            "  - GET http://localhost:3001/api/outlook/message/MESSAGE_ID — get full message\n" +
+            "  - POST http://localhost:3001/api/outlook/send -d '{\"subject\":\"...\",\"body\":\"...\",\"to\":[\"...\"]}' (requires [CONFIRM])\n" +
+            "  - POST http://localhost:3001/api/outlook/reply -d '{\"messageId\":\"...\",\"comment\":\"...\"}' (requires [CONFIRM])\n" +
+            "  Your system context already includes an Outlook unread email signal.\n"
+          : "") +
         "Use them freely to answer questions — read files, run commands, search code, browse the web, check email, manage calendar. " +
         "IMPORTANT: NEVER run sudo commands, NEVER install packages (apt, npm -g, brew), NEVER run commands that require interactive input or confirmation. " +
         "If a task would require sudo or installing software, tell the user what to run instead. " +
@@ -1299,7 +1320,7 @@ export function buildPrompt(
   parts.push(
     "\nACTION CONFIRMATIONS:" +
       "\nUse [CONFIRM: description] for these actions INSTEAD of executing:" +
-      "\n- Sending or replying to emails (send_gmail_message)" +
+      "\n- Sending or replying to emails (send_gmail_message, /api/outlook/send, /api/outlook/reply)" +
       "\n- Creating or modifying calendar events (create_event, modify_event)" +
       "\n- Git push, posting to channels, modifying databases" +
       "\n- Any difficult-to-undo external action" +
@@ -1748,6 +1769,7 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
 
     // Fire-and-forget: save user message (don't block the pipeline)
     saveMessage("user", text, { callSid: session.callSid }, "voice").catch(() => {});
+    broadcastExtension({ type: "message_in", channel: "voice", preview: text.substring(0, 200) });
 
     const conversationContext = session.conversationHistory
       .slice(-6)
@@ -1791,6 +1813,7 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
 
     // Fire-and-forget: save assistant message
     saveMessage("assistant", cleanResponse, { callSid: session.callSid }, "voice").catch(() => {});
+    broadcastExtension({ type: "message_out", channel: "voice", agent: "voice", preview: cleanResponse.substring(0, 200) });
 
     if (!session.streamSid) {
       console.error("[voice] No stream SID");
@@ -1995,10 +2018,14 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           sender: parsed.senderEmail,
           space: parsed.spaceName,
         }, "google-chat");
+        broadcastExtension({ type: "message_in", channel: "google-chat", preview: parsed.text.substring(0, 200) });
 
         const gchatAgentResult = await routeAndDispatch(supabase, parsed.text, "google-chat", parsed.senderEmail);
         const effectiveGchatText = gchatAgentResult?.route.strippedMessage || parsed.text;
-        if (gchatAgentResult) lastActiveAgent = gchatAgentResult.dispatch.agent.name;
+        if (gchatAgentResult) {
+          lastActiveAgent = gchatAgentResult.dispatch.agent.name;
+          broadcastExtension({ type: "route", channel: "google-chat", agent: gchatAgentResult.dispatch.agent.name, mode: gchatAgentResult.route.execution_mode });
+        }
 
         const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
           getContextDocket(),
@@ -2058,6 +2085,8 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
             const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, gchatOrcAgent);
             const { cleanedText: gchatClean } = extractApprovalTags(pipelineResponse);
             await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
+            broadcastExtension({ type: "message_out", channel: "google-chat", agent: gchatOrcAgent, preview: gchatClean.substring(0, 200) });
+            broadcastExtension({ type: "pipeline_complete", channel: "google-chat", mode: gchatExecMode, steps: result.stepResults.length, duration_ms: result.artifacts.total_duration_ms, cost_usd: result.artifacts.total_cost_usd });
             resetGchatIdleTimer();
 
             if (result.finalDispatch) {
@@ -2151,6 +2180,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
             .then(async ({ response }) => {
               const { cleanedText: gchatClean } = extractApprovalTags(response);
               const msgId = await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
+              broadcastExtension({ type: "message_out", channel: "google-chat", agent: gchatAgentResult?.dispatch.agent.name || "general", preview: gchatClean.substring(0, 200) });
               resetGchatIdleTimer();
               console.log(`[gchat] Async reply (${gchatClean.length} chars) to ${parsed.spaceName} thread=${parsed.threadName || "none"}: ${gchatClean.substring(0, 80)}...`);
 
@@ -2193,6 +2223,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           const { cleanedText: gchatClean, confirmations: gchatConfirms } = extractApprovalTags(response);
 
           await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
+          broadcastExtension({ type: "message_out", channel: "google-chat", agent: gchatAgentResult?.dispatch.agent.name || "general", preview: gchatClean.substring(0, 200) });
           resetGchatIdleTimer();
           console.log(`[gchat] Replying: ${gchatClean.substring(0, 80)}...`);
 
@@ -2292,6 +2323,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           sessionId: parsed.sessionId,
           intent: parsed.intentName,
         }, "alexa");
+        broadcastExtension({ type: "message_in", channel: "alexa", preview: parsed.text.substring(0, 200) });
 
         // Handle request types
         if (parsed.type === "LaunchRequest") {
@@ -2343,6 +2375,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
             ]);
 
             const agentResult = await routeAndDispatch(supabase, query, "alexa", parsed.userId);
+            if (agentResult) broadcastExtension({ type: "route", channel: "alexa", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode });
             const effectiveQuery = agentResult?.route.strippedMessage || query;
             const enrichedPrompt = buildPrompt(
               effectiveQuery, contextDocket, relevantContext, elasticContext, "alexa",
@@ -2382,6 +2415,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
                 .then(async (response) => {
                   const clean = response.replace(/<[^>]+>/g, "").substring(0, 4000);
                   await saveMessage("assistant", clean, { source: "alexa-async" }, "alexa");
+                  broadcastExtension({ type: "message_out", channel: "alexa", agent: agentResult?.dispatch.agent.name || "general", preview: clean.substring(0, 200) });
                   try {
                     await bot.api.sendMessage(ALLOWED_USER_ID, `[From Alexa] ${clean}`);
                   } catch (tgErr) {
@@ -2392,6 +2426,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
             } else {
               const clean = raceResult.response.replace(/<[^>]+>/g, "").substring(0, 6000);
               await saveMessage("assistant", clean, {}, "alexa");
+              broadcastExtension({ type: "message_out", channel: "alexa", agent: agentResult?.dispatch.agent.name || "general", preview: clean.substring(0, 200) });
               speechText = clean;
             }
             break;
@@ -2784,6 +2819,64 @@ If no actionable ideas are found, return: { "ideas": [] }`;
     return;
   }
 
+  // Memory analytics endpoints (GET requests)
+  if (url.pathname.startsWith("/api/memory/") && req.method === "GET") {
+    (async () => {
+      try {
+        const { handleGetStats, handleGetTimeline, handleGetByAgent } =
+          await import("./api/memory-analytics.ts");
+
+        // Parse query params
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+
+        // Extract endpoint and params
+        const pathParts = url.pathname.replace("/api/memory/", "").split("/");
+        const endpoint = pathParts[0]; // "stats", "timeline", or "by-agent"
+        const param = pathParts[1] || null; // agent name for by-agent
+
+        const mockReq = { query: queryParams, params: { agent: param } } as any;
+        const mockRes = {
+          status: (code: number) => ({
+            json: (data: any) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(data));
+            }
+          }),
+          json: (data: any) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(data));
+          }
+        } as any;
+
+        switch (endpoint) {
+          case "stats":
+            await handleGetStats(mockReq, mockRes);
+            break;
+          case "timeline":
+            await handleGetTimeline(mockReq, mockRes);
+            break;
+          case "by-agent":
+            if (!param) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "Missing agent parameter" }));
+              return;
+            }
+            await handleGetByAgent(mockReq, mockRes);
+            break;
+          default:
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Unknown memory endpoint" }));
+        }
+      } catch (err) {
+        console.error("[memory-analytics] Error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
   // Work session endpoints
   if (url.pathname.startsWith("/api/work-session/") && req.method === "POST") {
     let body = "";
@@ -2802,7 +2895,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         const endpoint = url.pathname.replace("/api/work-session/", "");
 
         // Import work-session handlers
-        const { startWorkSession, updateWorkSession, logDecision, completeWorkSession } =
+        const { startWorkSession, updateWorkSession, logDecision, completeWorkSession, pauseWorkSession, resumeWorkSession } =
           await import("./api/work-session.ts");
 
         // Mock req/res objects that match Express signature
@@ -2820,24 +2913,24 @@ If no actionable ideas are found, return: { "ideas": [] }`;
           }
         } as any;
 
-        if (!supabase) {
-          res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Database not configured" }));
-          return;
-        }
-
         switch (endpoint) {
           case "start":
-            await startWorkSession(mockReq, mockRes, supabase, bot);
+            await startWorkSession(mockReq, mockRes, bot);
             break;
           case "update":
-            await updateWorkSession(mockReq, mockRes, supabase, bot);
+            await updateWorkSession(mockReq, mockRes, bot);
             break;
           case "decision":
-            await logDecision(mockReq, mockRes, supabase, bot);
+            await logDecision(mockReq, mockRes, bot);
             break;
           case "complete":
-            await completeWorkSession(mockReq, mockRes, supabase, bot);
+            await completeWorkSession(mockReq, mockRes, bot);
+            break;
+          case "pause":
+            await pauseWorkSession(mockReq, mockRes, bot);
+            break;
+          case "resume":
+            await resumeWorkSession(mockReq, mockRes, bot);
             break;
           default:
             res.writeHead(404, { "Content-Type": "application/json" });
@@ -2845,6 +2938,63 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         }
       } catch (err) {
         console.error("[work-session] Error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
+    return;
+  }
+
+  // Incident response endpoints (ELLIE-89)
+  if (url.pathname.startsWith("/api/incident/") && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        let data: any;
+        try {
+          data = JSON.parse(body);
+        } catch (parseErr) {
+          console.error("[incident] JSON parse error:", parseErr, "body:", body.substring(0, 200));
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid JSON body" }));
+          return;
+        }
+        const endpoint = url.pathname.replace("/api/incident/", "");
+
+        const { raiseIncident, updateIncident, resolveIncident } =
+          await import("./api/incident.ts");
+
+        const mockReq = { body: data } as any;
+        const mockRes = {
+          status: (code: number) => ({
+            json: (data: any) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(data));
+            }
+          }),
+          json: (data: any) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(data));
+          }
+        } as any;
+
+        switch (endpoint) {
+          case "raise":
+            await raiseIncident(mockReq, mockRes, bot);
+            break;
+          case "update":
+            await updateIncident(mockReq, mockRes, bot);
+            break;
+          case "resolve":
+            await resolveIncident(mockReq, mockRes, bot);
+            break;
+          default:
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Unknown incident endpoint" }));
+        }
+      } catch (err) {
+        console.error("[incident] Error:", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -3097,11 +3247,134 @@ If no actionable ideas are found, return: { "ideas": [] }`;
     return;
   }
 
+  // ── Outlook email API endpoints ──
+  if (url.pathname.startsWith("/api/outlook/")) {
+    if (!isOutlookConfigured()) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Outlook not configured" }));
+      return;
+    }
+
+    const endpoint = url.pathname.replace("/api/outlook/", "");
+
+    if (endpoint === "unread" && req.method === "GET") {
+      (async () => {
+        try {
+          const limit = parseInt(url.searchParams.get("limit") || "10");
+          const messages = await outlookListUnread(limit);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ messages }));
+        } catch (err: any) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
+      return;
+    }
+
+    if (endpoint === "search" && req.method === "GET") {
+      (async () => {
+        try {
+          const q = url.searchParams.get("q") || "";
+          const limit = parseInt(url.searchParams.get("limit") || "10");
+          const messages = await outlookSearchMessages(q, limit);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ messages }));
+        } catch (err: any) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
+      return;
+    }
+
+    if (endpoint.startsWith("message/") && req.method === "GET") {
+      (async () => {
+        try {
+          const messageId = decodeURIComponent(endpoint.replace("message/", ""));
+          const message = await outlookGetMessage(messageId);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message }));
+        } catch (err: any) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
+      return;
+    }
+
+    if (endpoint === "send" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+      req.on("end", async () => {
+        try {
+          const payload = JSON.parse(body);
+          await outlookSendEmail(payload);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: true }));
+        } catch (err: any) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    if (endpoint === "reply" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+      req.on("end", async () => {
+        try {
+          const { messageId, comment } = JSON.parse(body);
+          await outlookReplyToMessage(messageId, comment);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: true }));
+        } catch (err: any) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    if (endpoint.startsWith("read/") && req.method === "POST") {
+      (async () => {
+        try {
+          const messageId = decodeURIComponent(endpoint.replace("read/", ""));
+          await outlookMarkAsRead(messageId);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: true }));
+        } catch (err: any) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      })();
+      return;
+    }
+  }
+
+  // Memory dashboard (static HTML)
+  if (url.pathname === "/memory" && req.method === "GET") {
+    (async () => {
+      try {
+        const htmlPath = join(PROJECT_ROOT, "public", "memory-dashboard.html");
+        const html = await readFile(htmlPath, "utf-8");
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(html);
+      } catch (err) {
+        console.error("[memory-dashboard] Error serving dashboard:", err);
+        res.writeHead(500);
+        res.end("Error loading dashboard");
+      }
+    })();
+    return;
+  }
+
   res.writeHead(404);
   res.end("Not found");
 });
 
-const voiceWss = new WebSocketServer({ server: httpServer, path: "/media-stream" });
+const voiceWss = new WebSocketServer({ noServer: true });
 
 voiceWss.on("connection", (ws: WebSocket) => {
   console.log("[voice] Media stream connected");
@@ -3208,11 +3481,111 @@ voiceWss.on("connection", (ws: WebSocket) => {
 });
 
 // ============================================================
+// CHROME EXTENSION LIVE FEED (WebSocket)
+// ============================================================
+
+const extensionWss = new WebSocketServer({ noServer: true });
+const extensionClients = new Set<WebSocket>();
+
+// Route WebSocket upgrades to the correct WSS
+httpServer.on("upgrade", (req, socket, head) => {
+  const pathname = new URL(req.url || "/", "http://localhost").pathname;
+  if (pathname === "/media-stream") {
+    voiceWss.handleUpgrade(req, socket, head, (ws) => {
+      voiceWss.emit("connection", ws, req);
+    });
+  } else if (pathname === "/extension") {
+    extensionWss.handleUpgrade(req, socket, head, (ws) => {
+      extensionWss.emit("connection", ws, req);
+    });
+  } else {
+    socket.destroy();
+  }
+});
+
+extensionWss.on("connection", (ws: WebSocket) => {
+  let authenticated = false;
+
+  // 5-second auth timeout
+  const authTimer = setTimeout(() => {
+    if (!authenticated) {
+      ws.close(4001, "Auth timeout");
+    }
+  }, 5000);
+
+  ws.on("message", (data: Buffer | string) => {
+    try {
+      const msg = JSON.parse(data.toString());
+
+      if (!authenticated) {
+        if (msg.type === "auth" && msg.key === EXTENSION_API_KEY && EXTENSION_API_KEY) {
+          authenticated = true;
+          clearTimeout(authTimer);
+          extensionClients.add(ws);
+          ws.send(JSON.stringify({ type: "auth_ok", ts: Date.now() }));
+          console.log(`[extension] Client authenticated (${extensionClients.size} connected)`);
+        } else {
+          ws.close(4003, "Invalid key");
+        }
+        return;
+      }
+
+      // Handle pong from client keepalive
+      if (msg.type === "pong") return;
+    } catch {
+      // Ignore parse errors
+    }
+  });
+
+  ws.on("close", () => {
+    clearTimeout(authTimer);
+    extensionClients.delete(ws);
+    if (authenticated) {
+      console.log(`[extension] Client disconnected (${extensionClients.size} connected)`);
+    }
+  });
+
+  ws.on("error", () => {
+    clearTimeout(authTimer);
+    extensionClients.delete(ws);
+  });
+});
+
+// Server-side ping every 30s to keep connections alive through nginx
+setInterval(() => {
+  const ping = JSON.stringify({ type: "ping", ts: Date.now() });
+  for (const ws of extensionClients) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(ping);
+    } else {
+      extensionClients.delete(ws);
+    }
+  }
+}, 30_000);
+
+/** Fire-and-forget broadcast to all connected extension clients. */
+function broadcastExtension(event: Record<string, any>): void {
+  if (extensionClients.size === 0) return;
+  const payload = JSON.stringify({ ...event, ts: Date.now() });
+  console.log(`[extension] Broadcasting ${event.type} to ${extensionClients.size} client(s)`);
+  for (const ws of extensionClients) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(payload);
+    } else {
+      console.log(`[extension] Client readyState=${ws.readyState}, skipping`);
+    }
+  }
+}
+
+// ============================================================
 // START
 // ============================================================
 
 // Init Google Chat (optional — skips gracefully if not configured)
 const gchatEnabled = await initGoogleChat();
+
+// Init Microsoft Outlook (optional — skips gracefully if not configured)
+const outlookEnabled = await initOutlook();
 
 // Start delivery nudge checker — sends reminder if response wasn't acknowledged
 startNudgeChecker(async (channel, count) => {
@@ -3235,11 +3608,13 @@ console.log(`Authorized user: ${ALLOWED_USER_ID || "ANY (not recommended)"}`);
 console.log(`Project directory: ${PROJECT_DIR || "(relay working directory)"}`);
 console.log(`Agent mode: ${AGENT_MODE ? "ON" : "OFF"}${AGENT_MODE ? ` (tools: ${ALLOWED_TOOLS.join(", ")})` : ""}`);
 console.log(`Google Chat: ${gchatEnabled ? "ON" : "OFF"}`);
+console.log(`Outlook: ${outlookEnabled ? "ON (" + getOutlookEmail() + ")" : "OFF"}`);
 
 // Start HTTP + WebSocket server
 httpServer.listen(HTTP_PORT, () => {
   console.log(`[http] Server listening on port ${HTTP_PORT}`);
   console.log(`[voice] WebSocket: ws://localhost:${HTTP_PORT}/media-stream`);
+  console.log(`[extension] WebSocket: ws://localhost:${HTTP_PORT}/extension`);
   console.log(`[voice] TwiML webhook: http://localhost:${HTTP_PORT}/voice`);
   if (PUBLIC_URL) {
     console.log(`[voice] Public URL: ${PUBLIC_URL}`);
