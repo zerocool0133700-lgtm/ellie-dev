@@ -17,6 +17,7 @@
     "sync:es": "bun run src/sync-es.ts",
     "work:start": "bun run scripts/work-session-start.ts",
     "security:sweep": "bun run scripts/security-sweep.ts",
+    "prove:memory": "bun run scripts/prove-shared-memory.ts",
     "test": "bun test"
   },
   "dependencies": {
