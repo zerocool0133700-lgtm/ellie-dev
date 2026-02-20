@@ -46,6 +46,7 @@ import {
   type DispatchResult,
 } from "./agent-router.ts";
 import { initClassifier } from "./intent-classifier.ts";
+import { initEntailmentClassifier } from "./entailment-classifier.ts";
 import { getStructuredContext, getAgentStructuredContext } from "./context-sources.ts";
 import {
   initOutlook,
@@ -1697,6 +1698,11 @@ if (anthropic && supabase) {
   initClassifier(anthropic, supabase);
 }
 
+// Initialize entailment classifier (ELLIE-92) for contradiction detection
+if (anthropic) {
+  initEntailmentClassifier(anthropic);
+}
+
 async function callClaudeVoice(systemPrompt: string, userMessage: string): Promise<string> {
   const start = Date.now();
 
@@ -3026,7 +3032,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         const endpoint = url.pathname.replace("/api/forest-memory/", "");
 
         const { writeMemoryEndpoint, readMemoryEndpoint, agentContextEndpoint,
-          resolveContradictionEndpoint, creatureWriteMemoryEndpoint } =
+          resolveContradictionEndpoint, askCriticEndpoint, creatureWriteMemoryEndpoint } =
           await import("./api/memory.ts");
 
         const mockReq = { body: data } as any;
@@ -3055,6 +3061,9 @@ If no actionable ideas are found, return: { "ideas": [] }`;
             break;
           case "resolve":
             await resolveContradictionEndpoint(mockReq, mockRes, bot);
+            break;
+          case "ask-critic":
+            await askCriticEndpoint(mockReq, mockRes, bot);
             break;
           case "creature-write":
             await creatureWriteMemoryEndpoint(mockReq, mockRes, bot);

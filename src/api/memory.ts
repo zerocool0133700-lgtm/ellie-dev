@@ -1,11 +1,13 @@
 /**
- * Shared Memory Endpoints
+ * Shared Memory Endpoints — ELLIE-90 + ELLIE-92
  *
  * These endpoints handle cross-agent memory operations:
- * - POST /api/memory/write — write a memory (with optional contradiction check)
- * - POST /api/memory/read — retrieve scoped memories
- * - POST /api/memory/context — get agent context (memories for a dispatch)
- * - POST /api/memory/resolve — resolve a contradiction
+ * - POST /api/forest-memory/write — write a memory (with optional entailment-verified contradiction check)
+ * - POST /api/forest-memory/read — retrieve scoped memories
+ * - POST /api/forest-memory/context — get agent context (memories for a dispatch)
+ * - POST /api/forest-memory/resolve — resolve a contradiction
+ * - POST /api/forest-memory/ask-critic — dispatch critic creature to evaluate a contradiction
+ * - POST /api/forest-memory/creature-write — write memory attributed to a creature
  *
  * Contradiction notifications route via the policy engine.
  */
@@ -13,13 +15,19 @@
 import type { Bot } from "grammy";
 import {
   writeMemory,
-  writeMemoryWithContradictionCheck,
   readMemories,
+  getMemory,
   getAgentContext,
+  findContradictions,
   resolveContradiction,
-  listUnresolvedContradictions,
+  markAsContradiction,
+  boostConfidence,
+  tryAutoResolve,
+  dispatchCreature,
   writeCreatureMemory,
+  sql,
 } from '../../../ellie-forest/src/index';
+import { classifyEntailment } from "../entailment-classifier.ts";
 import { notify, type NotifyContext } from "../notification-policy.ts";
 
 const TELEGRAM_USER_ID = process.env.TELEGRAM_USER_ID!;
@@ -32,7 +40,7 @@ function getNotifyCtx(bot: Bot): NotifyContext {
 const escapeMarkdown = (text: string) => text.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
 
 /**
- * POST /api/memory/write
+ * POST /api/forest-memory/write
  *
  * Body:
  * {
@@ -44,39 +52,80 @@ const escapeMarkdown = (text: string) => text.replace(/[_*[\]()~`>#+=|{}.!-]/g, 
  *   "source_entity_id": "uuid",
  *   "confidence": 0.8,       // optional
  *   "tags": ["technology"],   // optional
- *   "check_contradictions": true  // optional: run contradiction check
+ *   "check_contradictions": true  // optional: run entailment-verified contradiction check
  * }
  */
 export async function writeMemoryEndpoint(req: any, res: any, bot: Bot) {
   try {
-    const { content, check_contradictions, ...opts } = req.body;
+    const { content, check_contradictions, contradiction_threshold, ...opts } = req.body;
 
     if (!content) {
       return res.status(400).json({ error: 'Missing required field: content' });
     }
 
-    if (check_contradictions) {
-      const { memory, contradictions } = await writeMemoryWithContradictionCheck(
-        { content, ...opts },
-        opts.contradiction_threshold,
-      );
+    // Always write the memory first
+    const memory = await writeMemory({ content, ...opts });
 
-      // Notify on contradictions
-      if (contradictions.length > 0) {
+    if (!check_contradictions) {
+      return res.json({ success: true, memory_id: memory.id });
+    }
+
+    // Step 1: Find cosine-similar candidates in the same scope
+    const candidates = await findContradictions(memory.id, contradiction_threshold ?? 0.85);
+
+    if (candidates.length === 0) {
+      return res.json({ success: true, memory_id: memory.id, contradictions_found: 0, entailments_found: 0 });
+    }
+
+    // Step 2: Classify each candidate with LLM entailment
+    const contradictions: Array<typeof candidates[0] & { entailment: Awaited<ReturnType<typeof classifyEntailment>> }> = [];
+    const entailments: Array<typeof candidates[0] & { entailment: Awaited<ReturnType<typeof classifyEntailment>> }> = [];
+
+    for (const candidate of candidates) {
+      const result = await classifyEntailment(content, candidate.contradicting_content);
+
+      if (result.label === 'contradicts' && result.confidence >= 0.7) {
+        contradictions.push({ ...candidate, entailment: result });
+      } else if (result.label === 'entails' && result.confidence >= 0.7) {
+        entailments.push({ ...candidate, entailment: result });
+      }
+      // "neutral" or low-confidence: skip (cosine false positive)
+    }
+
+    // Step 3: Handle entailments (confidence reinforcement)
+    for (const ent of entailments) {
+      await boostConfidence(ent.contradicting_memory_id, 0.1, memory.id);
+    }
+
+    // Step 4: Handle contradictions
+    if (contradictions.length > 0) {
+      const primary = contradictions[0];
+      await markAsContradiction(memory.id, primary.contradicting_memory_id, {
+        entailment_confidence: primary.entailment.confidence,
+        entailment_reasoning: primary.entailment.reasoning,
+      });
+
+      // Step 5: Try auto-resolution
+      const autoResult = await tryAutoResolve(memory.id, primary.contradicting_memory_id);
+
+      if (!autoResult.resolved) {
+        // Notify — not auto-resolved, needs human attention
         const telegramMsg = [
           `⚠️ **Memory Contradiction Detected**`,
           ``,
           `**New:** ${escapeMarkdown(content.slice(0, 120))}`,
-          `**Contradicts:** ${escapeMarkdown(contradictions[0].contradicting_content.slice(0, 120))}`,
-          `**Similarity:** ${(contradictions[0].similarity * 100).toFixed(0)}%`,
+          `**Contradicts:** ${escapeMarkdown(primary.contradicting_content.slice(0, 120))}`,
+          `**Similarity:** ${(primary.similarity * 100).toFixed(0)}%`,
+          `**Reasoning:** ${escapeMarkdown(primary.entailment.reasoning.slice(0, 80))}`,
         ].join('\n');
 
         const gchatMsg = [
           `⚠️ Memory Contradiction Detected`,
           ``,
           `New: ${content}`,
-          `Contradicts: ${contradictions[0].contradicting_content}`,
-          `Similarity: ${(contradictions[0].similarity * 100).toFixed(0)}%`,
+          `Contradicts: ${primary.contradicting_content}`,
+          `Similarity: ${(primary.similarity * 100).toFixed(0)}%`,
+          `Reasoning: ${primary.entailment.reasoning}`,
           `Memory ID: ${memory.id}`,
           `Scope: ${memory.scope}`,
         ].join('\n');
@@ -93,16 +142,28 @@ export async function writeMemoryEndpoint(req: any, res: any, bot: Bot) {
         success: true,
         memory_id: memory.id,
         contradictions_found: contradictions.length,
+        entailments_found: entailments.length,
+        auto_resolved: autoResult.resolved,
+        auto_resolution: autoResult.resolved ? {
+          resolution: autoResult.resolution,
+          reason: autoResult.reason,
+        } : undefined,
         contradictions: contradictions.map(c => ({
           memory_id: c.contradicting_memory_id,
           content: c.contradicting_content,
           similarity: c.similarity,
+          reasoning: c.entailment.reasoning,
         })),
       });
     }
 
-    const memory = await writeMemory({ content, ...opts });
-    return res.json({ success: true, memory_id: memory.id });
+    // No contradictions, only entailments or neutrals
+    return res.json({
+      success: true,
+      memory_id: memory.id,
+      contradictions_found: 0,
+      entailments_found: entailments.length,
+    });
 
   } catch (error) {
     console.error('[memory:write] Error:', error);
@@ -111,16 +172,7 @@ export async function writeMemoryEndpoint(req: any, res: any, bot: Bot) {
 }
 
 /**
- * POST /api/memory/read
- *
- * Body:
- * {
- *   "query": "what port does the relay use",
- *   "scope": "tree",
- *   "scope_id": "uuid",
- *   "include_global": true,
- *   "match_count": 10
- * }
+ * POST /api/forest-memory/read
  */
 export async function readMemoryEndpoint(req: any, res: any, _bot: Bot) {
   try {
@@ -140,18 +192,7 @@ export async function readMemoryEndpoint(req: any, res: any, _bot: Bot) {
 }
 
 /**
- * POST /api/memory/context
- *
- * Returns scoped memories for an agent dispatch (branch + tree + global).
- *
- * Body:
- * {
- *   "tree_id": "uuid",
- *   "branch_id": "uuid",     // optional
- *   "entity_id": "uuid",     // optional
- *   "max_memories": 20,      // optional
- *   "min_confidence": 0.3    // optional
- * }
+ * POST /api/forest-memory/context
  */
 export async function agentContextEndpoint(req: any, res: any, _bot: Bot) {
   try {
@@ -171,28 +212,33 @@ export async function agentContextEndpoint(req: any, res: any, _bot: Bot) {
 }
 
 /**
- * POST /api/memory/resolve
+ * POST /api/forest-memory/resolve
  *
  * Body:
  * {
  *   "memory_id": "uuid",
- *   "resolution": "keep_new" | "keep_old" | "keep_both",
- *   "resolved_by": "entity-name"  // optional
+ *   "resolution": "keep_new" | "keep_old" | "keep_both" | "merge",
+ *   "resolved_by": "entity-name",    // optional
+ *   "merged_content": "combined..."  // required when resolution === "merge"
  * }
  */
 export async function resolveContradictionEndpoint(req: any, res: any, _bot: Bot) {
   try {
-    const { memory_id, resolution, resolved_by } = req.body;
+    const { memory_id, resolution, resolved_by, merged_content } = req.body;
 
     if (!memory_id || !resolution) {
       return res.status(400).json({ error: 'Missing required fields: memory_id, resolution' });
     }
 
-    if (!['keep_new', 'keep_old', 'keep_both'].includes(resolution)) {
-      return res.status(400).json({ error: 'Invalid resolution: must be keep_new, keep_old, or keep_both' });
+    if (!['keep_new', 'keep_old', 'keep_both', 'merge'].includes(resolution)) {
+      return res.status(400).json({ error: 'Invalid resolution: must be keep_new, keep_old, keep_both, or merge' });
     }
 
-    await resolveContradiction(memory_id, resolution, resolved_by);
+    if (resolution === 'merge' && !merged_content) {
+      return res.status(400).json({ error: 'merged_content required for merge resolution' });
+    }
+
+    await resolveContradiction(memory_id, resolution, resolved_by, merged_content);
     return res.json({ success: true, memory_id, resolution });
 
   } catch (error) {
@@ -202,21 +248,70 @@ export async function resolveContradictionEndpoint(req: any, res: any, _bot: Bot
 }
 
 /**
- * POST /api/memory/creature-write
+ * POST /api/forest-memory/ask-critic
  *
- * Convenience for agents to write memories attributed to their creature.
+ * Dispatches a critic creature to evaluate a memory contradiction.
  *
  * Body:
  * {
- *   "creature_id": "uuid",
- *   "tree_id": "uuid",
- *   "branch_id": "uuid",     // optional
- *   "entity_id": "uuid",     // optional
- *   "content": "Found that X causes Y",
- *   "type": "finding",       // optional
- *   "confidence": 0.8,       // optional
- *   "tags": ["debugging"]    // optional
+ *   "memory_id": "uuid",
+ *   "tree_id": "uuid"
  * }
+ */
+export async function askCriticEndpoint(req: any, res: any, _bot: Bot) {
+  try {
+    const { memory_id, tree_id } = req.body;
+
+    if (!memory_id || !tree_id) {
+      return res.status(400).json({ error: 'Missing required fields: memory_id, tree_id' });
+    }
+
+    const memory = await getMemory(memory_id);
+    if (!memory) {
+      return res.status(404).json({ error: 'Memory not found' });
+    }
+
+    const supersededMemory = memory.supersedes_id
+      ? await getMemory(memory.supersedes_id)
+      : null;
+
+    // Find the critic entity via agent FK
+    const [criticEntity] = await sql<{ id: string }[]>`
+      SELECT e.id FROM entities e
+      JOIN agents a ON e.agent_id = a.id
+      WHERE a.name = 'critic' AND e.active = TRUE
+      LIMIT 1
+    `;
+
+    if (!criticEntity) {
+      return res.status(503).json({ error: 'No critic entity available' });
+    }
+
+    const creature = await dispatchCreature({
+      type: 'gate',
+      tree_id,
+      entity_id: criticEntity.id,
+      intent: `Evaluate memory contradiction: "${memory.content.slice(0, 100)}" vs "${supersededMemory?.content?.slice(0, 100) ?? 'unknown'}"`,
+      instructions: {
+        action: 'resolve_contradiction',
+        memory_id,
+        new_content: memory.content,
+        old_content: supersededMemory?.content,
+        new_confidence: memory.confidence,
+        old_confidence: supersededMemory?.confidence,
+      },
+    });
+
+    return res.json({ success: true, creature_id: creature.id, status: 'dispatched' });
+
+  } catch (error) {
+    console.error('[memory:ask-critic] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+/**
+ * POST /api/forest-memory/creature-write
  */
 export async function creatureWriteMemoryEndpoint(req: any, res: any, _bot: Bot) {
   try {
