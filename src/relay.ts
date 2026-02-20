@@ -3002,6 +3002,70 @@ If no actionable ideas are found, return: { "ideas": [] }`;
     return;
   }
 
+  // Forest shared memory endpoints (ELLIE-90)
+  if (url.pathname.startsWith("/api/forest-memory/") && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        let data: any;
+        try {
+          data = JSON.parse(body);
+        } catch (parseErr) {
+          console.error("[forest-memory] JSON parse error:", parseErr, "body:", body.substring(0, 200));
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid JSON body" }));
+          return;
+        }
+        const endpoint = url.pathname.replace("/api/forest-memory/", "");
+
+        const { writeMemoryEndpoint, readMemoryEndpoint, agentContextEndpoint,
+          resolveContradictionEndpoint, creatureWriteMemoryEndpoint } =
+          await import("./api/memory.ts");
+
+        const mockReq = { body: data } as any;
+        const mockRes = {
+          status: (code: number) => ({
+            json: (data: any) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(data));
+            }
+          }),
+          json: (data: any) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(data));
+          }
+        } as any;
+
+        switch (endpoint) {
+          case "write":
+            await writeMemoryEndpoint(mockReq, mockRes, bot);
+            break;
+          case "read":
+            await readMemoryEndpoint(mockReq, mockRes, bot);
+            break;
+          case "context":
+            await agentContextEndpoint(mockReq, mockRes, bot);
+            break;
+          case "resolve":
+            await resolveContradictionEndpoint(mockReq, mockRes, bot);
+            break;
+          case "creature-write":
+            await creatureWriteMemoryEndpoint(mockReq, mockRes, bot);
+            break;
+          default:
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Unknown forest-memory endpoint" }));
+        }
+      } catch (err) {
+        console.error("[forest-memory] Error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
+    return;
+  }
+
   // Vault credential endpoints (ELLIE-32)
   if (url.pathname.startsWith("/api/vault/")) {
     let body = "";

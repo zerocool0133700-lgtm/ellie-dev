@@ -32,6 +32,7 @@ export type NotificationEvent =
   | "incident_raised"
   | "incident_update"
   | "incident_resolved"
+  | "memory_contradiction"
   | "dispatch_confirm"
   | "error"
   | "rollup"
@@ -114,6 +115,13 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: true, minIntervalSec: 0 }, // always alert on resolution
       "google-chat": { enabled: true, minIntervalSec: 0 },
+    },
+  },
+  memory_contradiction: {
+    priority: "normal",
+    channels: {
+      telegram: { enabled: true, minIntervalSec: 300 }, // max 1 per 5 min per memory
+      "google-chat": { enabled: true, minIntervalSec: 60 },
     },
   },
   dispatch_confirm: {
