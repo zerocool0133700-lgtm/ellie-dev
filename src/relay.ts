@@ -4302,7 +4302,7 @@ async function handleLaCommsMessage(ws: WebSocket, text: string, phoneMode: bool
     return;
   }
 
-  // ── Normal text mode: full agent routing + context gathering ──
+  // ── Normal text mode: full agent routing + context gathering (mirrors Google Chat) ──
   await enqueue(async () => {
     const agentResult = await routeAndDispatch(supabase, text, "la-comms", "dashboard");
     const effectiveText = agentResult?.route.strippedMessage || text;
@@ -4313,6 +4313,16 @@ async function handleLaCommsMessage(ws: WebSocket, text: string, phoneMode: bool
         agent: agentResult.dispatch.agent.name,
         mode: agentResult.route.execution_mode,
       });
+
+      // Dispatch notification (ELLIE-80 pattern from Google Chat)
+      if (agentResult.dispatch.agent.name !== "general" && agentResult.dispatch.is_new) {
+        notify(getNotifyCtx(), {
+          event: "dispatch_confirm",
+          workItemId: agentResult.dispatch.agent.name,
+          telegramMessage: `🤖 ${agentResult.dispatch.agent.name} agent`,
+          gchatMessage: `🤖 ${agentResult.dispatch.agent.name} agent dispatched`,
+        }).catch((err) => console.error("[notify] dispatch_confirm:", err.message));
+      }
     }
 
     const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext] = await Promise.all([
@@ -4324,6 +4334,93 @@ async function handleLaCommsMessage(ws: WebSocket, text: string, phoneMode: bool
       getForestContext(effectiveText),
     ]);
 
+    // ── Multi-step orchestration (pipeline, fan-out, critic-loop) ──
+    if (agentResult?.route.execution_mode !== "single" && agentResult?.route.skills?.length) {
+      const execMode = agentResult.route.execution_mode;
+      const steps: PipelineStep[] = agentResult.route.skills.map((s) => ({
+        agent_name: s.agent,
+        skill_name: s.skill !== "none" ? s.skill : undefined,
+        instruction: s.instruction,
+      }));
+
+      const agentNames = [...new Set(steps.map((s) => s.agent_name))].join(" → ");
+      const modeLabels: Record<string, string> = { pipeline: "Pipeline", "fan-out": "Fan-out", "critic-loop": "Critic loop" };
+
+      // Notify client that multi-step is starting
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: "response",
+          text: `Working on it... (${modeLabels[execMode] || execMode}: ${agentNames}, ${steps.length} steps)`,
+          agent: agentResult.dispatch.agent.name,
+          ts: Date.now(),
+        }));
+      }
+      broadcastExtension({ type: "pipeline_start", channel: "la-comms", mode: execMode, steps: steps.length });
+
+      try {
+        const result = await executeOrchestrated(execMode, steps, effectiveText, {
+          supabase,
+          channel: "la-comms",
+          userId: "dashboard",
+          anthropicClient: anthropic,
+          contextDocket, relevantContext, elasticContext,
+          structuredContext, recentMessages, forestContext,
+          buildPromptFn: buildPrompt,
+          callClaudeFn: callClaude,
+        });
+
+        const orcAgent = result.finalDispatch?.agent?.name || agentResult.dispatch.agent.name || "general";
+        const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, orcAgent);
+        const { cleanedText } = extractApprovalTags(pipelineResponse);
+
+        await saveMessage("assistant", cleanedText, {}, "la-comms");
+        broadcastExtension({
+          type: "message_out", channel: "la-comms", agent: orcAgent,
+          preview: cleanedText.substring(0, 200),
+        });
+        broadcastExtension({
+          type: "pipeline_complete", channel: "la-comms",
+          mode: execMode, steps: result.stepResults.length,
+          duration_ms: result.artifacts.total_duration_ms,
+          cost_usd: result.artifacts.total_cost_usd,
+        });
+
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: "response",
+            text: cleanedText,
+            agent: orcAgent,
+            ts: Date.now(),
+            duration_ms: result.artifacts.total_duration_ms,
+          }));
+        }
+
+        if (result.finalDispatch) {
+          syncResponse(supabase, result.finalDispatch.session_id, cleanedText, {
+            duration_ms: result.artifacts.total_duration_ms,
+          }).catch(() => {});
+        }
+      } catch (err) {
+        console.error("[la-comms] Multi-step failed:", err);
+        const errMsg = err instanceof PipelineStepError && err.partialOutput
+          ? err.partialOutput + "\n\n(Execution incomplete.)"
+          : "Sorry, I ran into an error processing your multi-step request.";
+
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: "response",
+            text: errMsg,
+            agent: agentResult.dispatch.agent.name || "general",
+            ts: Date.now(),
+          }));
+        }
+      }
+
+      resetLaCommsIdleTimer();
+      return;
+    }
+
+    // ── Single-agent path ──
     const enrichedPrompt = buildPrompt(
       effectiveText, contextDocket, relevantContext, elasticContext, "la-comms",
       agentResult?.dispatch.agent ? {
