@@ -2724,6 +2724,41 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     return;
   }
 
+  // STT endpoint — accepts audio, returns transcription
+  if (url.pathname === "/api/stt" && req.method === "POST") {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => { chunks.push(chunk); });
+    req.on("end", async () => {
+      try {
+        const authKey = req.headers["x-api-key"] as string;
+        if (!authKey || authKey !== EXTENSION_API_KEY || !EXTENSION_API_KEY) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Unauthorized" }));
+          return;
+        }
+        const audioBuffer = Buffer.concat(chunks);
+        if (audioBuffer.length === 0) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "No audio data" }));
+          return;
+        }
+        const text = await transcribe(audioBuffer);
+        if (!text) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ text: "", error: "Could not transcribe" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ text }));
+      } catch (err: any) {
+        console.error("[stt] API error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(err) }));
+      }
+    });
+    return;
+  }
+
   // Token health check — tests Anthropic API key validity
   if (url.pathname === "/api/token-health") {
     (async () => {
@@ -3166,6 +3201,50 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         }
       } catch (err) {
         console.error("[work-session] Error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
+    return;
+  }
+
+  // LA Comms broadcast endpoint
+  if (url.pathname === "/api/la-comms/send" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body);
+        const { message, agent = "general" } = data;
+
+        if (!message) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing required field: message" }));
+          return;
+        }
+
+        // Broadcast to all connected LA Comms clients
+        const payload = JSON.stringify({
+          type: "response",
+          text: message,
+          agent,
+          ts: Date.now(),
+        });
+
+        let sentCount = 0;
+        for (const ws of laCommsClients) {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(payload);
+            sentCount++;
+          }
+        }
+
+        console.log(`[la-comms] Broadcast message to ${sentCount} client(s)`);
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, sent_to: sentCount }));
+      } catch (err) {
+        console.error("[la-comms] Error:", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -3968,7 +4047,7 @@ httpServer.on("upgrade", (req, socket, head) => {
     extensionWss.handleUpgrade(req, socket, head, (ws) => {
       extensionWss.emit("connection", ws, req);
     });
-  } else if (pathname === "/la-comms") {
+  } else if (pathname === "/ws/la-comms") {
     laCommsWss.handleUpgrade(req, socket, head, (ws) => {
       laCommsWss.emit("connection", ws, req);
     });
