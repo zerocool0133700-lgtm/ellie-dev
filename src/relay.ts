@@ -25,6 +25,7 @@ import {
 } from "./memory.ts";
 import { consolidateNow } from "./consolidate-inline.ts";
 import { indexMessage, searchElastic } from "./elasticsearch.ts";
+import { getForestContext, initForestSync } from "./elasticsearch/context.ts";
 import {
   initGoogleChat,
   parseGoogleChatEvent,
@@ -47,6 +48,7 @@ import {
 } from "./agent-router.ts";
 import { initClassifier } from "./intent-classifier.ts";
 import { initEntailmentClassifier } from "./entailment-classifier.ts";
+import { startSyncListener } from "./elasticsearch/sync-listener.ts";
 import { getStructuredContext, getAgentStructuredContext } from "./context-sources.ts";
 import {
   initOutlook,
@@ -760,13 +762,14 @@ bot.on("message:text", withQueue(async (ctx) => {
     }
   }
 
-  // Gather context: docket + semantic search + ES full-text search + structured sources + recent messages
-  const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
+  // Gather context: docket + semantic search + ES full-text search + structured sources + recent messages + forest
+  const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext] = await Promise.all([
     getContextDocket(),
     getRelevantContext(supabase, effectiveText),
     searchElastic(effectiveText, { limit: 5, recencyBoost: true }),
     getAgentStructuredContext(supabase, getActiveAgent("telegram")),
     getRecentMessages(supabase),
+    getForestContext(effectiveText),
   ]);
 
   // Detect work item mentions (ELLIE-5, EVE-3, etc.)
@@ -808,7 +811,7 @@ bot.on("message:text", withQueue(async (ctx) => {
         anthropicClient: anthropic,
         onHeartbeat: () => { ctx.replyWithChatAction("typing").catch(() => {}); },
         contextDocket, relevantContext, elasticContext,
-        structuredContext, recentMessages, workItemContext,
+        structuredContext, recentMessages, workItemContext, forestContext,
         buildPromptFn: buildPrompt,
         callClaudeFn: callClaude,
       });
@@ -845,6 +848,7 @@ bot.on("message:text", withQueue(async (ctx) => {
           agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
           workItemContext, structuredContext, recentMessages,
           agentResult?.dispatch.skill_context,
+          forestContext,
         );
         const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
         const fallbackAgentName = agentResult?.dispatch.agent.name || "general";
@@ -864,6 +868,7 @@ bot.on("message:text", withQueue(async (ctx) => {
     agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
     workItemContext, structuredContext, recentMessages,
     agentResult?.dispatch.skill_context,
+    forestContext,
   );
 
   const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -935,12 +940,13 @@ bot.on("message:voice", withQueue(async (ctx) => {
       broadcastExtension({ type: "route", channel: "telegram", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode });
     }
 
-    const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
+    const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext] = await Promise.all([
       getContextDocket(),
       getRelevantContext(supabase, effectiveTranscription),
       searchElastic(effectiveTranscription, { limit: 5, recencyBoost: true }),
       getAgentStructuredContext(supabase, getActiveAgent("telegram")),
       getRecentMessages(supabase),
+      getForestContext(effectiveTranscription),
     ]);
 
     // ── Voice multi-step branch (ELLIE-58) ──
@@ -968,7 +974,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
           anthropicClient: anthropic,
           onHeartbeat: () => { ctx.replyWithChatAction("typing").catch(() => {}); },
           contextDocket, relevantContext, elasticContext,
-          structuredContext, recentMessages,
+          structuredContext, recentMessages, forestContext,
           buildPromptFn: buildPrompt,
           callClaudeFn: callClaude,
         });
@@ -1003,6 +1009,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
             agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
             undefined, structuredContext, recentMessages,
             agentResult?.dispatch.skill_context,
+            forestContext,
           );
           const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
           const voiceFallbackAgent = agentResult?.dispatch.agent.name || "general";
@@ -1026,6 +1033,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
       agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
       undefined, structuredContext, recentMessages,
       agentResult?.dispatch.skill_context,
+      forestContext,
     );
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -1241,6 +1249,7 @@ export function buildPrompt(
   structuredContext?: string,
   recentMessages?: string,
   skillContext?: { name: string; description: string },
+  forestContext?: string,
 ): string {
   const channelLabel = channel === "google-chat" ? "Google Chat" : "Telegram";
 
@@ -1311,6 +1320,7 @@ export function buildPrompt(
   if (recentMessages) parts.push(`\n${recentMessages}`);
   if (relevantContext) parts.push(`\n${relevantContext}`);
   if (elasticContext) parts.push(`\n${elasticContext}`);
+  if (forestContext) parts.push(`\n${forestContext}`);
 
   parts.push(
     "\nMEMORY MANAGEMENT:" +
@@ -1703,6 +1713,11 @@ if (anthropic) {
   initEntailmentClassifier(anthropic);
 }
 
+// Start ES forest sync listener (ELLIE-104) — pg_notify → Elasticsearch
+startSyncListener().catch((err) => {
+  console.warn("[relay] ES sync listener failed to start (non-fatal):", err);
+});
+
 async function callClaudeVoice(systemPrompt: string, userMessage: string): Promise<string> {
   const start = Date.now();
 
@@ -1790,10 +1805,11 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
 
     // Now that we have text, run text-dependent searches in parallel.
     // contextDocketPromise was already started during transcription.
-    const [contextDocket, relevantContext, elasticContext] = await Promise.all([
+    const [contextDocket, relevantContext, elasticContext, forestContext] = await Promise.all([
       contextDocketPromise,
       getRelevantContext(supabase, text),
       searchElastic(text, { limit: 3, recencyBoost: true }),
+      getForestContext(text),
     ]);
 
     const systemParts = [
@@ -2039,12 +2055,13 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           broadcastExtension({ type: "route", channel: "google-chat", agent: gchatAgentResult.dispatch.agent.name, mode: gchatAgentResult.route.execution_mode });
         }
 
-        const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
+        const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext] = await Promise.all([
           getContextDocket(),
           getRelevantContext(supabase, effectiveGchatText),
           searchElastic(effectiveGchatText, { limit: 5, recencyBoost: true }),
           getAgentStructuredContext(supabase, getActiveAgent("google-chat")),
           getRecentMessages(supabase),
+          getForestContext(effectiveGchatText),
         ]);
 
         // ── Sync response gate (shared by multi-step and single-agent paths) ──
@@ -2085,7 +2102,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               userId: parsed.senderEmail,
               anthropicClient: anthropic,
               contextDocket, relevantContext, elasticContext,
-              structuredContext, recentMessages,
+              structuredContext, recentMessages, forestContext,
               buildPromptFn: buildPrompt,
               callClaudeFn: callClaude,
             }),
@@ -2140,6 +2157,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           gchatAgentResult?.dispatch.agent ? { system_prompt: gchatAgentResult.dispatch.agent.system_prompt, name: gchatAgentResult.dispatch.agent.name, tools_enabled: gchatAgentResult.dispatch.agent.tools_enabled } : undefined,
           undefined, structuredContext, recentMessages,
           gchatAgentResult?.dispatch.skill_context,
+          forestContext,
         );
 
         const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
@@ -2378,12 +2396,13 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
             const query = parsed.slots.query || parsed.text;
 
             // Gather context + call Claude with 6s timeout
-            const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages] = await Promise.all([
+            const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext] = await Promise.all([
               getContextDocket(),
               getRelevantContext(supabase, query),
               searchElastic(query, { limit: 5, recencyBoost: true }),
               getAgentStructuredContext(supabase, getActiveAgent("google-chat")),
               getRecentMessages(supabase),
+              getForestContext(query),
             ]);
 
             const agentResult = await routeAndDispatch(supabase, query, "alexa", parsed.userId);
@@ -2398,6 +2417,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               } : undefined,
               undefined, structuredContext, recentMessages,
               agentResult?.dispatch.skill_context,
+              forestContext,
             );
 
             const ALEXA_TIMEOUT_MS = 6_000;
@@ -3499,6 +3519,48 @@ If no actionable ideas are found, return: { "ideas": [] }`;
     return;
   }
 
+  // Forest UI proxy — forward /forest/* to Nuxt dev server
+  if (url.pathname === "/forest" || url.pathname.startsWith("/forest/") || url.pathname.startsWith("/_nuxt/")) {
+    const forestPort = process.env.FOREST_UI_PORT || "3002";
+    const targetUrl = `http://127.0.0.1:${forestPort}${req.url}`;
+    (async () => {
+      try {
+        const proxyRes = await fetch(targetUrl, {
+          method: req.method,
+          headers: Object.fromEntries(
+            Object.entries(req.headers)
+              .filter(([, v]) => v !== undefined)
+              .map(([k, v]) => [k, Array.isArray(v) ? v.join(', ') : v!])
+          ),
+          body: ['GET', 'HEAD'].includes(req.method || 'GET') ? undefined : req as any,
+        });
+        res.writeHead(proxyRes.status, Object.fromEntries(proxyRes.headers.entries()));
+        if (proxyRes.body) {
+          const reader = proxyRes.body.getReader();
+          const pump = async () => {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              res.write(value);
+            }
+            res.end();
+          };
+          pump();
+        } else {
+          res.end(await proxyRes.text());
+        }
+      } catch (err) {
+        // Nuxt dev server not running — show helpful message
+        res.writeHead(502, { "Content-Type": "text/html" });
+        res.end(`<html><body style="background:#111;color:#aaa;font-family:monospace;padding:2em">
+          <h2>Forest UI not running</h2>
+          <p>Start the dev server: <code style="color:#4ade80">cd forest-ui && bun run dev</code></p>
+        </body></html>`);
+      }
+    })();
+    return;
+  }
+
   res.writeHead(404);
   res.end("Not found");
 });
@@ -3738,6 +3800,9 @@ console.log(`Project directory: ${PROJECT_DIR || "(relay working directory)"}`);
 console.log(`Agent mode: ${AGENT_MODE ? "ON" : "OFF"}${AGENT_MODE ? ` (tools: ${ALLOWED_TOOLS.join(", ")})` : ""}`);
 console.log(`Google Chat: ${gchatEnabled ? "ON" : "OFF"}`);
 console.log(`Outlook: ${outlookEnabled ? "ON (" + getOutlookEmail() + ")" : "OFF"}`);
+
+// Initialize ES forest sync (if configured)
+await initForestSync();
 
 // Start HTTP + WebSocket server
 httpServer.listen(HTTP_PORT, () => {
