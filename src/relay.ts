@@ -48,7 +48,6 @@ import {
 } from "./agent-router.ts";
 import { initClassifier } from "./intent-classifier.ts";
 import { initEntailmentClassifier } from "./entailment-classifier.ts";
-import { startSyncListener } from "./elasticsearch/sync-listener.ts";
 import { getStructuredContext, getAgentStructuredContext } from "./context-sources.ts";
 import {
   initOutlook,
@@ -1713,10 +1712,7 @@ if (anthropic) {
   initEntailmentClassifier(anthropic);
 }
 
-// Start ES forest sync listener (ELLIE-104) — pg_notify → Elasticsearch
-startSyncListener().catch((err) => {
-  console.warn("[relay] ES sync listener failed to start (non-fatal):", err);
-});
+// ES forest sync listener started via initForestSync() at boot (ELLIE-104/ELLIE-107)
 
 async function callClaudeVoice(systemPrompt: string, userMessage: string): Promise<string> {
   const start = Date.now();
