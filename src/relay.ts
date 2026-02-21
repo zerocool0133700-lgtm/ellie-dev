@@ -408,6 +408,12 @@ if (!(await acquireLock())) {
 
 export const bot = new Bot(BOT_TOKEN);
 
+// Notification policy context — used by notify() for dispatch confirms + error alerts (ELLIE-80)
+const GCHAT_SPACE_NOTIFY = process.env.GOOGLE_CHAT_SPACE_NAME || "";
+function getNotifyCtx(): NotifyContext {
+  return { bot, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY };
+}
+
 // Start approval expiry cleanup
 startExpiryCleanup();
 
@@ -572,6 +578,15 @@ async function callClaude(
           : "The process was terminated.";
 
         const partialOutput = output?.trim();
+
+        // Notify via policy engine — immediate alert on both channels (ELLIE-80)
+        notify(getNotifyCtx(), {
+          event: "error",
+          workItemId: "timeout",
+          telegramMessage: `⚠️ Task timed out after ${timeoutSec}s${forceKilled ? " (force-killed)" : ""}`,
+          gchatMessage: `⚠️ Task timed out after ${timeoutSec}s. ${processStatus}${partialOutput ? `\nPartial: ${partialOutput.substring(0, 300)}` : ""}`,
+        }).catch((err) => console.error("[notify] timeout error:", err.message));
+
         let message = `Task timed out after ${timeoutSec}s. ${processStatus}`;
 
         if (partialOutput) {
@@ -590,6 +605,15 @@ async function callClaude(
       if (exitCode === 143) {
         broadcastExtension({ type: "error", source: "callClaude", message: "SIGTERM (exit 143) — service restart or external kill" });
         const partialOutput = output?.trim();
+
+        // Notify via policy engine — immediate alert on both channels (ELLIE-80)
+        notify(getNotifyCtx(), {
+          event: "error",
+          workItemId: "sigterm",
+          telegramMessage: "⚠️ Process interrupted (SIGTERM)",
+          gchatMessage: `⚠️ Process interrupted (SIGTERM — exit 143).${partialOutput ? `\nPartial: ${partialOutput.substring(0, 300)}` : ""}`,
+        }).catch((err) => console.error("[notify] sigterm error:", err.message));
+
         let message = "I got interrupted while working on this (the service was restarted or the process was terminated externally).";
         if (partialOutput) {
           const preview = partialOutput.length > 500
@@ -600,6 +624,14 @@ async function callClaude(
         message += "\n\nWant me to try again?";
         return message;
       }
+
+      // Notify via policy engine — unexpected exit (ELLIE-80)
+      notify(getNotifyCtx(), {
+        event: "error",
+        workItemId: "exit-error",
+        telegramMessage: `⚠️ Claude exited with code ${exitCode}`,
+        gchatMessage: `⚠️ Claude exited with code ${exitCode}${stderr ? `: ${stderr.substring(0, 200)}` : ""}`,
+      }).catch((err) => console.error("[notify] exit error:", err.message));
 
       return `Error: ${stderr || "Claude exited with code " + exitCode}`;
     }
@@ -786,9 +818,15 @@ bot.on("message:text", withQueue(async (ctx) => {
     setActiveAgent("telegram", agentResult.dispatch.agent.name);
     broadcastExtension({ type: "route", channel: "telegram", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode, confidence: agentResult.route.confidence });
 
-    // Dispatch confirmation — fire BEFORE Claude call (ELLIE-80)
+    // Dispatch confirmation — routed through notification policy (ELLIE-80)
     if (agentResult.dispatch.agent.name !== "general" && agentResult.dispatch.is_new) {
-      await ctx.reply(`\u{1F916} ${agentResult.dispatch.agent.name} agent`);
+      const agentName = agentResult.dispatch.agent.name;
+      notify(getNotifyCtx(), {
+        event: "dispatch_confirm",
+        workItemId: agentName,
+        telegramMessage: `🤖 ${agentName} agent`,
+        gchatMessage: `🤖 ${agentName} agent dispatched`,
+      }).catch((err) => console.error("[notify] dispatch_confirm:", err.message));
     }
   }
 
@@ -2153,6 +2191,17 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
         if (gchatAgentResult) {
           setActiveAgent("google-chat", gchatAgentResult.dispatch.agent.name);
           broadcastExtension({ type: "route", channel: "google-chat", agent: gchatAgentResult.dispatch.agent.name, mode: gchatAgentResult.route.execution_mode });
+
+          // Dispatch confirmation — routed through notification policy (ELLIE-80)
+          if (gchatAgentResult.dispatch.agent.name !== "general" && gchatAgentResult.dispatch.is_new) {
+            const agentName = gchatAgentResult.dispatch.agent.name;
+            notify(getNotifyCtx(), {
+              event: "dispatch_confirm",
+              workItemId: agentName,
+              telegramMessage: `🤖 ${agentName} agent`,
+              gchatMessage: `🤖 ${agentName} agent dispatched`,
+            }).catch((err) => console.error("[notify] dispatch_confirm:", err.message));
+          }
         }
 
         const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext] = await Promise.all([

@@ -313,3 +313,12 @@ export function getEnabledChannels(event: NotificationEvent): NotificationChanne
     .filter(([, p]) => p.enabled)
     .map(([ch]) => ch);
 }
+
+/**
+ * Reset throttle state — for testing only.
+ */
+export function resetThrottleState(): void {
+  lastSent.clear();
+  for (const { timer } of pendingBatch.values()) clearTimeout(timer);
+  pendingBatch.clear();
+}
