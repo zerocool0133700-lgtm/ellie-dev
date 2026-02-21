@@ -55,7 +55,7 @@ export async function getForestContext(
   query: string,
   options?: { limit?: number; forceSearch?: boolean }
 ): Promise<string> {
-  if (!process.env.ELASTICSEARCH_URL) return "";
+  if (!process.env.ELASTICSEARCH_URL || process.env.ELASTICSEARCH_ENABLED === "false") return "";
 
   // Skip forest search for messages that aren't forest-relevant
   if (!options?.forceSearch && !shouldSearchForest(query)) return "";
@@ -77,8 +77,8 @@ export async function getForestContext(
  * Call this once during relay startup.
  */
 export async function initForestSync(): Promise<void> {
-  if (!process.env.ELASTICSEARCH_URL) {
-    console.log("[es-forest] ELASTICSEARCH_URL not set, forest ES disabled");
+  if (!process.env.ELASTICSEARCH_URL || process.env.ELASTICSEARCH_ENABLED === "false") {
+    console.log("[es-forest] Elasticsearch disabled (ELASTICSEARCH_URL not set or ELASTICSEARCH_ENABLED=false)");
     return;
   }
 

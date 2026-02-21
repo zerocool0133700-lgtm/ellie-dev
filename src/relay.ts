@@ -748,6 +748,37 @@ bot.on("message:text", withQueue(async (ctx) => {
   await saveMessage("user", text);
   broadcastExtension({ type: "message_in", channel: "telegram", preview: text.substring(0, 200) });
 
+  // Slash commands — direct responses, bypass Claude pipeline (ELLIE-113)
+  if (text.startsWith("/search ")) {
+    const query = text.slice(8).trim();
+    if (!query) { await ctx.reply("Usage: /search <query>"); return; }
+    try {
+      const { searchForestSafe } = await import("./elasticsearch/search-forest.ts");
+      const results = await searchForestSafe(query, { limit: 10 });
+      await sendResponse(ctx, results || "No results found.");
+    } catch (err) {
+      console.error("[/search] Error:", err);
+      await ctx.reply("Search failed — ES may be unavailable.");
+    }
+    return;
+  }
+
+  if (text === "/forest-metrics" || text.startsWith("/forest-metrics ")) {
+    try {
+      const { getForestMetricsSafe } = await import("./elasticsearch/search-forest.ts");
+      const now = new Date();
+      const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      const metrics = await getForestMetricsSafe({
+        timeRange: { from: weekAgo.toISOString(), to: now.toISOString() },
+      });
+      await sendResponse(ctx, formatForestMetrics(metrics));
+    } catch (err) {
+      console.error("[/forest-metrics] Error:", err);
+      await ctx.reply("Metrics failed — ES may be unavailable.");
+    }
+    return;
+  }
+
   // Route message to appropriate agent via LLM classifier (falls back gracefully)
   const agentResult = await routeAndDispatch(supabase, text, "telegram", userId);
   const effectiveText = agentResult?.route.strippedMessage || text;
@@ -1377,6 +1408,37 @@ export function buildPrompt(
   return parts.join("\n");
 }
 
+// Format forest metrics for chat display (ELLIE-113)
+function formatForestMetrics(m: { creaturesByEntity: Record<string, number>; eventsByKind: Record<string, number>; treesByType: Record<string, number>; creaturesByState: Record<string, number>; failureRate: number; totalEvents: number; totalCreatures: number; totalTrees: number }): string {
+  const lines = ["Forest Metrics (last 7 days)\n"];
+
+  lines.push(`Events: ${m.totalEvents} | Creatures: ${m.totalCreatures} | Trees: ${m.totalTrees}`);
+  lines.push(`Failure rate: ${(m.failureRate * 100).toFixed(1)}%`);
+
+  if (Object.keys(m.creaturesByEntity).length) {
+    lines.push("\nCreatures by entity:");
+    for (const [entity, count] of Object.entries(m.creaturesByEntity).sort((a, b) => b[1] - a[1])) {
+      lines.push(`  ${entity}: ${count}`);
+    }
+  }
+
+  if (Object.keys(m.eventsByKind).length) {
+    lines.push("\nEvents by kind:");
+    for (const [kind, count] of Object.entries(m.eventsByKind).sort((a, b) => b[1] - a[1]).slice(0, 15)) {
+      lines.push(`  ${kind}: ${count}`);
+    }
+  }
+
+  if (Object.keys(m.creaturesByState).length) {
+    lines.push("\nCreatures by state:");
+    for (const [state, count] of Object.entries(m.creaturesByState).sort((a, b) => b[1] - a[1])) {
+      lines.push(`  ${state}: ${count}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
 async function sendResponse(ctx: Context, response: string): Promise<void> {
   const MAX_LENGTH = 4000;
   const FILE_THRESHOLD = 8000;
@@ -1818,6 +1880,7 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
     if (contextDocket) systemParts.push(`\n${contextDocket}`);
     if (relevantContext) systemParts.push(`\n${relevantContext}`);
     if (elasticContext) systemParts.push(`\n${elasticContext}`);
+    if (forestContext) systemParts.push(`\n${forestContext}`);
 
     const systemPrompt = systemParts.join("\n");
 
@@ -2043,6 +2106,47 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           space: parsed.spaceName,
         }, "google-chat");
         broadcastExtension({ type: "message_in", channel: "google-chat", preview: parsed.text.substring(0, 200) });
+
+        // Slash commands — direct responses, bypass Claude pipeline (ELLIE-113)
+        if (parsed.text.startsWith("/search ")) {
+          const query = parsed.text.slice(8).trim();
+          let responseText = "Usage: /search <query>";
+          if (query) {
+            try {
+              const { searchForestSafe } = await import("./elasticsearch/search-forest.ts");
+              responseText = (await searchForestSafe(query, { limit: 10 })) || "No results found.";
+            } catch (err) {
+              console.error("[gchat /search] Error:", err);
+              responseText = "Search failed — ES may be unavailable.";
+            }
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            hostAppDataAction: { chatDataAction: { createMessageAction: { message: { text: responseText } } } },
+          }));
+          return;
+        }
+
+        if (parsed.text === "/forest-metrics" || parsed.text.startsWith("/forest-metrics ")) {
+          let responseText: string;
+          try {
+            const { getForestMetricsSafe } = await import("./elasticsearch/search-forest.ts");
+            const now = new Date();
+            const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+            const metrics = await getForestMetricsSafe({
+              timeRange: { from: weekAgo.toISOString(), to: now.toISOString() },
+            });
+            responseText = formatForestMetrics(metrics);
+          } catch (err) {
+            console.error("[gchat /forest-metrics] Error:", err);
+            responseText = "Metrics failed — ES may be unavailable.";
+          }
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            hostAppDataAction: { chatDataAction: { createMessageAction: { message: { text: responseText } } } },
+          }));
+          return;
+        }
 
         const gchatAgentResult = await routeAndDispatch(supabase, parsed.text, "google-chat", parsed.senderEmail);
         const effectiveGchatText = gchatAgentResult?.route.strippedMessage || parsed.text;
