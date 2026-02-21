@@ -3101,6 +3101,89 @@ If no actionable ideas are found, return: { "ideas": [] }`;
     return;
   }
 
+  // Forest ES search, metrics & suggest endpoints (ELLIE-105)
+  if (url.pathname.startsWith("/forest/api/") && req.method === "GET") {
+    (async () => {
+      try {
+        const endpoint = url.pathname.replace("/forest/api/", "");
+        const { searchForest, getForestMetrics, suggestTreeNames } =
+          await import("./elasticsearch/search-forest.ts");
+        const { withBreaker } = await import("./elasticsearch/circuit-breaker.ts");
+
+        switch (endpoint) {
+          case "search": {
+            const q = url.searchParams.get("q") || "";
+            if (!q) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "Missing required query parameter: q" }));
+              return;
+            }
+            const indices = url.searchParams.get("indices")?.split(",").filter(Boolean) as any;
+            const limit = parseInt(url.searchParams.get("limit") || "20", 10);
+            const results = await withBreaker(
+              () => searchForest(q, {
+                indices,
+                limit,
+                filters: {
+                  treeType: url.searchParams.get("types") || undefined,
+                  entityName: url.searchParams.get("entities") || undefined,
+                  state: url.searchParams.get("states") || undefined,
+                  dateFrom: url.searchParams.get("from") || undefined,
+                  dateTo: url.searchParams.get("to") || undefined,
+                },
+              }),
+              []
+            );
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ results, count: results.length }));
+            break;
+          }
+
+          case "metrics": {
+            const metrics = await withBreaker(
+              () => getForestMetrics({
+                timeRange: url.searchParams.get("from") && url.searchParams.get("to")
+                  ? { from: url.searchParams.get("from")!, to: url.searchParams.get("to")! }
+                  : undefined,
+                entityNames: url.searchParams.get("entities")?.split(",").filter(Boolean),
+              }),
+              {
+                creaturesByEntity: {}, eventsByKind: {}, treesByType: {},
+                creaturesByState: {}, failureRate: 0,
+                totalEvents: 0, totalCreatures: 0, totalTrees: 0,
+              }
+            );
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(metrics));
+            break;
+          }
+
+          case "suggest": {
+            const q = url.searchParams.get("q") || "";
+            if (!q) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "Missing required query parameter: q" }));
+              return;
+            }
+            const suggestions = await withBreaker(() => suggestTreeNames(q), []);
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ suggestions }));
+            break;
+          }
+
+          default:
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Unknown forest API endpoint" }));
+        }
+      } catch (err) {
+        console.error("[forest-api] Error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
   // Agent registry endpoints (ELLIE-91)
   if (url.pathname.startsWith("/api/agents") || url.pathname === "/api/capabilities") {
     (async () => {
