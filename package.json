@@ -15,6 +15,7 @@
     "setup:verify": "bun run setup/verify.ts",
     "consolidate": "bun run src/consolidate-memory.ts",
     "sync:es": "bun run src/sync-es.ts",
+    "sync:es:forest": "bun run scripts/es-backfill-forest.ts",
     "work:start": "bun run scripts/work-session-start.ts",
     "security:sweep": "bun run scripts/security-sweep.ts",
     "prove:memory": "bun run scripts/prove-shared-memory.ts",
@@ -31,6 +32,7 @@
     "grammy": "^1.40.0",
     "groq-sdk": "^0.8.0",
     "playwright-core": "^1.58.2",
+    "postgres": "^3.4.8",
     "twilio": "^5.12.1",
     "ws": "^8.19.0"
   },
