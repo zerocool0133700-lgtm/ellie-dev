@@ -10,7 +10,7 @@
 import { Bot, Context, InputFile, InlineKeyboard } from "grammy";
 import { spawn } from "bun";
 import { createHmac } from "crypto";
-import { writeFile, mkdir, readFile, unlink } from "fs/promises";
+import { writeFile, appendFile, mkdir, readFile, unlink } from "fs/promises";
 import { join, dirname } from "path";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { createServer, IncomingMessage, ServerResponse } from "http";
@@ -263,6 +263,15 @@ function resetGchatIdleTimer(): void {
   gchatIdleTimer = setTimeout(() => {
     console.log("[consolidate] Google Chat idle for 10 minutes — consolidating...");
     triggerConsolidation("google-chat");
+  }, TELEGRAM_IDLE_MS);
+}
+
+let laCommsIdleTimer: ReturnType<typeof setTimeout> | null = null;
+function resetLaCommsIdleTimer(): void {
+  if (laCommsIdleTimer) clearTimeout(laCommsIdleTimer);
+  laCommsIdleTimer = setTimeout(() => {
+    console.log("[consolidate] LA Comms idle for 10 minutes — consolidating...");
+    triggerConsolidation("la-comms");
   }, TELEGRAM_IDLE_MS);
 }
 
@@ -1319,7 +1328,7 @@ export function buildPrompt(
   skillContext?: { name: string; description: string },
   forestContext?: string,
 ): string {
-  const channelLabel = channel === "google-chat" ? "Google Chat" : "Telegram";
+  const channelLabel = channel === "google-chat" ? "Google Chat" : channel === "la-comms" ? "LA Comms (dashboard)" : "Telegram";
 
   // Use agent-specific system prompt if available, otherwise default
   const basePrompt = agentConfig?.system_prompt
@@ -2677,6 +2686,44 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     return;
   }
 
+  // TTS endpoint — returns OGG audio for dashboard playback
+  if (url.pathname === "/api/tts" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const authKey = req.headers["x-api-key"] as string;
+        if (!authKey || authKey !== EXTENSION_API_KEY || !EXTENSION_API_KEY) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Unauthorized" }));
+          return;
+        }
+        const data = JSON.parse(body);
+        if (!data.text || typeof data.text !== "string") {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing 'text' field" }));
+          return;
+        }
+        const audioBuffer = await textToSpeechOgg(data.text);
+        if (!audioBuffer) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "TTS unavailable" }));
+          return;
+        }
+        res.writeHead(200, {
+          "Content-Type": "audio/ogg",
+          "Content-Length": audioBuffer.length.toString(),
+        });
+        res.end(audioBuffer);
+      } catch (err: any) {
+        console.error("[tts] API error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(err) }));
+      }
+    });
+    return;
+  }
+
   // Token health check — tests Anthropic API key validity
   if (url.pathname === "/api/token-health") {
     (async () => {
@@ -3921,6 +3968,10 @@ httpServer.on("upgrade", (req, socket, head) => {
     extensionWss.handleUpgrade(req, socket, head, (ws) => {
       extensionWss.emit("connection", ws, req);
     });
+  } else if (pathname === "/la-comms") {
+    laCommsWss.handleUpgrade(req, socket, head, (ws) => {
+      laCommsWss.emit("connection", ws, req);
+    });
   } else {
     socket.destroy();
   }
@@ -3955,6 +4006,16 @@ extensionWss.on("connection", (ws: WebSocket) => {
 
       // Handle pong from client keepalive
       if (msg.type === "pong") return;
+
+      // Save feed to log file
+      if (msg.type === "save_feed" && msg.content) {
+        const logPath = `${import.meta.dir}/../logs/ellie-feed-log`;
+        const header = `\n--- Feed saved ${new Date().toISOString()} ---\n`;
+        appendFile(logPath, header + msg.content + "\n")
+          .then(() => console.log(`[extension] Feed saved to ${logPath}`))
+          .catch((err) => console.error(`[extension] Failed to save feed:`, err.message));
+        return;
+      }
     } catch {
       // Ignore parse errors
     }
@@ -3985,6 +4046,159 @@ setInterval(() => {
     }
   }
 }, 30_000);
+
+// ============================================================
+// LA COMMS — Dashboard WebSocket Chat
+// ============================================================
+
+const laCommsWss = new WebSocketServer({ noServer: true });
+const laCommsClients = new Set<WebSocket>();
+
+laCommsWss.on("connection", (ws: WebSocket) => {
+  let authenticated = false;
+
+  const authTimer = setTimeout(() => {
+    if (!authenticated) ws.close(4001, "Auth timeout");
+  }, 5000);
+
+  ws.on("message", (data: Buffer | string) => {
+    try {
+      const msg = JSON.parse(data.toString());
+
+      if (!authenticated) {
+        if (msg.type === "auth" && msg.key === EXTENSION_API_KEY && EXTENSION_API_KEY) {
+          authenticated = true;
+          clearTimeout(authTimer);
+          laCommsClients.add(ws);
+          ws.send(JSON.stringify({ type: "auth_ok", ts: Date.now() }));
+          console.log(`[la-comms] Client authenticated (${laCommsClients.size} connected)`);
+        } else {
+          ws.close(4003, "Invalid key");
+        }
+        return;
+      }
+
+      if (msg.type === "pong") return;
+
+      if (msg.type === "message" && msg.text) {
+        handleLaCommsMessage(ws, msg.text);
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  });
+
+  ws.on("close", () => {
+    clearTimeout(authTimer);
+    laCommsClients.delete(ws);
+    if (authenticated) {
+      console.log(`[la-comms] Client disconnected (${laCommsClients.size} connected)`);
+    }
+  });
+
+  ws.on("error", () => {
+    clearTimeout(authTimer);
+    laCommsClients.delete(ws);
+  });
+});
+
+// Server-side ping every 30s
+setInterval(() => {
+  const ping = JSON.stringify({ type: "ping", ts: Date.now() });
+  for (const ws of laCommsClients) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(ping);
+    } else {
+      laCommsClients.delete(ws);
+    }
+  }
+}, 30_000);
+
+async function handleLaCommsMessage(ws: WebSocket, text: string): Promise<void> {
+  console.log(`[la-comms] User: ${text.substring(0, 80)}...`);
+  acknowledgeChannel("la-comms");
+
+  await saveMessage("user", text, {}, "la-comms");
+  broadcastExtension({ type: "message_in", channel: "la-comms", preview: text.substring(0, 200) });
+
+  // Send typing indicator
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "typing", ts: Date.now() }));
+  }
+
+  await enqueue(async () => {
+    const agentResult = await routeAndDispatch(supabase, text, "la-comms", "dashboard");
+    const effectiveText = agentResult?.route.strippedMessage || text;
+    if (agentResult) {
+      setActiveAgent("la-comms", agentResult.dispatch.agent.name);
+      broadcastExtension({
+        type: "route", channel: "la-comms",
+        agent: agentResult.dispatch.agent.name,
+        mode: agentResult.route.execution_mode,
+      });
+    }
+
+    const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext] = await Promise.all([
+      getContextDocket(),
+      getRelevantContext(supabase, effectiveText),
+      searchElastic(effectiveText, { limit: 5, recencyBoost: true }),
+      getAgentStructuredContext(supabase, getActiveAgent("la-comms")),
+      getRecentMessages(supabase),
+      getForestContext(effectiveText),
+    ]);
+
+    const enrichedPrompt = buildPrompt(
+      effectiveText, contextDocket, relevantContext, elasticContext, "la-comms",
+      agentResult?.dispatch.agent ? {
+        system_prompt: agentResult.dispatch.agent.system_prompt,
+        name: agentResult.dispatch.agent.name,
+        tools_enabled: agentResult.dispatch.agent.tools_enabled,
+      } : undefined,
+      undefined, structuredContext, recentMessages,
+      agentResult?.dispatch.skill_context,
+      forestContext,
+    );
+
+    const agentTools = agentResult?.dispatch.agent.tools_enabled;
+    const agentModel = agentResult?.dispatch.agent.model;
+    const startTime = Date.now();
+
+    const rawResponse = await callClaude(enrichedPrompt, {
+      resume: true,
+      allowedTools: agentTools?.length ? agentTools : undefined,
+      model: agentModel || undefined,
+    });
+    const durationMs = Date.now() - startTime;
+
+    const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general");
+    const { cleanedText } = extractApprovalTags(response);
+
+    await saveMessage("assistant", cleanedText, {}, "la-comms");
+    broadcastExtension({
+      type: "message_out", channel: "la-comms",
+      agent: agentResult?.dispatch.agent.name || "general",
+      preview: cleanedText.substring(0, 200),
+    });
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "response",
+        text: cleanedText,
+        agent: agentResult?.dispatch.agent.name || "general",
+        ts: Date.now(),
+        duration_ms: durationMs,
+      }));
+    }
+
+    if (agentResult) {
+      syncResponse(supabase, agentResult.dispatch.session_id, cleanedText, {
+        duration_ms: durationMs,
+      }).catch(() => {});
+    }
+
+    resetLaCommsIdleTimer();
+  }, "la-comms", text.substring(0, 100));
+}
 
 /** Fire-and-forget broadcast to all connected extension clients. */
 function broadcastExtension(event: Record<string, any>): void {
@@ -4041,6 +4255,7 @@ httpServer.listen(HTTP_PORT, () => {
   console.log(`[http] Server listening on port ${HTTP_PORT}`);
   console.log(`[voice] WebSocket: ws://localhost:${HTTP_PORT}/media-stream`);
   console.log(`[extension] WebSocket: ws://localhost:${HTTP_PORT}/extension`);
+  console.log(`[la-comms] WebSocket: ws://localhost:${HTTP_PORT}/la-comms`);
   console.log(`[voice] TwiML webhook: http://localhost:${HTTP_PORT}/voice`);
   if (PUBLIC_URL) {
     console.log(`[voice] Public URL: ${PUBLIC_URL}`);
