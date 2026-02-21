@@ -1771,6 +1771,31 @@ async function textToSpeechOgg(text: string): Promise<Buffer | null> {
   return Buffer.from(await response.arrayBuffer());
 }
 
+/** Low-bandwidth TTS for phone conversation mode (mp3_22050_32 — ~4x smaller than opus_48000_64). */
+async function textToSpeechFast(text: string): Promise<Buffer | null> {
+  if (!ELEVENLABS_API_KEY) return null;
+
+  const response = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}?output_format=mp3_22050_32`,
+    {
+      method: "POST",
+      headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        model_id: "eleven_turbo_v2_5",
+        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    console.error("[tts] ElevenLabs fast error:", response.status, await response.text());
+    return null;
+  }
+
+  return Buffer.from(await response.arrayBuffer());
+}
+
 // ============================================================
 // VOICE: Call session + audio processing
 // ============================================================
@@ -2704,14 +2729,18 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           res.end(JSON.stringify({ error: "Missing 'text' field" }));
           return;
         }
-        const audioBuffer = await textToSpeechOgg(data.text);
+        const fast = data.fast === true || url.searchParams.get("fast") === "1";
+        const audioBuffer = fast
+          ? await textToSpeechFast(data.text)
+          : await textToSpeechOgg(data.text);
         if (!audioBuffer) {
           res.writeHead(503, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "TTS unavailable" }));
           return;
         }
+        const contentType = fast ? "audio/mpeg" : "audio/ogg";
         res.writeHead(200, {
-          "Content-Type": "audio/ogg",
+          "Content-Type": contentType,
           "Content-Length": audioBuffer.length.toString(),
         });
         res.end(audioBuffer);
@@ -4160,7 +4189,7 @@ laCommsWss.on("connection", (ws: WebSocket) => {
       if (msg.type === "pong") return;
 
       if (msg.type === "message" && msg.text) {
-        handleLaCommsMessage(ws, msg.text);
+        handleLaCommsMessage(ws, msg.text, !!msg.phone_mode);
       }
     } catch {
       // Ignore parse errors
@@ -4193,8 +4222,11 @@ setInterval(() => {
   }
 }, 30_000);
 
-async function handleLaCommsMessage(ws: WebSocket, text: string): Promise<void> {
-  console.log(`[la-comms] User: ${text.substring(0, 80)}...`);
+// Phone mode conversation history (6-turn window, mirroring voice call pattern)
+const laCommsPhoneHistory: Array<{ role: string; content: string }> = [];
+
+async function handleLaCommsMessage(ws: WebSocket, text: string, phoneMode: boolean = false): Promise<void> {
+  console.log(`[la-comms] User${phoneMode ? " (phone)" : ""}: ${text.substring(0, 80)}...`);
   acknowledgeChannel("la-comms");
 
   await saveMessage("user", text, {}, "la-comms");
@@ -4205,6 +4237,72 @@ async function handleLaCommsMessage(ws: WebSocket, text: string): Promise<void> 
     ws.send(JSON.stringify({ type: "typing", ts: Date.now() }));
   }
 
+  if (phoneMode) {
+    // ── Phone mode fast path: 6-turn context, Haiku, brevity prompt, no agent routing ──
+    await enqueue(async () => {
+      laCommsPhoneHistory.push({ role: "user", content: text });
+
+      const conversationContext = laCommsPhoneHistory
+        .slice(-6)
+        .map(m => `${m.role}: ${m.content}`)
+        .join("\n");
+
+      // Lightweight context — skip structured context, recent messages, agent routing
+      const [contextDocket, relevantContext, elasticContext] = await Promise.all([
+        getContextDocket(),
+        getRelevantContext(supabase, text),
+        searchElastic(text, { limit: 3, recencyBoost: true }),
+      ]);
+
+      const systemParts = [
+        "You are Ellie, Dave's AI assistant. You are in a VOICE CONVERSATION via the dashboard.",
+        "Keep responses SHORT and natural for speech — 1-3 sentences max.",
+        "No markdown, no bullet points, no formatting. Just spoken words.",
+        "Be warm and conversational, like talking to a friend.",
+      ];
+      if (USER_NAME) systemParts.push(`You are speaking with ${USER_NAME}.`);
+      if (contextDocket) systemParts.push(`\n${contextDocket}`);
+      if (relevantContext) systemParts.push(`\n${relevantContext}`);
+      if (elasticContext) systemParts.push(`\n${elasticContext}`);
+
+      const systemPrompt = systemParts.join("\n");
+      const userPrompt = conversationContext
+        ? `Conversation so far:\n${conversationContext}\n\nDave just said: ${text}`
+        : `Dave said: ${text}`;
+
+      const startTime = Date.now();
+      const rawResponse = await callClaudeVoice(systemPrompt, userPrompt);
+      const durationMs = Date.now() - startTime;
+
+      const cleanedText = rawResponse.trim();
+      laCommsPhoneHistory.push({ role: "assistant", content: cleanedText });
+
+      // Cap history at 20 entries to prevent memory growth
+      if (laCommsPhoneHistory.length > 20) laCommsPhoneHistory.splice(0, laCommsPhoneHistory.length - 20);
+
+      await saveMessage("assistant", cleanedText, {}, "la-comms");
+      broadcastExtension({
+        type: "message_out", channel: "la-comms",
+        agent: "general",
+        preview: cleanedText.substring(0, 200),
+      });
+
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: "response",
+          text: cleanedText,
+          agent: "general",
+          ts: Date.now(),
+          duration_ms: durationMs,
+        }));
+      }
+
+      resetLaCommsIdleTimer();
+    }, "la-comms", text.substring(0, 100));
+    return;
+  }
+
+  // ── Normal text mode: full agent routing + context gathering ──
   await enqueue(async () => {
     const agentResult = await routeAndDispatch(supabase, text, "la-comms", "dashboard");
     const effectiveText = agentResult?.route.strippedMessage || text;
