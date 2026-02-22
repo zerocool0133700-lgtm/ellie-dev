@@ -100,7 +100,7 @@ export async function startWorkSession(req: any, res: any, bot: Bot, supabase?: 
       title, work_item_id,
       entity_names: entityNames,
     });
-    const { tree, trunk } = result;
+    const { tree, trunk, creatures, branches } = result;
     if ((result as any).resumed) {
       console.log(`[work-session:start] Resumed existing session ${tree.id} for ${work_item_id}`);
     }
@@ -130,11 +130,15 @@ export async function startWorkSession(req: any, res: any, bot: Bot, supabase?: 
       gchatMessage: gchatMsg,
     });
 
-    // Update Plane work item: set "In Progress" + add session comment
-    try {
-      await updateWorkItemOnSessionStart(work_item_id, tree.id);
-    } catch (planeError) {
-      console.warn('[work-session:start] Plane update failed (non-fatal):', planeError);
+    // Update Plane work item: set "In Progress" + add session comment (skip on resumed sessions)
+    if (!(result as any).resumed) {
+      try {
+        await updateWorkItemOnSessionStart(work_item_id, tree.id);
+      } catch (planeError) {
+        console.warn('[work-session:start] Plane update failed (non-fatal):', planeError);
+      }
+    } else {
+      console.log(`[work-session:start] Skipping Plane update — resumed session`);
     }
 
     return res.json({
@@ -142,7 +146,17 @@ export async function startWorkSession(req: any, res: any, bot: Bot, supabase?: 
       session_id: tree.id,
       tree_id: tree.id,
       work_item_id,
-      started_at: tree.created_at
+      started_at: tree.created_at,
+      branches: (branches ?? []).map((b: any) => ({
+        id: b.id,
+        name: b.name,
+        entity_id: b.entity_id,
+      })),
+      creatures: (creatures ?? []).map((c: any) => ({
+        id: c.id,
+        branch_id: c.branch_id,
+        entity_id: c.entity_id,
+      })),
     });
 
   } catch (error) {
@@ -322,20 +336,53 @@ export async function completeWorkSession(req: any, res: any, bot: Bot) {
       return res.status(404).json({ error: 'No active session found for this work item' });
     }
 
-    // Complete session in forest (merges branches, completes creatures, archives tree — transactional)
+    // Complete session in forest (merges branches, completes creatures, transitions to dormant)
     await forestCompleteSession(tree.id, summary);
 
-    // Update Plane work item: set "Done" + add completion comment
+    // Auto-deploy: if dashboard source is newer than build, rebuild and restart
     try {
-      await updateWorkItemOnSessionComplete(work_item_id, summary, "completed");
-    } catch (planeError) {
-      console.warn('[work-session:complete] Plane update failed (non-fatal):', planeError);
+      const { execSync } = await import('child_process');
+      const { statSync } = await import('fs');
+      const dashboardDir = '/home/ellie/ellie-home';
+      const buildMtime = statSync(`${dashboardDir}/.output/server/index.mjs`).mtimeMs;
+      // Check if any app/ source file is newer than the build
+      const newerFiles = execSync(
+        `find app/ -name '*.vue' -o -name '*.ts' | xargs stat -c '%Y %n' | awk '$1 > ${Math.floor(buildMtime / 1000)} {print $2}'`,
+        { cwd: dashboardDir, encoding: 'utf-8', timeout: 5000 }
+      ).trim();
+      if (newerFiles) {
+        console.log(`[work-session:complete] Auto-deploy: stale build detected (${newerFiles.split('\n').length} files newer)`);
+        execSync('bun run build', { cwd: dashboardDir, encoding: 'utf-8', timeout: 60000 });
+        console.log(`[work-session:complete] Auto-deploy: build done, restarting dashboard...`);
+        execSync('sudo systemctl restart ellie-dashboard', { encoding: 'utf-8', timeout: 10000 });
+        console.log(`[work-session:complete] Auto-deploy: dashboard restarted`);
+      } else {
+        console.log(`[work-session:complete] Auto-deploy: build is current, skipping`);
+      }
+    } catch (deployErr: any) {
+      console.warn('[work-session:complete] Auto-deploy failed (non-fatal):', deployErr?.message?.slice(0, 200));
     }
 
-    // Notify via policy engine (both channels for completion)
+    // Only update Plane if the most recent creature session had meaningful duration (>= 2 min)
+    // Use the creature's created_at, not the tree's — tree may have been created hours ago
+    const { default: forestSql } = await import('../../../ellie-forest/src/db');
+    const [lastCreature] = await forestSql<{ created_at: Date }[]>`
+      SELECT created_at FROM creatures WHERE tree_id = ${tree.id}
+      ORDER BY created_at DESC LIMIT 1
+    `;
+    const sessionStart = lastCreature?.created_at || tree.created_at;
     const duration = Math.round(
-      (new Date().getTime() - new Date(tree.created_at).getTime()) / 1000 / 60
+      (new Date().getTime() - new Date(sessionStart).getTime()) / 1000 / 60
     );
+    if (duration >= 2) {
+      try {
+        await updateWorkItemOnSessionComplete(work_item_id, summary, "completed");
+      } catch (planeError) {
+        console.warn('[work-session:complete] Plane update failed (non-fatal):', planeError);
+      }
+    } else {
+      console.log(`[work-session:complete] Skipping Plane update — session too short (${duration}min)`);
+    }
 
     const escapeMarkdown = (text: string) => text.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
     const telegramMsg = [

@@ -411,6 +411,7 @@ export async function processMemoryIntents(
   response: string,
   sourceAgent: string = "general",
   defaultVisibility: "private" | "shared" | "global" = "shared",
+  forestSessionIds?: { tree_id: string; branch_id?: string; creature_id?: string; entity_id?: string },
 ): Promise<string> {
   if (!supabase) return response;
 
@@ -489,6 +490,37 @@ export async function processMemoryIntents(
         .eq("id", data[0].id);
     }
     clean = clean.replace(match[0], "");
+  }
+
+  // [MEMORY:] tags → forest shared memories
+  if (forestSessionIds?.tree_id) {
+    console.log(`[memory] Forest session active — tree: ${forestSessionIds.tree_id.slice(0, 8)}, scanning for [MEMORY:] tags`);
+    const memoryRegex = /\[MEMORY:(?:(\w+):)?(?:([\d.]+):)?\s*(.+?)\]/gi;
+    const memoryMatches = [...response.matchAll(memoryRegex)];
+    if (memoryMatches.length === 0) {
+      console.log(`[memory] No [MEMORY:] tags found in response (${response.length} chars)`);
+    }
+    for (const match of memoryMatches) {
+      const memType = match[1] || 'finding';
+      const confidence = match[2] ? parseFloat(match[2]) : 0.7;
+      const content = match[3];
+      try {
+        const { writeCreatureMemory } = await import('../../ellie-forest/src/index');
+        await writeCreatureMemory({
+          creature_id: forestSessionIds.creature_id ?? undefined as any,
+          tree_id: forestSessionIds.tree_id,
+          branch_id: forestSessionIds.branch_id,
+          entity_id: forestSessionIds.entity_id,
+          content,
+          type: memType as any,
+          confidence,
+        });
+        console.log(`[memory] Forest memory: [${memType}:${confidence}] ${content.slice(0, 60)}...`);
+      } catch (err) {
+        console.warn('[memory] Forest memory write failed:', err);
+      }
+      clean = clean.replace(match[0], '');
+    }
   }
 
   return clean.trim();

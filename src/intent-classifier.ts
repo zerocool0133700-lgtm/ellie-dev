@@ -432,7 +432,7 @@ async function getAgentDescriptions(): Promise<AgentDescription[]> {
 
   // Primary: fetch from forest DB (canonical agent registry)
   try {
-    const { listAgents } = await import('../../../ellie-forest/src/index');
+    const { listAgents } = await import('../../ellie-forest/src/index');
     const agents = await listAgents({ status: 'active' });
     _agentCache = agents.map((a) => ({
       name: a.name,

@@ -9,6 +9,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { listOpenIssues, isPlaneConfigured } from "./plane.ts";
 
+const USER_TIMEZONE = process.env.USER_TIMEZONE || "America/Chicago";
+
 // ============================================================
 // PLANE: Open Work Items
 // ============================================================
@@ -223,7 +225,7 @@ export async function getRecentConversations(
         day: "numeric",
         hour: "numeric",
         minute: "2-digit",
-        timeZone: "America/Chicago",
+        timeZone: USER_TIMEZONE,
       });
       const channel = c.channel || "telegram";
       const status = c.status || "closed";
@@ -385,12 +387,12 @@ async function getCalendarForAccount(account: GoogleAccount): Promise<{ label: s
     const time = isAllDay
       ? new Date(start).toLocaleDateString("en-US", {
           weekday: "short", month: "short", day: "numeric",
-          timeZone: "America/Chicago",
+          timeZone: USER_TIMEZONE,
         })
       : new Date(start).toLocaleString("en-US", {
           weekday: "short", month: "short", day: "numeric",
           hour: "numeric", minute: "2-digit",
-          timeZone: "America/Chicago",
+          timeZone: USER_TIMEZONE,
         });
     const location = e.location ? ` @ ${e.location}` : "";
     return `- ${time}: ${e.summary || "(no title)"}${location}`;
@@ -571,7 +573,7 @@ async function getGoogleTasksForAccount(account: GoogleAccount): Promise<string>
       ? ` (due ${new Date(t.due).toLocaleDateString("en-US", {
           month: "short",
           day: "numeric",
-          timeZone: "America/Chicago",
+          timeZone: USER_TIMEZONE,
         })})`
       : "";
     const notes = t.notes ? ` — ${t.notes.substring(0, 50)}` : "";
@@ -696,7 +698,7 @@ export async function getAgentStructuredContext(
   // Load agent profile from forest DB
   let profile: { sources?: string[] | 'all'; priority?: string[]; exclude?: string[] } = {};
   try {
-    const { getAgent } = await import('../../../ellie-forest/src/index');
+    const { getAgent } = await import('../../ellie-forest/src/index');
     const agent = await getAgent(agentName);
     if (agent?.context_profile) {
       profile = agent.context_profile as typeof profile;
@@ -750,4 +752,127 @@ export async function getStructuredContext(
   supabase: SupabaseClient | null,
 ): Promise<string> {
   return getAgentStructuredContext(supabase, 'general');
+}
+
+// ============================================================
+// AGENT MEMORY CONTEXT (ELLIE-136)
+// ============================================================
+
+/** Model-based memory limits — smaller models get fewer memories to stay within context */
+export function getMaxMemoriesForModel(model?: string | null): number {
+  if (!model) return 15;
+  if (model.includes('haiku')) return 8;
+  if (model.includes('sonnet')) return 15;
+  return 20; // opus and other large models
+}
+
+/** Agent name → forest entity name mapping */
+const AGENT_ENTITY_MAP: Record<string, string> = {
+  dev: 'dev_agent', research: 'research_agent', critic: 'critic_agent',
+  content: 'content_agent', finance: 'finance_agent', strategy: 'strategy_agent',
+  general: 'general_agent',
+};
+
+export interface AgentSessionContext {
+  /** Formatted memory text for prompt injection */
+  memoryContext: string;
+  /** Active session IDs for memory write protocol */
+  sessionIds?: {
+    tree_id: string;
+    branch_id?: string;
+    creature_id?: string;
+    entity_id?: string;
+    work_item_id?: string;
+  };
+}
+
+/**
+ * Retrieve agent memory context from the forest for prompt injection.
+ * Looks up the agent's entity, finds active forest tree (by work item or most recent),
+ * calls getAgentContext() for compounding memories, and returns session IDs for writes.
+ */
+export async function getAgentMemoryContext(
+  agentName: string,
+  workItemId?: string,
+  maxMemories?: number,
+): Promise<AgentSessionContext> {
+  const empty: AgentSessionContext = { memoryContext: '' };
+
+  try {
+    const {
+      getAgentContext, getEntity, getWorkSessionByPlaneId,
+    } = await import('../../ellie-forest/src/index');
+
+    // Resolve entity
+    const entityName = AGENT_ENTITY_MAP[agentName] ?? agentName;
+    const entity = await getEntity(entityName);
+    if (!entity) return empty;
+
+    // Find active tree — prefer explicit work item ID, fall back to growing tree for this entity
+    let tree: any = null;
+    if (workItemId) {
+      tree = await getWorkSessionByPlaneId(workItemId);
+    }
+    if (!tree) {
+      // No explicit work item — check for a growing tree this agent is actively working on
+      const { default: forestSql } = await import('../../ellie-forest/src/db');
+      const [activeTree] = await forestSql`
+        SELECT DISTINCT t.* FROM trees t
+        JOIN creatures c ON c.tree_id = t.id
+        WHERE t.type = 'work_session' AND t.state = 'growing'
+          AND c.entity_id = ${entity.id}
+        ORDER BY t.last_activity DESC LIMIT 1
+      `;
+      if (activeTree) {
+        tree = activeTree;
+        console.log(`[context] Found growing tree ${tree.id.slice(0, 8)} for ${entityName} (no explicit work item)`);
+      }
+    }
+    if (!tree) return empty;
+
+    // Find this agent's branch and creature on the tree
+    const { default: sql } = await import('../../ellie-forest/src/db');
+    const [branch] = await sql<{ id: string }[]>`
+      SELECT id FROM branches WHERE tree_id = ${tree.id} AND entity_id = ${entity.id} AND state = 'open' LIMIT 1
+    `;
+    const [creature] = await sql<{ id: string }[]>`
+      SELECT id FROM creatures WHERE tree_id = ${tree.id} AND entity_id = ${entity.id} AND state IN ('pending', 'dispatched', 'working') LIMIT 1
+    `;
+
+    // Retrieve memories
+    const memories = await getAgentContext({
+      tree_id: tree.id,
+      branch_id: branch?.id,
+      entity_id: entity.id,
+      max_memories: maxMemories ?? 15,
+      include_global: true,
+    });
+
+    // Format memories for prompt
+    let memoryContext = '';
+    if (memories.length > 0) {
+      const lines = memories.map((m: any) => {
+        const scope = m.scope === 'global' ? '[global]' : m.scope === 'tree' ? '[session]' : `[${m.scope}]`;
+        const conf = m.confidence ? ` (confidence: ${m.confidence.toFixed(1)})` : '';
+        return `  ${scope} ${m.content}${conf}`;
+      });
+      memoryContext =
+        `\nAGENT MEMORY CONTEXT (${memories.length} memories from past sessions):` +
+        `\n${lines.join('\n')}`;
+    }
+
+    return {
+      memoryContext,
+      sessionIds: {
+        tree_id: tree.id,
+        branch_id: branch?.id,
+        creature_id: creature?.id,
+        entity_id: entity.id,
+        work_item_id: tree.work_item_id ?? workItemId,
+      },
+    };
+  } catch (err) {
+    console.warn(`[context] Agent memory context failed for ${agentName}:`, err);
+    return empty;
+  }
 }

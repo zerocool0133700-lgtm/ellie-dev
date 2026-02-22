@@ -181,6 +181,7 @@ export async function routeAndDispatch(
   message: string,
   channel: string,
   userId: string,
+  workItemId?: string,
 ): Promise<{
   route: RouteResult;
   dispatch: DispatchResult;
@@ -197,6 +198,8 @@ export async function routeAndDispatch(
     route = { ...edgeRoute, confidence: edgeRoute.confidence || 0.5, execution_mode: edgeRoute.execution_mode || "single" as const };
   }
 
+  const effectiveWorkItemId = workItemId;
+
   const dispatchMessage = route.strippedMessage || message;
 
   const dispatch = await dispatchAgent(
@@ -205,7 +208,7 @@ export async function routeAndDispatch(
     userId,
     channel,
     dispatchMessage,
-    undefined,
+    effectiveWorkItemId,
     route.skill_name,
   );
   if (!dispatch) return null;

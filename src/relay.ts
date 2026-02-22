@@ -48,7 +48,7 @@ import {
 } from "./agent-router.ts";
 import { initClassifier } from "./intent-classifier.ts";
 import { initEntailmentClassifier } from "./entailment-classifier.ts";
-import { getStructuredContext, getAgentStructuredContext } from "./context-sources.ts";
+import { getStructuredContext, getAgentStructuredContext, getAgentMemoryContext, getMaxMemoriesForModel } from "./context-sources.ts";
 import {
   initOutlook,
   isOutlookConfigured,
@@ -826,7 +826,8 @@ bot.on("message:text", withQueue(async (ctx) => {
   }
 
   // Route message to appropriate agent via LLM classifier (falls back gracefully)
-  const agentResult = await routeAndDispatch(supabase, text, "telegram", userId);
+  const detectedWorkItem = text.match(/\b([A-Z]+-\d+)\b/)?.[1];
+  const agentResult = await routeAndDispatch(supabase, text, "telegram", userId, detectedWorkItem);
   const effectiveText = agentResult?.route.strippedMessage || text;
   if (agentResult) {
     setActiveAgent("telegram", agentResult.dispatch.agent.name);
@@ -844,23 +845,29 @@ bot.on("message:text", withQueue(async (ctx) => {
     }
   }
 
-  // Gather context: docket + semantic search + ES full-text search + structured sources + recent messages + forest
-  const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext] = await Promise.all([
+  // Gather context: docket + semantic search + ES full-text search + structured sources + recent messages + forest + agent memory
+  const activeAgent = getActiveAgent("telegram");
+  const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext, agentMemory] = await Promise.all([
     getContextDocket(),
     getRelevantContext(supabase, effectiveText),
     searchElastic(effectiveText, { limit: 5, recencyBoost: true }),
-    getAgentStructuredContext(supabase, getActiveAgent("telegram")),
+    getAgentStructuredContext(supabase, activeAgent),
     getRecentMessages(supabase),
     getForestContext(effectiveText),
+    getAgentMemoryContext(activeAgent, detectedWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model)),
   ]);
 
   // Detect work item mentions (ELLIE-5, EVE-3, etc.)
   let workItemContext = "";
   const workItemMatch = effectiveText.match(/\b([A-Z]+-\d+)\b/);
+  const isWorkIntent = agentResult?.route.skill_name === "code_changes" ||
+    agentResult?.route.skill_name === "code_review" ||
+    agentResult?.route.skill_name === "debugging";
   if (workItemMatch && isPlaneConfigured()) {
     const details = await fetchWorkItemDetails(workItemMatch[1]);
     if (details) {
-      workItemContext = `\nACTIVE WORK ITEM: ${workItemMatch[1]}\n` +
+      const label = isWorkIntent ? "ACTIVE WORK ITEM" : "REFERENCED WORK ITEM";
+      workItemContext = `\n${label}: ${workItemMatch[1]}\n` +
         `Title: ${details.name}\n` +
         `Priority: ${details.priority}\n` +
         `Description: ${details.description}\n`;
@@ -901,7 +908,7 @@ bot.on("message:text", withQueue(async (ctx) => {
       clearInterval(typingInterval);
 
       const agentName = result.finalDispatch?.agent?.name || agentResult?.dispatch.agent.name || "general";
-      const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, agentName);
+      const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, agentName, "shared", agentMemory.sessionIds);
       const cleanedPipelineResponse = await sendWithApprovals(ctx, pipelineResponse, session.sessionId, agentName);
       await saveMessage("assistant", cleanedPipelineResponse);
       broadcastExtension({ type: "pipeline_complete", channel: "telegram", mode: execMode, steps: result.stepResults.length, duration_ms: result.artifacts.total_duration_ms, cost_usd: result.artifacts.total_cost_usd });
@@ -920,7 +927,7 @@ bot.on("message:text", withQueue(async (ctx) => {
       clearInterval(typingInterval);
       if (err instanceof PipelineStepError && err.partialOutput) {
         console.error(`[orchestrator] Step ${err.stepIndex} failed (${err.errorType}), sending partial results`);
-        const partialResponse = await processMemoryIntents(supabase, err.partialOutput, agentResult?.dispatch.agent.name || "general");
+        const partialResponse = await processMemoryIntents(supabase, err.partialOutput, agentResult?.dispatch.agent.name || "general", "shared", agentMemory.sessionIds);
         await sendResponse(ctx, partialResponse + "\n\n(Execution incomplete \u2014 showing partial results.)");
         await saveMessage("assistant", partialResponse);
       } else {
@@ -931,10 +938,12 @@ bot.on("message:text", withQueue(async (ctx) => {
           workItemContext, structuredContext, recentMessages,
           agentResult?.dispatch.skill_context,
           forestContext,
+          agentMemory.memoryContext || undefined,
+          agentMemory.sessionIds,
         );
         const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
         const fallbackAgentName = agentResult?.dispatch.agent.name || "general";
-        const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw, fallbackAgentName);
+        const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw, fallbackAgentName, "shared", agentMemory.sessionIds);
         const cleaned = await sendWithApprovals(ctx, fallbackResponse, session.sessionId, fallbackAgentName);
         await saveMessage("assistant", cleaned);
       }
@@ -951,6 +960,8 @@ bot.on("message:text", withQueue(async (ctx) => {
     workItemContext, structuredContext, recentMessages,
     agentResult?.dispatch.skill_context,
     forestContext,
+    agentMemory.memoryContext || undefined,
+    agentMemory.sessionIds,
   );
 
   const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -964,8 +975,39 @@ bot.on("message:text", withQueue(async (ctx) => {
   });
   const durationMs = Date.now() - startTime;
 
+  // Late-resolve sessionIds if not available at context-build time
+  let effectiveSessionIds = agentMemory.sessionIds;
+  if (!effectiveSessionIds && agentResult?.dispatch.agent.name) {
+    try {
+      const { default: forestSql } = await import('../../ellie-forest/src/db');
+      const { getEntity } = await import('../../ellie-forest/src/index');
+      const AGENT_ENTITY_MAP: Record<string, string> = { dev: "dev_agent", general: "general_agent" };
+      const entityName = AGENT_ENTITY_MAP[agentResult.dispatch.agent.name] ?? agentResult.dispatch.agent.name;
+      const entity = await getEntity(entityName);
+      if (entity) {
+        const [tree] = await forestSql<any[]>`
+          SELECT DISTINCT t.id, t.work_item_id FROM trees t
+          JOIN creatures c ON c.tree_id = t.id
+          WHERE t.type = 'work_session' AND t.state IN ('growing', 'dormant')
+            AND t.last_activity > NOW() - INTERVAL '5 minutes' AND c.entity_id = ${entity.id}
+          ORDER BY t.last_activity DESC LIMIT 1
+        `;
+        if (tree) {
+          const [creature] = await forestSql<{ id: string }[]>`
+            SELECT id FROM creatures WHERE tree_id = ${tree.id} AND entity_id = ${entity.id}
+            ORDER BY created_at DESC LIMIT 1
+          `;
+          effectiveSessionIds = { tree_id: tree.id, creature_id: creature?.id, entity_id: entity.id, work_item_id: tree.work_item_id };
+          console.log(`[telegram] Late-resolved sessionIds: tree=${tree.id.slice(0, 8)}`);
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[telegram] Late-resolve sessionIds failed:`, err?.message || err);
+    }
+  }
+
   // Parse and save any memory intents, strip tags from response
-  const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general");
+  const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general", "shared", effectiveSessionIds);
 
   const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId, agentResult?.dispatch.agent.name);
 
@@ -1015,7 +1057,8 @@ bot.on("message:voice", withQueue(async (ctx) => {
     broadcastExtension({ type: "message_in", channel: "telegram", preview: `[Voice ${voice.duration}s]: ${transcription.substring(0, 150)}` });
 
     const voiceUserId = ctx.from?.id.toString() || "";
-    const agentResult = await routeAndDispatch(supabase, transcription, "telegram", voiceUserId);
+    const voiceWorkItem = transcription.match(/\b([A-Z]+-\d+)\b/)?.[1];
+    const agentResult = await routeAndDispatch(supabase, transcription, "telegram", voiceUserId, voiceWorkItem);
     const effectiveTranscription = agentResult?.route.strippedMessage || transcription;
     if (agentResult) {
       setActiveAgent("telegram", agentResult.dispatch.agent.name);
@@ -1033,13 +1076,15 @@ bot.on("message:voice", withQueue(async (ctx) => {
       }
     }
 
-    const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext] = await Promise.all([
+    const voiceActiveAgent = getActiveAgent("telegram");
+    const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext, agentMemory] = await Promise.all([
       getContextDocket(),
       getRelevantContext(supabase, effectiveTranscription),
       searchElastic(effectiveTranscription, { limit: 5, recencyBoost: true }),
-      getAgentStructuredContext(supabase, getActiveAgent("telegram")),
+      getAgentStructuredContext(supabase, voiceActiveAgent),
       getRecentMessages(supabase),
       getForestContext(effectiveTranscription),
+      getAgentMemoryContext(voiceActiveAgent, voiceWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model)),
     ]);
 
     // ── Voice multi-step branch (ELLIE-58) ──
@@ -1074,7 +1119,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
 
         clearInterval(typingInterval);
         const voiceAgentName = result.finalDispatch?.agent?.name || agentResult?.dispatch.agent.name || "general";
-        const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, voiceAgentName);
+        const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, voiceAgentName, "shared", agentMemory.sessionIds);
         const cleaned = await sendWithApprovals(ctx, pipelineResponse, session.sessionId, voiceAgentName);
         await saveMessage("assistant", cleaned);
 
@@ -1090,7 +1135,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
       } catch (err) {
         clearInterval(typingInterval);
         if (err instanceof PipelineStepError && err.partialOutput) {
-          const partialResponse = await processMemoryIntents(supabase, err.partialOutput, agentResult?.dispatch.agent.name || "general");
+          const partialResponse = await processMemoryIntents(supabase, err.partialOutput, agentResult?.dispatch.agent.name || "general", "shared", agentMemory.sessionIds);
           await sendResponse(ctx, partialResponse + "\n\n(Execution incomplete \u2014 showing partial results.)");
           await saveMessage("assistant", partialResponse);
         } else {
@@ -1103,10 +1148,12 @@ bot.on("message:voice", withQueue(async (ctx) => {
             undefined, structuredContext, recentMessages,
             agentResult?.dispatch.skill_context,
             forestContext,
+            agentMemory.memoryContext || undefined,
+            agentMemory.sessionIds,
           );
           const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
           const voiceFallbackAgent = agentResult?.dispatch.agent.name || "general";
-          const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw, voiceFallbackAgent);
+          const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw, voiceFallbackAgent, "shared", agentMemory.sessionIds);
           const cleaned = await sendWithApprovals(ctx, fallbackResponse, session.sessionId, voiceFallbackAgent);
           await saveMessage("assistant", cleaned);
         }
@@ -1127,6 +1174,8 @@ bot.on("message:voice", withQueue(async (ctx) => {
       undefined, structuredContext, recentMessages,
       agentResult?.dispatch.skill_context,
       forestContext,
+      agentMemory.memoryContext || undefined,
+      agentMemory.sessionIds,
     );
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -1139,7 +1188,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
       model: agentModel || undefined,
     });
     const durationMs = Date.now() - startTime;
-    const claudeResponse = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general");
+    const claudeResponse = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general", "shared", agentMemory.sessionIds);
 
     // Try voice response for short replies without approval buttons
     const TTS_MAX_CHARS = 1500;
@@ -1346,6 +1395,8 @@ export function buildPrompt(
   recentMessages?: string,
   skillContext?: { name: string; description: string },
   forestContext?: string,
+  agentMemoryContext?: string,
+  sessionIds?: { tree_id: string; branch_id?: string; creature_id?: string; entity_id?: string; work_item_id?: string },
 ): string {
   const channelLabel = channel === "google-chat" ? "Google Chat" : channel === "la-comms" ? "LA Comms (dashboard)" : "Telegram";
 
@@ -1407,6 +1458,10 @@ export function buildPrompt(
   }
 
   if (USER_NAME) parts.push(`You are speaking with ${USER_NAME}.`);
+
+  // Inject current time in user's timezone
+  const now = new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE, dateStyle: "full", timeStyle: "short" });
+  parts.push(`Current date/time: ${now} (${USER_TIMEZONE}).`);
   if (profileContext) parts.push(`\nProfile:\n${profileContext}`);
   if (structuredContext) parts.push(`\n${structuredContext}`);
   if (contextDocket) parts.push(`\nCONTEXT:\n${contextDocket}`);
@@ -1415,16 +1470,49 @@ export function buildPrompt(
   if (elasticContext) parts.push(`\n${elasticContext}`);
   if (forestContext) parts.push(`\n${forestContext}`);
 
+  // Agent compounding memory context (ELLIE-136)
+  if (agentMemoryContext) parts.push(agentMemoryContext);
+
+  // Memory write protocol — [MEMORY:] tags (ELLIE-136)
+  if (sessionIds) {
+    parts.push(
+      "\nFOREST MEMORY WRITES (IMPORTANT):" +
+      "\nYou are working in an active forest session. Record your findings with [MEMORY:] tags." +
+      "\nInclude at least one [MEMORY:] tag when you:" +
+      "\n  - Discover a fact, bug, or root cause" +
+      "\n  - Make an architectural or implementation decision" +
+      "\n  - Form a hypothesis about what's happening" +
+      "\n  - Complete a task or milestone" +
+      "\n" +
+      "\nExamples:" +
+      "\n  [MEMORY: The login endpoint returns 401 when the token is expired]" +
+      "\n  [MEMORY:decision: Using Redis for caching because latency requirements are <10ms]" +
+      "\n  [MEMORY:hypothesis:0.6: The race condition is in the session cleanup goroutine]" +
+      "\n" +
+      "\nFormat: [MEMORY:type:confidence: content] — type and confidence optional." +
+      "\nTypes: finding, decision, hypothesis, fact, pattern. Default: finding" +
+      "\nConfidence: 0.6 (speculative) → 0.9 (verified). Default: 0.7" +
+      "\nThese memories compound — future agents see your findings and build on them." +
+      "\nAlways include [MEMORY:] tags in your response text, never omit them."
+    );
+  }
+
   parts.push(
     "\nMEMORY MANAGEMENT:" +
-      "\nYou MUST actively log memories during conversations. Include these tags in your response " +
-      "(they are processed automatically and hidden from the user):" +
-      "\n[REMEMBER: fact to store]" +
-      "\n[GOAL: goal text | DEADLINE: optional date]" +
-      "\n[DONE: search text for completed goal]" +
-      "\nUse [REMEMBER:] for: preferences, decisions, project details, personal info, " +
-      "technical choices, things the user researched or asked about, and any context that " +
-      "would be useful in future conversations. When in doubt, remember it."
+      "\nTwo memory systems exist — use the right one:" +
+      "\n" +
+      "\n1. CONVERSATION MEMORY ([REMEMBER:] tags) — for personal facts about the user:" +
+      "\n   preferences, decisions, project details, personal info, things the user asked to remember." +
+      "\n   [REMEMBER: fact to store]" +
+      "\n   [GOAL: goal text | DEADLINE: optional date]" +
+      "\n   [DONE: search text for completed goal]" +
+      "\n" +
+      "\n2. FOREST MEMORY ([MEMORY:] tags) — for work products:" +
+      "\n   strategic analysis, code findings, bug discoveries, architectural decisions, hypotheses." +
+      "\n   These compound across sessions and are shared with other agents." +
+      (sessionIds ? "" : "\n   (No active work session — forest writes unavailable.)") +
+      "\n" +
+      "\nUse [REMEMBER:] freely for user context. Use [MEMORY:] for institutional knowledge."
   );
 
   parts.push(
@@ -1446,13 +1534,33 @@ export function buildPrompt(
   // Work item context and dispatch protocol
   if (workItemContext) {
     parts.push(workItemContext);
+  }
+  if (workItemContext?.includes("ACTIVE WORK ITEM")) {
     parts.push(
       "\nWORK SESSION DISPATCH PROTOCOL:" +
-        "\nYou are working on the above work item. Follow these steps:" +
-        "\n1. Use Plane MCP tools to update issue state (mcp__plane__update_issue)" +
-        "\n2. POST progress updates to http://localhost:3001/api/work-session/* via curl" +
-        "\n3. Commit with [IDENTIFIER] prefix (e.g., [ELLIE-5] Brief description)" +
-        "\n4. When done, POST to /api/work-session/complete and update Plane to Done"
+        "\nYou are working on the above work item. Follow ALL steps in order:" +
+        "\n" +
+        "\n1. UNDERSTAND — read the ticket description and acceptance criteria" +
+        "\n2. IMPLEMENT — write code, modify files, etc." +
+        "\n3. COMMIT with [IDENTIFIER] prefix (e.g., [ELLIE-5] Brief description)" +
+        "\n4. DEPLOY — you MUST do BOTH of these if you changed dashboard code:" +
+        "\n   a) cd /home/ellie/ellie-home && bun run build" +
+        "\n   b) sudo systemctl restart ellie-dashboard" +
+        "\n   For relay code: systemctl --user restart claude-telegram-relay" +
+        "\n   NEVER skip this step. Code changes are NOT live until built AND restarted." +
+        "\n5. VERIFY — confirm the feature works (check logs, test if possible)" +
+        "\n6. COMPLETE — POST to http://localhost:3001/api/work-session/complete:" +
+        '\n   curl -X POST http://localhost:3001/api/work-session/complete \\' +
+        "\n     -H 'Content-Type: application/json' \\" +
+        '\n     -d \'{"work_item_id":"ELLIE-5","summary":"Implemented X by doing Y. Changed files A, B, C."}\'' +
+        "\n   The summary MUST describe what was actually accomplished." +
+        "\n   Include: what changed, what files were modified, key decisions made." +
+        "\n" +
+        "\nDo NOT call /complete unless you have:" +
+        "\n  - Actually written or verified code" +
+        "\n  - Committed the changes" +
+        "\n  - Built and restarted affected services" +
+        "\n  If someone else already wrote code, verify it works before completing."
     );
   }
 
@@ -2261,7 +2369,8 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
         // All remaining work is async — response delivered via Chat API
         (async () => {
           try {
-            const gchatAgentResult = await routeAndDispatch(supabase, parsed.text, "google-chat", parsed.senderEmail);
+            const gchatWorkItem = parsed.text.match(/\b([A-Z]+-\d+)\b/)?.[1];
+            const gchatAgentResult = await routeAndDispatch(supabase, parsed.text, "google-chat", parsed.senderEmail, gchatWorkItem);
             const effectiveGchatText = gchatAgentResult?.route.strippedMessage || parsed.text;
             if (gchatAgentResult) {
               setActiveAgent("google-chat", gchatAgentResult.dispatch.agent.name);
@@ -2279,22 +2388,28 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               }
             }
 
-            const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext] = await Promise.all([
+            const gchatActiveAgent = getActiveAgent("google-chat");
+            const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext, agentMemory] = await Promise.all([
               getContextDocket(),
               getRelevantContext(supabase, effectiveGchatText),
               searchElastic(effectiveGchatText, { limit: 5, recencyBoost: true }),
-              getAgentStructuredContext(supabase, getActiveAgent("google-chat")),
+              getAgentStructuredContext(supabase, gchatActiveAgent),
               getRecentMessages(supabase),
               getForestContext(effectiveGchatText),
+              getAgentMemoryContext(gchatActiveAgent, gchatWorkItem, getMaxMemoriesForModel(gchatAgentResult?.dispatch.agent.model)),
             ]);
 
             // Detect work item mentions (ELLIE-5, EVE-3, etc.) — matches Telegram text handler
             let workItemContext = "";
             const workItemMatch = effectiveGchatText.match(/\b([A-Z]+-\d+)\b/);
+            const isGchatWorkIntent = gchatAgentResult?.route.skill_name === "code_changes" ||
+              gchatAgentResult?.route.skill_name === "code_review" ||
+              gchatAgentResult?.route.skill_name === "debugging";
             if (workItemMatch && isPlaneConfigured()) {
               const details = await fetchWorkItemDetails(workItemMatch[1]);
               if (details) {
-                workItemContext = `\nACTIVE WORK ITEM: ${workItemMatch[1]}\n` +
+                const label = isGchatWorkIntent ? "ACTIVE WORK ITEM" : "REFERENCED WORK ITEM";
+                workItemContext = `\n${label}: ${workItemMatch[1]}\n` +
                   `Title: ${details.name}\n` +
                   `Priority: ${details.priority}\n` +
                   `Description: ${details.description}\n`;
@@ -2328,7 +2443,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               ]);
 
               const gchatOrcAgent = result.finalDispatch?.agent?.name || gchatAgentResult?.dispatch.agent.name || "general";
-              const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, gchatOrcAgent);
+              const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, gchatOrcAgent, "shared", agentMemory.sessionIds);
               const { cleanedText: gchatClean } = extractApprovalTags(pipelineResponse);
               await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
               broadcastExtension({ type: "message_out", channel: "google-chat", agent: gchatOrcAgent, preview: gchatClean.substring(0, 200) });
@@ -2361,6 +2476,8 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               workItemContext || undefined, structuredContext, recentMessages,
               gchatAgentResult?.dispatch.skill_context,
               forestContext,
+              agentMemory.memoryContext || undefined,
+              agentMemory.sessionIds,
             );
 
             const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
@@ -2373,7 +2490,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               model: gchatAgentModel || undefined,
             });
             const gchatDuration = Date.now() - gchatStart;
-            const response = await processMemoryIntents(supabase, rawResponse, gchatAgentResult?.dispatch.agent.name || "general");
+            const response = await processMemoryIntents(supabase, rawResponse, gchatAgentResult?.dispatch.agent.name || "general", "shared", agentMemory.sessionIds);
 
             if (gchatAgentResult) {
               syncResponse(supabase, gchatAgentResult.dispatch.session_id, response, {
@@ -2517,7 +2634,8 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
             const query = parsed.slots.query || parsed.text;
 
             // Route first, then gather context with correct agent
-            const agentResult = await routeAndDispatch(supabase, query, "alexa", parsed.userId);
+            const alexaWorkItem = query.match(/\b([A-Z]+-\d+)\b/)?.[1];
+            const agentResult = await routeAndDispatch(supabase, query, "alexa", parsed.userId, alexaWorkItem);
             if (agentResult) {
               setActiveAgent("alexa", agentResult.dispatch.agent.name);
               broadcastExtension({ type: "route", channel: "alexa", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode });
@@ -2525,13 +2643,15 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
             const effectiveQuery = agentResult?.route.strippedMessage || query;
 
             // Gather context with correct active agent
-            const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext] = await Promise.all([
+            const alexaActiveAgent = getActiveAgent("alexa");
+            const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext, agentMemory] = await Promise.all([
               getContextDocket(),
               getRelevantContext(supabase, effectiveQuery),
               searchElastic(effectiveQuery, { limit: 5, recencyBoost: true }),
-              getAgentStructuredContext(supabase, getActiveAgent("alexa")),
+              getAgentStructuredContext(supabase, alexaActiveAgent),
               getRecentMessages(supabase),
               getForestContext(effectiveQuery),
+              getAgentMemoryContext(alexaActiveAgent, alexaWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model)),
             ]);
             const enrichedPrompt = buildPrompt(
               effectiveQuery, contextDocket, relevantContext, elasticContext, "alexa",
@@ -2543,6 +2663,8 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               undefined, structuredContext, recentMessages,
               agentResult?.dispatch.skill_context,
               forestContext,
+              agentMemory.memoryContext || undefined,
+              agentMemory.sessionIds,
             );
 
             const ALEXA_TIMEOUT_MS = 6_000;
@@ -2553,7 +2675,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
                   ? agentResult.dispatch.agent.tools_enabled : undefined,
                 model: agentResult?.dispatch.agent.model || undefined,
               });
-              return await processMemoryIntents(supabase, raw, agentResult?.dispatch.agent.name || "general");
+              return await processMemoryIntents(supabase, raw, agentResult?.dispatch.agent.name || "general", "shared", agentMemory.sessionIds);
             })();
 
             const timeoutPromise = new Promise<"timeout">((resolve) =>
@@ -4130,8 +4252,8 @@ laCommsWss.on("connection", (ws: WebSocket) => {
 
       if (msg.type === "pong") return;
 
-      if (msg.type === "message" && msg.text) {
-        handleLaCommsMessage(ws, msg.text, !!msg.phone_mode);
+      if (msg.type === "message" && (msg.text || msg.image)) {
+        handleLaCommsMessage(ws, msg.text || "", !!msg.phone_mode, msg.image);
       }
     } catch {
       // Ignore parse errors
@@ -4167,12 +4289,34 @@ setInterval(() => {
 // Phone mode conversation history (6-turn window, mirroring voice call pattern)
 const laCommsPhoneHistory: Array<{ role: string; content: string }> = [];
 
-async function handleLaCommsMessage(ws: WebSocket, text: string, phoneMode: boolean = false): Promise<void> {
-  console.log(`[la-comms] User${phoneMode ? " (phone)" : ""}: ${text.substring(0, 80)}...`);
+async function handleLaCommsMessage(
+  ws: WebSocket,
+  text: string,
+  phoneMode: boolean = false,
+  image?: { data: string; mime_type: string; name: string },
+): Promise<void> {
+  console.log(`[la-comms] User${phoneMode ? " (phone)" : ""}${image ? " [+image]" : ""}: ${text.substring(0, 80)}...`);
   acknowledgeChannel("la-comms");
 
-  await saveMessage("user", text, {}, "la-comms");
+  await saveMessage("user", text, image ? { image_name: image.name, image_mime: image.mime_type } : {}, "la-comms");
   broadcastExtension({ type: "message_in", channel: "la-comms", preview: text.substring(0, 200) });
+
+  // Write image to temp file if present (same pattern as Telegram photo handler)
+  let imagePath: string | null = null;
+  if (image?.data) {
+    try {
+      const ext = image.mime_type === "image/png" ? ".png"
+        : image.mime_type === "image/gif" ? ".gif"
+        : image.mime_type === "image/webp" ? ".webp"
+        : ".jpg";
+      imagePath = join(UPLOADS_DIR, `la-comms_${Date.now()}${ext}`);
+      await writeFile(imagePath, Buffer.from(image.data, "base64"));
+      console.log(`[la-comms] Image saved: ${imagePath} (${image.name})`);
+    } catch (err) {
+      console.error("[la-comms] Failed to save image:", err);
+      imagePath = null;
+    }
+  }
 
   // Send typing indicator
   if (ws.readyState === WebSocket.OPEN) {
@@ -4246,8 +4390,13 @@ async function handleLaCommsMessage(ws: WebSocket, text: string, phoneMode: bool
 
   // ── Normal text mode: full agent routing + context gathering (mirrors Google Chat) ──
   await enqueue(async () => {
-    const agentResult = await routeAndDispatch(supabase, text, "la-comms", "dashboard");
-    const effectiveText = agentResult?.route.strippedMessage || text;
+    const laCommsWorkItem = text.match(/\b([A-Z]+-\d+)\b/)?.[1];
+    const agentResult = await routeAndDispatch(supabase, text, "la-comms", "dashboard", laCommsWorkItem);
+    let effectiveText = agentResult?.route.strippedMessage || text;
+    // Prepend image file reference so Claude Code CLI can see the image
+    if (imagePath) {
+      effectiveText = `[Image: ${imagePath}]\n\n${effectiveText || "Analyze this image."}`;
+    }
     if (agentResult) {
       setActiveAgent("la-comms", agentResult.dispatch.agent.name);
       broadcastExtension({
@@ -4267,22 +4416,28 @@ async function handleLaCommsMessage(ws: WebSocket, text: string, phoneMode: bool
       }
     }
 
-    const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext] = await Promise.all([
+    const laCommsActiveAgent = getActiveAgent("la-comms");
+    const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext, agentMemory] = await Promise.all([
       getContextDocket(),
       getRelevantContext(supabase, effectiveText),
       searchElastic(effectiveText, { limit: 5, recencyBoost: true }),
-      getAgentStructuredContext(supabase, getActiveAgent("la-comms")),
+      getAgentStructuredContext(supabase, laCommsActiveAgent),
       getRecentMessages(supabase),
       getForestContext(effectiveText),
+      getAgentMemoryContext(laCommsActiveAgent, laCommsWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model)),
     ]);
 
     // Detect work item mentions (ELLIE-5, EVE-3, etc.) — matches Telegram text handler
     let workItemContext = "";
     const workItemMatch = effectiveText.match(/\b([A-Z]+-\d+)\b/);
+    const isLaCommsWorkIntent = agentResult?.route.skill_name === "code_changes" ||
+      agentResult?.route.skill_name === "code_review" ||
+      agentResult?.route.skill_name === "debugging";
     if (workItemMatch && isPlaneConfigured()) {
       const details = await fetchWorkItemDetails(workItemMatch[1]);
       if (details) {
-        workItemContext = `\nACTIVE WORK ITEM: ${workItemMatch[1]}\n` +
+        const label = isLaCommsWorkIntent ? "ACTIVE WORK ITEM" : "REFERENCED WORK ITEM";
+        workItemContext = `\n${label}: ${workItemMatch[1]}\n` +
           `Title: ${details.name}\n` +
           `Priority: ${details.priority}\n` +
           `Description: ${details.description}\n`;
@@ -4325,7 +4480,7 @@ async function handleLaCommsMessage(ws: WebSocket, text: string, phoneMode: bool
         });
 
         const orcAgent = result.finalDispatch?.agent?.name || agentResult.dispatch.agent.name || "general";
-        const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, orcAgent);
+        const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, orcAgent, "shared", agentMemory.sessionIds);
         const { cleanedText } = extractApprovalTags(pipelineResponse);
 
         await saveMessage("assistant", cleanedText, {}, "la-comms");
@@ -4371,6 +4526,9 @@ async function handleLaCommsMessage(ws: WebSocket, text: string, phoneMode: bool
         }
       }
 
+      // Cleanup temp image file
+      if (imagePath) unlink(imagePath).catch(() => {});
+
       resetLaCommsIdleTimer();
       return;
     }
@@ -4386,20 +4544,80 @@ async function handleLaCommsMessage(ws: WebSocket, text: string, phoneMode: bool
       workItemContext || undefined, structuredContext, recentMessages,
       agentResult?.dispatch.skill_context,
       forestContext,
+      agentMemory.memoryContext || undefined,
+      agentMemory.sessionIds,
     );
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;
     const agentModel = agentResult?.dispatch.agent.model;
     const startTime = Date.now();
 
-    const rawResponse = await callClaude(enrichedPrompt, {
-      resume: true,
-      allowedTools: agentTools?.length ? agentTools : undefined,
-      model: agentModel || undefined,
-    });
+    // Send typing heartbeat every 4s so the user knows we're still working
+    const typingInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "typing", ts: Date.now() }));
+      }
+    }, 4_000);
+
+    let rawResponse: string;
+    try {
+      rawResponse = await callClaude(enrichedPrompt, {
+        resume: true,
+        allowedTools: agentTools?.length ? agentTools : undefined,
+        model: agentModel || undefined,
+      });
+    } finally {
+      clearInterval(typingInterval);
+    }
     const durationMs = Date.now() - startTime;
 
-    const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general");
+    // If sessionIds weren't available at context-build time (tree created during agent run),
+    // look up the most recently active tree for this agent's entity
+    let effectiveSessionIds = agentMemory.sessionIds;
+    if (!effectiveSessionIds && agentResult?.dispatch.agent.name) {
+      try {
+        const { default: forestSql } = await import('../../ellie-forest/src/db');
+        const { getEntity } = await import('../../ellie-forest/src/index');
+        const AGENT_ENTITY_MAP: Record<string, string> = { dev: "dev_agent", general: "general_agent" };
+        const entityName = AGENT_ENTITY_MAP[agentResult.dispatch.agent.name] ?? agentResult.dispatch.agent.name;
+        const entity = await getEntity(entityName);
+        if (entity) {
+          // Find most recently active tree (growing or dormant within last 5 min)
+          const [tree] = await forestSql<any[]>`
+            SELECT DISTINCT t.id, t.work_item_id FROM trees t
+            JOIN creatures c ON c.tree_id = t.id
+            WHERE t.type = 'work_session'
+              AND t.state IN ('growing', 'dormant')
+              AND t.last_activity > NOW() - INTERVAL '5 minutes'
+              AND c.entity_id = ${entity.id}
+            ORDER BY t.last_activity DESC LIMIT 1
+          `;
+          if (tree) {
+            const [branch] = await forestSql<{ id: string }[]>`
+              SELECT id FROM branches WHERE tree_id = ${tree.id} AND entity_id = ${entity.id} AND state = 'open' LIMIT 1
+            `;
+            const [creature] = await forestSql<{ id: string }[]>`
+              SELECT id FROM creatures WHERE tree_id = ${tree.id} AND entity_id = ${entity.id}
+              ORDER BY created_at DESC LIMIT 1
+            `;
+            effectiveSessionIds = {
+              tree_id: tree.id,
+              branch_id: branch?.id,
+              creature_id: creature?.id,
+              entity_id: entity.id,
+              work_item_id: tree.work_item_id,
+            };
+            console.log(`[la-comms] Late-resolved sessionIds: tree=${tree.id.slice(0, 8)}, creature=${creature?.id?.slice(0, 8) || 'none'}`);
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[la-comms] Late-resolve sessionIds failed:`, err?.message || err);
+      }
+    } else if (!effectiveSessionIds) {
+      console.log(`[la-comms] No sessionIds and no agent to late-resolve (agent=${agentResult?.dispatch.agent.name})`);
+    }
+
+    const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general", "shared", effectiveSessionIds);
     const { cleanedText } = extractApprovalTags(response);
 
     await saveMessage("assistant", cleanedText, {}, "la-comms");
@@ -4424,6 +4642,9 @@ async function handleLaCommsMessage(ws: WebSocket, text: string, phoneMode: bool
         duration_ms: durationMs,
       }).catch(() => {});
     }
+
+    // Cleanup temp image file
+    if (imagePath) unlink(imagePath).catch(() => {});
 
     resetLaCommsIdleTimer();
   }, "la-comms", text.substring(0, 100));

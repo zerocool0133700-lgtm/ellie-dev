@@ -295,6 +295,17 @@ Summarize what was set up and what is running. Remind the user:
 
 > **For the project owner (Dave).** If `.env` has `PLANE_API_KEY` set and Plane MCP is available, this protocol is active. Otherwise, skip this section — it does not apply to first-time setup users.
 
+### IMPORTANT: When to Use This Protocol
+
+**USE** this protocol when Dave explicitly asks to **work on**, **implement**, **fix**, **build**, or **code** something.
+
+**DO NOT USE** this protocol for:
+- Status checks ("check on ELLIE-5", "what's the status of 139")
+- Information queries ("what is ELLIE-5 about?", "show me the ticket")
+- Reviews ("look at ELLIE-5", "review the work on 139")
+
+For status checks, just use `mcp__plane__get_issue_using_readable_identifier` to fetch and display the ticket — do NOT call `/api/work-session/start`, `/api/work-session/complete`, or update the Plane issue state.
+
 ## Session Startup
 
 When Dave starts a Claude Code session and mentions a work item (e.g., "work on ELLIE-5") or asks to work on something:
