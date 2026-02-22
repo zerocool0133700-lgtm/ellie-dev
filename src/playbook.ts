@@ -19,7 +19,7 @@ import {
   fetchWorkItemDetails,
   createPlaneIssue,
 } from "./plane.ts";
-import { dispatchAgent } from "./agent-router.ts";
+import { dispatchAgent, syncResponse } from "./agent-router.ts";
 import { processMemoryIntents } from "./memory.ts";
 
 // ────────────────────────────────────────────────────────────────
@@ -202,6 +202,14 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
     console.warn(`[playbook] Work session start failed (non-fatal):`, err?.message);
   }
 
+  // 3b. Extract sessionIds from work-session/start response
+  const sessionIds = sessionResult?.success ? {
+    tree_id: sessionResult.tree_id,
+    branch_id: sessionResult.creatures?.[0]?.branch_id,
+    creature_id: sessionResult.creatures?.[0]?.id,
+    entity_id: sessionResult.creatures?.[0]?.entity_id,
+  } : undefined;
+
   // 4. Dispatch agent (get session + agent config)
   const dispatch = await dispatchAgent(ctx.supabase, agentName, ctx.telegramUserId, ctx.channel, `Work on ${ticketId}: ${details.name}`, ticketId);
   if (!dispatch) {
@@ -232,7 +240,7 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
     undefined, // skillContext
     undefined, // forestContext
     undefined, // agentMemoryContext
-    sessionResult?.session?.sessionIds, // forest sessionIds
+    sessionIds, // forest sessionIds
   );
 
   // 6. Call Claude
@@ -246,8 +254,16 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
   const durationMin = Math.round((Date.now() - startTime) / 1000 / 60);
 
   // 7. Process memory intents from the dev agent's response
-  const sessionIds = sessionResult?.session?.sessionIds;
   await processMemoryIntents(ctx.supabase, rawResponse, agentName, "shared", sessionIds);
+
+  // 7b. Close agent session in Supabase
+  if (dispatch.session_id) {
+    await syncResponse(ctx.supabase, dispatch.session_id, rawResponse, {
+      duration_ms: Date.now() - startTime,
+      status: "completed",
+      agent_name: agentName,
+    });
+  }
 
   // 8. Notify completion
   const preview = rawResponse.replace(/\[MEMORY:[^\]]*\]/gi, "").trim().slice(0, 300);

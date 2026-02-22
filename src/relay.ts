@@ -4402,7 +4402,18 @@ async function handleLaCommsMessage(
       ws.send(JSON.stringify({ type: "response", text: `Processing ${laCommsPlaybookCmds.length} playbook command(s)...`, agent: "system", ts: Date.now() }));
     }
     const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "la-comms", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-    executePlaybookCommands(laCommsPlaybookCmds, pbCtx).catch(err => console.error("[playbook]", err));
+    executePlaybookCommands(laCommsPlaybookCmds, pbCtx)
+      .then(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "response", text: `Playbook command(s) completed.`, agent: "system", ts: Date.now() }));
+        }
+      })
+      .catch(err => {
+        console.error("[playbook]", err);
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "response", text: `Playbook error: ${err?.message?.slice(0, 200) || "unknown"}`, agent: "system", ts: Date.now() }));
+        }
+      });
     return;
   }
 
