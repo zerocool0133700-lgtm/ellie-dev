@@ -48,7 +48,7 @@ import {
 } from "./agent-router.ts";
 import { initClassifier } from "./intent-classifier.ts";
 import { initEntailmentClassifier } from "./entailment-classifier.ts";
-import { getStructuredContext, getAgentStructuredContext, getAgentMemoryContext, getMaxMemoriesForModel } from "./context-sources.ts";
+import { getStructuredContext, getAgentStructuredContext, getAgentMemoryContext, getMaxMemoriesForModel, getGoogleTasksJSON } from "./context-sources.ts";
 import {
   initOutlook,
   isOutlookConfigured,
@@ -80,6 +80,7 @@ import {
   listOpenIssues,
   setTimeoutRecoveryLock,
 } from "./plane.ts";
+import { extractPlaybookCommands, executePlaybookCommands, type PlaybookContext } from "./playbook.ts";
 import { notify, type NotifyContext } from "./notification-policy.ts";
 import {
   getOrCreateConversation,
@@ -825,6 +826,16 @@ bot.on("message:text", withQueue(async (ctx) => {
     return;
   }
 
+  // ELLIE:: user-typed commands — bypass classifier, execute directly
+  const { cleanedText: userPlaybookClean, commands: userPlaybookCmds } = extractPlaybookCommands(text);
+  if (userPlaybookCmds.length > 0) {
+    console.log(`[telegram] ELLIE:: commands in user message: ${userPlaybookCmds.map(c => c.type).join(", ")}`);
+    await ctx.reply(`Processing ${userPlaybookCmds.length} playbook command(s)...`);
+    const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "telegram", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
+    executePlaybookCommands(userPlaybookCmds, pbCtx).catch(err => console.error("[playbook]", err));
+    return;
+  }
+
   // Route message to appropriate agent via LLM classifier (falls back gracefully)
   const detectedWorkItem = text.match(/\b([A-Z]+-\d+)\b/)?.[1];
   const agentResult = await routeAndDispatch(supabase, text, "telegram", userId, detectedWorkItem);
@@ -909,7 +920,8 @@ bot.on("message:text", withQueue(async (ctx) => {
 
       const agentName = result.finalDispatch?.agent?.name || agentResult?.dispatch.agent.name || "general";
       const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, agentName, "shared", agentMemory.sessionIds);
-      const cleanedPipelineResponse = await sendWithApprovals(ctx, pipelineResponse, session.sessionId, agentName);
+      const { cleanedText: playbookClean, commands: playbookCommands } = extractPlaybookCommands(pipelineResponse);
+      const cleanedPipelineResponse = await sendWithApprovals(ctx, playbookClean, session.sessionId, agentName);
       await saveMessage("assistant", cleanedPipelineResponse);
       broadcastExtension({ type: "pipeline_complete", channel: "telegram", mode: execMode, steps: result.stepResults.length, duration_ms: result.artifacts.total_duration_ms, cost_usd: result.artifacts.total_cost_usd });
 
@@ -917,6 +929,12 @@ bot.on("message:text", withQueue(async (ctx) => {
         syncResponse(supabase, result.finalDispatch.session_id, cleanedPipelineResponse, {
           duration_ms: result.artifacts.total_duration_ms,
         }).catch(() => {});
+      }
+
+      // Fire playbook commands async (ELLIE:: tags)
+      if (playbookCommands.length > 0) {
+        const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "telegram", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
+        executePlaybookCommands(playbookCommands, pbCtx).catch(err => console.error("[playbook]", err));
       }
 
       console.log(
@@ -986,7 +1004,7 @@ bot.on("message:text", withQueue(async (ctx) => {
       const entity = await getEntity(entityName);
       if (entity) {
         const [tree] = await forestSql<any[]>`
-          SELECT DISTINCT t.id, t.work_item_id FROM trees t
+          SELECT t.id, t.work_item_id FROM trees t
           JOIN creatures c ON c.tree_id = t.id
           WHERE t.type = 'work_session' AND t.state IN ('growing', 'dormant')
             AND t.last_activity > NOW() - INTERVAL '5 minutes' AND c.entity_id = ${entity.id}
@@ -1009,7 +1027,10 @@ bot.on("message:text", withQueue(async (ctx) => {
   // Parse and save any memory intents, strip tags from response
   const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general", "shared", effectiveSessionIds);
 
-  const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId, agentResult?.dispatch.agent.name);
+  // Extract ELLIE:: playbook commands before sending to user
+  const { cleanedText: playbookCleanedResponse, commands: tgPlaybookCommands } = extractPlaybookCommands(response);
+
+  const cleanedResponse = await sendWithApprovals(ctx, playbookCleanedResponse, session.sessionId, agentResult?.dispatch.agent.name);
 
   await saveMessage("assistant", cleanedResponse);
   broadcastExtension({ type: "message_out", channel: "telegram", agent: agentResult?.dispatch.agent.name || "general", preview: cleanedResponse.substring(0, 200) });
@@ -1022,6 +1043,12 @@ bot.on("message:text", withQueue(async (ctx) => {
     if (syncResult?.new_session_id) {
       await ctx.reply("\u21AA\uFE0F Handing off to another agent...");
     }
+  }
+
+  // Fire playbook commands async (ELLIE:: tags)
+  if (tgPlaybookCommands.length > 0) {
+    const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "telegram", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
+    executePlaybookCommands(tgPlaybookCommands, pbCtx).catch(err => console.error("[playbook]", err));
   }
 
   resetTelegramIdleTimer();
@@ -1535,36 +1562,51 @@ export function buildPrompt(
   if (workItemContext) {
     parts.push(workItemContext);
   }
-  if (workItemContext?.includes("ACTIVE WORK ITEM")) {
+
+  const isGeneralAgent = !agentConfig?.name || agentConfig.name === "general";
+
+  if (workItemContext?.includes("ACTIVE WORK ITEM") && !isGeneralAgent) {
+    // Specialist agents (dev, etc.) get a simplified protocol — no /complete call
     parts.push(
-      "\nWORK SESSION DISPATCH PROTOCOL:" +
-        "\nYou are working on the above work item. Follow ALL steps in order:" +
-        "\n" +
-        "\n1. UNDERSTAND — read the ticket description and acceptance criteria" +
-        "\n2. IMPLEMENT — write code, modify files, etc." +
-        "\n3. COMMIT with [IDENTIFIER] prefix (e.g., [ELLIE-5] Brief description)" +
-        "\n4. DEPLOY — you MUST do BOTH of these if you changed dashboard code:" +
-        "\n   a) cd /home/ellie/ellie-home && bun run build" +
-        "\n   b) sudo systemctl restart ellie-dashboard" +
-        "\n   For relay code: systemctl --user restart claude-telegram-relay" +
-        "\n   NEVER skip this step. Code changes are NOT live until built AND restarted." +
-        "\n5. VERIFY — confirm the feature works (check logs, test if possible)" +
-        "\n6. COMPLETE — POST to http://localhost:3001/api/work-session/complete:" +
-        '\n   curl -X POST http://localhost:3001/api/work-session/complete \\' +
-        "\n     -H 'Content-Type: application/json' \\" +
-        '\n     -d \'{"work_item_id":"ELLIE-5","summary":"Implemented X by doing Y. Changed files A, B, C."}\'' +
-        "\n   The summary MUST describe what was actually accomplished." +
-        "\n   Include: what changed, what files were modified, key decisions made." +
-        "\n" +
-        "\nDo NOT call /complete unless you have:" +
-        "\n  - Actually written or verified code" +
-        "\n  - Committed the changes" +
-        "\n  - Built and restarted affected services" +
-        "\n  If someone else already wrote code, verify it works before completing."
+      "\nDEV AGENT PROTOCOL:" +
+        "\n1. Read the ticket and understand requirements" +
+        "\n2. Implement code changes" +
+        "\n3. Commit with [ELLIE-N] prefix (e.g., [ELLIE-5] Brief description)" +
+        "\n4. Build if dashboard code changed: cd /home/ellie/ellie-home && bun run build" +
+        "\n5. Restart affected service: sudo systemctl restart ellie-dashboard" +
+        "\n   (for relay code: systemctl --user restart claude-telegram-relay)" +
+        "\n6. Verify changes work" +
+        "\nDo NOT call /api/work-session/complete — handled externally."
     );
   }
 
   if (isPlaneConfigured()) {
+    if (isGeneralAgent) {
+      // General agent gets playbook commands for orchestration
+      parts.push(
+        "\nELLIE:: PLAYBOOK COMMANDS:" +
+          "\nYou can emit these tags to trigger infrastructure actions. Tags are stripped" +
+          "\nbefore your message reaches the user." +
+          "\n" +
+          "\n  ELLIE:: send ELLIE-144 to dev" +
+          "\n    Dispatches the dev agent to work on a ticket. You'll be notified when done." +
+          "\n    Use when: Dave asks to implement, fix, or build something on a specific ticket." +
+          "\n" +
+          "\n  ELLIE:: close ELLIE-144 \"summary of what was accomplished\"" +
+          "\n    Closes a ticket: updates Plane to Done, deploys if needed." +
+          "\n    Use when: Work is verified complete on a ticket." +
+          "\n" +
+          "\n  ELLIE:: create ticket \"Title\" \"Description of work\"" +
+          "\n    Creates a new ticket in Plane. Returns the identifier." +
+          "\n    Use when: New work should be tracked." +
+          "\n" +
+          "\nRules:" +
+          "\n- Place tags at the END of your response, after your conversational text" +
+          "\n- You can include multiple tags in one response" +
+          "\n- Dev dispatch is async — you'll get a notification when done" +
+          "\n- Only use these when the user's request clearly warrants it"
+      );
+    }
     parts.push(
       "\nWORK ITEM COMMANDS:" +
         "\nYou can manage Plane work items via MCP tools (workspace: evelife, project: ELLIE)." +
@@ -2444,7 +2486,8 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
 
               const gchatOrcAgent = result.finalDispatch?.agent?.name || gchatAgentResult?.dispatch.agent.name || "general";
               const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, gchatOrcAgent, "shared", agentMemory.sessionIds);
-              const { cleanedText: gchatClean } = extractApprovalTags(pipelineResponse);
+              const { cleanedText: gchatOrcPlaybookClean, commands: gchatOrcPlaybookCmds } = extractPlaybookCommands(pipelineResponse);
+              const { cleanedText: gchatClean } = extractApprovalTags(gchatOrcPlaybookClean);
               await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
               broadcastExtension({ type: "message_out", channel: "google-chat", agent: gchatOrcAgent, preview: gchatClean.substring(0, 200) });
               broadcastExtension({ type: "pipeline_complete", channel: "google-chat", mode: gchatExecMode, steps: result.stepResults.length, duration_ms: result.artifacts.total_duration_ms, cost_usd: result.artifacts.total_cost_usd });
@@ -2466,6 +2509,12 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
                 telegramChatId: ALLOWED_USER_ID,
                 fallback: true,
               });
+
+              // Fire playbook commands async (ELLIE:: tags)
+              if (gchatOrcPlaybookCmds.length > 0) {
+                const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "google-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
+                executePlaybookCommands(gchatOrcPlaybookCmds, pbCtx).catch(err => console.error("[playbook]", err));
+              }
               return;
             }
 
@@ -2491,20 +2540,21 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
             });
             const gchatDuration = Date.now() - gchatStart;
             const response = await processMemoryIntents(supabase, rawResponse, gchatAgentResult?.dispatch.agent.name || "general", "shared", agentMemory.sessionIds);
+            const { cleanedText: gchatPlaybookClean, commands: gchatPlaybookCmds } = extractPlaybookCommands(response);
 
             if (gchatAgentResult) {
-              syncResponse(supabase, gchatAgentResult.dispatch.session_id, response, {
+              syncResponse(supabase, gchatAgentResult.dispatch.session_id, gchatPlaybookClean, {
                 duration_ms: gchatDuration,
               }).catch(() => {});
             }
 
-            const { cleanedText: gchatClean } = extractApprovalTags(response);
+            const { cleanedText: gchatClean } = extractApprovalTags(gchatPlaybookClean);
             const msgId = await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
             broadcastExtension({ type: "message_out", channel: "google-chat", agent: gchatAgentResult?.dispatch.agent.name || "general", preview: gchatClean.substring(0, 200) });
             resetGchatIdleTimer();
             console.log(`[gchat] Async reply (${gchatClean.length} chars) to ${parsed.spaceName}: ${gchatClean.substring(0, 80)}...`);
 
-            const result = await deliverMessage(supabase, gchatClean, {
+            const gchatDeliverResult = await deliverMessage(supabase, gchatClean, {
               channel: "google-chat",
               messageId: msgId || undefined,
               spaceName: parsed.spaceName,
@@ -2514,12 +2564,18 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               fallback: true,
             });
 
-            if (result.status === "sent") {
-              console.log(`[gchat] Async delivery complete → ${result.externalId}`);
-            } else if (result.status === "fallback") {
-              console.log(`[gchat] Async delivery via fallback (${result.channel}) → ${result.externalId}`);
+            if (gchatDeliverResult.status === "sent") {
+              console.log(`[gchat] Async delivery complete → ${gchatDeliverResult.externalId}`);
+            } else if (gchatDeliverResult.status === "fallback") {
+              console.log(`[gchat] Async delivery via fallback (${gchatDeliverResult.channel}) → ${gchatDeliverResult.externalId}`);
             } else {
-              console.error(`[gchat] Async delivery FAILED: ${result.error}`);
+              console.error(`[gchat] Async delivery FAILED: ${gchatDeliverResult.error}`);
+            }
+
+            // Fire playbook commands async (ELLIE:: tags)
+            if (gchatPlaybookCmds.length > 0) {
+              const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "google-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
+              executePlaybookCommands(gchatPlaybookCmds, pbCtx).catch(err => console.error("[playbook]", err));
             }
           } catch (err) {
             console.error("[gchat] Async processing error:", err);
@@ -2880,6 +2936,21 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
+    })();
+    return;
+  }
+
+  // GTD — return pending Google Tasks as JSON
+  if (url.pathname === "/api/gtd" && req.method === "GET") {
+    (async () => {
+      try {
+        const data = await getGoogleTasksJSON();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(data));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Failed to fetch tasks" }));
+      }
     })();
     return;
   }
@@ -4323,6 +4394,18 @@ async function handleLaCommsMessage(
     ws.send(JSON.stringify({ type: "typing", ts: Date.now() }));
   }
 
+  // ELLIE:: user-typed commands — bypass classifier, execute directly
+  const { cleanedText: laCommsPlaybookClean, commands: laCommsPlaybookCmds } = extractPlaybookCommands(text);
+  if (laCommsPlaybookCmds.length > 0) {
+    console.log(`[la-comms] ELLIE:: commands in user message: ${laCommsPlaybookCmds.map(c => c.type).join(", ")}`);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "response", text: `Processing ${laCommsPlaybookCmds.length} playbook command(s)...`, agent: "system", ts: Date.now() }));
+    }
+    const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "la-comms", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
+    executePlaybookCommands(laCommsPlaybookCmds, pbCtx).catch(err => console.error("[playbook]", err));
+    return;
+  }
+
   if (phoneMode) {
     // ── Phone mode fast path: 6-turn context, Haiku, brevity prompt, no agent routing ──
     await enqueue(async () => {
@@ -4481,7 +4564,8 @@ async function handleLaCommsMessage(
 
         const orcAgent = result.finalDispatch?.agent?.name || agentResult.dispatch.agent.name || "general";
         const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, orcAgent, "shared", agentMemory.sessionIds);
-        const { cleanedText } = extractApprovalTags(pipelineResponse);
+        const { cleanedText: laOrcPlaybookClean, commands: laOrcPlaybookCmds } = extractPlaybookCommands(pipelineResponse);
+        const { cleanedText } = extractApprovalTags(laOrcPlaybookClean);
 
         await saveMessage("assistant", cleanedText, {}, "la-comms");
         broadcastExtension({
@@ -4509,6 +4593,12 @@ async function handleLaCommsMessage(
           syncResponse(supabase, result.finalDispatch.session_id, cleanedText, {
             duration_ms: result.artifacts.total_duration_ms,
           }).catch(() => {});
+        }
+
+        // Fire playbook commands async (ELLIE:: tags)
+        if (laOrcPlaybookCmds.length > 0) {
+          const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "la-comms", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
+          executePlaybookCommands(laOrcPlaybookCmds, pbCtx).catch(err => console.error("[playbook]", err));
         }
       } catch (err) {
         console.error("[la-comms] Multi-step failed:", err);
@@ -4584,7 +4674,7 @@ async function handleLaCommsMessage(
         if (entity) {
           // Find most recently active tree (growing or dormant within last 5 min)
           const [tree] = await forestSql<any[]>`
-            SELECT DISTINCT t.id, t.work_item_id FROM trees t
+            SELECT t.id, t.work_item_id FROM trees t
             JOIN creatures c ON c.tree_id = t.id
             WHERE t.type = 'work_session'
               AND t.state IN ('growing', 'dormant')
@@ -4618,7 +4708,8 @@ async function handleLaCommsMessage(
     }
 
     const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general", "shared", effectiveSessionIds);
-    const { cleanedText } = extractApprovalTags(response);
+    const { cleanedText: laPlaybookClean, commands: laPlaybookCmds } = extractPlaybookCommands(response);
+    const { cleanedText } = extractApprovalTags(laPlaybookClean);
 
     await saveMessage("assistant", cleanedText, {}, "la-comms");
     broadcastExtension({
@@ -4641,6 +4732,12 @@ async function handleLaCommsMessage(
       syncResponse(supabase, agentResult.dispatch.session_id, cleanedText, {
         duration_ms: durationMs,
       }).catch(() => {});
+    }
+
+    // Fire playbook commands async (ELLIE:: tags)
+    if (laPlaybookCmds.length > 0) {
+      const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "la-comms", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
+      executePlaybookCommands(laPlaybookCmds, pbCtx).catch(err => console.error("[playbook]", err));
     }
 
     // Cleanup temp image file

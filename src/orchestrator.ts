@@ -721,6 +721,7 @@ export function sanitizeInstruction(instruction: string): string {
     .replace(/[\x00-\x1F\x7F]/g, " ")         // strip control chars
     .replace(/\[CONFIRM:/gi, "[_CONFIRM_:")     // neutralize approval tags
     .replace(/\[REMEMBER:/gi, "[_REMEMBER_:")   // neutralize memory tags
+    .replace(/ELLIE::/gi, "ELLIE__")            // neutralize playbook tags
     .slice(0, MAX_INSTRUCTION_CHARS);
 }
 

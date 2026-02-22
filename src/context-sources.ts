@@ -599,6 +599,61 @@ export async function getGoogleTasks(): Promise<string> {
   }
 }
 
+export interface GoogleTaskItem {
+  id: string;
+  title: string;
+  notes?: string;
+  due?: string;
+  status: string;
+  updated: string;
+}
+
+/**
+ * Fetch pending Google Tasks as structured JSON for the /gtd command.
+ */
+async function getGoogleTasksJSONForAccount(account: GoogleAccount): Promise<{ label: string; tasks: GoogleTaskItem[] }> {
+  const token = await getAccessTokenForAccount(account);
+  if (!token) return { label: account.label, tasks: [] };
+
+  const res = await fetch(
+    "https://tasks.googleapis.com/tasks/v1/lists/@default/tasks?" +
+      new URLSearchParams({
+        showCompleted: "false",
+        showHidden: "false",
+        maxResults: "20",
+      }),
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+
+  if (!res.ok) return { label: account.label, tasks: [] };
+
+  const data = await res.json();
+  const items = data.items || [];
+
+  return {
+    label: account.label,
+    tasks: items.map((t: any) => ({
+      id: t.id,
+      title: t.title,
+      notes: t.notes || undefined,
+      due: t.due || undefined,
+      status: t.status,
+      updated: t.updated,
+    })),
+  };
+}
+
+export async function getGoogleTasksJSON(): Promise<{ accounts: { label: string; tasks: GoogleTaskItem[] }[] }> {
+  if (!googleAccounts.length) return { accounts: [] };
+  try {
+    const accounts = await Promise.all(googleAccounts.map(getGoogleTasksJSONForAccount));
+    return { accounts };
+  } catch (error) {
+    console.error("[context] Failed to fetch Google Tasks JSON:", error);
+    return { accounts: [] };
+  }
+}
+
 // ============================================================
 // PENDING ACTION ITEMS: Extracted from recent conversations
 // ============================================================

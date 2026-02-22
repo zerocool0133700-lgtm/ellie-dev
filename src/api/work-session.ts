@@ -347,7 +347,7 @@ export async function completeWorkSession(req: any, res: any, bot: Bot) {
       const buildMtime = statSync(`${dashboardDir}/.output/server/index.mjs`).mtimeMs;
       // Check if any app/ source file is newer than the build
       const newerFiles = execSync(
-        `find app/ -name '*.vue' -o -name '*.ts' | xargs stat -c '%Y %n' | awk '$1 > ${Math.floor(buildMtime / 1000)} {print $2}'`,
+        `find app/ \\( -name '*.vue' -o -name '*.ts' \\) | xargs stat -c '%Y %n' | awk '$1 > ${Math.floor(buildMtime / 1000)} {print $2}'`,
         { cwd: dashboardDir, encoding: 'utf-8', timeout: 5000 }
       ).trim();
       if (newerFiles) {
