@@ -1,0 +1,33 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "index.refresh_interval": "1s"
+  },
+  "mappings": {
+    "properties": {
+      "creature_id": { "type": "keyword" },
+      "type": { "type": "keyword" },
+      "tree_id": { "type": "keyword" },
+      "entity_id": { "type": "keyword" },
+      "branch_id": { "type": "keyword" },
+      "parent_creature_id": { "type": "keyword" },
+      "intent": {
+        "type": "text",
+        "analyzer": "standard",
+        "fields": {
+          "keyword": { "type": "keyword", "ignore_above": 256 }
+        }
+      },
+      "state": { "type": "keyword" },
+      "error": { "type": "text" },
+      "tree_title": { "type": "keyword" },
+      "tree_type": { "type": "keyword" },
+      "entity_name": { "type": "keyword" },
+      "dispatched_at": { "type": "date" },
+      "started_at": { "type": "date" },
+      "completed_at": { "type": "date" },
+      "created_at": { "type": "date" }
+    }
+  }
+}

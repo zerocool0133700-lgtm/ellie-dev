@@ -1,0 +1,31 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "index.refresh_interval": "1s"
+  },
+  "mappings": {
+    "properties": {
+      "event_id": { "type": "keyword" },
+      "kind": { "type": "keyword" },
+      "tree_id": { "type": "keyword" },
+      "entity_id": { "type": "keyword" },
+      "branch_id": { "type": "keyword" },
+      "trunk_id": { "type": "keyword" },
+      "creature_id": { "type": "keyword" },
+      "commit_id": { "type": "keyword" },
+      "summary": {
+        "type": "text",
+        "analyzer": "standard",
+        "fields": {
+          "keyword": { "type": "keyword", "ignore_above": 256 }
+        }
+      },
+      "data": { "type": "object", "enabled": false },
+      "tree_title": { "type": "keyword" },
+      "tree_type": { "type": "keyword" },
+      "entity_name": { "type": "keyword" },
+      "created_at": { "type": "date" }
+    }
+  }
+}

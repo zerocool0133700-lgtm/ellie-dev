@@ -156,16 +156,41 @@ async function checkEndpointAuth(): Promise<SecurityFinding[]> {
     { path: "/api/security-sweep", method: "GET", hasAuth: false, writesDB: false, runsCommands: true, severity: "low" },
   ];
 
+  // Load cloudflared tunnel config to check which paths are actually exposed
+  let tunnelPaths: string[] = [];
+  for (const cfgPath of ["/etc/cloudflared/config.yml", resolve(HOME, ".cloudflared/config.yml")]) {
+    try {
+      const cfgContent = await readFile(cfgPath, "utf-8");
+      const pathMatches = cfgContent.match(/path:\s+(.+)/g) || [];
+      tunnelPaths = pathMatches.map(m => m.replace("path:", "").trim().replace(/[\^$]/g, ""));
+      break;
+    } catch { /* try next */ }
+  }
+
   const unauthed = endpoints.filter((e) => !e.hasAuth);
   const writeEndpoints = unauthed.filter((e) => e.writesDB || e.runsCommands);
 
-  if (writeEndpoints.length > 0) {
+  // Split into tunnel-exposed vs localhost-only
+  const exposedWrite = writeEndpoints.filter(e => tunnelPaths.some(tp => e.path.startsWith(tp) || tp.startsWith(e.path.slice(1))));
+  const localhostWrite = writeEndpoints.filter(e => !tunnelPaths.some(tp => e.path.startsWith(tp) || tp.startsWith(e.path.slice(1))));
+
+  if (exposedWrite.length > 0) {
     findings.push({
       severity: "medium",
       category: "endpoint_auth",
-      title: `${writeEndpoints.length} relay write endpoints have no authentication`,
-      description: `Endpoints: ${writeEndpoints.map((e) => `${e.method} ${e.path}`).join(", ")}. These modify database or spawn processes with no auth.`,
-      recommendation: "Add a shared secret header check or restrict to localhost-only via Cloudflare tunnel rules.",
+      title: `${exposedWrite.length} tunnel-exposed write endpoints have no authentication`,
+      description: `Endpoints: ${exposedWrite.map((e) => `${e.method} ${e.path}`).join(", ")}. These are reachable via the Cloudflare tunnel and modify database or spawn processes with no auth.`,
+      recommendation: "Add a shared secret header check or application-level auth.",
+    });
+  }
+
+  if (localhostWrite.length > 0) {
+    findings.push({
+      severity: "low",
+      category: "endpoint_auth",
+      title: `${localhostWrite.length} localhost-only write endpoints have no authentication`,
+      description: `Endpoints: ${localhostWrite.map((e) => `${e.method} ${e.path}`).join(", ")}. These are NOT in the cloudflared tunnel config — only reachable from localhost. Called by the dashboard (which is behind CF Access).`,
+      recommendation: "Consider adding a shared secret header for defense-in-depth, but risk is low.",
     });
   }
 
@@ -634,13 +659,31 @@ async function checkCloudflareTunnel(): Promise<SecurityFinding[]> {
   }
 
   // Check for catch-all route to dashboard
-  if (content.includes("service: http://localhost:3000")) {
+  // A catch-all is dangerous when it routes ellie.ellie-labs.dev (the public domain)
+  // to the dashboard. If the dashboard is on its own subdomain (e.g. dashboard.ellie-labs.dev),
+  // that's fine — CF Access protects it at the edge.
+  const dashboardLines = content.split("\n");
+  let hasDangerousCatchAll = false;
+  for (let i = 0; i < dashboardLines.length; i++) {
+    const line = dashboardLines[i].trim();
+    if (line === "service: http://localhost:3000") {
+      // Check if the preceding hostname is NOT a dedicated dashboard subdomain
+      const prevHostname = dashboardLines.slice(Math.max(0, i - 3), i)
+        .map(l => l.trim())
+        .find(l => l.includes("hostname:"));
+      const hostname = prevHostname?.replace("hostname:", "").trim() || "";
+      if (!hostname.includes("dashboard")) {
+        hasDangerousCatchAll = true;
+      }
+    }
+  }
+  if (hasDangerousCatchAll) {
     findings.push({
       severity: "high",
       category: "cloudflare_tunnel",
       title: "Catch-all tunnel rule exposes all dashboard APIs",
       description: "The cloudflared config routes all unmatched paths to the dashboard (port 3000). This means every dashboard API endpoint (including restart-relay, restart-service) is publicly accessible.",
-      recommendation: "Add Cloudflare Access policy to restrict dashboard access to authorized users only.",
+      recommendation: "Move the dashboard to a dedicated subdomain (e.g. dashboard.ellie-labs.dev) and add Cloudflare Access policy.",
     });
   }
 
@@ -661,15 +704,58 @@ async function checkCloudflareTunnel(): Promise<SecurityFinding[]> {
     }
   }
 
-  // Check for Cloudflare Access
-  // We can't directly check this from the server, but we can note the absence
-  findings.push({
-    severity: "high",
-    category: "cloudflare_tunnel",
-    title: "No Cloudflare Access policy detected",
-    description: "The tunnel configuration does not reference Cloudflare Access. Anyone with the tunnel URL can access the dashboard and all API endpoints.",
-    recommendation: "Configure Cloudflare Access with email OTP or SSO to restrict access to authorized users.",
-  });
+  // Check for Cloudflare Access — verify via dashboard env vars and middleware
+  // CF Access vars live in the dashboard's .env, not the relay's
+  let cfTeam = process.env.CF_ACCESS_TEAM;
+  let cfAud = process.env.CF_ACCESS_AUD;
+  if (!cfTeam || !cfAud) {
+    try {
+      const dashEnv = await readFile(resolve(DASHBOARD_ROOT, ".env"), "utf-8");
+      for (const line of dashEnv.split("\n")) {
+        const m = line.match(/^(CF_ACCESS_TEAM|CF_ACCESS_AUD)=(.+)$/);
+        if (m) {
+          if (m[1] === "CF_ACCESS_TEAM") cfTeam = m[2].trim();
+          if (m[1] === "CF_ACCESS_AUD") cfAud = m[2].trim();
+        }
+      }
+    } catch {
+      // Can't read dashboard .env
+    }
+  }
+  let dashboardHasTunnelGuard = false;
+  try {
+    const guardPath = resolve(DASHBOARD_ROOT, "server/middleware/tunnel-guard.ts");
+    const guardContent = await readFile(guardPath, "utf-8");
+    dashboardHasTunnelGuard = guardContent.includes("validateCfAccessJwt") || guardContent.includes("cf-access-jwt-assertion");
+  } catch {
+    // tunnel-guard.ts doesn't exist
+  }
+
+  if (cfTeam && cfAud && dashboardHasTunnelGuard) {
+    findings.push({
+      severity: "info",
+      category: "cloudflare_tunnel",
+      title: "Cloudflare Access configured for dashboard",
+      description: `CF Access team "${cfTeam}" with JWT validation in tunnel-guard middleware. Dashboard requires authenticated CF Access session.`,
+      recommendation: "No action needed. Verify the Access policy is active in the CF Zero Trust dashboard.",
+    });
+  } else if (cfTeam && cfAud) {
+    findings.push({
+      severity: "medium",
+      category: "cloudflare_tunnel",
+      title: "CF Access env vars set but no JWT validation middleware",
+      description: `CF_ACCESS_TEAM and CF_ACCESS_AUD are set, but tunnel-guard.ts doesn't appear to validate CF Access JWTs.`,
+      recommendation: "Add CF Access JWT validation to the dashboard middleware (tunnel-guard.ts).",
+    });
+  } else {
+    findings.push({
+      severity: "high",
+      category: "cloudflare_tunnel",
+      title: "No Cloudflare Access policy detected",
+      description: "CF_ACCESS_TEAM and CF_ACCESS_AUD are not set. Anyone with the tunnel URL can access the dashboard.",
+      recommendation: "Configure Cloudflare Access with email OTP or SSO and set CF_ACCESS_TEAM + CF_ACCESS_AUD env vars.",
+    });
+  }
 
   return findings;
 }

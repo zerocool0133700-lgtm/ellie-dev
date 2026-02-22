@@ -34,7 +34,7 @@ export function createMockSupabase(tableOverrides?: Record<string, any>) {
       { name: "critical_review", complexity: "light" },
       { name: "web_research", complexity: "heavy" },
       { name: "calendar_management", complexity: "heavy" },
-      { name: "gmail_management", complexity: "heavy" },
+      { name: "email_management", complexity: "heavy" },
     ],
     models: [
       { model_id: "claude-haiku-4-5-20251001", cost_input_mtok: 0.80, cost_output_mtok: 4.0 },

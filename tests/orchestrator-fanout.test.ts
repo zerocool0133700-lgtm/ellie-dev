@@ -73,7 +73,7 @@ describe("ELLIE-55: Fan-Out Execution", () => {
       const options = createMockOptions();
       const steps = [
         createStep({ instruction: "Check calendar", skill_name: "calendar_management" }),
-        createStep({ instruction: "Check email", skill_name: "gmail_management" }),
+        createStep({ instruction: "Check email", skill_name: "email_management" }),
       ];
 
       const result = await executeOrchestrated("fan-out", steps, "Check calendar and email", options);

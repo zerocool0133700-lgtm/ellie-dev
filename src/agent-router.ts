@@ -139,6 +139,7 @@ export async function syncResponse(
     tokens?: number;
     duration_ms?: number;
     status?: "completed" | "failed";
+    agent_name?: string;
     handoff?: {
       to_agent: string;
       reason: string;
@@ -193,7 +194,7 @@ export async function routeAndDispatch(
     console.error("[agent-router] classifyIntent failed, trying edge function fallback:", err);
     const edgeRoute = await routeMessage(supabase, message, channel, userId);
     if (!edgeRoute) return null;
-    route = { ...edgeRoute, confidence: 0.5, execution_mode: "single" as const };
+    route = { ...edgeRoute, confidence: edgeRoute.confidence || 0.5, execution_mode: edgeRoute.execution_mode || "single" as const };
   }
 
   const dispatchMessage = route.strippedMessage || message;

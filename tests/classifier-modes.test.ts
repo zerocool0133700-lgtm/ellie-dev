@@ -30,7 +30,7 @@ function createClassifierSupabase() {
     { name: "critical_review", description: "Review content", agents: { name: "critic" }, triggers: ["review"], priority: 1 },
     { name: "web_research", description: "Research topics", agents: { name: "research" }, triggers: ["research"], priority: 1 },
     { name: "calendar_management", description: "Manage calendar", agents: { name: "general" }, triggers: ["calendar"], priority: 1 },
-    { name: "gmail_management", description: "Manage email", agents: { name: "general" }, triggers: ["email"], priority: 1 },
+    { name: "email_management", description: "Manage email", agents: { name: "general" }, triggers: ["email"], priority: 1 },
     { name: "code_changes", description: "Write code", agents: { name: "dev" }, triggers: ["code"], priority: 1 },
   ];
 
@@ -122,7 +122,7 @@ describe("Classifier Execution Mode Detection", () => {
                     execution_mode: "fan-out",
                     skills: [
                       { agent: "general", skill: "calendar_management", instruction: "Check calendar events" },
-                      { agent: "general", skill: "gmail_management", instruction: "Check unread emails" },
+                      { agent: "general", skill: "email_management", instruction: "Check unread emails" },
                     ],
                   }),
                 },
@@ -145,7 +145,7 @@ describe("Classifier Execution Mode Detection", () => {
       expect(result.skills).toBeDefined();
       expect(result.skills!.length).toBe(2);
       expect(result.skills![0].skill).toBe("calendar_management");
-      expect(result.skills![1].skill).toBe("gmail_management");
+      expect(result.skills![1].skill).toBe("email_management");
     });
   });
 
@@ -323,7 +323,7 @@ describe("Classifier Execution Mode Detection", () => {
                     execution_mode: "fan-out",
                     skills: [
                       { agent: "general", skill: "calendar_management", instruction: "A".repeat(3000) },
-                      { agent: "general", skill: "gmail_management", instruction: "Check email" },
+                      { agent: "general", skill: "email_management", instruction: "Check email" },
                     ],
                   }),
                 },

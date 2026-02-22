@@ -1,0 +1,43 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "index.refresh_interval": "1s"
+  },
+  "mappings": {
+    "properties": {
+      "tree_id": { "type": "keyword" },
+      "type": { "type": "keyword" },
+      "state": { "type": "keyword" },
+      "owner_id": { "type": "keyword" },
+      "title": {
+        "type": "text",
+        "analyzer": "standard",
+        "fields": {
+          "keyword": { "type": "keyword", "ignore_above": 256 }
+        }
+      },
+      "description": {
+        "type": "text",
+        "analyzer": "standard"
+      },
+      "work_item_id": { "type": "keyword" },
+      "external_ref": { "type": "keyword" },
+      "conversation_id": { "type": "keyword" },
+      "tags": { "type": "keyword" },
+      "tree_name_suggest": {
+        "type": "completion",
+        "analyzer": "simple",
+        "max_input_length": 100
+      },
+      "entity_count": { "type": "integer" },
+      "open_branches": { "type": "integer" },
+      "trunk_count": { "type": "integer" },
+      "created_at": { "type": "date" },
+      "promoted_at": { "type": "date" },
+      "last_activity": { "type": "date" },
+      "closed_at": { "type": "date" },
+      "archived_at": { "type": "date" }
+    }
+  }
+}

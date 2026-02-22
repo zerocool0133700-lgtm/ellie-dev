@@ -118,6 +118,11 @@ const HTTP_PORT = parseInt(process.env.HTTP_PORT || "3000");
 const PUBLIC_URL = process.env.PUBLIC_URL || "";
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
 const EXTENSION_API_KEY = process.env.EXTENSION_API_KEY || "";
+const ALLOWED_CALLERS: Set<string> = new Set(
+  [process.env.DAVE_PHONE_NUMBER, ...(process.env.ALLOWED_CALLERS || "").split(",")]
+    .map(n => n?.trim().replace(/\D/g, ""))
+    .filter(Boolean)
+);
 const SILENCE_THRESHOLD_MS = 800; // ms of silence after speech to trigger processing
 const MIN_AUDIO_MS = 400;
 const TMP_DIR = process.env.TMPDIR || "/tmp";
@@ -902,9 +907,9 @@ bot.on("message:text", withQueue(async (ctx) => {
       broadcastExtension({ type: "pipeline_complete", channel: "telegram", mode: execMode, steps: result.stepResults.length, duration_ms: result.artifacts.total_duration_ms, cost_usd: result.artifacts.total_cost_usd });
 
       if (result.finalDispatch) {
-        await syncResponse(supabase, result.finalDispatch.session_id, cleanedPipelineResponse, {
+        syncResponse(supabase, result.finalDispatch.session_id, cleanedPipelineResponse, {
           duration_ms: result.artifacts.total_duration_ms,
-        });
+        }).catch(() => {});
       }
 
       console.log(
@@ -1015,6 +1020,17 @@ bot.on("message:voice", withQueue(async (ctx) => {
     if (agentResult) {
       setActiveAgent("telegram", agentResult.dispatch.agent.name);
       broadcastExtension({ type: "route", channel: "telegram", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode });
+
+      // Dispatch confirmation for voice (matches text handler)
+      if (agentResult.dispatch.agent.name !== "general" && agentResult.dispatch.is_new) {
+        const agentName = agentResult.dispatch.agent.name;
+        notify(getNotifyCtx(), {
+          event: "dispatch_confirm",
+          workItemId: agentName,
+          telegramMessage: `🤖 ${agentName} agent`,
+          gchatMessage: `🤖 ${agentName} agent dispatched`,
+        }).catch((err) => console.error("[notify] dispatch_confirm:", err.message));
+      }
     }
 
     const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext] = await Promise.all([
@@ -1063,9 +1079,9 @@ bot.on("message:voice", withQueue(async (ctx) => {
         await saveMessage("assistant", cleaned);
 
         if (result.finalDispatch) {
-          await syncResponse(supabase, result.finalDispatch.session_id, cleaned, {
+          syncResponse(supabase, result.finalDispatch.session_id, cleaned, {
             duration_ms: result.artifacts.total_duration_ms,
-          });
+          }).catch(() => {});
         }
 
         console.log(
@@ -1197,8 +1213,10 @@ bot.on("message:photo", withQueue(async (ctx) => {
     // Cleanup after processing
     await unlink(filePath).catch(() => {});
 
-    const cleanResponse = await processMemoryIntents(supabase, claudeResponse, getActiveAgent("telegram"));
-    const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId, getActiveAgent("telegram"));
+    // Use the last-routed agent for context (photo/doc handlers don't route independently)
+    const activeAgent = getActiveAgent("telegram");
+    const cleanResponse = await processMemoryIntents(supabase, claudeResponse, activeAgent);
+    const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId, activeAgent);
     await saveMessage("assistant", finalResponse);
     resetTelegramIdleTimer();
   } catch (error) {
@@ -1234,8 +1252,9 @@ bot.on("message:document", withQueue(async (ctx) => {
 
     await unlink(filePath).catch(() => {});
 
-    const cleanResponse = await processMemoryIntents(supabase, claudeResponse, getActiveAgent("telegram"));
-    const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId, getActiveAgent("telegram"));
+    const activeAgent = getActiveAgent("telegram");
+    const cleanResponse = await processMemoryIntents(supabase, claudeResponse, activeAgent);
+    const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId, activeAgent);
     await saveMessage("assistant", finalResponse);
     resetTelegramIdleTimer();
   } catch (error) {
@@ -1347,47 +1366,44 @@ export function buildPrompt(
   }
 
   if (AGENT_MODE) {
-    if (agentConfig?.tools_enabled?.length) {
-      parts.push(
-        `You have access to these tools: ${agentConfig.tools_enabled.join(", ")}. ` +
-        "Use them freely to answer questions. " +
-        "IMPORTANT: NEVER run sudo commands, NEVER install packages (apt, npm -g, brew), NEVER run commands that require interactive input or confirmation. " +
-        "If a task would require sudo or installing software, tell the user what to run instead. " +
-        "The user is reading on a phone. After using tools, give a concise final answer (not the raw tool output). " +
-        "If a task requires multiple steps, just do them — don't ask for permission."
-      );
-    } else {
-      parts.push(
-        "You have full tool access: Read, Edit, Write, Bash, Glob, Grep, WebSearch, WebFetch. " +
-        "You also have MCP tools:\n" +
-        "- Google Workspace (user_google_email: zerocool0133700@gmail.com):\n" +
-        "  Gmail: search_gmail_messages, get_gmail_message_content, send_gmail_message (send requires [CONFIRM])\n" +
-        "  Calendar: get_events, create_event (create/modify requires [CONFIRM])\n" +
-        "  Tasks: list_tasks, create_task, update_task, get_task\n" +
-        "  Also: Drive, Docs, Sheets, Forms, Contacts\n" +
-        "  Your system context already includes an unread email signal and pending Google Tasks.\n" +
-        "  Use Gmail MCP tools to read full email content, reply to threads, or draft messages.\n" +
-        "- GitHub, Memory, Sequential Thinking\n" +
-        "- Plane (project management — workspace: evelife at plane.ellie-labs.dev)\n" +
-        "- Brave Search (mcp__brave-search__brave_web_search, mcp__brave-search__brave_local_search)\n" +
-        "- Miro (diagrams, docs, tables), Excalidraw (drawings, diagrams)\n" +
-        (isOutlookConfigured()
-          ? "- Microsoft Outlook (" + getOutlookEmail() + "):\n" +
-            "  Available via HTTP API (use curl from Bash):\n" +
-            "  - GET http://localhost:3001/api/outlook/unread — list unread messages\n" +
-            "  - GET http://localhost:3001/api/outlook/search?q=QUERY — search messages\n" +
-            "  - GET http://localhost:3001/api/outlook/message/MESSAGE_ID — get full message\n" +
-            "  - POST http://localhost:3001/api/outlook/send -d '{\"subject\":\"...\",\"body\":\"...\",\"to\":[\"...\"]}' (requires [CONFIRM])\n" +
-            "  - POST http://localhost:3001/api/outlook/reply -d '{\"messageId\":\"...\",\"comment\":\"...\"}' (requires [CONFIRM])\n" +
-            "  Your system context already includes an Outlook unread email signal.\n"
-          : "") +
-        "Use them freely to answer questions — read files, run commands, search code, browse the web, check email, manage calendar. " +
-        "IMPORTANT: NEVER run sudo commands, NEVER install packages (apt, npm -g, brew), NEVER run commands that require interactive input or confirmation. " +
-        "If a task would require sudo or installing software, tell the user what to run instead. " +
-        "The user is reading on a phone. After using tools, give a concise final answer (not the raw tool output). " +
-        "If a task requires multiple steps, just do them — don't ask for permission."
-      );
-    }
+    // Tool header — agent-specific list or full default set
+    const toolHeader = agentConfig?.tools_enabled?.length
+      ? `You have access to these tools: ${agentConfig.tools_enabled.join(", ")}.`
+      : "You have full tool access: Read, Edit, Write, Bash, Glob, Grep, WebSearch, WebFetch.";
+
+    // MCP tool details — shared across all agent paths
+    const mcpDetails =
+      "You also have MCP tools:\n" +
+      "- Google Workspace (user_google_email: zerocool0133700@gmail.com):\n" +
+      "  Gmail: search_gmail_messages, get_gmail_message_content, send_gmail_message (send requires [CONFIRM])\n" +
+      "  Calendar: get_events, create_event (create/modify requires [CONFIRM])\n" +
+      "  Tasks: list_tasks, create_task, update_task, get_task\n" +
+      "  Also: Drive, Docs, Sheets, Forms, Contacts\n" +
+      "  Your system context already includes an unread email signal and pending Google Tasks.\n" +
+      "  Use Gmail MCP tools to read full email content, reply to threads, or draft messages.\n" +
+      "- GitHub, Memory, Sequential Thinking\n" +
+      "- Plane (project management — workspace: evelife at plane.ellie-labs.dev)\n" +
+      "- Brave Search (mcp__brave-search__brave_web_search, mcp__brave-search__brave_local_search)\n" +
+      "- Miro (diagrams, docs, tables), Excalidraw (drawings, diagrams)\n" +
+      (isOutlookConfigured()
+        ? "- Microsoft Outlook (" + getOutlookEmail() + "):\n" +
+          "  Available via HTTP API (use curl from Bash):\n" +
+          "  - GET http://localhost:3001/api/outlook/unread — list unread messages\n" +
+          "  - GET http://localhost:3001/api/outlook/search?q=QUERY — search messages\n" +
+          "  - GET http://localhost:3001/api/outlook/message/MESSAGE_ID — get full message\n" +
+          "  - POST http://localhost:3001/api/outlook/send -d '{\"subject\":\"...\",\"body\":\"...\",\"to\":[\"...\"]}' (requires [CONFIRM])\n" +
+          "  - POST http://localhost:3001/api/outlook/reply -d '{\"messageId\":\"...\",\"comment\":\"...\"}' (requires [CONFIRM])\n" +
+          "  Your system context already includes an Outlook unread email signal.\n"
+        : "");
+
+    parts.push(
+      toolHeader + " " + mcpDetails +
+      "Use them freely to answer questions — read files, run commands, search code, browse the web, check email, manage calendar. " +
+      "IMPORTANT: NEVER run sudo commands, NEVER install packages (apt, npm -g, brew), NEVER run commands that require interactive input or confirmation. " +
+      "If a task would require sudo or installing software, tell the user what to run instead. " +
+      "The user is reading on a phone. After using tools, give a concise final answer (not the raw tool output). " +
+      "If a task requires multiple steps, just do them — don't ask for permission."
+    );
   }
 
   if (USER_NAME) parts.push(`You are speaking with ${USER_NAME}.`);
@@ -2046,6 +2062,21 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
         return;
       }
 
+      // Caller whitelist — only allow known numbers
+      if (ALLOWED_CALLERS.size > 0) {
+        const params = new URLSearchParams(voiceBody);
+        const caller = (params.get("From") || "").replace(/\D/g, "");
+        if (!ALLOWED_CALLERS.has(caller)) {
+          console.warn(`[voice] Rejected call from ${params.get("From")} — not in whitelist`);
+          const rejectTwiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response><Say>Sorry, this number is not authorized.</Say><Hangup/></Response>`;
+          res.writeHead(200, { "Content-Type": "application/xml" });
+          res.end(rejectTwiml);
+          return;
+        }
+        console.log(`[voice] Accepted call from ${params.get("From")}`);
+      }
+
     const wsUrl = PUBLIC_URL
       ? PUBLIC_URL.replace(/^https?/, "wss") + "/media-stream"
       : `wss://${req.headers.host}/media-stream`;
@@ -2220,108 +2251,164 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           return;
         }
 
-        const gchatAgentResult = await routeAndDispatch(supabase, parsed.text, "google-chat", parsed.senderEmail);
-        const effectiveGchatText = gchatAgentResult?.route.strippedMessage || parsed.text;
-        if (gchatAgentResult) {
-          setActiveAgent("google-chat", gchatAgentResult.dispatch.agent.name);
-          broadcastExtension({ type: "route", channel: "google-chat", agent: gchatAgentResult.dispatch.agent.name, mode: gchatAgentResult.route.execution_mode });
+        // Immediately acknowledge — all routing + Claude work happens async.
+        // This prevents Google Chat's ~30s webhook timeout from showing "not responding".
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          hostAppDataAction: { chatDataAction: { createMessageAction: { message: { text: "Working on it..." } } } },
+        }));
 
-          // Dispatch confirmation — routed through notification policy (ELLIE-80)
-          if (gchatAgentResult.dispatch.agent.name !== "general" && gchatAgentResult.dispatch.is_new) {
-            const agentName = gchatAgentResult.dispatch.agent.name;
-            notify(getNotifyCtx(), {
-              event: "dispatch_confirm",
-              workItemId: agentName,
-              telegramMessage: `🤖 ${agentName} agent`,
-              gchatMessage: `🤖 ${agentName} agent dispatched`,
-            }).catch((err) => console.error("[notify] dispatch_confirm:", err.message));
-          }
-        }
+        // All remaining work is async — response delivered via Chat API
+        (async () => {
+          try {
+            const gchatAgentResult = await routeAndDispatch(supabase, parsed.text, "google-chat", parsed.senderEmail);
+            const effectiveGchatText = gchatAgentResult?.route.strippedMessage || parsed.text;
+            if (gchatAgentResult) {
+              setActiveAgent("google-chat", gchatAgentResult.dispatch.agent.name);
+              broadcastExtension({ type: "route", channel: "google-chat", agent: gchatAgentResult.dispatch.agent.name, mode: gchatAgentResult.route.execution_mode });
 
-        const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext] = await Promise.all([
-          getContextDocket(),
-          getRelevantContext(supabase, effectiveGchatText),
-          searchElastic(effectiveGchatText, { limit: 5, recencyBoost: true }),
-          getAgentStructuredContext(supabase, getActiveAgent("google-chat")),
-          getRecentMessages(supabase),
-          getForestContext(effectiveGchatText),
-        ]);
+              // Dispatch confirmation — routed through notification policy (ELLIE-80)
+              if (gchatAgentResult.dispatch.agent.name !== "general" && gchatAgentResult.dispatch.is_new) {
+                const agentName = gchatAgentResult.dispatch.agent.name;
+                notify(getNotifyCtx(), {
+                  event: "dispatch_confirm",
+                  workItemId: agentName,
+                  telegramMessage: `🤖 ${agentName} agent`,
+                  gchatMessage: `🤖 ${agentName} agent dispatched`,
+                }).catch((err) => console.error("[notify] dispatch_confirm:", err.message));
+              }
+            }
 
-        // ── Sync response gate (shared by multi-step and single-agent paths) ──
-        const GCHAT_SYNC_TIMEOUT_MS = 25_000;
-        let respondedSync = false;
+            const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext] = await Promise.all([
+              getContextDocket(),
+              getRelevantContext(supabase, effectiveGchatText),
+              searchElastic(effectiveGchatText, { limit: 5, recencyBoost: true }),
+              getAgentStructuredContext(supabase, getActiveAgent("google-chat")),
+              getRecentMessages(supabase),
+              getForestContext(effectiveGchatText),
+            ]);
 
-        function sendSyncResponse(text: string, cardsV2?: any[]) {
-          if (respondedSync) return;
-          respondedSync = true;
-          res.writeHead(200, { "Content-Type": "application/json" });
-          const message: Record<string, any> = { text };
-          if (cardsV2?.length) message.cardsV2 = cardsV2;
-          res.end(JSON.stringify({
-            hostAppDataAction: { chatDataAction: { createMessageAction: { message } } },
-          }));
-        }
+            // Detect work item mentions (ELLIE-5, EVE-3, etc.) — matches Telegram text handler
+            let workItemContext = "";
+            const workItemMatch = effectiveGchatText.match(/\b([A-Z]+-\d+)\b/);
+            if (workItemMatch && isPlaneConfigured()) {
+              const details = await fetchWorkItemDetails(workItemMatch[1]);
+              if (details) {
+                workItemContext = `\nACTIVE WORK ITEM: ${workItemMatch[1]}\n` +
+                  `Title: ${details.name}\n` +
+                  `Priority: ${details.priority}\n` +
+                  `Description: ${details.description}\n`;
+              }
+            }
 
-        // ── Google Chat multi-step branch (ELLIE-58) ──
-        if (gchatAgentResult?.route.execution_mode !== "single" && gchatAgentResult?.route.skills?.length) {
-          const gchatExecMode = gchatAgentResult.route.execution_mode;
-          const gchatSteps: PipelineStep[] = gchatAgentResult.route.skills.map((s) => ({
-            agent_name: s.agent,
-            skill_name: s.skill !== "none" ? s.skill : undefined,
-            instruction: s.instruction,
-          }));
+            // ── Google Chat multi-step branch (ELLIE-58) ──
+            if (gchatAgentResult?.route.execution_mode !== "single" && gchatAgentResult?.route.skills?.length) {
+              const gchatExecMode = gchatAgentResult.route.execution_mode;
+              const gchatSteps: PipelineStep[] = gchatAgentResult.route.skills.map((s) => ({
+                agent_name: s.agent,
+                skill_name: s.skill !== "none" ? s.skill : undefined,
+                instruction: s.instruction,
+              }));
 
-          const modeLabels: Record<string, string> = { pipeline: "Pipeline", "fan-out": "Fan-out", "critic-loop": "Critic loop" };
-          const gchatAgentNames = [...new Set(gchatSteps.map((s) => s.agent_name))].join(" \u2192 ");
+              const GCHAT_ORCHESTRATION_TIMEOUT_MS = 300_000; // 5 minutes max
+              const result = await Promise.race([
+                executeOrchestrated(gchatExecMode, gchatSteps, effectiveGchatText, {
+                  supabase,
+                  channel: "google-chat",
+                  userId: parsed.senderEmail,
+                  anthropicClient: anthropic,
+                  contextDocket, relevantContext, elasticContext,
+                  structuredContext, recentMessages, workItemContext, forestContext,
+                  buildPromptFn: buildPrompt,
+                  callClaudeFn: callClaude,
+                }),
+                new Promise<never>((_, reject) =>
+                  setTimeout(() => reject(new Error("Orchestration timeout (5m)")), GCHAT_ORCHESTRATION_TIMEOUT_MS),
+                ),
+              ]);
 
-          // Multi-step will always exceed 25s — send sync response immediately, run async
-          sendSyncResponse(`Working on it... (${modeLabels[gchatExecMode] || gchatExecMode}: ${gchatAgentNames}, ${gchatSteps.length} steps)`);
+              const gchatOrcAgent = result.finalDispatch?.agent?.name || gchatAgentResult?.dispatch.agent.name || "general";
+              const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, gchatOrcAgent);
+              const { cleanedText: gchatClean } = extractApprovalTags(pipelineResponse);
+              await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
+              broadcastExtension({ type: "message_out", channel: "google-chat", agent: gchatOrcAgent, preview: gchatClean.substring(0, 200) });
+              broadcastExtension({ type: "pipeline_complete", channel: "google-chat", mode: gchatExecMode, steps: result.stepResults.length, duration_ms: result.artifacts.total_duration_ms, cost_usd: result.artifacts.total_cost_usd });
+              resetGchatIdleTimer();
 
-          const GCHAT_ORCHESTRATION_TIMEOUT_MS = 300_000; // 5 minutes max
-          Promise.race([
-            executeOrchestrated(gchatExecMode, gchatSteps, effectiveGchatText, {
-              supabase,
-              channel: "google-chat",
-              userId: parsed.senderEmail,
-              anthropicClient: anthropic,
-              contextDocket, relevantContext, elasticContext,
-              structuredContext, recentMessages, forestContext,
-              buildPromptFn: buildPrompt,
-              callClaudeFn: callClaude,
-            }),
-            new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error("Orchestration timeout (5m)")), GCHAT_ORCHESTRATION_TIMEOUT_MS),
-            ),
-          ]).then(async (result) => {
-            const gchatOrcAgent = result.finalDispatch?.agent?.name || gchatAgentResult?.dispatch.agent.name || "general";
-            const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, gchatOrcAgent);
-            const { cleanedText: gchatClean } = extractApprovalTags(pipelineResponse);
-            await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
-            broadcastExtension({ type: "message_out", channel: "google-chat", agent: gchatOrcAgent, preview: gchatClean.substring(0, 200) });
-            broadcastExtension({ type: "pipeline_complete", channel: "google-chat", mode: gchatExecMode, steps: result.stepResults.length, duration_ms: result.artifacts.total_duration_ms, cost_usd: result.artifacts.total_cost_usd });
-            resetGchatIdleTimer();
+              if (result.finalDispatch) {
+                syncResponse(supabase, result.finalDispatch.session_id, gchatClean, {
+                  duration_ms: result.artifacts.total_duration_ms,
+                }).catch(() => {});
+              }
 
-            if (result.finalDispatch) {
-              syncResponse(supabase, result.finalDispatch.session_id, gchatClean, {
-                duration_ms: result.artifacts.total_duration_ms,
+              console.log(`[gchat] ${gchatExecMode}: ${result.stepResults.length} steps in ${result.artifacts.total_duration_ms}ms, $${result.artifacts.total_cost_usd.toFixed(4)}`);
+
+              await deliverMessage(supabase, gchatClean, {
+                channel: "google-chat",
+                spaceName: parsed.spaceName,
+                threadName: null,
+                telegramBot: bot,
+                telegramChatId: ALLOWED_USER_ID,
+                fallback: true,
+              });
+              return;
+            }
+
+            // ── Google Chat single-agent path (default) ──
+            const enrichedPrompt = buildPrompt(
+              effectiveGchatText, contextDocket, relevantContext, elasticContext, "google-chat",
+              gchatAgentResult?.dispatch.agent ? { system_prompt: gchatAgentResult.dispatch.agent.system_prompt, name: gchatAgentResult.dispatch.agent.name, tools_enabled: gchatAgentResult.dispatch.agent.tools_enabled } : undefined,
+              workItemContext || undefined, structuredContext, recentMessages,
+              gchatAgentResult?.dispatch.skill_context,
+              forestContext,
+            );
+
+            const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
+            const gchatAgentModel = gchatAgentResult?.dispatch.agent.model;
+
+            const gchatStart = Date.now();
+            const rawResponse = await callClaude(enrichedPrompt, {
+              resume: true,
+              allowedTools: gchatAgentTools?.length ? gchatAgentTools : undefined,
+              model: gchatAgentModel || undefined,
+            });
+            const gchatDuration = Date.now() - gchatStart;
+            const response = await processMemoryIntents(supabase, rawResponse, gchatAgentResult?.dispatch.agent.name || "general");
+
+            if (gchatAgentResult) {
+              syncResponse(supabase, gchatAgentResult.dispatch.session_id, response, {
+                duration_ms: gchatDuration,
               }).catch(() => {});
             }
 
-            console.log(`[gchat] ${gchatExecMode}: ${result.stepResults.length} steps in ${result.artifacts.total_duration_ms}ms, $${result.artifacts.total_cost_usd.toFixed(4)}`);
+            const { cleanedText: gchatClean } = extractApprovalTags(response);
+            const msgId = await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
+            broadcastExtension({ type: "message_out", channel: "google-chat", agent: gchatAgentResult?.dispatch.agent.name || "general", preview: gchatClean.substring(0, 200) });
+            resetGchatIdleTimer();
+            console.log(`[gchat] Async reply (${gchatClean.length} chars) to ${parsed.spaceName}: ${gchatClean.substring(0, 80)}...`);
 
-            await deliverMessage(supabase, gchatClean, {
+            const result = await deliverMessage(supabase, gchatClean, {
               channel: "google-chat",
+              messageId: msgId || undefined,
               spaceName: parsed.spaceName,
               threadName: null,
               telegramBot: bot,
               telegramChatId: ALLOWED_USER_ID,
               fallback: true,
             });
-          }).catch((err) => {
-            console.error("[gchat] Multi-step failed:", err);
+
+            if (result.status === "sent") {
+              console.log(`[gchat] Async delivery complete → ${result.externalId}`);
+            } else if (result.status === "fallback") {
+              console.log(`[gchat] Async delivery via fallback (${result.channel}) → ${result.externalId}`);
+            } else {
+              console.error(`[gchat] Async delivery FAILED: ${result.error}`);
+            }
+          } catch (err) {
+            console.error("[gchat] Async processing error:", err);
             const errMsg = err instanceof PipelineStepError && err.partialOutput
               ? err.partialOutput + "\n\n(Execution incomplete.)"
-              : "Sorry, I ran into an error processing your multi-step request.";
+              : "Sorry, I ran into an error while processing your request. Please try again.";
             deliverMessage(supabase, errMsg, {
               channel: "google-chat",
               spaceName: parsed.spaceName,
@@ -2329,159 +2416,10 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               telegramBot: bot,
               telegramChatId: ALLOWED_USER_ID,
               fallback: true,
-            }).catch(() => {});
-          });
-          return;
-        }
-
-        // ── Google Chat single-agent path (default) ──
-        const enrichedPrompt = buildPrompt(
-          effectiveGchatText, contextDocket, relevantContext, elasticContext, "google-chat",
-          gchatAgentResult?.dispatch.agent ? { system_prompt: gchatAgentResult.dispatch.agent.system_prompt, name: gchatAgentResult.dispatch.agent.name, tools_enabled: gchatAgentResult.dispatch.agent.tools_enabled } : undefined,
-          undefined, structuredContext, recentMessages,
-          gchatAgentResult?.dispatch.skill_context,
-          forestContext,
-        );
-
-        const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
-        const gchatAgentModel = gchatAgentResult?.dispatch.agent.model;
-
-        // Race Claude call against the sync timeout.
-        // If Claude finishes fast, respond synchronously (best UX).
-        // If it takes too long, send "working on it" synchronously, then post the
-        // real result async via the Chat API when Claude finishes.
-
-        // Start Claude call (runs in background if timeout fires first)
-        const claudePromise = (async () => {
-          const gchatStart = Date.now();
-          const rawResponse = await callClaude(enrichedPrompt, {
-            resume: true,
-            allowedTools: gchatAgentTools?.length ? gchatAgentTools : undefined,
-            model: gchatAgentModel || undefined,
-          });
-          const gchatDuration = Date.now() - gchatStart;
-          const response = await processMemoryIntents(supabase, rawResponse, gchatAgentResult?.dispatch.agent.name || "general");
-
-          if (gchatAgentResult) {
-            syncResponse(supabase, gchatAgentResult.dispatch.session_id, response, {
-              duration_ms: gchatDuration,
+              maxRetries: 1,
             }).catch(() => {});
           }
-
-          return { response, gchatDuration };
         })();
-
-        // Start timeout timer
-        const timeoutPromise = new Promise<"timeout">((resolve) =>
-          setTimeout(() => resolve("timeout"), GCHAT_SYNC_TIMEOUT_MS)
-        );
-
-        const raceResult = await Promise.race([
-          claudePromise.then((r) => ({ type: "done" as const, ...r })),
-          timeoutPromise.then(() => ({ type: "timeout" as const })),
-        ]);
-
-        if (raceResult.type === "timeout") {
-          // Claude is still working — send interim response, continue in background
-          const agentLabel = gchatAgentResult?.dispatch.agent.name || "general";
-          const preview = parsed.text.length > 60 ? parsed.text.substring(0, 57) + "..." : parsed.text;
-          console.log(`[gchat] Timeout — sending interim response, continuing async`);
-          sendSyncResponse(`Working on it... (${agentLabel} agent is processing your request)`);
-
-          // Wait for Claude to finish, then deliver result with retry + fallback
-          claudePromise
-            .then(async ({ response }) => {
-              const { cleanedText: gchatClean } = extractApprovalTags(response);
-              const msgId = await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
-              broadcastExtension({ type: "message_out", channel: "google-chat", agent: gchatAgentResult?.dispatch.agent.name || "general", preview: gchatClean.substring(0, 200) });
-              resetGchatIdleTimer();
-              console.log(`[gchat] Async reply (${gchatClean.length} chars) to ${parsed.spaceName} thread=${parsed.threadName || "none"}: ${gchatClean.substring(0, 80)}...`);
-
-              // Don't use thread for async replies — thread replies in DMs get buried
-              // and users don't see them. Send as top-level message instead.
-              const result = await deliverMessage(supabase, gchatClean, {
-                channel: "google-chat",
-                messageId: msgId || undefined,
-                spaceName: parsed.spaceName,
-                threadName: null,
-                telegramBot: bot,
-                telegramChatId: ALLOWED_USER_ID,
-                fallback: true,
-              });
-
-              if (result.status === "sent") {
-                console.log(`[gchat] Async delivery complete → ${result.externalId}`);
-              } else if (result.status === "fallback") {
-                console.log(`[gchat] Async delivery via fallback (${result.channel}) → ${result.externalId}`);
-              } else {
-                console.error(`[gchat] Async delivery FAILED: ${result.error}`);
-              }
-            })
-            .catch((err) => {
-              console.error("[gchat] Async Claude/delivery error:", err);
-              // Last resort — try to notify user something went wrong
-              deliverMessage(supabase, "Sorry, I ran into an error while processing your request. Please try again.", {
-                channel: "google-chat",
-                spaceName: parsed.spaceName,
-                threadName: parsed.threadName,
-                telegramBot: bot,
-                telegramChatId: ALLOWED_USER_ID,
-                fallback: true,
-                maxRetries: 1,
-              }).catch(() => {});
-            });
-        } else {
-          // Claude finished within timeout — respond synchronously (best UX)
-          const { response } = raceResult;
-          const { cleanedText: gchatClean, confirmations: gchatConfirms } = extractApprovalTags(response);
-
-          await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
-          broadcastExtension({ type: "message_out", channel: "google-chat", agent: gchatAgentResult?.dispatch.agent.name || "general", preview: gchatClean.substring(0, 200) });
-          resetGchatIdleTimer();
-          console.log(`[gchat] Replying: ${gchatClean.substring(0, 80)}...`);
-
-          if (gchatConfirms.length > 0) {
-            const cardSections = gchatConfirms.map((desc) => {
-              const actionId = crypto.randomUUID();
-              storePendingAction(actionId, desc, session.sessionId, 0, 0, {
-                channel: "google-chat",
-                spaceName: parsed.spaceName,
-                agentName: gchatAgentResult?.dispatch.agent.name || getActiveAgent("google-chat"),
-              });
-              return {
-                widgets: [
-                  { textParagraph: { text: `<b>Action:</b> ${desc}` } },
-                  {
-                    buttonList: {
-                      buttons: [
-                        {
-                          text: "Approve",
-                          color: { red: 0.2, green: 0.7, blue: 0.3, alpha: 1 },
-                          onClick: { action: { function: "approve_action", parameters: [{ key: "action_id", value: actionId }] } },
-                        },
-                        {
-                          text: "Deny",
-                          color: { red: 0.7, green: 0.2, blue: 0.2, alpha: 1 },
-                          onClick: { action: { function: "deny_action", parameters: [{ key: "action_id", value: actionId }] } },
-                        },
-                      ],
-                    },
-                  },
-                ],
-              };
-            });
-
-            sendSyncResponse(gchatClean, [{
-              cardId: "approval_card",
-              card: {
-                header: { title: "Action Confirmation Required" },
-                sections: cardSections,
-              },
-            }]);
-          } else {
-            sendSyncResponse(gchatClean);
-          }
-        }
 
       } catch (err) {
         console.error("[gchat] Webhook error:", err);
@@ -2578,19 +2516,23 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           case "AskEllieIntent": {
             const query = parsed.slots.query || parsed.text;
 
-            // Gather context + call Claude with 6s timeout
+            // Route first, then gather context with correct agent
+            const agentResult = await routeAndDispatch(supabase, query, "alexa", parsed.userId);
+            if (agentResult) {
+              setActiveAgent("alexa", agentResult.dispatch.agent.name);
+              broadcastExtension({ type: "route", channel: "alexa", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode });
+            }
+            const effectiveQuery = agentResult?.route.strippedMessage || query;
+
+            // Gather context with correct active agent
             const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext] = await Promise.all([
               getContextDocket(),
-              getRelevantContext(supabase, query),
-              searchElastic(query, { limit: 5, recencyBoost: true }),
-              getAgentStructuredContext(supabase, getActiveAgent("google-chat")),
+              getRelevantContext(supabase, effectiveQuery),
+              searchElastic(effectiveQuery, { limit: 5, recencyBoost: true }),
+              getAgentStructuredContext(supabase, getActiveAgent("alexa")),
               getRecentMessages(supabase),
-              getForestContext(query),
+              getForestContext(effectiveQuery),
             ]);
-
-            const agentResult = await routeAndDispatch(supabase, query, "alexa", parsed.userId);
-            if (agentResult) broadcastExtension({ type: "route", channel: "alexa", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode });
-            const effectiveQuery = agentResult?.route.strippedMessage || query;
             const enrichedPrompt = buildPrompt(
               effectiveQuery, contextDocket, relevantContext, elasticContext, "alexa",
               agentResult?.dispatch.agent ? {
@@ -3207,7 +3149,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
 
         switch (endpoint) {
           case "start":
-            await startWorkSession(mockReq, mockRes, bot);
+            await startWorkSession(mockReq, mockRes, bot, supabase);
             break;
           case "update":
             await updateWorkSession(mockReq, mockRes, bot);
@@ -4334,6 +4276,19 @@ async function handleLaCommsMessage(ws: WebSocket, text: string, phoneMode: bool
       getForestContext(effectiveText),
     ]);
 
+    // Detect work item mentions (ELLIE-5, EVE-3, etc.) — matches Telegram text handler
+    let workItemContext = "";
+    const workItemMatch = effectiveText.match(/\b([A-Z]+-\d+)\b/);
+    if (workItemMatch && isPlaneConfigured()) {
+      const details = await fetchWorkItemDetails(workItemMatch[1]);
+      if (details) {
+        workItemContext = `\nACTIVE WORK ITEM: ${workItemMatch[1]}\n` +
+          `Title: ${details.name}\n` +
+          `Priority: ${details.priority}\n` +
+          `Description: ${details.description}\n`;
+      }
+    }
+
     // ── Multi-step orchestration (pipeline, fan-out, critic-loop) ──
     if (agentResult?.route.execution_mode !== "single" && agentResult?.route.skills?.length) {
       const execMode = agentResult.route.execution_mode;
@@ -4364,7 +4319,7 @@ async function handleLaCommsMessage(ws: WebSocket, text: string, phoneMode: bool
           userId: "dashboard",
           anthropicClient: anthropic,
           contextDocket, relevantContext, elasticContext,
-          structuredContext, recentMessages, forestContext,
+          structuredContext, recentMessages, workItemContext, forestContext,
           buildPromptFn: buildPrompt,
           callClaudeFn: callClaude,
         });
@@ -4428,7 +4383,7 @@ async function handleLaCommsMessage(ws: WebSocket, text: string, phoneMode: bool
         name: agentResult.dispatch.agent.name,
         tools_enabled: agentResult.dispatch.agent.tools_enabled,
       } : undefined,
-      undefined, structuredContext, recentMessages,
+      workItemContext || undefined, structuredContext, recentMessages,
       agentResult?.dispatch.skill_context,
       forestContext,
     );

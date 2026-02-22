@@ -86,6 +86,7 @@ export interface OrchestratorOptions {
   structuredContext?: string;
   recentMessages?: string;
   workItemContext?: string;
+  forestContext?: string;
   // Injected relay functions (avoids circular import)
   buildPromptFn: (
     userMessage: string,
@@ -98,6 +99,7 @@ export interface OrchestratorOptions {
     structuredContext?: string,
     recentMessages?: string,
     skillContext?: { name: string; description: string },
+    forestContext?: string,
   ) => string;
   callClaudeFn: (
     prompt: string,
@@ -359,7 +361,7 @@ async function executeFanOut(
     throw new PipelineStepError(0, steps[0], "claude_error", null);
   }
 
-  // Record all successful step results
+  // Record all successful step results — use first step's dispatch as canonical
   let finalDispatch: DispatchResult | null = null;
   for (const r of successfulResults) {
     artifacts.steps.push(r.stepResult!);
@@ -367,7 +369,7 @@ async function executeFanOut(
     artifacts.total_input_tokens += r.stepResult!.input_tokens;
     artifacts.total_output_tokens += r.stepResult!.output_tokens;
     artifacts.total_cost_usd += r.stepResult!.cost_usd;
-    if (r.dispatch) finalDispatch = r.dispatch;
+    if (r.dispatch && !finalDispatch) finalDispatch = r.dispatch;
   }
 
   // Synthesize results via LLM — use tracked stepIndex for correct mapping
@@ -648,7 +650,7 @@ async function executeStep(
   // 7. Build result
   const stepResult: StepResult = {
     step_index: stepIndex,
-    agent_name: step.agent_name,
+    agent_name: dispatch.agent.name || step.agent_name,
     skill_name: step.skill_name,
     output: rawOutput,
     duration_ms: duration,
@@ -752,6 +754,7 @@ function buildStepPrompt(
     options.structuredContext,
     options.recentMessages,
     dispatch.skill_context,
+    options.forestContext,
   );
 
   // Prepend execution context (sanitize instruction to prevent tag injection)

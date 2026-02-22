@@ -36,6 +36,14 @@ const PUBLIC_URL = process.env.PUBLIC_URL || ""; // ngrok/cloudflare URL
 
 const TMP_DIR = process.env.TMPDIR || "/tmp";
 
+// Caller whitelist and name mapping
+const ALLOWED_CALLERS = (process.env.ALLOWED_CALLERS || "").split(",").map(n => n.trim()).filter(Boolean);
+
+const KNOWN_CALLERS: Record<string, string> = {
+  "+12149528212": "Dave",
+  "+12145389677": "Georgia",
+};
+
 // Silence detection: how long to wait after last audio before processing
 const SILENCE_THRESHOLD_MS = 1500;
 // Minimum audio duration to bother transcribing (ms)
@@ -219,6 +227,8 @@ interface CallSession {
   ws: WebSocket;
   streamSid: string | null;
   callSid: string | null;
+  callerName: string;
+  callerNumber: string;
   audioChunks: Buffer[];
   silenceTimer: ReturnType<typeof setTimeout> | null;
   lastAudioTime: number;
@@ -226,11 +236,13 @@ interface CallSession {
   conversationHistory: Array<{ role: string; content: string }>;
 }
 
-function createSession(ws: WebSocket): CallSession {
+function createSession(ws: WebSocket, callerName: string, callerNumber: string): CallSession {
   return {
     ws,
     streamSid: null,
     callSid: null,
+    callerName,
+    callerNumber,
     audioChunks: [],
     silenceTimer: null,
     lastAudioTime: 0,
@@ -268,7 +280,6 @@ async function processAudio(session: CallSession): Promise<void> {
     // Format current time with timezone
     const now = new Date();
     const USER_TIMEZONE = process.env.USER_TIMEZONE || "America/Chicago";
-    const USER_NAME = process.env.USER_NAME || "Dave";
     const timeStr = now.toLocaleString("en-US", {
       timeZone: USER_TIMEZONE,
       weekday: "long",
@@ -280,18 +291,18 @@ async function processAudio(session: CallSession): Promise<void> {
     });
 
     const prompt = [
-      "You are Ellie, Dave's AI assistant. You are on a VOICE CALL.",
+      `You are Ellie, Dave's AI assistant. You are on a VOICE CALL with ${session.callerName}.`,
       "Keep responses SHORT and natural for speech — 1-3 sentences max.",
       "No markdown, no bullet points, no formatting. Just spoken words.",
       "Be warm and conversational, like talking to a friend.",
       "",
-      `Speaking with: ${USER_NAME}`,
+      `Speaking with: ${session.callerName}`,
       `Current time: ${timeStr}`,
       "",
       "Conversation so far:",
       conversationContext,
       "",
-      `${USER_NAME} just said: ${text}`,
+      `${session.callerName} just said: ${text}`,
     ].join("\n");
 
     const response = await callClaude(prompt);
@@ -359,21 +370,49 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
 
   // Twilio webhook for incoming/outgoing calls — returns TwiML
   if (url.pathname === "/voice" && req.method === "POST") {
-    const wsUrl = PUBLIC_URL
-      ? PUBLIC_URL.replace(/^https?/, "wss") + "/media-stream"
-      : `wss://${req.headers.host}/media-stream`;
+    // Parse Twilio POST body to get caller's number
+    let body = "";
+    req.on("data", chunk => body += chunk.toString());
+    req.on("end", () => {
+      const params = new URLSearchParams(body);
+      const from = params.get("From") || "";
 
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+      console.log(`[voice] Incoming call from: ${from}`);
+
+      // Check whitelist
+      if (ALLOWED_CALLERS.length > 0 && !ALLOWED_CALLERS.includes(from)) {
+        console.log(`[voice] Rejected unauthorized caller: ${from}`);
+        const rejectTwiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>Connecting you to Ellie.</Say>
+  <Say>Sorry, this number is not authorized.</Say>
+  <Hangup/>
+</Response>`;
+        res.writeHead(403, { "Content-Type": "application/xml" });
+        res.end(rejectTwiml);
+        return;
+      }
+
+      // Look up caller name
+      const callerName = KNOWN_CALLERS[from] || "Unknown Caller";
+      console.log(`[voice] Authorized caller: ${callerName} (${from})`);
+
+      // Build WebSocket URL with caller info
+      const wsUrl = PUBLIC_URL
+        ? PUBLIC_URL.replace(/^https?/, "wss") + `/media-stream?from=${encodeURIComponent(from)}`
+        : `wss://${req.headers.host}/media-stream?from=${encodeURIComponent(from)}`;
+
+      const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>Hey ${callerName}, connecting you to Ellie.</Say>
   <Connect>
     <Stream url="${wsUrl}" />
   </Connect>
 </Response>`;
 
-    res.writeHead(200, { "Content-Type": "application/xml" });
-    res.end(twiml);
-    console.log("[voice] TwiML served, connecting media stream...");
+      res.writeHead(200, { "Content-Type": "application/xml" });
+      res.end(twiml);
+      console.log(`[voice] TwiML served for ${callerName}, connecting media stream...`);
+    });
     return;
   }
 
@@ -390,9 +429,16 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
 
 const wss = new WebSocketServer({ server: httpServer, path: "/media-stream" });
 
-wss.on("connection", (ws: WebSocket) => {
+wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   console.log("[voice] Media stream connected");
-  const session = createSession(ws);
+
+  // Extract caller info from query string
+  const url = new URL(req.url || "/media-stream", `http://${req.headers.host}`);
+  const callerNumber = url.searchParams.get("from") || "";
+  const callerName = KNOWN_CALLERS[callerNumber] || "Unknown Caller";
+
+  console.log(`[voice] Session started for ${callerName} (${callerNumber})`);
+  const session = createSession(ws, callerName, callerNumber);
 
   ws.on("message", async (data: Buffer | string) => {
     try {

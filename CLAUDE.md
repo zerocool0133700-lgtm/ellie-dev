@@ -317,10 +317,10 @@ When Dave starts a Claude Code session and mentions a work item (e.g., "work on 
    {
      "work_item_id": "ELLIE-5",
      "title": "Implement Claude Code Work Session Dispatch Protocol",
-     "project": "ellie-dev",
-     "agent": "dev"
+     "project": "ellie-dev"
    }
    ```
+   The relay auto-detects which agent is active from the routing system. Do NOT hardcode `"agent": "dev"` — the relay resolves this from the active agent session. Only pass `"agent"` if you need to override the auto-detection.
    The relay creates the session record and returns `session_id` in the response.
 
 5. **Begin work** on the task.

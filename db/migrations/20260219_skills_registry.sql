@@ -91,9 +91,9 @@ BEGIN
    ARRAY['what''s on today', 'morning briefing', 'daily plan', 'what should I focus on', 'priorities today'],
    ARRAY['mcp__google-workspace__get_events', 'mcp__google-workspace__list_tasks'], false, '{}', 4),
 
-  (v_general, v_owner_id, 'gmail_management',
-   'Read, search, reply to, and send emails via Gmail. Manage inbox and draft messages.',
-   ARRAY['email', 'gmail', 'inbox', 'send email', 'reply to', 'draft email', 'mail', 'unread'],
+  (v_general, v_owner_id, 'email_management',
+   'Manage email across Gmail and Outlook/Hotmail — search, read, send, reply, draft.',
+   ARRAY['email', 'gmail', 'outlook', 'hotmail', 'inbox', 'send email', 'reply to', 'draft email', 'mail', 'unread', 'microsoft', 'check email'],
    ARRAY['mcp__google-workspace__search_gmail_messages', 'mcp__google-workspace__send_gmail_message'], true, '{}', 8),
 
   (v_general, v_owner_id, 'calendar_management',

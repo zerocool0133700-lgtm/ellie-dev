@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Memory Analytics Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0a0e27;
+      color: #e4e7eb;
+      padding: 2rem;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      font-size: 2rem;
+      margin-bottom: 0.5rem;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .subtitle {
+      color: #9ca3af;
+      margin-bottom: 2rem;
+      font-size: 0.95rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 1.5rem;
+      margin-bottom: 2rem;
+    }
+
+    .card {
+      background: #1a1f3a;
+      border-radius: 12px;
+      padding: 1.5rem;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+    }
+
+    .card h2 {
+      font-size: 1.25rem;
+      margin-bottom: 1rem;
+      color: #f3f4f6;
+    }
+
+    .stat {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.75rem 0;
+      border-bottom: 1px solid #2d3548;
+    }
+
+    .stat:last-child {
+      border-bottom: none;
+    }
+
+    .stat-label {
+      color: #9ca3af;
+      font-size: 0.9rem;
+    }
+
+    .stat-value {
+      font-size: 1.5rem;
+      font-weight: 600;
+      color: #667eea;
+    }
+
+    .agent-pill {
+      display: inline-block;
+      padding: 0.25rem 0.75rem;
+      border-radius: 12px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      margin: 0.25rem;
+      cursor: pointer;
+      transition: transform 0.2s;
+    }
+
+    .agent-pill:hover {
+      transform: scale(1.05);
+    }
+
+    .agent-general { background: #3b82f6; color: white; }
+    .agent-dev { background: #10b981; color: white; }
+    .agent-research { background: #8b5cf6; color: white; }
+    .agent-content { background: #f59e0b; color: white; }
+    .agent-finance { background: #ef4444; color: white; }
+    .agent-strategy { background: #ec4899; color: white; }
+    .agent-critic { background: #6366f1; color: white; }
+    .agent-null { background: #6b7280; color: white; }
+
+    .chart-container {
+      position: relative;
+      height: 300px;
+      margin-top: 1rem;
+    }
+
+    .loading {
+      text-align: center;
+      color: #9ca3af;
+      padding: 2rem;
+    }
+
+    .memory-list {
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    .memory-item {
+      padding: 0.75rem;
+      margin-bottom: 0.5rem;
+      background: #0f1629;
+      border-radius: 8px;
+      border-left: 3px solid #667eea;
+    }
+
+    .memory-type {
+      font-size: 0.75rem;
+      color: #9ca3af;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .memory-content {
+      margin-top: 0.5rem;
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+
+    .memory-date {
+      font-size: 0.75rem;
+      color: #6b7280;
+      margin-top: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Memory Analytics Dashboard</h1>
+    <p class="subtitle">Cross-agent memory attribution and timeline visualization</p>
+
+    <div id="loading" class="loading">Loading data...</div>
+
+    <div id="dashboard" style="display: none;">
+      <!-- Stats Overview -->
+      <div class="grid">
+        <div class="card">
+          <h2>Overview</h2>
+          <div class="stat">
+            <span class="stat-label">Total Memories</span>
+            <span class="stat-value" id="total-memories">0</span>
+          </div>
+          <div class="stat">
+            <span class="stat-label">Attribution Rate</span>
+            <span class="stat-value" id="attribution-rate">0%</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>By Visibility</h2>
+          <div id="visibility-stats"></div>
+        </div>
+
+        <div class="card">
+          <h2>By Type</h2>
+          <div id="type-stats"></div>
+        </div>
+      </div>
+
+      <!-- Agent Distribution -->
+      <div class="card" style="margin-bottom: 2rem;">
+        <h2>Agent Distribution</h2>
+        <div id="agent-pills"></div>
+        <div class="chart-container">
+          <canvas id="agent-chart"></canvas>
+        </div>
+      </div>
+
+      <!-- Timeline -->
+      <div class="card" style="margin-bottom: 2rem;">
+        <h2>30-Day Timeline</h2>
+        <div class="chart-container" style="height: 400px;">
+          <canvas id="timeline-chart"></canvas>
+        </div>
+      </div>
+
+      <!-- Memory Browser -->
+      <div class="card">
+        <h2>Memory Browser</h2>
+        <p style="color: #9ca3af; font-size: 0.9rem; margin-bottom: 1rem;">
+          Click an agent pill above to view memories
+        </p>
+        <div id="memory-browser" class="memory-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_BASE = window.location.origin;
+
+    async function fetchStats() {
+      const res = await fetch(`${API_BASE}/api/memory/stats`);
+      return await res.json();
+    }
+
+    async function fetchTimeline() {
+      const res = await fetch(`${API_BASE}/api/memory/timeline?days=30`);
+      return await res.json();
+    }
+
+    async function fetchByAgent(agent) {
+      const res = await fetch(`${API_BASE}/api/memory/by-agent/${agent}?limit=50`);
+      return await res.json();
+    }
+
+    function renderStats(stats) {
+      document.getElementById('total-memories').textContent = stats.total.toLocaleString();
+      document.getElementById('attribution-rate').textContent = stats.attribution_rate.toFixed(1) + '%';
+
+      // Visibility stats
+      const visibilityHtml = Object.entries(stats.by_visibility)
+        .map(([vis, count]) => `
+          <div class="stat">
+            <span class="stat-label">${vis}</span>
+            <span class="stat-value">${count}</span>
+          </div>
+        `).join('');
+      document.getElementById('visibility-stats').innerHTML = visibilityHtml;
+
+      // Type stats
+      const typeHtml = Object.entries(stats.by_type)
+        .map(([type, count]) => `
+          <div class="stat">
+            <span class="stat-label">${type}</span>
+            <span class="stat-value">${count}</span>
+          </div>
+        `).join('');
+      document.getElementById('type-stats').innerHTML = typeHtml;
+
+      // Agent pills
+      const agentHtml = Object.entries(stats.by_agent)
+        .sort((a, b) => b[1] - a[1])
+        .map(([agent, count]) => {
+          const className = `agent-${agent.toLowerCase()}`;
+          return `<span class="${className} agent-pill" onclick="loadAgentMemories('${agent}')">${agent} (${count})</span>`;
+        }).join('');
+      document.getElementById('agent-pills').innerHTML = agentHtml;
+
+      // Agent chart
+      const ctx = document.getElementById('agent-chart').getContext('2d');
+      new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: Object.keys(stats.by_agent),
+          datasets: [{
+            data: Object.values(stats.by_agent),
+            backgroundColor: [
+              '#3b82f6', // general
+              '#6b7280', // NULL
+              '#8b5cf6', // research
+              '#10b981', // dev
+              '#f59e0b', // content
+              '#ef4444', // finance
+              '#ec4899', // strategy
+              '#6366f1', // critic
+            ]
+          }]
+        },
+        options: {
+          plugins: {
+            legend: { display: false }
+          }
+        }
+      });
+    }
+
+    function renderTimeline(timeline) {
+      // Group by date, stack agents
+      const dateMap = new Map();
+      timeline.forEach(entry => {
+        if (!dateMap.has(entry.date)) {
+          dateMap.set(entry.date, {});
+        }
+        dateMap.get(entry.date)[entry.agent] = entry.count;
+      });
+
+      const dates = Array.from(dateMap.keys()).sort();
+      const agents = [...new Set(timeline.map(e => e.agent))];
+
+      const datasets = agents.map(agent => ({
+        label: agent,
+        data: dates.map(date => dateMap.get(date)[agent] || 0),
+        backgroundColor: {
+          general: '#3b82f6',
+          NULL: '#6b7280',
+          research: '#8b5cf6',
+          dev: '#10b981',
+          content: '#f59e0b',
+          finance: '#ef4444',
+          strategy: '#ec4899',
+          critic: '#6366f1',
+        }[agent] || '#9ca3af'
+      }));
+
+      const ctx = document.getElementById('timeline-chart').getContext('2d');
+      new Chart(ctx, {
+        type: 'line',
+        data: { labels: dates, datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: true, position: 'bottom' }
+          },
+          scales: {
+            x: { stacked: false },
+            y: { stacked: false }
+          }
+        }
+      });
+    }
+
+    async function loadAgentMemories(agent) {
+      const browser = document.getElementById('memory-browser');
+      browser.innerHTML = '<p class="loading">Loading memories...</p>';
+
+      const memories = await fetchByAgent(agent);
+
+      if (memories.length === 0) {
+        browser.innerHTML = '<p style="color: #9ca3af;">No memories found for this agent.</p>';
+        return;
+      }
+
+      const html = memories.map(m => `
+        <div class="memory-item">
+          <div class="memory-type">${m.type} • ${m.visibility}</div>
+          <div class="memory-content">${m.content}</div>
+          <div class="memory-date">${new Date(m.created_at).toLocaleString()}</div>
+        </div>
+      `).join('');
+
+      browser.innerHTML = html;
+    }
+
+    async function init() {
+      try {
+        const [stats, timeline] = await Promise.all([fetchStats(), fetchTimeline()]);
+
+        renderStats(stats);
+        renderTimeline(timeline);
+
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('dashboard').style.display = 'block';
+      } catch (error) {
+        document.getElementById('loading').innerHTML = `<p style="color: #ef4444;">Error loading data: ${error.message}</p>`;
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "index.refresh_interval": "1s"
+  },
+  "mappings": {
+    "properties": {
+      "commit_id": { "type": "keyword" },
+      "tree_id": { "type": "keyword" },
+      "branch_id": { "type": "keyword" },
+      "trunk_id": { "type": "keyword" },
+      "entity_id": { "type": "keyword" },
+      "git_sha": { "type": "keyword" },
+      "message": {
+        "type": "text",
+        "analyzer": "standard",
+        "fields": {
+          "keyword": { "type": "keyword", "ignore_above": 256 }
+        }
+      },
+      "content_summary": {
+        "type": "text",
+        "analyzer": "standard"
+      },
+      "tree_title": { "type": "keyword" },
+      "tree_type": { "type": "keyword" },
+      "entity_name": { "type": "keyword" },
+      "created_at": { "type": "date" }
+    }
+  }
+}

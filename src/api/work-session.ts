@@ -8,6 +8,7 @@
  */
 
 import type { Bot } from "grammy";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { updateWorkItemOnSessionStart, updateWorkItemOnSessionComplete } from "../plane.ts";
 import {
   startWorkSession as forestStartSession,
@@ -20,6 +21,37 @@ import {
   getEntity,
 } from '../../../ellie-forest/src/index';
 import { notify, type NotifyContext } from "../notification-policy.ts";
+
+/**
+ * Resolve agent from Supabase agent_sessions when not explicitly provided.
+ * Looks up the most recently active session to determine which agent was routed.
+ */
+async function resolveAgent(
+  supabase: SupabaseClient | null,
+  explicitAgent?: string,
+): Promise<string | undefined> {
+  if (explicitAgent) return explicitAgent;
+  if (!supabase) return undefined;
+
+  try {
+    const { data } = await supabase
+      .from("agent_sessions")
+      .select("agents(name)")
+      .eq("state", "active")
+      .order("last_activity", { ascending: false })
+      .limit(1)
+      .single();
+
+    const name = (data as any)?.agents?.name;
+    if (name) {
+      console.log(`[work-session] Auto-resolved agent from active session: ${name}`);
+      return name;
+    }
+  } catch {
+    // Non-fatal — fall back to no agent
+  }
+  return undefined;
+}
 
 const TELEGRAM_USER_ID = process.env.TELEGRAM_USER_ID!;
 const GCHAT_SPACE = process.env.GOOGLE_CHAT_SPACE_NAME;
@@ -41,15 +73,18 @@ function getNotifyCtx(bot: Bot): NotifyContext {
  *   "agent": "james" // optional
  * }
  */
-export async function startWorkSession(req: any, res: any, bot: Bot) {
+export async function startWorkSession(req: any, res: any, bot: Bot, supabase?: SupabaseClient | null) {
   try {
-    const { work_item_id, title, project, agent } = req.body;
+    const { work_item_id, title, project, agent: explicitAgent } = req.body;
 
     if (!work_item_id || !title || !project) {
       return res.status(400).json({
         error: 'Missing required fields: work_item_id, title, project'
       });
     }
+
+    // Resolve agent: use explicit value if provided, otherwise auto-detect from active session
+    const agent = await resolveAgent(supabase ?? null, explicitAgent);
 
     // Map agent short names to forest entity names
     const AGENT_ENTITY_MAP: Record<string, string> = {
@@ -155,17 +190,19 @@ export async function updateWorkSession(req: any, res: any, bot: Bot) {
       `📝 **Progress Update**`,
       ``,
       `**${escapeMarkdown(work_item_id)}:** ${escapeMarkdown(tree.title || work_item_id)}`,
+      agent ? `**Agent:** ${escapeMarkdown(agent)}` : '',
       ``,
       escapeMarkdown(message)
-    ].join('\n');
+    ].filter(Boolean).join('\n');
 
     const gchatMsg = [
       `📝 Progress Update`,
       ``,
       `${work_item_id}: ${tree.title || work_item_id}`,
+      agent ? `Agent: ${agent}` : '',
       ``,
       message,
-    ].join('\n');
+    ].filter(Boolean).join('\n');
 
     await notify(getNotifyCtx(bot), {
       event: "session_update",
@@ -225,17 +262,19 @@ export async function logDecision(req: any, res: any, bot: Bot) {
       `⚡ **Decision Point**`,
       ``,
       `**${escapeMarkdown(work_item_id)}:** ${escapeMarkdown(tree.title || work_item_id)}`,
+      agent ? `**Agent:** ${escapeMarkdown(agent)}` : '',
       ``,
       escapeMarkdown(message)
-    ].join('\n');
+    ].filter(Boolean).join('\n');
 
     const gchatMsg = [
       `⚡ Decision Point`,
       ``,
       `${work_item_id}: ${tree.title || work_item_id}`,
+      agent ? `Agent: ${agent}` : '',
       ``,
       message,
-    ].join('\n');
+    ].filter(Boolean).join('\n');
 
     await notify(getNotifyCtx(bot), {
       event: "session_decision",
@@ -269,7 +308,7 @@ export async function logDecision(req: any, res: any, bot: Bot) {
  */
 export async function completeWorkSession(req: any, res: any, bot: Bot) {
   try {
-    const { work_item_id, summary } = req.body;
+    const { work_item_id, summary, agent } = req.body;
 
     if (!work_item_id || !summary) {
       return res.status(400).json({
@@ -303,20 +342,22 @@ export async function completeWorkSession(req: any, res: any, bot: Bot) {
       `✅ **Work Session Complete**`,
       ``,
       `**${escapeMarkdown(work_item_id)}:** ${escapeMarkdown(tree.title || work_item_id)}`,
+      agent ? `**Agent:** ${escapeMarkdown(agent)}` : '',
       `**Duration:** ${duration} minutes`,
       ``,
       escapeMarkdown(summary)
-    ].join('\n');
+    ].filter(Boolean).join('\n');
 
     const gchatMsg = [
       `✅ Work Session Complete`,
       ``,
       `${work_item_id}: ${tree.title || work_item_id}`,
+      agent ? `Agent: ${agent}` : '',
       `Duration: ${duration} minutes`,
       ``,
       `Summary:`,
       summary,
-    ].join('\n');
+    ].filter(Boolean).join('\n');
 
     await notify(getNotifyCtx(bot), {
       event: "session_complete",
@@ -351,7 +392,7 @@ export async function completeWorkSession(req: any, res: any, bot: Bot) {
  */
 export async function pauseWorkSession(req: any, res: any, bot: Bot) {
   try {
-    const { work_item_id, reason } = req.body;
+    const { work_item_id, reason, agent } = req.body;
 
     if (!work_item_id) {
       return res.status(400).json({
@@ -374,6 +415,7 @@ export async function pauseWorkSession(req: any, res: any, bot: Bot) {
       `\u23F8\uFE0F **Work Session Paused**`,
       ``,
       `**${escapeMarkdown(work_item_id)}:** ${escapeMarkdown(tree.title || work_item_id)}`,
+      agent ? `**Agent:** ${escapeMarkdown(agent)}` : '',
       reason ? `**Reason:** ${escapeMarkdown(reason)}` : '',
     ].filter(Boolean).join('\n');
 
@@ -381,6 +423,7 @@ export async function pauseWorkSession(req: any, res: any, bot: Bot) {
       `\u23F8\uFE0F Work Session Paused`,
       ``,
       `${work_item_id}: ${tree.title || work_item_id}`,
+      agent ? `Agent: ${agent}` : '',
       reason ? `Reason: ${reason}` : '',
     ].filter(Boolean).join('\n');
 
@@ -416,7 +459,7 @@ export async function pauseWorkSession(req: any, res: any, bot: Bot) {
  */
 export async function resumeWorkSession(req: any, res: any, bot: Bot) {
   try {
-    const { work_item_id } = req.body;
+    const { work_item_id, agent } = req.body;
 
     if (!work_item_id) {
       return res.status(400).json({
@@ -446,13 +489,15 @@ export async function resumeWorkSession(req: any, res: any, bot: Bot) {
       `\u25B6\uFE0F **Work Session Resumed**`,
       ``,
       `**${escapeMarkdown(work_item_id)}:** ${escapeMarkdown(tree.title || work_item_id)}`,
-    ].join('\n');
+      agent ? `**Agent:** ${escapeMarkdown(agent)}` : '',
+    ].filter(Boolean).join('\n');
 
     const gchatMsg = [
       `\u25B6\uFE0F Work Session Resumed`,
       ``,
       `${work_item_id}: ${tree.title || work_item_id}`,
-    ].join('\n');
+      agent ? `Agent: ${agent}` : '',
+    ].filter(Boolean).join('\n');
 
     await notify(getNotifyCtx(bot), {
       event: "session_resume",

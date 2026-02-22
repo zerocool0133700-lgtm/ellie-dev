@@ -21,7 +21,9 @@ const PLANE_WORKSPACE = process.env.PLANE_WORKSPACE_SLUG || process.env.PLANE_WO
 const RELAY_URL = process.env.RELAY_URL || "http://localhost:3001";
 
 // Accept project identifier as CLI arg, default to ELLIE
+// Accept agent as optional second arg — if omitted, relay auto-detects from active routing
 const PROJECT_ARG = process.argv[2]?.toUpperCase();
+const AGENT_ARG = process.argv[3]?.toLowerCase() || undefined;
 
 if (!PLANE_API_KEY) {
   console.error("PLANE_API_KEY not set in .env");
@@ -200,7 +202,7 @@ async function main() {
         work_item_id: workItemId,
         title: selected.name,
         project: "ellie-dev",
-        agent: "dev",
+        ...(AGENT_ARG ? { agent: AGENT_ARG } : {}),
       }),
     });
     const data = await res.json() as any;
