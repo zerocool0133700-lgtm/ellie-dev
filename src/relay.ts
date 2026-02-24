@@ -7,7 +7,7 @@
  * Run: bun run src/relay.ts
  */
 
-import { Bot, Context, InputFile, InlineKeyboard } from "grammy";
+import { Bot, Context, InputFile } from "grammy";
 import { spawn } from "bun";
 import { createHmac } from "crypto";
 import { writeFile, appendFile, mkdir, readFile, unlink } from "fs/promises";
@@ -18,13 +18,57 @@ import { WebSocketServer, WebSocket } from "ws";
 import Anthropic from "@anthropic-ai/sdk";
 import { transcribe } from "./transcribe.ts";
 import {
+  textToSpeechOgg,
+  textToSpeechFast,
+} from "./tts.ts";
+import {
+  buildPrompt,
+  getArchetypeContext,
+  getPsyContext,
+  getPhaseContext,
+  getHealthContext,
+  runPostMessageAssessment,
+  getPlanningMode,
+  setPlanningMode,
+  USER_NAME,
+  USER_TIMEZONE,
+} from "./prompt-builder.ts";
+import {
+  callClaude,
+  callClaudeWithTyping,
+  callClaudeVoice,
+  session,
+  saveSession,
+  acquireLock,
+  releaseLock,
+  setBroadcastExtension,
+  setNotifyCtx,
+  setAnthropicClient,
+  type SessionState,
+} from "./claude-cli.ts";
+import {
+  enqueue,
+  enqueueEllieChat,
+  withQueue,
+  getQueueStatus,
+  setQueueBroadcast,
+} from "./message-queue.ts";
+import { handleVoiceConnection, setVoicePipelineDeps } from "./voice-pipeline.ts";
+import {
+  saveMessage,
+  sendResponse,
+  sendWithApprovals,
+  sendWithApprovalsEllieChat,
+  ellieChatPendingActions,
+  setSenderDeps,
+} from "./message-sender.ts";
+import {
   processMemoryIntents,
   getMemoryContext,
   getRelevantContext,
-  getRecentMessages,
 } from "./memory.ts";
 import { consolidateNow } from "./consolidate-inline.ts";
-import { indexMessage, searchElastic } from "./elasticsearch.ts";
+import { searchElastic } from "./elasticsearch.ts";
 import { getForestContext, initForestSync } from "./elasticsearch/context.ts";
 import {
   initGoogleChat,
@@ -45,10 +89,18 @@ import {
   syncResponse,
   dispatchAgent,
   type DispatchResult,
+  type RouteResult,
 } from "./agent-router.ts";
 import { initClassifier } from "./intent-classifier.ts";
 import { initEntailmentClassifier } from "./entailment-classifier.ts";
+import {
+  trimSearchContext,
+  getSpecialistAck,
+  formatForestMetrics,
+  estimateTokens,
+} from "./relay-utils.ts";
 import { getStructuredContext, getAgentStructuredContext, getAgentMemoryContext, getMaxMemoriesForModel, getGoogleTasksJSON } from "./context-sources.ts";
+import { syncAllCalendars } from "./calendar-sync.ts";
 import {
   initOutlook,
   isOutlookConfigured,
@@ -69,7 +121,6 @@ import {
 import type { ExecutionMode } from "./intent-classifier.ts";
 import {
   extractApprovalTags,
-  storePendingAction,
   getPendingAction,
   removePendingAction,
   startExpiryCleanup,
@@ -79,18 +130,26 @@ import {
   fetchWorkItemDetails,
   listOpenIssues,
   setTimeoutRecoveryLock,
+  createPlaneIssue,
 } from "./plane.ts";
 import { extractPlaybookCommands, executePlaybookCommands, type PlaybookContext } from "./playbook.ts";
 import { notify, type NotifyContext } from "./notification-policy.ts";
 import {
   getOrCreateConversation,
-  attachMessage,
-  maybeGenerateSummary,
   closeActiveConversation,
   closeConversation,
   expireIdleConversations,
   getConversationContext,
+  getConversationMessages,
 } from "./conversations.ts";
+import {
+  getQueueContext,
+  acknowledgeQueueItems,
+  expireStaleItems,
+  getQueueStats,
+  getAndAcknowledgeReadouts,
+} from "./api/agent-queue.ts";
+import { onBridgeWrite } from "./api/bridge.ts";
 
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
 
@@ -106,8 +165,6 @@ const RELAY_DIR = process.env.RELAY_DIR || join(process.env.HOME || "~", ".claud
 
 // Agent mode: gives Claude access to tools (Read, Write, Bash, etc.)
 const AGENT_MODE = process.env.AGENT_MODE !== "false"; // on by default
-// Agent model override: when true, per-agent model settings are passed to CLI (uses API credits instead of Max subscription)
-const AGENT_MODEL_OVERRIDE = process.env.AGENT_MODEL_OVERRIDE === "true"; // off by default
 const DEFAULT_TOOLS = "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch";
 const MCP_TOOLS = "mcp__google-workspace__*,mcp__github__*,mcp__memory__*,mcp__sequential-thinking__*,mcp__plane__*,mcp__claude_ai_Miro__*,mcp__brave-search__*,mcp__excalidraw__*";
 const ALLOWED_TOOLS = (process.env.ALLOWED_TOOLS || `${DEFAULT_TOOLS},${MCP_TOOLS}`).split(",").map(t => t.trim());
@@ -124,9 +181,6 @@ const ALLOWED_CALLERS: Set<string> = new Set(
     .map(n => n?.trim().replace(/\D/g, ""))
     .filter(Boolean)
 );
-const SILENCE_THRESHOLD_MS = 800; // ms of silence after speech to trigger processing
-const MIN_AUDIO_MS = 400;
-const TMP_DIR = process.env.TMPDIR || "/tmp";
 
 /**
  * Validate Twilio webhook signature (X-Twilio-Signature).
@@ -160,21 +214,12 @@ function validateTwilioSignature(
 }
 
 // Mulaw energy threshold — Twilio sends continuous packets even during silence.
-// Mulaw silence center is 0xFF (positive) / 0x7F (negative). Values near these are quiet.
-// We measure "energy" as deviation from the silence point.
-const MULAW_ENERGY_THRESHOLD = 10; // average energy per sample to count as speech
-
 // Directories
 const TEMP_DIR = join(RELAY_DIR, "temp");
 const UPLOADS_DIR = join(RELAY_DIR, "uploads");
 
-// Session tracking for conversation continuity
-const SESSION_FILE = join(RELAY_DIR, "session.json");
-
-interface SessionState {
-  sessionId: string | null;
-  lastActivity: string;
-}
+// SessionState, session, saveSession, acquireLock, releaseLock
+// imported from ./claude-cli.ts (ELLIE-205)
 
 // Track active agent per channel (Telegram, GChat, etc.)
 const activeAgentByChannel = new Map<string, string>();
@@ -215,7 +260,14 @@ async function getContextDocket(): Promise<string> {
 // CONVERSATION END DETECTION
 // ============================================================
 
-const TELEGRAM_IDLE_MS = 10 * 60_000; // 10 minutes of silence = conversation over
+const IDLE_MS_DEFAULT = 10 * 60_000;     // 10 minutes of silence = conversation over
+const IDLE_MS_PLANNING = 60 * 60_000;   // 60 minutes in planning mode
+// planningMode state managed in prompt-builder.ts (getPlanningMode/setPlanningMode)
+
+function getIdleMs(): number {
+  return getPlanningMode() ? IDLE_MS_PLANNING : IDLE_MS_DEFAULT;
+}
+
 let telegramIdleTimer: ReturnType<typeof setTimeout> | null = null;
 let gchatIdleTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -258,95 +310,31 @@ async function triggerConsolidation(channel?: string): Promise<void> {
  */
 function resetTelegramIdleTimer(): void {
   if (telegramIdleTimer) clearTimeout(telegramIdleTimer);
+  const ms = getIdleMs();
   telegramIdleTimer = setTimeout(() => {
-    console.log("[consolidate] Telegram idle for 10 minutes — consolidating...");
+    console.log(`[consolidate] Telegram idle for ${ms / 60_000} minutes — consolidating...`);
     triggerConsolidation("telegram");
-  }, TELEGRAM_IDLE_MS);
+  }, ms);
 }
 
 function resetGchatIdleTimer(): void {
   if (gchatIdleTimer) clearTimeout(gchatIdleTimer);
+  const ms = getIdleMs();
   gchatIdleTimer = setTimeout(() => {
-    console.log("[consolidate] Google Chat idle for 10 minutes — consolidating...");
+    console.log(`[consolidate] Google Chat idle for ${ms / 60_000} minutes — consolidating...`);
     triggerConsolidation("google-chat");
-  }, TELEGRAM_IDLE_MS);
+  }, ms);
 }
 
-let laCommsIdleTimer: ReturnType<typeof setTimeout> | null = null;
-function resetLaCommsIdleTimer(): void {
-  if (laCommsIdleTimer) clearTimeout(laCommsIdleTimer);
-  laCommsIdleTimer = setTimeout(() => {
-    console.log("[consolidate] LA Comms idle for 10 minutes — consolidating...");
-    triggerConsolidation("la-comms");
-  }, TELEGRAM_IDLE_MS);
+let ellieChatIdleTimer: ReturnType<typeof setTimeout> | null = null;
+function resetEllieChatIdleTimer(): void {
+  if (ellieChatIdleTimer) clearTimeout(ellieChatIdleTimer);
+  const ms = getIdleMs();
+  ellieChatIdleTimer = setTimeout(() => {
+    console.log(`[consolidate] Ellie Chat idle for ${ms / 60_000} minutes — consolidating...`);
+    triggerConsolidation("ellie-chat");
+  }, ms);
 }
-
-// ============================================================
-// SESSION MANAGEMENT
-// ============================================================
-
-async function loadSession(): Promise<SessionState> {
-  try {
-    const content = await readFile(SESSION_FILE, "utf-8");
-    return JSON.parse(content);
-  } catch {
-    return { sessionId: null, lastActivity: new Date().toISOString() };
-  }
-}
-
-async function saveSession(state: SessionState): Promise<void> {
-  await writeFile(SESSION_FILE, JSON.stringify(state, null, 2));
-}
-
-let session = await loadSession();
-
-// ============================================================
-// LOCK FILE (prevent multiple instances)
-// ============================================================
-
-const LOCK_FILE = join(RELAY_DIR, "bot.lock");
-
-async function acquireLock(): Promise<boolean> {
-  try {
-    const existingLock = await readFile(LOCK_FILE, "utf-8").catch(() => null);
-
-    if (existingLock) {
-      const pid = parseInt(existingLock);
-      try {
-        process.kill(pid, 0); // Check if process exists
-        console.log(`Another instance running (PID: ${pid})`);
-        return false;
-      } catch {
-        console.log("Stale lock found, taking over...");
-      }
-    }
-
-    await writeFile(LOCK_FILE, process.pid.toString());
-    return true;
-  } catch (error) {
-    console.error("Lock error:", error);
-    return false;
-  }
-}
-
-async function releaseLock(): Promise<void> {
-  await unlink(LOCK_FILE).catch(() => {});
-}
-
-// Cleanup on exit
-process.on("exit", () => {
-  try {
-    require("fs").unlinkSync(LOCK_FILE);
-  } catch {}
-});
-process.on("SIGINT", async () => {
-  await releaseLock();
-  process.exit(0);
-});
-process.on("SIGTERM", async () => {
-  await releaseLock();
-  process.exit(0);
-});
 
 // ============================================================
 // SETUP
@@ -374,46 +362,7 @@ const supabase: SupabaseClient | null =
     ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY)
     : null;
 
-async function saveMessage(
-  role: string,
-  content: string,
-  metadata?: Record<string, unknown>,
-  channel: string = "telegram"
-): Promise<string | null> {
-  if (!supabase) return null;
-  try {
-    // Get or create active conversation for this channel
-    const conversationId = await getOrCreateConversation(supabase, channel);
-
-    const { data } = await supabase.from("messages").insert({
-      role,
-      content,
-      channel,
-      metadata: metadata || {},
-      conversation_id: conversationId,
-    }).select("id").single();
-
-    // Index to ES (fire-and-forget)
-    if (data?.id) {
-      indexMessage({
-        id: data.id,
-        content, role, channel,
-        created_at: new Date().toISOString(),
-      }).catch(() => {});
-
-      // Update conversation stats + maybe generate rolling summary (fire-and-forget)
-      if (conversationId) {
-        attachMessage(supabase, data.id, conversationId).catch(() => {});
-        maybeGenerateSummary(supabase, conversationId).catch(() => {});
-      }
-    }
-
-    return data?.id || null;
-  } catch (error) {
-    console.error("Supabase save error:", error);
-    return null;
-  }
-}
+// saveMessage extracted to ./message-sender.ts (ELLIE-207)
 
 // Acquire lock
 if (!(await acquireLock())) {
@@ -433,12 +382,113 @@ function getNotifyCtx(): NotifyContext {
 startExpiryCleanup();
 
 // Periodic idle conversation expiry (every 5 minutes)
-setInterval(() => {
+setInterval(async () => {
   if (supabase) {
-    expireIdleConversations(supabase).catch(() => {});
+    // Properly close stale conversations with memory extraction (replaces blind DB expiry)
+    try {
+      const { data: stale } = await supabase
+        .from("conversations")
+        .select("id, channel, message_count, last_message_at")
+        .eq("status", "active")
+        .lt("last_message_at", new Date(Date.now() - 30 * 60_000).toISOString());
+      for (const convo of stale || []) {
+        console.log(`[conversation] Expiring stale ${convo.channel} conversation (${convo.message_count} msgs, last activity: ${convo.last_message_at})`);
+        if (convo.message_count >= 2) {
+          await closeConversation(supabase, convo.id);
+        } else {
+          await supabase.rpc("close_conversation", { p_conversation_id: convo.id });
+        }
+      }
+    } catch (err: any) {
+      console.error("[conversation] Stale conversation cleanup error:", err?.message);
+    }
     expireStaleAgentSessions(supabase).catch(() => {});
   }
+  // Expire Ellie Chat pending confirm actions (15-min TTL)
+  const now = Date.now();
+  for (const [id, action] of ellieChatPendingActions) {
+    if (now - action.createdAt > 15 * 60_000) {
+      ellieChatPendingActions.delete(id);
+      console.log(`[ellie-chat approval] Expired: ${action.description.substring(0, 60)}`);
+    }
+  }
 }, 5 * 60_000);
+
+// Calendar sync (every 5 minutes)
+setInterval(async () => {
+  try {
+    await syncAllCalendars();
+  } catch (err: any) {
+    console.error("[calendar-sync] Periodic sync error:", err?.message);
+  }
+}, 5 * 60_000);
+
+// Stale queue item expiry — every hour (ELLIE-201)
+setInterval(() => {
+  expireStaleItems().catch(err => console.error("[agent-queue] Stale expiry error:", err));
+}, 60 * 60_000);
+// Run once on startup (10s delay)
+setTimeout(() => {
+  expireStaleItems().catch(err => console.error("[agent-queue] Initial stale expiry error:", err));
+}, 10_000);
+
+// Bridge write notifications — Telegram + ellie-chat (ELLIE-199)
+onBridgeWrite(({ collaborator, content, memoryId, type, workItemId }) => {
+  const preview = content.length > 80 ? content.slice(0, 80) + '...' : content;
+  const ticket = workItemId ? ` (${workItemId})` : '';
+  const label = type === 'decision' ? 'decided' : type === 'hypothesis' ? 'hypothesized' : 'logged';
+
+  // Telegram notification
+  notify(getNotifyCtx(), {
+    event: "dispatch_confirm",
+    workItemId: memoryId,
+    telegramMessage: `📋 *${collaborator}* ${label}${ticket}: ${preview}`,
+    gchatMessage: `${collaborator} ${label}${ticket}: ${preview}`,
+  }).catch(err => console.error("[bridge-notify]", err.message));
+
+  // Push to ellie-chat clients (lazy ref — ellieChatClients defined later in file)
+  broadcastToEllieChatClients({
+    type: "finding",
+    collaborator,
+    content,
+    memoryId,
+    findingType: type,
+    workItemId,
+    ts: Date.now(),
+  });
+});
+
+// Initial calendar sync (10s after startup)
+setTimeout(async () => {
+  try {
+    await syncAllCalendars();
+    console.log("[calendar-sync] Initial sync complete");
+  } catch (err: any) {
+    console.error("[calendar-sync] Initial sync error:", err?.message);
+  }
+}, 10_000);
+
+// Memory maintenance: expire short-term memories (every 15 minutes)
+setInterval(async () => {
+  try {
+    const { expireShortTermMemories } = await import('../../ellie-forest/src/shared-memory');
+    const expired = await expireShortTermMemories();
+    if (expired > 0) console.log(`[memory-maintenance] Expired ${expired} short-term memories`);
+  } catch (err: any) {
+    console.error("[memory-maintenance] Short-term expiry error:", err?.message);
+  }
+}, 15 * 60_000);
+
+// Memory maintenance: refresh weights (every hour)
+setInterval(async () => {
+  try {
+    const { refreshWeights } = await import('../../ellie-forest/src/shared-memory');
+    const refreshed = await refreshWeights({ limit: 500 });
+    if (refreshed > 0) console.log(`[memory-maintenance] Refreshed weights for ${refreshed} memories`);
+  } catch (err: any) {
+    console.error("[memory-maintenance] Weight refresh error:", err?.message);
+  }
+}, 60 * 60_000);
 
 // Note: expireStaleWorkSessions (old Supabase work_sessions table) removed in ELLIE-88.
 // Forest is now the source of truth for work sessions. See ellie-forest/src/work-sessions.ts.
@@ -479,305 +529,11 @@ bot.use(async (ctx, next) => {
   await next();
 });
 
-// ============================================================
-// CORE: Call Claude CLI
-// ============================================================
+// callClaude, callClaudeWithTyping, callClaudeVoice, session management
+// extracted to ./claude-cli.ts (ELLIE-205)
 
-async function callClaude(
-  prompt: string,
-  options?: { resume?: boolean; imagePath?: string; allowedTools?: string[]; model?: string; sessionId?: string }
-): Promise<string> {
-  const args = [CLAUDE_PATH, "-p", prompt];
-
-  // Resume previous session if available and requested
-  // Explicit sessionId override takes priority (used by approval handlers)
-  const resumeSessionId = options?.sessionId || session.sessionId;
-  if (options?.resume && resumeSessionId) {
-    args.push("--resume", resumeSessionId);
-  }
-
-  args.push("--output-format", "text");
-
-  // Per-agent model override — opt-in via AGENT_MODEL_OVERRIDE=true env var
-  // (specifying a model ID routes to API credits instead of the Max subscription default)
-  if (AGENT_MODEL_OVERRIDE && options?.model) { args.push("--model", options.model); }
-
-  // Agent mode: allow tools without interactive prompts
-  if (AGENT_MODE) {
-    const tools = options?.allowedTools?.length ? options.allowedTools : ALLOWED_TOOLS;
-    args.push("--allowedTools", ...tools);
-  }
-
-  // Log CLI invocation details (redact prompt, show flags)
-  const flagArgs = args.slice(1).filter(a => a.startsWith("--"));
-  const resumeId = options?.resume && resumeSessionId ? resumeSessionId.slice(0, 8) : null;
-  const toolCount = options?.allowedTools?.length || ALLOWED_TOOLS.length;
-  console.log(
-    `[claude] Invoking: prompt=${prompt.length} chars` +
-    `${resumeId ? `, resume=${resumeId}` : ""}` +
-    `, tools=${toolCount}` +
-    `, flags=[${flagArgs.join(", ")}]`
-  );
-
-  try {
-    const proc = spawn(args, {
-      stdin: "ignore",   // Close stdin — prevents blocking on permission prompts
-      stdout: "pipe",
-      stderr: "pipe",
-      cwd: PROJECT_DIR || undefined,
-      env: {
-        ...process.env,
-        CLAUDECODE: "",             // Prevent nested session detection
-        ANTHROPIC_API_KEY: "",      // Don't override Max subscription with API key
-      },
-    });
-
-    // Agentic tasks can take several minutes (tool use, multi-step reasoning)
-    const TIMEOUT_MS = AGENT_MODE ? 420_000 : 60_000;
-    let timedOut = false;
-    let forceKilled = false;
-    let killTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      const timeoutSec = TIMEOUT_MS / 1000;
-      console.error(`[claude] Timeout after ${timeoutSec}s — sending SIGTERM (pid ${proc.pid})`);
-      proc.kill(); // SIGTERM
-
-      // Escalate to SIGKILL if process doesn't exit within 5s
-      killTimer = setTimeout(() => {
-        try {
-          process.kill(proc.pid, 0); // Throws if process is dead
-          console.error(`[claude] Process ${proc.pid} survived SIGTERM — sending SIGKILL`);
-          proc.kill(9); // SIGKILL
-          forceKilled = true;
-        } catch {
-          // Process already exited from SIGTERM — no action needed
-        }
-      }, 5_000);
-    }, TIMEOUT_MS);
-
-    const output = await new Response(proc.stdout).text();
-    const stderr = await new Response(proc.stderr).text();
-    clearTimeout(timeout);
-    if (killTimer) clearTimeout(killTimer);
-
-    const exitCode = await proc.exited;
-
-    if (exitCode !== 0) {
-      console.error(
-        `[claude] Exit code ${exitCode}` +
-        `${timedOut ? " (timed out)" : ""}` +
-        `${forceKilled ? " (force-killed)" : ""}` +
-        `${stderr ? ` — stderr: ${stderr.substring(0, 500)}` : " — no stderr"}` +
-        `${output ? ` — stdout preview: ${output.substring(0, 200)}` : ""}`
-      );
-
-      // Retry without --resume if the session history is corrupted
-      // (e.g., tool_use.name exceeding API limits from a previous turn)
-      const combined = (stderr + output).toLowerCase();
-      if (options?.resume && resumeSessionId && combined.includes("tool_use.name")) {
-        console.warn("[claude] Corrupted session history — retrying without --resume");
-        return callClaude(prompt, { ...options, resume: false, sessionId: undefined });
-      }
-
-      // Timeout: return actionable message instead of generic error
-      if (timedOut) {
-        broadcastExtension({ type: "error", source: "callClaude", message: `Timeout after ${TIMEOUT_MS / 1000}s${forceKilled ? " (force-killed)" : ""}` });
-        // Lock Plane state changes during recovery to prevent churn
-        setTimeoutRecoveryLock(60_000);
-
-        const timeoutSec = TIMEOUT_MS / 1000;
-        const processStatus = forceKilled
-          ? "The process did not respond to termination and was force-killed."
-          : "The process was terminated.";
-
-        const partialOutput = output?.trim();
-
-        // Notify via policy engine — immediate alert on both channels (ELLIE-80)
-        notify(getNotifyCtx(), {
-          event: "error",
-          workItemId: "timeout",
-          telegramMessage: `⚠️ Task timed out after ${timeoutSec}s${forceKilled ? " (force-killed)" : ""}`,
-          gchatMessage: `⚠️ Task timed out after ${timeoutSec}s. ${processStatus}${partialOutput ? `\nPartial: ${partialOutput.substring(0, 300)}` : ""}`,
-        }).catch((err) => console.error("[notify] timeout error:", err.message));
-
-        let message = `Task timed out after ${timeoutSec}s. ${processStatus}`;
-
-        if (partialOutput) {
-          const preview = partialOutput.length > 500
-            ? partialOutput.substring(0, 500) + "..."
-            : partialOutput;
-          message += `\n\nPartial output before timeout:\n${preview}`;
-        }
-
-        message += `\n\nYou can retry the request, or ask "what did you get done?" to check if work was partially completed.`;
-
-        return message;
-      }
-
-      // Exit 143 = SIGTERM (128+15) from external signal (e.g. service restart)
-      if (exitCode === 143) {
-        broadcastExtension({ type: "error", source: "callClaude", message: "SIGTERM (exit 143) — service restart or external kill" });
-        const partialOutput = output?.trim();
-
-        // Notify via policy engine — immediate alert on both channels (ELLIE-80)
-        notify(getNotifyCtx(), {
-          event: "error",
-          workItemId: "sigterm",
-          telegramMessage: "⚠️ Process interrupted (SIGTERM)",
-          gchatMessage: `⚠️ Process interrupted (SIGTERM — exit 143).${partialOutput ? `\nPartial: ${partialOutput.substring(0, 300)}` : ""}`,
-        }).catch((err) => console.error("[notify] sigterm error:", err.message));
-
-        let message = "I got interrupted while working on this (the service was restarted or the process was terminated externally).";
-        if (partialOutput) {
-          const preview = partialOutput.length > 500
-            ? partialOutput.substring(0, 500) + "..."
-            : partialOutput;
-          message += `\n\nHere's what I had so far:\n${preview}`;
-        }
-        message += "\n\nWant me to try again?";
-        return message;
-      }
-
-      // Notify via policy engine — unexpected exit (ELLIE-80)
-      notify(getNotifyCtx(), {
-        event: "error",
-        workItemId: "exit-error",
-        telegramMessage: `⚠️ Claude exited with code ${exitCode}`,
-        gchatMessage: `⚠️ Claude exited with code ${exitCode}${stderr ? `: ${stderr.substring(0, 200)}` : ""}`,
-      }).catch((err) => console.error("[notify] exit error:", err.message));
-
-      return `Error: ${stderr || "Claude exited with code " + exitCode}`;
-    }
-
-    console.log(`[claude] Success: ${output.length} chars, exit ${exitCode}`);
-
-    // Extract session ID from output if present (for --resume)
-    const sessionMatch = output.match(/Session ID: ([a-f0-9-]+)/i);
-    if (sessionMatch) {
-      session.sessionId = sessionMatch[1];
-      session.lastActivity = new Date().toISOString();
-      await saveSession(session);
-      console.log(`[claude] Session ID: ${session.sessionId.slice(0, 8)}`);
-    }
-
-    return output.trim();
-  } catch (error) {
-    console.error(`[claude] Spawn error:`, error);
-    return `Error: Could not run Claude CLI`;
-  }
-}
-
-// ============================================================
-// TYPING HEARTBEAT + CONCURRENCY
-// ============================================================
-
-async function callClaudeWithTyping(
-  ctx: Context,
-  prompt: string,
-  options?: { resume?: boolean; imagePath?: string; allowedTools?: string[]; model?: string }
-): Promise<string> {
-  // Send typing indicator every 4 seconds while Claude works
-  const interval = setInterval(() => {
-    ctx.replyWithChatAction("typing").catch(() => {});
-  }, 4_000);
-
-  try {
-    return await callClaude(prompt, options);
-  } finally {
-    clearInterval(interval);
-  }
-}
-
-// Concurrency guard: queue messages while Claude is working
-interface QueueItem {
-  task: () => Promise<void>;
-  channel: string;
-  preview: string;
-  enqueuedAt: number;
-}
-
-let busy = false;
-let currentItem: { channel: string; preview: string; startedAt: number } | null = null;
-const messageQueue: QueueItem[] = [];
-
-async function processQueue(): Promise<void> {
-  while (messageQueue.length > 0) {
-    const next = messageQueue.shift()!;
-    currentItem = { channel: next.channel, preview: next.preview, startedAt: Date.now() };
-    broadcastExtension({ type: "queue_status", busy: true, queueLength: messageQueue.length, current: currentItem });
-    await next.task();
-  }
-  currentItem = null;
-  busy = false;
-  broadcastExtension({ type: "queue_status", busy: false, queueLength: 0, current: null });
-}
-
-/**
- * Enqueue a task for the shared Claude pipeline.
- * Used by non-Telegram channels (Google Chat) that don't have a grammY ctx.
- * Returns a promise that resolves when the task completes.
- */
-function enqueue(
-  task: () => Promise<void>,
-  channel: string = "google-chat",
-  preview: string = "(message)",
-): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    const item: QueueItem = {
-      task: async () => {
-        try {
-          await task();
-          resolve();
-        } catch (err) {
-          reject(err);
-        }
-      },
-      channel,
-      preview,
-      enqueuedAt: Date.now(),
-    };
-
-    if (busy) {
-      messageQueue.push(item);
-      return;
-    }
-    busy = true;
-    currentItem = { channel: item.channel, preview: item.preview, startedAt: Date.now() };
-    item.task().finally(() => processQueue());
-  });
-}
-
-function withQueue(
-  handler: (ctx: Context) => Promise<void>,
-  previewExtractor?: (ctx: Context) => string,
-) {
-  return async (ctx: Context) => {
-    const preview = previewExtractor
-      ? previewExtractor(ctx)
-      : (ctx.message?.text?.substring(0, 50) ?? "(no text)");
-
-    if (busy) {
-      const position = messageQueue.length + 1;
-      await ctx.reply(`I'm working on something — I'll get to this next. (Queue position: ${position})`);
-      messageQueue.push({
-        task: () => handler(ctx),
-        channel: "telegram",
-        preview,
-        enqueuedAt: Date.now(),
-      });
-      return;
-    }
-    busy = true;
-    currentItem = { channel: "telegram", preview, startedAt: Date.now() };
-    try {
-      await handler(ctx);
-    } finally {
-      await processQueue();
-    }
-  };
-}
+// Queue (enqueue, enqueueEllieChat, withQueue, getQueueStatus)
+// extracted to ./message-queue.ts (ELLIE-206)
 
 // ============================================================
 // MESSAGE HANDLERS
@@ -792,7 +548,7 @@ bot.on("message:text", withQueue(async (ctx) => {
   await ctx.replyWithChatAction("typing");
   acknowledgeChannel("telegram"); // User responded — clear pending responses
 
-  await saveMessage("user", text);
+  await saveMessage("user", text, undefined, "telegram", userId);
   broadcastExtension({ type: "message_in", channel: "telegram", preview: text.substring(0, 200) });
 
   // Slash commands — direct responses, bypass Claude pipeline (ELLIE-113)
@@ -826,6 +582,22 @@ bot.on("message:text", withQueue(async (ctx) => {
     return;
   }
 
+  // /plan on|off — toggle planning mode
+  const planMatch = text.match(/^\/plan\s+(on|off)$/i);
+  if (planMatch) {
+    setPlanningMode(planMatch[1].toLowerCase() === "on");
+    const msg = getPlanningMode()
+      ? "Planning mode ON — conversation will persist for up to 60 minutes of idle time."
+      : "Planning mode OFF — reverting to 10-minute idle timeout.";
+    console.log(`[planning] ${msg}`);
+    await ctx.reply(msg);
+    resetTelegramIdleTimer();
+    resetGchatIdleTimer();
+    resetEllieChatIdleTimer();
+    broadcastExtension({ type: "planning_mode", active: getPlanningMode() });
+    return;
+  }
+
   // ELLIE:: user-typed commands — bypass classifier, execute directly
   const { cleanedText: userPlaybookClean, commands: userPlaybookCmds } = extractPlaybookCommands(text);
   if (userPlaybookCmds.length > 0) {
@@ -856,17 +628,24 @@ bot.on("message:text", withQueue(async (ctx) => {
     }
   }
 
-  // Gather context: docket + semantic search + ES full-text search + structured sources + recent messages + forest + agent memory
+  // Gather context: full conversation (primary) + docket + search (excluding current conversation) + structured + forest + agent memory + queue
   const activeAgent = getActiveAgent("telegram");
-  const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext, agentMemory] = await Promise.all([
+  const activeConvoId = await getOrCreateConversation(supabase!, "telegram") || undefined;
+  const [conversationContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext] = await Promise.all([
+    activeConvoId && supabase ? getConversationMessages(supabase, activeConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
     getContextDocket(),
-    getRelevantContext(supabase, effectiveText),
-    searchElastic(effectiveText, { limit: 5, recencyBoost: true }),
+    getRelevantContext(supabase, effectiveText, "telegram", activeAgent, activeConvoId),
+    searchElastic(effectiveText, { limit: 5, recencyBoost: true, channel: "telegram", sourceAgent: activeAgent, excludeConversationId: activeConvoId }),
     getAgentStructuredContext(supabase, activeAgent),
-    getRecentMessages(supabase),
     getForestContext(effectiveText),
     getAgentMemoryContext(activeAgent, detectedWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model)),
+    agentResult?.dispatch.is_new ? getQueueContext(activeAgent) : Promise.resolve(""),
   ]);
+  const recentMessages = conversationContext.text;
+  // Auto-acknowledge queue items on new session (fire-and-forget)
+  if (agentResult?.dispatch.is_new && queueContext) {
+    acknowledgeQueueItems(activeAgent).catch(() => {});
+  }
 
   // Detect work item mentions (ELLIE-5, EVE-3, etc.)
   let workItemContext = "";
@@ -922,7 +701,8 @@ bot.on("message:text", withQueue(async (ctx) => {
       const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, agentName, "shared", agentMemory.sessionIds);
       const { cleanedText: playbookClean, commands: playbookCommands } = extractPlaybookCommands(pipelineResponse);
       const cleanedPipelineResponse = await sendWithApprovals(ctx, playbookClean, session.sessionId, agentName);
-      await saveMessage("assistant", cleanedPipelineResponse);
+      await saveMessage("assistant", cleanedPipelineResponse, undefined, "telegram", userId);
+      runPostMessageAssessment(text, cleanedPipelineResponse, anthropic).catch(err => console.error("[assessment]", err));
       broadcastExtension({ type: "pipeline_complete", channel: "telegram", mode: execMode, steps: result.stepResults.length, duration_ms: result.artifacts.total_duration_ms, cost_usd: result.artifacts.total_cost_usd });
 
       if (result.finalDispatch) {
@@ -947,7 +727,8 @@ bot.on("message:text", withQueue(async (ctx) => {
         console.error(`[orchestrator] Step ${err.stepIndex} failed (${err.errorType}), sending partial results`);
         const partialResponse = await processMemoryIntents(supabase, err.partialOutput, agentResult?.dispatch.agent.name || "general", "shared", agentMemory.sessionIds);
         await sendResponse(ctx, partialResponse + "\n\n(Execution incomplete \u2014 showing partial results.)");
-        await saveMessage("assistant", partialResponse);
+        await saveMessage("assistant", partialResponse, undefined, "telegram", userId);
+        runPostMessageAssessment(text, partialResponse, anthropic).catch(err2 => console.error("[assessment]", err2));
       } else {
         console.error("[orchestrator] Multi-step failed, falling back to single agent:", err);
         const fallbackPrompt = buildPrompt(
@@ -958,12 +739,18 @@ bot.on("message:text", withQueue(async (ctx) => {
           forestContext,
           agentMemory.memoryContext || undefined,
           agentMemory.sessionIds,
+          await getArchetypeContext(),
+          await getPsyContext(),
+          await getPhaseContext(),
+          await getHealthContext(),
+          queueContext || undefined,
         );
         const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
         const fallbackAgentName = agentResult?.dispatch.agent.name || "general";
         const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw, fallbackAgentName, "shared", agentMemory.sessionIds);
         const cleaned = await sendWithApprovals(ctx, fallbackResponse, session.sessionId, fallbackAgentName);
-        await saveMessage("assistant", cleaned);
+        await saveMessage("assistant", cleaned, undefined, "telegram", userId);
+        runPostMessageAssessment(text, cleaned, anthropic).catch(err2 => console.error("[assessment]", err2));
       }
     }
 
@@ -980,6 +767,11 @@ bot.on("message:text", withQueue(async (ctx) => {
     forestContext,
     agentMemory.memoryContext || undefined,
     agentMemory.sessionIds,
+    await getArchetypeContext(),
+    await getPsyContext(),
+    await getPhaseContext(),
+    await getHealthContext(),
+    queueContext || undefined,
   );
 
   const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -1032,7 +824,8 @@ bot.on("message:text", withQueue(async (ctx) => {
 
   const cleanedResponse = await sendWithApprovals(ctx, playbookCleanedResponse, session.sessionId, agentResult?.dispatch.agent.name);
 
-  await saveMessage("assistant", cleanedResponse);
+  await saveMessage("assistant", cleanedResponse, undefined, "telegram", userId);
+  runPostMessageAssessment(text, cleanedResponse, anthropic).catch(err => console.error("[assessment]", err));
   broadcastExtension({ type: "message_out", channel: "telegram", agent: agentResult?.dispatch.agent.name || "general", preview: cleanedResponse.substring(0, 200) });
 
   // Sync response to agent session (fire-and-forget)
@@ -1080,10 +873,9 @@ bot.on("message:voice", withQueue(async (ctx) => {
       return;
     }
 
-    await saveMessage("user", `[Voice ${voice.duration}s]: ${transcription}`);
-    broadcastExtension({ type: "message_in", channel: "telegram", preview: `[Voice ${voice.duration}s]: ${transcription.substring(0, 150)}` });
-
     const voiceUserId = ctx.from?.id.toString() || "";
+    await saveMessage("user", `[Voice ${voice.duration}s]: ${transcription}`, undefined, "telegram", voiceUserId);
+    broadcastExtension({ type: "message_in", channel: "telegram", preview: `[Voice ${voice.duration}s]: ${transcription.substring(0, 150)}` });
     const voiceWorkItem = transcription.match(/\b([A-Z]+-\d+)\b/)?.[1];
     const agentResult = await routeAndDispatch(supabase, transcription, "telegram", voiceUserId, voiceWorkItem);
     const effectiveTranscription = agentResult?.route.strippedMessage || transcription;
@@ -1104,15 +896,21 @@ bot.on("message:voice", withQueue(async (ctx) => {
     }
 
     const voiceActiveAgent = getActiveAgent("telegram");
-    const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext, agentMemory] = await Promise.all([
+    const voiceConvoId = await getOrCreateConversation(supabase!, "telegram") || undefined;
+    const [voiceConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, voiceQueueContext] = await Promise.all([
+      voiceConvoId && supabase ? getConversationMessages(supabase, voiceConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
       getContextDocket(),
-      getRelevantContext(supabase, effectiveTranscription),
-      searchElastic(effectiveTranscription, { limit: 5, recencyBoost: true }),
+      getRelevantContext(supabase, effectiveTranscription, "telegram", voiceActiveAgent, voiceConvoId),
+      searchElastic(effectiveTranscription, { limit: 5, recencyBoost: true, channel: "telegram", sourceAgent: voiceActiveAgent, excludeConversationId: voiceConvoId }),
       getAgentStructuredContext(supabase, voiceActiveAgent),
-      getRecentMessages(supabase),
       getForestContext(effectiveTranscription),
       getAgentMemoryContext(voiceActiveAgent, voiceWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model)),
+      agentResult?.dispatch.is_new ? getQueueContext(voiceActiveAgent) : Promise.resolve(""),
     ]);
+    const recentMessages = voiceConvoContext.text;
+    if (agentResult?.dispatch.is_new && voiceQueueContext) {
+      acknowledgeQueueItems(voiceActiveAgent).catch(() => {});
+    }
 
     // ── Voice multi-step branch (ELLIE-58) ──
     if (agentResult?.route.execution_mode !== "single" && agentResult?.route.skills?.length) {
@@ -1148,7 +946,8 @@ bot.on("message:voice", withQueue(async (ctx) => {
         const voiceAgentName = result.finalDispatch?.agent?.name || agentResult?.dispatch.agent.name || "general";
         const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, voiceAgentName, "shared", agentMemory.sessionIds);
         const cleaned = await sendWithApprovals(ctx, pipelineResponse, session.sessionId, voiceAgentName);
-        await saveMessage("assistant", cleaned);
+        await saveMessage("assistant", cleaned, undefined, "telegram", voiceUserId);
+        runPostMessageAssessment(transcription, cleaned, anthropic).catch(err => console.error("[assessment]", err));
 
         if (result.finalDispatch) {
           syncResponse(supabase, result.finalDispatch.session_id, cleaned, {
@@ -1164,7 +963,8 @@ bot.on("message:voice", withQueue(async (ctx) => {
         if (err instanceof PipelineStepError && err.partialOutput) {
           const partialResponse = await processMemoryIntents(supabase, err.partialOutput, agentResult?.dispatch.agent.name || "general", "shared", agentMemory.sessionIds);
           await sendResponse(ctx, partialResponse + "\n\n(Execution incomplete \u2014 showing partial results.)");
-          await saveMessage("assistant", partialResponse);
+          await saveMessage("assistant", partialResponse, undefined, "telegram", voiceUserId);
+          runPostMessageAssessment(transcription, partialResponse, anthropic).catch(err2 => console.error("[assessment]", err2));
         } else {
           console.error("[orchestrator] Voice multi-step failed:", err);
           await ctx.reply("Multi-step execution failed \u2014 processing as single request.");
@@ -1177,12 +977,18 @@ bot.on("message:voice", withQueue(async (ctx) => {
             forestContext,
             agentMemory.memoryContext || undefined,
             agentMemory.sessionIds,
+            await getArchetypeContext(),
+            await getPsyContext(),
+            await getPhaseContext(),
+            await getHealthContext(),
+            voiceQueueContext || undefined,
           );
           const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
           const voiceFallbackAgent = agentResult?.dispatch.agent.name || "general";
           const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw, voiceFallbackAgent, "shared", agentMemory.sessionIds);
           const cleaned = await sendWithApprovals(ctx, fallbackResponse, session.sessionId, voiceFallbackAgent);
-          await saveMessage("assistant", cleaned);
+          await saveMessage("assistant", cleaned, undefined, "telegram", voiceUserId);
+          runPostMessageAssessment(transcription, cleaned, anthropic).catch(err2 => console.error("[assessment]", err2));
         }
       }
 
@@ -1203,6 +1009,11 @@ bot.on("message:voice", withQueue(async (ctx) => {
       forestContext,
       agentMemory.memoryContext || undefined,
       agentMemory.sessionIds,
+      await getArchetypeContext(),
+      await getPsyContext(),
+      await getPhaseContext(),
+      await getHealthContext(),
+      voiceQueueContext || undefined,
     );
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -1226,7 +1037,8 @@ bot.on("message:voice", withQueue(async (ctx) => {
       if (audioBuffer) {
         await ctx.replyWithVoice(new InputFile(audioBuffer, "response.ogg"));
         await sendResponse(ctx, cleanedText);
-        await saveMessage("assistant", cleanedText);
+        await saveMessage("assistant", cleanedText, undefined, "telegram", voiceUserId);
+        runPostMessageAssessment(transcription, cleanedText, anthropic).catch(err => console.error("[assessment]", err));
 
         if (agentResult) {
           syncResponse(supabase, agentResult.dispatch.session_id, cleanedText, {
@@ -1242,7 +1054,8 @@ bot.on("message:voice", withQueue(async (ctx) => {
     // Fall back to text (long response, TTS failure, or approval buttons)
     const cleanedResponse = await sendWithApprovals(ctx, claudeResponse, session.sessionId, agentResult?.dispatch.agent.name);
 
-    await saveMessage("assistant", cleanedResponse);
+    await saveMessage("assistant", cleanedResponse, undefined, "telegram", voiceUserId);
+    runPostMessageAssessment(transcription, cleanedResponse, anthropic).catch(err => console.error("[assessment]", err));
 
     if (agentResult) {
       syncResponse(supabase, agentResult.dispatch.session_id, cleanedResponse, {
@@ -1282,7 +1095,8 @@ bot.on("message:photo", withQueue(async (ctx) => {
     const caption = ctx.message.caption || "Analyze this image.";
     const prompt = `[Image: ${filePath}]\n\n${caption}`;
 
-    await saveMessage("user", `[Image]: ${caption}`);
+    const imgUserId = ctx.from?.id.toString() || "";
+    await saveMessage("user", `[Image]: ${caption}`, undefined, "telegram", imgUserId);
 
     const claudeResponse = await callClaudeWithTyping(ctx, prompt, { resume: true });
 
@@ -1293,7 +1107,7 @@ bot.on("message:photo", withQueue(async (ctx) => {
     const activeAgent = getActiveAgent("telegram");
     const cleanResponse = await processMemoryIntents(supabase, claudeResponse, activeAgent);
     const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId, activeAgent);
-    await saveMessage("assistant", finalResponse);
+    await saveMessage("assistant", finalResponse, undefined, "telegram", imgUserId);
     resetTelegramIdleTimer();
   } catch (error) {
     console.error("Image error:", error);
@@ -1322,7 +1136,8 @@ bot.on("message:document", withQueue(async (ctx) => {
     const caption = ctx.message.caption || `Analyze: ${doc.file_name}`;
     const prompt = `[File: ${filePath}]\n\n${caption}`;
 
-    await saveMessage("user", `[Document: ${doc.file_name}]: ${caption}`);
+    const docUserId = ctx.from?.id.toString() || "";
+    await saveMessage("user", `[Document: ${doc.file_name}]: ${caption}`, undefined, "telegram", docUserId);
 
     const claudeResponse = await callClaudeWithTyping(ctx, prompt, { resume: true });
 
@@ -1331,7 +1146,7 @@ bot.on("message:document", withQueue(async (ctx) => {
     const activeAgent = getActiveAgent("telegram");
     const cleanResponse = await processMemoryIntents(supabase, claudeResponse, activeAgent);
     const finalResponse = await sendWithApprovals(ctx, cleanResponse, session.sessionId, activeAgent);
-    await saveMessage("assistant", finalResponse);
+    await saveMessage("assistant", finalResponse, undefined, "telegram", docUserId);
     resetTelegramIdleTimer();
   } catch (error) {
     console.error("Document error:", error);
@@ -1356,7 +1171,8 @@ bot.callbackQuery(/^approve:(.+)$/, withQueue(async (ctx) => {
   await ctx.answerCallbackQuery({ text: "Approved" });
   removePendingAction(actionId);
 
-  await saveMessage("user", `[Approved action: ${action.description}]`);
+  const approveUserId = ctx.from?.id.toString() || "";
+  await saveMessage("user", `[Approved action: ${action.description}]`, undefined, "telegram", approveUserId);
 
   const resumePrompt = `The user APPROVED the following action: "${action.description}". Proceed with executing it now.`;
 
@@ -1365,7 +1181,7 @@ bot.callbackQuery(/^approve:(.+)$/, withQueue(async (ctx) => {
   const approveAgent = action.agentName || getActiveAgent("telegram");
   const response = await processMemoryIntents(supabase, rawResponse, approveAgent);
   const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId, approveAgent);
-  await saveMessage("assistant", cleanedResponse);
+  await saveMessage("assistant", cleanedResponse, undefined, "telegram", approveUserId);
   resetTelegramIdleTimer();
 }, () => "[Approval]"));
 
@@ -1382,7 +1198,8 @@ bot.callbackQuery(/^deny:(.+)$/, withQueue(async (ctx) => {
   await ctx.answerCallbackQuery({ text: "Denied" });
   removePendingAction(actionId);
 
-  await saveMessage("user", `[Denied action: ${action.description}]`);
+  const denyUserId = ctx.from?.id.toString() || "";
+  await saveMessage("user", `[Denied action: ${action.description}]`, undefined, "telegram", denyUserId);
 
   const resumePrompt = `The user DENIED the following action: "${action.description}". Do NOT proceed with this action. Acknowledge briefly.`;
 
@@ -1391,7 +1208,7 @@ bot.callbackQuery(/^deny:(.+)$/, withQueue(async (ctx) => {
   const denyAgent = action.agentName || getActiveAgent("telegram");
   const response = await processMemoryIntents(supabase, rawResponse, denyAgent);
   const cleanedResponse = await sendWithApprovals(ctx, response, session.sessionId, denyAgent);
-  await saveMessage("assistant", cleanedResponse);
+  await saveMessage("assistant", cleanedResponse, undefined, "telegram", denyUserId);
   resetTelegramIdleTimer();
 }, () => "[Denial]"));
 
@@ -1399,603 +1216,13 @@ bot.callbackQuery(/^deny:(.+)$/, withQueue(async (ctx) => {
 // HELPERS
 // ============================================================
 
-// Load profile once at startup
-let profileContext = "";
-try {
-  profileContext = await readFile(join(PROJECT_ROOT, "config", "profile.md"), "utf-8");
-} catch {
-  // No profile yet — that's fine
-}
+// formatForestMetrics is imported from relay-utils.ts
 
-const USER_NAME = process.env.USER_NAME || "";
-const USER_TIMEZONE = process.env.USER_TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone;
+// sendResponse, sendWithApprovals, sendWithApprovalsEllieChat
+// extracted to ./message-sender.ts (ELLIE-207)
 
-export function buildPrompt(
-  userMessage: string,
-  contextDocket?: string,
-  relevantContext?: string,
-  elasticContext?: string,
-  channel: string = "telegram",
-  agentConfig?: { system_prompt?: string | null; name?: string; tools_enabled?: string[] },
-  workItemContext?: string,
-  structuredContext?: string,
-  recentMessages?: string,
-  skillContext?: { name: string; description: string },
-  forestContext?: string,
-  agentMemoryContext?: string,
-  sessionIds?: { tree_id: string; branch_id?: string; creature_id?: string; entity_id?: string; work_item_id?: string },
-): string {
-  const channelLabel = channel === "google-chat" ? "Google Chat" : channel === "la-comms" ? "LA Comms (dashboard)" : "Telegram";
-
-  // Use agent-specific system prompt if available, otherwise default
-  const basePrompt = agentConfig?.system_prompt
-    ? `${agentConfig.system_prompt}\nYou are responding via ${channelLabel}. Keep responses concise and conversational.`
-    : `You are a personal AI assistant responding via ${channelLabel}. Keep responses concise and conversational.`;
-
-  const parts = [basePrompt];
-
-  // Inject matched skill context (ELLIE-53)
-  if (skillContext) {
-    parts.push(
-      `\nACTIVE SKILL: ${skillContext.name}` +
-      `\nTask: ${skillContext.description}` +
-      `\nFocus your response on this specific capability. Use the appropriate tools to fulfill this request.`
-    );
-  }
-
-  if (AGENT_MODE) {
-    // Tool header — agent-specific list or full default set
-    const toolHeader = agentConfig?.tools_enabled?.length
-      ? `You have access to these tools: ${agentConfig.tools_enabled.join(", ")}.`
-      : "You have full tool access: Read, Edit, Write, Bash, Glob, Grep, WebSearch, WebFetch.";
-
-    // MCP tool details — shared across all agent paths
-    const mcpDetails =
-      "You also have MCP tools:\n" +
-      "- Google Workspace (user_google_email: zerocool0133700@gmail.com):\n" +
-      "  Gmail: search_gmail_messages, get_gmail_message_content, send_gmail_message (send requires [CONFIRM])\n" +
-      "  Calendar: get_events, create_event (create/modify requires [CONFIRM])\n" +
-      "  Tasks: list_tasks, create_task, update_task, get_task\n" +
-      "  Also: Drive, Docs, Sheets, Forms, Contacts\n" +
-      "  Your system context already includes an unread email signal and pending Google Tasks.\n" +
-      "  Use Gmail MCP tools to read full email content, reply to threads, or draft messages.\n" +
-      "- GitHub, Memory, Sequential Thinking\n" +
-      "- Plane (project management — workspace: evelife at plane.ellie-labs.dev)\n" +
-      "- Brave Search (mcp__brave-search__brave_web_search, mcp__brave-search__brave_local_search)\n" +
-      "- Miro (diagrams, docs, tables), Excalidraw (drawings, diagrams)\n" +
-      (isOutlookConfigured()
-        ? "- Microsoft Outlook (" + getOutlookEmail() + "):\n" +
-          "  Available via HTTP API (use curl from Bash):\n" +
-          "  - GET http://localhost:3001/api/outlook/unread — list unread messages\n" +
-          "  - GET http://localhost:3001/api/outlook/search?q=QUERY — search messages\n" +
-          "  - GET http://localhost:3001/api/outlook/message/MESSAGE_ID — get full message\n" +
-          "  - POST http://localhost:3001/api/outlook/send -d '{\"subject\":\"...\",\"body\":\"...\",\"to\":[\"...\"]}' (requires [CONFIRM])\n" +
-          "  - POST http://localhost:3001/api/outlook/reply -d '{\"messageId\":\"...\",\"comment\":\"...\"}' (requires [CONFIRM])\n" +
-          "  Your system context already includes an Outlook unread email signal.\n"
-        : "");
-
-    parts.push(
-      toolHeader + " " + mcpDetails +
-      "Use them freely to answer questions — read files, run commands, search code, browse the web, check email, manage calendar. " +
-      "IMPORTANT: NEVER run sudo commands, NEVER install packages (apt, npm -g, brew), NEVER run commands that require interactive input or confirmation. " +
-      "If a task would require sudo or installing software, tell the user what to run instead. " +
-      "The user is reading on a phone. After using tools, give a concise final answer (not the raw tool output). " +
-      "If a task requires multiple steps, just do them — don't ask for permission."
-    );
-  }
-
-  if (USER_NAME) parts.push(`You are speaking with ${USER_NAME}.`);
-
-  // Inject current time in user's timezone
-  const now = new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE, dateStyle: "full", timeStyle: "short" });
-  parts.push(`Current date/time: ${now} (${USER_TIMEZONE}).`);
-  if (profileContext) parts.push(`\nProfile:\n${profileContext}`);
-  if (structuredContext) parts.push(`\n${structuredContext}`);
-  if (contextDocket) parts.push(`\nCONTEXT:\n${contextDocket}`);
-  if (recentMessages) parts.push(`\n${recentMessages}`);
-  if (relevantContext) parts.push(`\n${relevantContext}`);
-  if (elasticContext) parts.push(`\n${elasticContext}`);
-  if (forestContext) parts.push(`\n${forestContext}`);
-
-  // Agent compounding memory context (ELLIE-136)
-  if (agentMemoryContext) parts.push(agentMemoryContext);
-
-  // Memory write protocol — [MEMORY:] tags (ELLIE-136)
-  if (sessionIds) {
-    parts.push(
-      "\nFOREST MEMORY WRITES (IMPORTANT):" +
-      "\nYou are working in an active forest session. Record your findings with [MEMORY:] tags." +
-      "\nInclude at least one [MEMORY:] tag when you:" +
-      "\n  - Discover a fact, bug, or root cause" +
-      "\n  - Make an architectural or implementation decision" +
-      "\n  - Form a hypothesis about what's happening" +
-      "\n  - Complete a task or milestone" +
-      "\n" +
-      "\nExamples:" +
-      "\n  [MEMORY: The login endpoint returns 401 when the token is expired]" +
-      "\n  [MEMORY:decision: Using Redis for caching because latency requirements are <10ms]" +
-      "\n  [MEMORY:hypothesis:0.6: The race condition is in the session cleanup goroutine]" +
-      "\n" +
-      "\nFormat: [MEMORY:type:confidence: content] — type and confidence optional." +
-      "\nTypes: finding, decision, hypothesis, fact, pattern. Default: finding" +
-      "\nConfidence: 0.6 (speculative) → 0.9 (verified). Default: 0.7" +
-      "\nThese memories compound — future agents see your findings and build on them." +
-      "\nAlways include [MEMORY:] tags in your response text, never omit them."
-    );
-  }
-
-  parts.push(
-    "\nMEMORY MANAGEMENT:" +
-      "\nTwo memory systems exist — use the right one:" +
-      "\n" +
-      "\n1. CONVERSATION MEMORY ([REMEMBER:] tags) — for personal facts about the user:" +
-      "\n   preferences, decisions, project details, personal info, things the user asked to remember." +
-      "\n   [REMEMBER: fact to store]" +
-      "\n   [GOAL: goal text | DEADLINE: optional date]" +
-      "\n   [DONE: search text for completed goal]" +
-      "\n" +
-      "\n2. FOREST MEMORY ([MEMORY:] tags) — for work products:" +
-      "\n   strategic analysis, code findings, bug discoveries, architectural decisions, hypotheses." +
-      "\n   These compound across sessions and are shared with other agents." +
-      (sessionIds ? "" : "\n   (No active work session — forest writes unavailable.)") +
-      "\n" +
-      "\nUse [REMEMBER:] freely for user context. Use [MEMORY:] for institutional knowledge."
-  );
-
-  parts.push(
-    "\nACTION CONFIRMATIONS:" +
-      "\nUse [CONFIRM: description] for these actions INSTEAD of executing:" +
-      "\n- Sending or replying to emails (send_gmail_message, /api/outlook/send, /api/outlook/reply)" +
-      "\n- Creating or modifying calendar events (create_event, modify_event)" +
-      "\n- Git push, posting to channels, modifying databases" +
-      "\n- Any difficult-to-undo external action" +
-      "\nDo NOT use [CONFIRM:] for:" +
-      "\n- Read-only: searching email, reading messages, checking calendar, listing tasks" +
-      "\n- Google Tasks management: creating/completing/updating tasks (low-stakes, easily reversible)" +
-      "\n- Actions the user explicitly and directly asked you to do in simple terms" +
-      "\nThe user will see Approve/Deny buttons. If approved, you will be resumed with instructions to proceed." +
-      '\nExample: "I\'ll send the report now. [CONFIRM: Send weekly report email to alice@example.com]"' +
-      "\nYou can include multiple [CONFIRM:] tags if multiple actions need approval."
-  );
-
-  // Work item context and dispatch protocol
-  if (workItemContext) {
-    parts.push(workItemContext);
-  }
-
-  const isGeneralAgent = !agentConfig?.name || agentConfig.name === "general";
-
-  if (workItemContext?.includes("ACTIVE WORK ITEM") && !isGeneralAgent) {
-    // Specialist agents (dev, etc.) get a simplified protocol — no /complete call
-    parts.push(
-      "\nDEV AGENT PROTOCOL:" +
-        "\n1. Read the ticket and understand requirements" +
-        "\n2. Implement code changes" +
-        "\n3. Commit with [ELLIE-N] prefix (e.g., [ELLIE-5] Brief description)" +
-        "\n4. Build if dashboard code changed: cd /home/ellie/ellie-home && bun run build" +
-        "\n5. Restart affected service: sudo systemctl restart ellie-dashboard" +
-        "\n   (for relay code: systemctl --user restart claude-telegram-relay)" +
-        "\n6. Verify changes work" +
-        "\nDo NOT call /api/work-session/complete — handled externally."
-    );
-  }
-
-  if (isPlaneConfigured()) {
-    if (isGeneralAgent) {
-      // General agent gets playbook commands for orchestration
-      parts.push(
-        "\nELLIE:: PLAYBOOK COMMANDS:" +
-          "\nYou can emit these tags to trigger infrastructure actions. Tags are stripped" +
-          "\nbefore your message reaches the user." +
-          "\n" +
-          "\n  ELLIE:: send ELLIE-144 to dev" +
-          "\n    Dispatches the dev agent to work on a ticket. You'll be notified when done." +
-          "\n    Use when: Dave asks to implement, fix, or build something on a specific ticket." +
-          "\n" +
-          "\n  ELLIE:: close ELLIE-144 \"summary of what was accomplished\"" +
-          "\n    Closes a ticket: updates Plane to Done, deploys if needed." +
-          "\n    Use when: Work is verified complete on a ticket." +
-          "\n" +
-          "\n  ELLIE:: create ticket \"Title\" \"Description of work\"" +
-          "\n    Creates a new ticket in Plane. Returns the identifier." +
-          "\n    Use when: New work should be tracked." +
-          "\n" +
-          "\nRules:" +
-          "\n- Place tags at the END of your response, after your conversational text" +
-          "\n- You can include multiple tags in one response" +
-          "\n- Dev dispatch is async — you'll get a notification when done" +
-          "\n- Only use these when the user's request clearly warrants it"
-      );
-    }
-    parts.push(
-      "\nWORK ITEM COMMANDS:" +
-        "\nYou can manage Plane work items via MCP tools (workspace: evelife, project: ELLIE)." +
-        "\n- List open issues: mcp__plane__list_states, then query issues" +
-        "\n- Create new issues when asked" +
-        "\n- Use [ELLIE-N] prefix in commit messages when working on a tracked item"
-    );
-  }
-
-  parts.push(`\nUser: ${userMessage}`);
-
-  return parts.join("\n");
-}
-
-// Format forest metrics for chat display (ELLIE-113)
-function formatForestMetrics(m: { creaturesByEntity: Record<string, number>; eventsByKind: Record<string, number>; treesByType: Record<string, number>; creaturesByState: Record<string, number>; failureRate: number; totalEvents: number; totalCreatures: number; totalTrees: number }): string {
-  const lines = ["Forest Metrics (last 7 days)\n"];
-
-  lines.push(`Events: ${m.totalEvents} | Creatures: ${m.totalCreatures} | Trees: ${m.totalTrees}`);
-  lines.push(`Failure rate: ${(m.failureRate * 100).toFixed(1)}%`);
-
-  if (Object.keys(m.creaturesByEntity).length) {
-    lines.push("\nCreatures by entity:");
-    for (const [entity, count] of Object.entries(m.creaturesByEntity).sort((a, b) => b[1] - a[1])) {
-      lines.push(`  ${entity}: ${count}`);
-    }
-  }
-
-  if (Object.keys(m.eventsByKind).length) {
-    lines.push("\nEvents by kind:");
-    for (const [kind, count] of Object.entries(m.eventsByKind).sort((a, b) => b[1] - a[1]).slice(0, 15)) {
-      lines.push(`  ${kind}: ${count}`);
-    }
-  }
-
-  if (Object.keys(m.creaturesByState).length) {
-    lines.push("\nCreatures by state:");
-    for (const [state, count] of Object.entries(m.creaturesByState).sort((a, b) => b[1] - a[1])) {
-      lines.push(`  ${state}: ${count}`);
-    }
-  }
-
-  return lines.join("\n");
-}
-
-async function sendResponse(ctx: Context, response: string): Promise<void> {
-  const MAX_LENGTH = 4000;
-  const FILE_THRESHOLD = 8000;
-
-  // Short response: send as-is
-  if (response.length <= MAX_LENGTH) {
-    await ctx.reply(response);
-    return;
-  }
-
-  // Very long response: truncate message + attach full output as file
-  if (response.length > FILE_THRESHOLD) {
-    const truncated = response.substring(0, MAX_LENGTH - 200);
-    await ctx.reply(`${truncated}\n\n... (truncated — full output attached)`);
-
-    const buffer = Buffer.from(response, "utf-8");
-    await ctx.replyWithDocument(new InputFile(buffer, "output.txt"));
-    return;
-  }
-
-  // Medium response: split into chunks
-  const chunks = [];
-  let remaining = response;
-
-  while (remaining.length > 0) {
-    if (remaining.length <= MAX_LENGTH) {
-      chunks.push(remaining);
-      break;
-    }
-
-    let splitIndex = remaining.lastIndexOf("\n\n", MAX_LENGTH);
-    if (splitIndex === -1) splitIndex = remaining.lastIndexOf("\n", MAX_LENGTH);
-    if (splitIndex === -1) splitIndex = remaining.lastIndexOf(" ", MAX_LENGTH);
-    if (splitIndex === -1) splitIndex = MAX_LENGTH;
-
-    chunks.push(remaining.substring(0, splitIndex));
-    remaining = remaining.substring(splitIndex).trim();
-  }
-
-  for (const chunk of chunks) {
-    await ctx.reply(chunk);
-  }
-}
-
-/**
- * Send response with approval button handling.
- * Extracts [CONFIRM: ...] tags, sends text first, then each confirmation
- * as a separate message with Approve/Deny inline keyboard buttons.
- */
-async function sendWithApprovals(
-  ctx: Context,
-  response: string,
-  currentSessionId: string | null,
-  agentName?: string,
-): Promise<string> {
-  const { cleanedText, confirmations } = extractApprovalTags(response);
-
-  if (confirmations.length > 0) {
-    if (cleanedText) {
-      await sendResponse(ctx, cleanedText);
-    }
-    for (const description of confirmations) {
-      const actionId = crypto.randomUUID();
-      const keyboard = new InlineKeyboard()
-        .text("\u2705 Approve", `approve:${actionId}`)
-        .text("\u274c Deny", `deny:${actionId}`);
-
-      const sent = await ctx.reply(
-        `\u26a0\ufe0f Confirm action:\n${description}`,
-        { reply_markup: keyboard },
-      );
-
-      storePendingAction(
-        actionId,
-        description,
-        currentSessionId,
-        sent.chat.id,
-        sent.message_id,
-        { agentName: agentName || getActiveAgent("telegram") },
-      );
-      console.log(`[approval] Pending: ${description.substring(0, 60)}`);
-    }
-  } else {
-    await sendResponse(ctx, cleanedText);
-  }
-
-  return cleanedText;
-}
-
-// ============================================================
-// VOICE: Whisper transcription (mulaw buffer → text)
-// ============================================================
-
-async function transcribeMulaw(mulawChunks: Buffer[]): Promise<string> {
-  const combined = Buffer.concat(mulawChunks);
-  if (combined.length < 400) return "";
-
-  const timestamp = Date.now();
-  const mulawPath = join(TMP_DIR, `call_${timestamp}.raw`);
-  const wavPath = join(TMP_DIR, `call_${timestamp}.wav`);
-
-  try {
-    await writeFile(mulawPath, combined);
-
-    const ffmpeg = spawn([
-      "ffmpeg", "-f", "mulaw", "-ar", "8000", "-ac", "1",
-      "-i", mulawPath,
-      "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
-      wavPath, "-y"
-    ], { stdout: "pipe", stderr: "pipe" });
-
-    if (await ffmpeg.exited !== 0) {
-      console.error("[voice] ffmpeg error:", await new Response(ffmpeg.stderr).text());
-      return "";
-    }
-
-    const provider = process.env.VOICE_PROVIDER || "local";
-
-    if (provider === "groq") {
-      const wavBuffer = await readFile(wavPath);
-      const Groq = (await import("groq-sdk")).default;
-      const groq = new Groq();
-      const file = new File([wavBuffer], "call.wav", { type: "audio/wav" });
-      const result = await groq.audio.transcriptions.create({ file, model: "whisper-large-v3-turbo" });
-      return result.text.trim();
-    }
-
-    const whisperBinary = process.env.WHISPER_BINARY || "whisper-cpp";
-    const modelPath = process.env.WHISPER_MODEL_PATH || "";
-    if (!modelPath) { console.error("[voice] WHISPER_MODEL_PATH not set"); return ""; }
-
-    const txtPath = join(TMP_DIR, `call_${timestamp}.txt`);
-    const whisper = spawn([
-      whisperBinary, "--model", modelPath,
-      "--file", wavPath,
-      "--output-txt", "--output-file", join(TMP_DIR, `call_${timestamp}`),
-      "--no-prints"
-    ], { stdout: "pipe", stderr: "pipe" });
-
-    if (await whisper.exited !== 0) {
-      console.error("[voice] whisper error:", await new Response(whisper.stderr).text());
-      return "";
-    }
-
-    const text = await readFile(txtPath, "utf-8");
-    await unlink(txtPath).catch(() => {});
-    return text.trim();
-  } finally {
-    await unlink(mulawPath).catch(() => {});
-    await unlink(wavPath).catch(() => {});
-  }
-}
-
-// ============================================================
-// VOICE: ElevenLabs TTS (text → mulaw base64 for Twilio)
-// ============================================================
-
-/**
- * Stream TTS audio directly to Twilio WebSocket as chunks arrive from ElevenLabs.
- * Returns true on success, false on failure.
- * This avoids buffering the entire audio before playback — first audio plays
- * while the rest is still being generated.
- */
-async function streamTTSToTwilio(
-  text: string,
-  ws: WebSocket,
-  streamSid: string,
-): Promise<boolean> {
-  if (!ELEVENLABS_API_KEY) { console.error("[voice] No ElevenLabs API key"); return false; }
-
-  const start = Date.now();
-
-  const response = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream?output_format=ulaw_8000`,
-    {
-      method: "POST",
-      headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text,
-        model_id: "eleven_turbo_v2_5",
-        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
-      }),
-    }
-  );
-
-  if (!response.ok || !response.body) {
-    console.error("[voice] ElevenLabs stream error:", response.status, await response.text());
-    return false;
-  }
-
-  // Stream chunks to Twilio as they arrive from ElevenLabs
-  const CHUNK_SIZE = 160 * 20; // ~400ms of mulaw audio per Twilio chunk
-  let buffer = Buffer.alloc(0);
-  let firstChunkSent = false;
-
-  const reader = response.body.getReader();
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer = Buffer.concat([buffer, Buffer.from(value)]);
-
-    // Send complete chunks as they accumulate
-    while (buffer.length >= CHUNK_SIZE) {
-      const chunk = buffer.subarray(0, CHUNK_SIZE);
-      buffer = buffer.subarray(CHUNK_SIZE);
-
-      ws.send(JSON.stringify({
-        event: "media",
-        streamSid,
-        media: { payload: chunk.toString("base64") },
-      }));
-
-      if (!firstChunkSent) {
-        console.log(`[voice] First TTS chunk sent in ${Date.now() - start}ms`);
-        firstChunkSent = true;
-      }
-    }
-  }
-
-  // Send remaining audio
-  if (buffer.length > 0) {
-    ws.send(JSON.stringify({
-      event: "media",
-      streamSid,
-      media: { payload: buffer.toString("base64") },
-    }));
-  }
-
-  console.log(`[voice] TTS stream complete in ${Date.now() - start}ms`);
-  return true;
-}
-
-/**
- * Non-streaming fallback for textToSpeechMulaw (used if streaming not possible).
- */
-async function textToSpeechMulaw(text: string): Promise<string> {
-  if (!ELEVENLABS_API_KEY) { console.error("[voice] No ElevenLabs API key"); return ""; }
-
-  const response = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}?output_format=ulaw_8000`,
-    {
-      method: "POST",
-      headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text,
-        model_id: "eleven_turbo_v2_5",
-        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
-      }),
-    }
-  );
-
-  if (!response.ok) {
-    console.error("[voice] ElevenLabs error:", response.status, await response.text());
-    return "";
-  }
-
-  return Buffer.from(await response.arrayBuffer()).toString("base64");
-}
-
-/** Convert text to OGG/Opus audio via ElevenLabs (for Telegram voice messages). */
-async function textToSpeechOgg(text: string): Promise<Buffer | null> {
-  if (!ELEVENLABS_API_KEY) return null;
-
-  const response = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}?output_format=opus_48000_64`,
-    {
-      method: "POST",
-      headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text,
-        model_id: "eleven_turbo_v2_5",
-        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
-      }),
-    }
-  );
-
-  if (!response.ok) {
-    console.error("[tts] ElevenLabs error:", response.status, await response.text());
-    return null;
-  }
-
-  return Buffer.from(await response.arrayBuffer());
-}
-
-/** Low-bandwidth TTS for phone conversation mode (mp3_22050_32 — ~4x smaller than opus_48000_64). */
-async function textToSpeechFast(text: string): Promise<Buffer | null> {
-  if (!ELEVENLABS_API_KEY) return null;
-
-  const response = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}?output_format=mp3_22050_32`,
-    {
-      method: "POST",
-      headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text,
-        model_id: "eleven_turbo_v2_5",
-        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
-      }),
-    }
-  );
-
-  if (!response.ok) {
-    console.error("[tts] ElevenLabs fast error:", response.status, await response.text());
-    return null;
-  }
-
-  return Buffer.from(await response.arrayBuffer());
-}
-
-// ============================================================
-// VOICE: Call session + audio processing
-// ============================================================
-
-// Compute average energy of a mulaw audio buffer.
-// Mulaw encodes silence as 0xFF (positive zero) or 0x7F (negative zero).
-// We decode each sample to linear and take the average absolute value.
-function mulawEnergy(buf: Buffer): number {
-  if (buf.length === 0) return 0;
-  // Mulaw to linear magnitude lookup (simplified — just measures deviation from silence)
-  let sum = 0;
-  for (let i = 0; i < buf.length; i++) {
-    const byte = buf[i];
-    // Mulaw: bias = 0x84, sign bit = 0x80
-    // Quick approximation: distance from silence points (0x7F or 0xFF)
-    const dist = Math.min(Math.abs(byte - 0xFF), Math.abs(byte - 0x7F));
-    sum += dist;
-  }
-  return sum / buf.length;
-}
-
-interface VoiceCallSession {
-  ws: WebSocket;
-  streamSid: string | null;
-  callSid: string | null;
-  audioChunks: Buffer[];
-  silenceTimer: ReturnType<typeof setTimeout> | null;
-  lastAudioTime: number;
-  lastSpeechTime: number;
-  hasSpeech: boolean;
-  processing: boolean;
-  speaking: boolean; // true while Ellie's TTS is playing back — ignore inbound audio
-  conversationHistory: Array<{ role: string; content: string }>;
-}
+// VoiceCallSession + processVoiceAudio + handleVoiceConnection
+// extracted to ./voice-pipeline.ts (ELLIE-211)
 
 // Direct Anthropic API client for voice + intent classification
 const anthropic = process.env.ANTHROPIC_API_KEY
@@ -2013,184 +1240,6 @@ if (anthropic) {
 }
 
 // ES forest sync listener started via initForestSync() at boot (ELLIE-104/ELLIE-107)
-
-async function callClaudeVoice(systemPrompt: string, userMessage: string): Promise<string> {
-  const start = Date.now();
-
-  // Use direct API for voice — fast (~600ms) with full memory but no tools
-  if (anthropic) {
-    try {
-      const response = await anthropic.messages.create({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 300,
-        system: systemPrompt,
-        messages: [{ role: "user", content: userMessage }],
-      });
-      const text = response.content
-        .filter((b: any) => b.type === "text")
-        .map((b: any) => b.text)
-        .join("");
-      console.log(`[voice] API responded in ${Date.now() - start}ms`);
-      return text.trim();
-    } catch (err) {
-      console.error("[voice] API error, falling back to CLI:", err);
-    }
-  }
-
-  // Fallback: CLI without tools (still faster than CLI with tools)
-  const prompt = `${systemPrompt}\n\n${userMessage}`;
-  const args = [CLAUDE_PATH, "-p", prompt, "--output-format", "text", "--model", "claude-haiku-4-5-20251001"];
-
-  console.log(`[voice] Claude CLI fallback: ${userMessage.substring(0, 80)}...`);
-
-  const proc = spawn(args, {
-    stdin: "ignore",
-    stdout: "pipe", stderr: "pipe",
-    cwd: PROJECT_DIR || undefined,
-    env: { ...process.env, CLAUDECODE: "", ANTHROPIC_API_KEY: "" },
-  });
-
-  const timeout = setTimeout(() => proc.kill(), 60_000);
-  const output = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  clearTimeout(timeout);
-
-  if (await proc.exited !== 0) {
-    console.error("[voice] Claude CLI error:", stderr);
-    return "Sorry, I had trouble processing that. Could you repeat?";
-  }
-
-  console.log(`[voice] CLI responded in ${Date.now() - start}ms`);
-  return output.trim();
-}
-
-async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
-  if (session.processing || session.audioChunks.length === 0) return;
-  session.processing = true;
-
-  const chunks = session.audioChunks.splice(0);
-  const pipelineStart = Date.now();
-
-  try {
-    // --- OPTIMIZATION: Start context retrieval IN PARALLEL with transcription ---
-    // Context doesn't depend on the transcribed text (docket is cached, semantic search
-    // uses the text but we can start the docket fetch and fall back gracefully).
-    // We kick off the docket fetch now and do the text-dependent searches after transcription.
-    const contextDocketPromise = getContextDocket();
-
-    console.log(`[voice] Transcribing ${chunks.length} chunks...`);
-    const text = await transcribeMulaw(chunks);
-
-    if (!text || text.length < 2 || text.includes("[BLANK_AUDIO]") || text.includes("(blank audio)")) {
-      console.log("[voice] Empty/blank transcription, skipping");
-      session.processing = false;
-      return;
-    }
-
-    console.log(`[voice] User said: "${text}" (transcribed in ${Date.now() - pipelineStart}ms)`);
-    session.conversationHistory.push({ role: "user", content: text });
-
-    // Fire-and-forget: save user message (don't block the pipeline)
-    saveMessage("user", text, { callSid: session.callSid }, "voice").catch(() => {});
-    broadcastExtension({ type: "message_in", channel: "voice", preview: text.substring(0, 200) });
-
-    const conversationContext = session.conversationHistory
-      .slice(-6)
-      .map(m => `${m.role}: ${m.content}`)
-      .join("\n");
-
-    // Now that we have text, run text-dependent searches in parallel.
-    // contextDocketPromise was already started during transcription.
-    const [contextDocket, relevantContext, elasticContext, forestContext] = await Promise.all([
-      contextDocketPromise,
-      getRelevantContext(supabase, text),
-      searchElastic(text, { limit: 3, recencyBoost: true }),
-      getForestContext(text),
-    ]);
-
-    const systemParts = [
-      "You are Ellie, Dave's AI assistant. You are on a VOICE CALL.",
-      "Keep responses SHORT and natural for speech — 1-3 sentences max.",
-      "No markdown, no bullet points, no formatting. Just spoken words.",
-      "Be warm and conversational, like talking to a friend.",
-    ];
-    if (USER_NAME) systemParts.push(`You are speaking with ${USER_NAME}.`);
-    if (contextDocket) systemParts.push(`\n${contextDocket}`);
-    if (relevantContext) systemParts.push(`\n${relevantContext}`);
-    if (elasticContext) systemParts.push(`\n${elasticContext}`);
-    if (forestContext) systemParts.push(`\n${forestContext}`);
-
-    const systemPrompt = systemParts.join("\n");
-
-    const userPrompt = conversationContext
-      ? `Conversation so far:\n${conversationContext}\n\nDave just said: ${text}`
-      : `Dave said: ${text}`;
-
-    const response = await callClaudeVoice(systemPrompt, userPrompt);
-    const cleanResponse = response
-      .replace(/\[REMEMBER:.*?\]/g, "")
-      .replace(/\[GOAL:.*?\]/g, "")
-      .replace(/\[DONE:.*?\]/g, "")
-      .trim();
-
-    console.log(`[voice] Ellie says: "${cleanResponse}" (LLM done at ${Date.now() - pipelineStart}ms)`);
-    session.conversationHistory.push({ role: "assistant", content: cleanResponse });
-
-    // Fire-and-forget: save assistant message
-    saveMessage("assistant", cleanResponse, { callSid: session.callSid }, "voice").catch(() => {});
-    broadcastExtension({ type: "message_out", channel: "voice", agent: "voice", preview: cleanResponse.substring(0, 200) });
-
-    if (!session.streamSid) {
-      console.error("[voice] No stream SID");
-      session.processing = false;
-      return;
-    }
-
-    // Mark as speaking — ignore inbound audio until playback finishes
-    session.speaking = true;
-
-    // Clear buffered audio then stream response
-    session.ws.send(JSON.stringify({ event: "clear", streamSid: session.streamSid }));
-
-    // --- OPTIMIZATION: Stream TTS chunks to Twilio as they arrive from ElevenLabs ---
-    const streamed = await streamTTSToTwilio(cleanResponse, session.ws, session.streamSid);
-
-    if (!streamed) {
-      // Fallback to non-streaming TTS
-      console.log("[voice] Streaming failed, falling back to buffered TTS");
-      const audioBase64 = await textToSpeechMulaw(cleanResponse);
-      if (!audioBase64) {
-        console.error("[voice] No audio from fallback TTS");
-        session.speaking = false;
-        session.processing = false;
-        return;
-      }
-      const CHUNK_SIZE = 160 * 20;
-      const audioBuffer = Buffer.from(audioBase64, "base64");
-      for (let i = 0; i < audioBuffer.length; i += CHUNK_SIZE) {
-        const chunk = audioBuffer.subarray(i, i + CHUNK_SIZE);
-        session.ws.send(JSON.stringify({
-          event: "media",
-          streamSid: session.streamSid,
-          media: { payload: chunk.toString("base64") },
-        }));
-      }
-    }
-
-    // Send mark to detect when playback finishes
-    session.ws.send(JSON.stringify({
-      event: "mark",
-      streamSid: session.streamSid,
-      mark: { name: `response_${Date.now()}` },
-    }));
-
-    console.log(`[voice] Total pipeline: ${Date.now() - pipelineStart}ms`);
-  } catch (error) {
-    console.error("[voice] Processing error:", error);
-  }
-
-  session.processing = false;
-}
 
 // ============================================================
 // HTTP SERVER + VOICE WEBSOCKET
@@ -2357,8 +1406,25 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
         await saveMessage("user", parsed.text, {
           sender: parsed.senderEmail,
           space: parsed.spaceName,
-        }, "google-chat");
+        }, "google-chat", parsed.senderEmail);
         broadcastExtension({ type: "message_in", channel: "google-chat", preview: parsed.text.substring(0, 200) });
+
+        // /plan on|off — planning mode toggle
+        const gchatPlanMatch = parsed.text.match(/^\/plan\s+(on|off)$/i);
+        if (gchatPlanMatch) {
+          setPlanningMode(gchatPlanMatch[1].toLowerCase() === "on");
+          const msg = getPlanningMode()
+            ? "Planning mode ON — conversation will persist for up to 60 minutes of idle time."
+            : "Planning mode OFF — reverting to 10-minute idle timeout.";
+          resetTelegramIdleTimer();
+          resetGchatIdleTimer();
+          resetEllieChatIdleTimer();
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            hostAppDataAction: { chatDataAction: { createMessageAction: { message: { text: msg } } } },
+          }));
+          return;
+        }
 
         // Slash commands — direct responses, bypass Claude pipeline (ELLIE-113)
         if (parsed.text.startsWith("/search ")) {
@@ -2431,15 +1497,21 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
             }
 
             const gchatActiveAgent = getActiveAgent("google-chat");
-            const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext, agentMemory] = await Promise.all([
+            const gchatConvoId = await getOrCreateConversation(supabase!, "google-chat") || undefined;
+            const [gchatConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, gchatQueueContext] = await Promise.all([
+              gchatConvoId && supabase ? getConversationMessages(supabase, gchatConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
               getContextDocket(),
-              getRelevantContext(supabase, effectiveGchatText),
-              searchElastic(effectiveGchatText, { limit: 5, recencyBoost: true }),
+              getRelevantContext(supabase, effectiveGchatText, "google-chat", gchatActiveAgent, gchatConvoId),
+              searchElastic(effectiveGchatText, { limit: 5, recencyBoost: true, channel: "google-chat", sourceAgent: gchatActiveAgent, excludeConversationId: gchatConvoId }),
               getAgentStructuredContext(supabase, gchatActiveAgent),
-              getRecentMessages(supabase),
               getForestContext(effectiveGchatText),
               getAgentMemoryContext(gchatActiveAgent, gchatWorkItem, getMaxMemoriesForModel(gchatAgentResult?.dispatch.agent.model)),
+              gchatAgentResult?.dispatch.is_new ? getQueueContext(gchatActiveAgent) : Promise.resolve(""),
             ]);
+            const recentMessages = gchatConvoContext.text;
+            if (gchatAgentResult?.dispatch.is_new && gchatQueueContext) {
+              acknowledgeQueueItems(gchatActiveAgent).catch(() => {});
+            }
 
             // Detect work item mentions (ELLIE-5, EVE-3, etc.) — matches Telegram text handler
             let workItemContext = "";
@@ -2488,7 +1560,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, gchatOrcAgent, "shared", agentMemory.sessionIds);
               const { cleanedText: gchatOrcPlaybookClean, commands: gchatOrcPlaybookCmds } = extractPlaybookCommands(pipelineResponse);
               const { cleanedText: gchatClean } = extractApprovalTags(gchatOrcPlaybookClean);
-              await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
+              await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat", parsed.senderEmail);
               broadcastExtension({ type: "message_out", channel: "google-chat", agent: gchatOrcAgent, preview: gchatClean.substring(0, 200) });
               broadcastExtension({ type: "pipeline_complete", channel: "google-chat", mode: gchatExecMode, steps: result.stepResults.length, duration_ms: result.artifacts.total_duration_ms, cost_usd: result.artifacts.total_cost_usd });
               resetGchatIdleTimer();
@@ -2527,6 +1599,11 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               forestContext,
               agentMemory.memoryContext || undefined,
               agentMemory.sessionIds,
+              await getArchetypeContext(),
+              await getPsyContext(),
+              await getPhaseContext(),
+              await getHealthContext(),
+              gchatQueueContext || undefined,
             );
 
             const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
@@ -2549,7 +1626,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
             }
 
             const { cleanedText: gchatClean } = extractApprovalTags(gchatPlaybookClean);
-            const msgId = await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat");
+            const msgId = await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat", parsed.senderEmail);
             broadcastExtension({ type: "message_out", channel: "google-chat", agent: gchatAgentResult?.dispatch.agent.name || "general", preview: gchatClean.substring(0, 200) });
             resetGchatIdleTimer();
             console.log(`[gchat] Async reply (${gchatClean.length} chars) to ${parsed.spaceName}: ${gchatClean.substring(0, 80)}...`);
@@ -2646,7 +1723,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
           userId: parsed.userId,
           sessionId: parsed.sessionId,
           intent: parsed.intentName,
-        }, "alexa");
+        }, "alexa", parsed.userId);
         broadcastExtension({ type: "message_in", channel: "alexa", preview: parsed.text.substring(0, 200) });
 
         // Handle request types
@@ -2700,15 +1777,21 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
 
             // Gather context with correct active agent
             const alexaActiveAgent = getActiveAgent("alexa");
-            const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext, agentMemory] = await Promise.all([
+            const alexaConvoId = await getOrCreateConversation(supabase!, "alexa") || undefined;
+            const [alexaConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, alexaQueueContext] = await Promise.all([
+              alexaConvoId && supabase ? getConversationMessages(supabase, alexaConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
               getContextDocket(),
-              getRelevantContext(supabase, effectiveQuery),
-              searchElastic(effectiveQuery, { limit: 5, recencyBoost: true }),
+              getRelevantContext(supabase, effectiveQuery, "alexa", alexaActiveAgent, alexaConvoId),
+              searchElastic(effectiveQuery, { limit: 5, recencyBoost: true, channel: "alexa", sourceAgent: alexaActiveAgent, excludeConversationId: alexaConvoId }),
               getAgentStructuredContext(supabase, alexaActiveAgent),
-              getRecentMessages(supabase),
               getForestContext(effectiveQuery),
               getAgentMemoryContext(alexaActiveAgent, alexaWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model)),
+              agentResult?.dispatch.is_new ? getQueueContext(alexaActiveAgent) : Promise.resolve(""),
             ]);
+            const recentMessages = alexaConvoContext.text;
+            if (agentResult?.dispatch.is_new && alexaQueueContext) {
+              acknowledgeQueueItems(alexaActiveAgent).catch(() => {});
+            }
             const enrichedPrompt = buildPrompt(
               effectiveQuery, contextDocket, relevantContext, elasticContext, "alexa",
               agentResult?.dispatch.agent ? {
@@ -2721,6 +1804,11 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               forestContext,
               agentMemory.memoryContext || undefined,
               agentMemory.sessionIds,
+              await getArchetypeContext(),
+              await getPsyContext(),
+              await getPhaseContext(),
+              await getHealthContext(),
+              alexaQueueContext || undefined,
             );
 
             const ALEXA_TIMEOUT_MS = 6_000;
@@ -2749,7 +1837,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               claudePromise
                 .then(async (response) => {
                   const clean = response.replace(/<[^>]+>/g, "").substring(0, 4000);
-                  await saveMessage("assistant", clean, { source: "alexa-async" }, "alexa");
+                  await saveMessage("assistant", clean, { source: "alexa-async" }, "alexa", parsed.userId);
                   broadcastExtension({ type: "message_out", channel: "alexa", agent: agentResult?.dispatch.agent.name || "general", preview: clean.substring(0, 200) });
                   try {
                     await bot.api.sendMessage(ALLOWED_USER_ID, `[From Alexa] ${clean}`);
@@ -2760,7 +1848,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
                 .catch((err) => console.error("[alexa] Async Claude error:", err));
             } else {
               const clean = raceResult.response.replace(/<[^>]+>/g, "").substring(0, 6000);
-              await saveMessage("assistant", clean, {}, "alexa");
+              await saveMessage("assistant", clean, {}, "alexa", parsed.userId);
               broadcastExtension({ type: "message_out", channel: "alexa", agent: agentResult?.dispatch.agent.name || "general", preview: clean.substring(0, 200) });
               speechText = clean;
             }
@@ -2811,23 +1899,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
   // Queue status — returns current processing state and queued items
   if (url.pathname === "/queue-status") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({
-      busy,
-      queueLength: messageQueue.length,
-      current: currentItem
-        ? {
-            channel: currentItem.channel,
-            preview: currentItem.preview,
-            durationMs: Date.now() - currentItem.startedAt,
-          }
-        : null,
-      queued: messageQueue.map((item, index) => ({
-        position: index + 1,
-        channel: item.channel,
-        preview: item.preview,
-        waitingMs: Date.now() - item.enqueuedAt,
-      })),
-    }));
+    res.end(JSON.stringify(getQueueStatus()));
     return;
   }
 
@@ -2955,6 +2027,43 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
     return;
   }
 
+  // Calendar sync — manual trigger
+  if (url.pathname === "/api/calendar-sync" && req.method === "POST") {
+    (async () => {
+      try {
+        await syncAllCalendars();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Sync failed" }));
+      }
+    })();
+    return;
+  }
+
+  // Calendar events — read from ellie-forest DB
+  if (url.pathname === "/api/calendar" && req.method === "GET") {
+    (async () => {
+      try {
+        const { sql: forestSql } = await import("../../ellie-forest/src/index.ts");
+        const now = new Date().toISOString();
+        const weekOut = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+        const data = await forestSql`
+          SELECT * FROM calendar_events
+          WHERE end_time >= ${now} AND start_time <= ${weekOut} AND status != 'cancelled'
+          ORDER BY start_time ASC
+        `;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(data || []));
+      } catch {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify([]));
+      }
+    })();
+    return;
+  }
+
   // Manual consolidation (close conversation)
   if (url.pathname === "/api/consolidate" && req.method === "POST") {
     let body = "";
@@ -2971,6 +2080,64 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
         console.error("[consolidate] API error:", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: String(err) }));
+      }
+    });
+    return;
+  }
+
+  // Create Plane ticket from context (messages, memories, or freeform text)
+  if (url.pathname === "/api/ticket/from-context" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body);
+        const contextParts: string[] = [];
+
+        if (data.messages?.length) {
+          contextParts.push("CONVERSATION:\n" + data.messages.join("\n---\n"));
+        }
+
+        if (data.memory_ids?.length && supabase) {
+          const { data: mems } = await supabase.from("memory")
+            .select("type, content")
+            .in("id", data.memory_ids);
+          if (mems?.length) {
+            contextParts.push("MEMORIES:\n" + mems.map((m: any) => `[${m.type}] ${m.content}`).join("\n"));
+          }
+        }
+
+        if (data.text) {
+          contextParts.push("CONTEXT:\n" + data.text);
+        }
+
+        if (contextParts.length === 0) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "No context provided. Include messages, memory_ids, or text." }));
+          return;
+        }
+
+        const context = contextParts.join("\n\n");
+        const prompt = `Generate a Plane project ticket from this context. Return ONLY valid JSON with no markdown formatting:\n{"title": "concise title under 80 chars", "description": "detailed description with requirements as bullet points", "priority": "medium"}\n\nPriority must be one of: urgent, high, medium, low, none.\n\nContext:\n${context}`;
+
+        console.log(`[ticket] Generating ticket from ${contextParts.length} context source(s)...`);
+        const raw = await callClaude(prompt);
+        const jsonMatch = raw.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) throw new Error("Could not parse ticket JSON from Claude response");
+        const ticket = JSON.parse(jsonMatch[0]);
+
+        if (!ticket.title) throw new Error("Generated ticket has no title");
+
+        const result = await createPlaneIssue("ELLIE", ticket.title, ticket.description, ticket.priority);
+        if (!result) throw new Error("Plane API failed to create issue");
+
+        console.log(`[ticket] Created ${result.identifier}: ${ticket.title}`);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: true, identifier: result.identifier, title: ticket.title, description: ticket.description }));
+      } catch (err: any) {
+        console.error("[ticket] Error:", err?.message || err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Failed to create ticket" }));
       }
     });
     return;
@@ -3215,24 +2382,32 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         const ideas = parsed.ideas || [];
         console.log(`[extract-ideas] Extracted ${ideas.length} ideas`);
 
-        // Format and send to Google Chat
-        const gchatSpace = process.env.GOOGLE_CHAT_SPACE_NAME;
-        if (gchatSpace && ideas.length > 0) {
-          let chatMsg = `*Idea Extraction — ${ideas.length} potential work items*\n\n`;
+        // Send extracted ideas to ellie-chat for interactive triage
+        if (ideas.length > 0) {
+          const newIdeas = ideas.filter((i: any) => !i.existing);
+          const existingIdeas = ideas.filter((i: any) => i.existing);
+
+          let chatMsg = `**Idea Extraction** — ${ideas.length} potential work items\n\n`;
           for (const idea of ideas) {
-            const tag = idea.existing ? `[EXISTS: ${idea.existing}]` : "[NEW]";
-            chatMsg += `${tag} *${idea.title}*\n${idea.description}\n\n`;
+            const tag = idea.existing ? `[EXISTS: ${idea.existing}]` : "**[NEW]**";
+            chatMsg += `${tag} **${idea.title}**\n${idea.description}\n\n`;
           }
-          const ideaResult = await deliverMessage(supabase, chatMsg.trim(), {
-            channel: "google-chat",
-            spaceName: gchatSpace,
-            telegramBot: bot,
-            telegramChatId: ALLOWED_USER_ID,
-            fallback: true,
+          if (newIdeas.length > 0) {
+            chatMsg += `\n${newIdeas.length} new idea${newIdeas.length > 1 ? "s" : ""} ready to work — reply to discuss, create tickets, or refine.`;
+          }
+
+          // Save as assistant message and broadcast to connected clients
+          await saveMessage("assistant", chatMsg.trim(), {}, "ellie-chat");
+          const payload = JSON.stringify({
+            type: "response",
+            text: chatMsg.trim(),
+            agent: "general",
+            ts: Date.now(),
           });
-          console.log(`[extract-ideas] Sent to ${ideaResult.channel} (${ideaResult.status})`);
-        } else if (!gchatSpace) {
-          console.warn("[extract-ideas] GOOGLE_CHAT_SPACE_NAME not set — skipping chat notification");
+          for (const ws of ellieChatClients) {
+            if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+          }
+          console.log(`[extract-ideas] Sent ${ideas.length} ideas to ellie-chat (${newIdeas.length} new, ${existingIdeas.length} existing)`);
         }
 
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -3372,8 +2547,8 @@ If no actionable ideas are found, return: { "ideas": [] }`;
     return;
   }
 
-  // LA Comms broadcast endpoint
-  if (url.pathname === "/api/la-comms/send" && req.method === "POST") {
+  // Ellie Chat broadcast endpoint
+  if (url.pathname === "/api/ellie-chat/send" && req.method === "POST") {
     let body = "";
     req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
     req.on("end", async () => {
@@ -3387,7 +2562,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
           return;
         }
 
-        // Broadcast to all connected LA Comms clients
+        // Broadcast to all connected Ellie Chat clients
         const payload = JSON.stringify({
           type: "response",
           text: message,
@@ -3396,19 +2571,19 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         });
 
         let sentCount = 0;
-        for (const ws of laCommsClients) {
+        for (const ws of ellieChatClients) {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(payload);
             sentCount++;
           }
         }
 
-        console.log(`[la-comms] Broadcast message to ${sentCount} client(s)`);
+        console.log(`[ellie-chat] Broadcast message to ${sentCount} client(s)`);
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, sent_to: sentCount }));
       } catch (err) {
-        console.error("[la-comms] Error:", err);
+        console.error("[ellie-chat] Error:", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -3491,7 +2666,8 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         const endpoint = url.pathname.replace("/api/forest-memory/", "");
 
         const { writeMemoryEndpoint, readMemoryEndpoint, agentContextEndpoint,
-          resolveContradictionEndpoint, askCriticEndpoint, creatureWriteMemoryEndpoint } =
+          resolveContradictionEndpoint, askCriticEndpoint, creatureWriteMemoryEndpoint,
+          arcsEndpoint } =
           await import("./api/memory.ts");
 
         const mockReq = { body: data } as any;
@@ -3527,6 +2703,9 @@ If no actionable ideas are found, return: { "ideas": [] }`;
           case "creature-write":
             await creatureWriteMemoryEndpoint(mockReq, mockRes, bot);
             break;
+          case "arcs":
+            await arcsEndpoint(mockReq, mockRes, bot);
+            break;
           default:
             res.writeHead(404, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "Unknown forest-memory endpoint" }));
@@ -3537,6 +2716,223 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
     });
+    return;
+  }
+
+  // Forest Bridge API — external collaborator endpoints (ELLIE-177)
+  if (url.pathname.startsWith("/api/bridge/") && (req.method === "POST" || req.method === "GET")) {
+    const isPost = req.method === "POST";
+
+    const handleBridgeRequest = async (body?: string) => {
+      try {
+        let data: any = {};
+        if (isPost && body) {
+          try {
+            data = JSON.parse(body);
+          } catch (parseErr) {
+            console.error("[bridge] JSON parse error:", parseErr);
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Invalid JSON body" }));
+            return;
+          }
+        }
+
+        const endpoint = url.pathname.replace("/api/bridge/", "");
+
+        const {
+          bridgeReadEndpoint, bridgeWriteEndpoint,
+          bridgeListEndpoint, bridgeScopesEndpoint,
+          bridgeWhoamiEndpoint,
+        } = await import("./api/bridge.ts");
+
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+
+        const mockReq = {
+          body: data,
+          query: queryParams,
+          bridgeKey: req.headers["x-bridge-key"] as string,
+        } as any;
+
+        const mockRes = {
+          status: (code: number) => ({
+            json: (resData: any) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(resData));
+            },
+          }),
+          json: (resData: any) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(resData));
+          },
+        } as any;
+
+        switch (endpoint) {
+          case "read":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await bridgeReadEndpoint(mockReq, mockRes);
+            break;
+          case "write":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await bridgeWriteEndpoint(mockReq, mockRes);
+            break;
+          case "list":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await bridgeListEndpoint(mockReq, mockRes);
+            break;
+          case "scopes":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await bridgeScopesEndpoint(mockReq, mockRes);
+            break;
+          case "whoami":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await bridgeWhoamiEndpoint(mockReq, mockRes);
+            break;
+          default:
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Unknown bridge endpoint" }));
+        }
+      } catch (err) {
+        console.error("[bridge] Error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    };
+
+    if (isPost) {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+      req.on("end", () => handleBridgeRequest(body));
+    } else {
+      handleBridgeRequest();
+    }
+    return;
+  }
+
+  // App Auth API — phone app onboarding (ELLIE-176)
+  if (url.pathname.startsWith("/api/app-auth/") && (req.method === "POST" || req.method === "GET")) {
+    const isPost = req.method === "POST";
+
+    const handleAppAuthRequest = async (body?: string) => {
+      try {
+        let data: any = {};
+        if (isPost && body) {
+          try { data = JSON.parse(body); } catch {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Invalid JSON body" }));
+            return;
+          }
+        }
+
+        const endpoint = url.pathname.replace("/api/app-auth/", "");
+
+        const {
+          sendCodeEndpoint, verifyCodeEndpoint,
+          meEndpoint, updateProfileEndpoint,
+        } = await import("./api/app-auth.ts");
+
+        const mockReq = {
+          body: data,
+          headers: { authorization: req.headers["authorization"] || "" },
+        } as any;
+
+        const mockRes = {
+          status: (code: number) => ({
+            json: (resData: any) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(resData));
+            },
+          }),
+          json: (resData: any) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(resData));
+          },
+        } as any;
+
+        switch (endpoint) {
+          case "send-code":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await sendCodeEndpoint(mockReq, mockRes);
+            break;
+          case "verify-code":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await verifyCodeEndpoint(mockReq, mockRes);
+            break;
+          case "me":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await meEndpoint(mockReq, mockRes);
+            break;
+          case "update-profile":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await updateProfileEndpoint(mockReq, mockRes);
+            break;
+          default:
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Unknown app-auth endpoint" }));
+        }
+      } catch (err) {
+        console.error("[app-auth] Error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    };
+
+    if (isPost) {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+      req.on("end", () => handleAppAuthRequest(body));
+    } else {
+      handleAppAuthRequest();
+    }
+    return;
+  }
+
+  // ── Agent Queue API (ELLIE-200) ──────────────────────────────
+  if (url.pathname.startsWith("/api/queue/")) {
+    const handleQueueRequest = async (body?: string) => {
+      try {
+        const { createQueueItem, listQueueItems, updateQueueStatus, deleteQueueItem, getQueueStats } = await import("./api/agent-queue.ts");
+
+        let data: any = {};
+        if (body) { try { data = JSON.parse(body); } catch { /* empty */ } }
+
+        const mockReq = { body: data, url: `http://localhost${url.pathname}${url.search}`, headers: req.headers } as any;
+        const mockRes = {
+          status: (code: number) => ({ json: (d: any) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); } }),
+          json: (d: any) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); },
+        } as any;
+
+        const path = url.pathname.replace("/api/queue/", "");
+
+        if (path === "create" && req.method === "POST") {
+          await createQueueItem(mockReq, mockRes);
+        } else if (path === "list" && req.method === "GET") {
+          await listQueueItems(mockReq, mockRes);
+        } else if (path === "stats" && req.method === "GET") {
+          await getQueueStats(mockReq, mockRes);
+        } else if (path.match(/^[0-9a-f-]+\/status$/) && req.method === "POST") {
+          const id = path.replace("/status", "");
+          await updateQueueStatus(mockReq, mockRes, id);
+        } else if (path.match(/^[0-9a-f-]+$/) && req.method === "DELETE") {
+          await deleteQueueItem(mockReq, mockRes, path);
+        } else {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Unknown queue endpoint" }));
+        }
+      } catch (err) {
+        console.error("[agent-queue] Error:", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    };
+
+    if (req.method === "POST" || req.method === "DELETE") {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+      req.on("end", () => handleQueueRequest(body));
+    } else {
+      handleQueueRequest();
+    }
     return;
   }
 
@@ -4088,110 +3484,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
 });
 
 const voiceWss = new WebSocketServer({ noServer: true });
-
-voiceWss.on("connection", (ws: WebSocket) => {
-  console.log("[voice] Media stream connected");
-  const session: VoiceCallSession = {
-    ws, streamSid: null, callSid: null,
-    audioChunks: [], silenceTimer: null,
-    lastAudioTime: 0, lastSpeechTime: 0,
-    hasSpeech: false, processing: false, speaking: false,
-    conversationHistory: [],
-  };
-
-  ws.on("message", async (data: Buffer | string) => {
-    try {
-      const msg = JSON.parse(data.toString());
-
-      switch (msg.event) {
-        case "connected":
-          console.log("[voice] Stream connected:", msg.protocol);
-          break;
-
-        case "start":
-          session.streamSid = msg.streamSid;
-          session.callSid = msg.callSid;
-          console.log(`[voice] Call started — streamSid: ${msg.streamSid}, callSid: ${msg.callSid}`);
-          break;
-
-        case "media": {
-          // Ignore inbound audio while Ellie is speaking (prevents echo/feedback loop)
-          if (session.speaking) break;
-
-          const payload = Buffer.from(msg.media.payload, "base64");
-          const now = Date.now();
-          session.lastAudioTime = now;
-
-          const energy = mulawEnergy(payload);
-          const isSpeech = energy > MULAW_ENERGY_THRESHOLD;
-
-          if (isSpeech) {
-            // This packet has speech — accumulate it
-            session.audioChunks.push(payload);
-            session.lastSpeechTime = now;
-            session.hasSpeech = true;
-
-            // Clear any pending silence timer since we're still hearing speech
-            if (session.silenceTimer) {
-              clearTimeout(session.silenceTimer);
-              session.silenceTimer = null;
-            }
-          } else if (session.hasSpeech && !session.processing) {
-            // Silence after speech — start/reset silence timer
-            // Still accumulate a little trailing audio for natural cutoff
-            session.audioChunks.push(payload);
-
-            if (!session.silenceTimer) {
-              session.silenceTimer = setTimeout(() => {
-                session.silenceTimer = null;
-                const totalBytes = session.audioChunks.reduce((sum, c) => sum + c.length, 0);
-                const estimatedMs = (totalBytes / 8000) * 1000;
-
-                if (estimatedMs >= MIN_AUDIO_MS) {
-                  session.hasSpeech = false;
-                  processVoiceAudio(session);
-                } else {
-                  session.audioChunks = [];
-                  session.hasSpeech = false;
-                }
-              }, SILENCE_THRESHOLD_MS);
-            }
-          }
-          // If no speech yet and not after speech, just discard (background silence)
-          break;
-        }
-
-        case "mark":
-          console.log(`[voice] Playback mark: ${msg.mark?.name}`);
-          session.speaking = false;
-          // Clear any audio that leaked in during playback
-          session.audioChunks = [];
-          session.hasSpeech = false;
-          break;
-
-        case "stop":
-          console.log("[voice] Stream stopped");
-          if (session.silenceTimer) clearTimeout(session.silenceTimer);
-          break;
-      }
-    } catch (error) {
-      console.error("[voice] Message parse error:", error);
-    }
-  });
-
-  ws.on("close", () => {
-    console.log("[voice] WebSocket closed");
-    if (session.silenceTimer) clearTimeout(session.silenceTimer);
-
-    // Voice call ended — consolidate immediately
-    if (session.conversationHistory.length > 0) {
-      console.log("[voice] Call ended with messages — triggering consolidation...");
-      triggerConsolidation("voice");
-    }
-  });
-
-  ws.on("error", (error) => console.error("[voice] WebSocket error:", error));
-});
+voiceWss.on("connection", handleVoiceConnection);
 
 // ============================================================
 // CHROME EXTENSION LIVE FEED (WebSocket)
@@ -4211,9 +3504,9 @@ httpServer.on("upgrade", (req, socket, head) => {
     extensionWss.handleUpgrade(req, socket, head, (ws) => {
       extensionWss.emit("connection", ws, req);
     });
-  } else if (pathname === "/ws/la-comms") {
-    laCommsWss.handleUpgrade(req, socket, head, (ws) => {
-      laCommsWss.emit("connection", ws, req);
+  } else if (pathname === "/ws/ellie-chat" || pathname === "/ws/la-comms") {
+    ellieChatWss.handleUpgrade(req, socket, head, (ws) => {
+      ellieChatWss.emit("connection", ws, req);
     });
   } else {
     socket.destroy();
@@ -4291,13 +3584,62 @@ setInterval(() => {
 }, 30_000);
 
 // ============================================================
-// LA COMMS — Dashboard WebSocket Chat
+// ELLIE CHAT — Dashboard WebSocket Chat
 // ============================================================
 
-const laCommsWss = new WebSocketServer({ noServer: true });
-const laCommsClients = new Set<WebSocket>();
+const ellieChatWss = new WebSocketServer({ noServer: true });
+const ellieChatClients = new Set<WebSocket>();
 
-laCommsWss.on("connection", (ws: WebSocket) => {
+/** Broadcast a JSON message to all connected ellie-chat clients (ELLIE-199). */
+function broadcastToEllieChatClients(event: Record<string, any>): void {
+  if (ellieChatClients.size === 0) return;
+  const payload = JSON.stringify(event);
+  for (const ws of ellieChatClients) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+  }
+}
+
+/** Deliver pending readout queue items on ellie-chat connect (ELLIE-199). */
+async function deliverPendingReadouts(ws: WebSocket): Promise<void> {
+  try {
+    const items = await getAndAcknowledgeReadouts();
+    if (items.length === 0) return;
+
+    // Format as a single assistant message summarizing all findings
+    const lines = items.map((item: any) => {
+      const ticket = item.work_item_id ? ` (${item.work_item_id})` : '';
+      return `**${item.source}** ${item.category}${ticket}: ${item.content}`;
+    });
+
+    const summary = items.length === 1
+      ? `${items[0].source} has a new finding for you:\n\n${lines[0]}`
+      : `${items[0].source} has ${items.length} new findings:\n\n${lines.join('\n\n')}`;
+
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "response",
+        text: summary,
+        agent: "general",
+        ts: Date.now(),
+      }));
+    }
+
+    console.log(`[ellie-chat] Delivered ${items.length} readout finding(s) on connect`);
+  } catch (err) {
+    console.error("[ellie-chat] Readout delivery error:", err);
+  }
+}
+
+// App user tracking for phone app connections (ELLIE-176, ELLIE-196)
+interface WsAppUser { id: string; name: string | null; email: string | null; onboarding_state: string; anonymous_id: string | null; token?: string }
+const wsAppUserMap = new WeakMap<WebSocket, WsAppUser>();
+
+// Per-user phone mode history (ELLIE-197) — keyed by user id or anonymous_id
+const ellieChatPhoneHistories = new Map<string, Array<{ role: string; content: string }>>();
+
+// ellieChatPendingActions imported from ./message-sender.ts (ELLIE-207)
+
+ellieChatWss.on("connection", (ws: WebSocket) => {
   let authenticated = false;
 
   const authTimer = setTimeout(() => {
@@ -4309,22 +3651,167 @@ laCommsWss.on("connection", (ws: WebSocket) => {
       const msg = JSON.parse(data.toString());
 
       if (!authenticated) {
-        if (msg.type === "auth" && msg.key === EXTENSION_API_KEY && EXTENSION_API_KEY) {
+        if (msg.type !== "auth") { ws.close(4003, "Expected auth"); return; }
+
+        // Mode 1: Shared key (dashboard/extension) — maps to system-dashboard user (ELLIE-197)
+        if (msg.key && msg.key === EXTENSION_API_KEY && EXTENSION_API_KEY) {
           authenticated = true;
           clearTimeout(authTimer);
-          laCommsClients.add(ws);
+          ellieChatClients.add(ws);
+          wsAppUserMap.set(ws, { id: 'system-dashboard', name: 'Dashboard', email: null, onboarding_state: 'system', anonymous_id: null });
           ws.send(JSON.stringify({ type: "auth_ok", ts: Date.now() }));
-          console.log(`[la-comms] Client authenticated (${laCommsClients.size} connected)`);
-        } else {
-          ws.close(4003, "Invalid key");
+          console.log(`[ellie-chat] Client authenticated via key (${ellieChatClients.size} connected)`);
+          deliverPendingReadouts(ws).catch(() => {});
+          return;
         }
+
+        // Mode 2: Authenticated app user (session token)
+        if (msg.token) {
+          (async () => {
+            try {
+              const { getUserByToken } = await import("./api/app-auth.ts");
+              const user = await getUserByToken(msg.token);
+              if (!user) { ws.close(4003, "Invalid token"); return; }
+              authenticated = true;
+              clearTimeout(authTimer);
+              ellieChatClients.add(ws);
+              wsAppUserMap.set(ws, { id: user.id, name: user.name, email: user.email, onboarding_state: user.onboarding_state, anonymous_id: user.anonymous_id, token: msg.token });
+              ws.send(JSON.stringify({ type: "auth_ok", ts: Date.now(), user: { id: user.id, name: user.name, onboarding_state: user.onboarding_state } }));
+              console.log(`[ellie-chat] App user authenticated: ${user.name || user.id} (${ellieChatClients.size} connected)`);
+              deliverPendingReadouts(ws).catch(() => {});
+            } catch (err) {
+              console.error("[ellie-chat] Token auth error:", err);
+              ws.close(4003, "Auth error");
+            }
+          })();
+          return;
+        }
+
+        // Mode 3: Anonymous app user (new visitor)
+        if (msg.anonymous_id) {
+          authenticated = true;
+          clearTimeout(authTimer);
+          ellieChatClients.add(ws);
+          wsAppUserMap.set(ws, { id: '', name: null, email: null, onboarding_state: 'anonymous', anonymous_id: msg.anonymous_id });
+          ws.send(JSON.stringify({ type: "auth_ok", ts: Date.now(), user: { id: null, name: null, onboarding_state: 'anonymous' } }));
+          console.log(`[ellie-chat] Anonymous app user connected: ${msg.anonymous_id} (${ellieChatClients.size} connected)`);
+          return;
+        }
+
+        ws.close(4003, "Invalid auth");
         return;
       }
 
       if (msg.type === "pong") return;
 
+      // Session upgrade: anonymous → authenticated (ELLIE-176)
+      if (msg.type === "session_upgrade" && msg.token) {
+        (async () => {
+          try {
+            const { getUserByToken } = await import("./api/app-auth.ts");
+            const user = await getUserByToken(msg.token);
+            if (!user) {
+              ws.send(JSON.stringify({ type: "error", text: "Invalid session token" }));
+              return;
+            }
+            wsAppUserMap.set(ws, { id: user.id, name: user.name, email: user.email, onboarding_state: user.onboarding_state, anonymous_id: user.anonymous_id, token: msg.token });
+            ws.send(JSON.stringify({ type: "session_upgraded", ts: Date.now(), user: { id: user.id, name: user.name, onboarding_state: user.onboarding_state } }));
+            console.log(`[ellie-chat] Session upgraded: ${user.name || user.id}`);
+          } catch (err) {
+            console.error("[ellie-chat] Session upgrade error:", err);
+          }
+        })();
+        return;
+      }
+
       if (msg.type === "message" && (msg.text || msg.image)) {
-        handleLaCommsMessage(ws, msg.text || "", !!msg.phone_mode, msg.image);
+        handleEllieChatMessage(ws, msg.text || "", !!msg.phone_mode, msg.image);
+        return;
+      }
+
+      // New chat: close current conversation + agent sessions so next message starts fresh
+      if (msg.type === "new_chat") {
+        (async () => {
+          try {
+            const ncUser = wsAppUserMap.get(ws);
+            const ncUserId = ncUser?.id || ncUser?.anonymous_id || undefined;
+            if (supabase) {
+              // Close conversations scoped to this user (ELLIE-197)
+              let convQuery = supabase
+                .from("conversations")
+                .update({ status: "closed" })
+                .in("channel", ["ellie-chat", "la-comms"])
+                .eq("status", "active");
+              if (ncUserId) convQuery = convQuery.eq("user_id", ncUserId);
+              await convQuery;
+
+              let sessQuery = supabase
+                .from("agent_sessions")
+                .update({ state: "completed", completed_at: new Date().toISOString() })
+                .in("channel", ["ellie-chat", "la-comms"])
+                .eq("state", "active");
+              if (ncUserId) sessQuery = sessQuery.eq("user_id", ncUserId);
+              await sessQuery;
+            }
+            // Clear per-user phone history
+            if (ncUserId) ellieChatPhoneHistories.delete(ncUserId);
+            ws.send(JSON.stringify({ type: "new_chat_ok", ts: Date.now() }));
+            console.log(`[ellie-chat] New chat started for ${ncUser?.name || ncUserId || 'unknown'}`);
+          } catch (err: any) {
+            console.error("[ellie-chat] New chat error:", err?.message);
+          }
+        })();
+        return;
+      }
+
+      // Confirm/Deny response from frontend approve/deny buttons
+      if (msg.type === "confirm_response" && msg.id && typeof msg.approved === "boolean") {
+        const action = ellieChatPendingActions.get(msg.id);
+        if (!action) {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "response", text: "That confirmation has expired.", agent: "system", ts: Date.now() }));
+          }
+          return;
+        }
+        ellieChatPendingActions.delete(msg.id);
+
+        const verb = msg.approved ? "Approved" : "Denied";
+        const resumePrompt = msg.approved
+          ? `The user APPROVED the following action: "${action.description}". Proceed with executing it now.`
+          : `The user DENIED the following action: "${action.description}". Do NOT proceed. Acknowledge briefly.`;
+
+        const confirmUser = wsAppUserMap.get(ws);
+        const confirmUserId = confirmUser?.id || confirmUser?.anonymous_id || undefined;
+        saveMessage("user", `[${verb} action: ${action.description}]`, {}, "ellie-chat", confirmUserId).catch(() => {});
+
+        enqueueEllieChat(async () => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "typing", ts: Date.now() }));
+          }
+          const rawResponse = await callClaude(resumePrompt, { resume: true });
+          const processed = await processMemoryIntents(supabase, rawResponse, action.agentName, "shared", undefined);
+          const { cleanedText: pbClean, commands: pbCmds } = extractPlaybookCommands(processed);
+          const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, pbClean, session.sessionId, action.agentName);
+
+          await saveMessage("assistant", cleanedText, {}, "ellie-chat", confirmUserId);
+
+          if (!hadConfirmations && ws.readyState === WebSocket.OPEN && cleanedText) {
+            ws.send(JSON.stringify({
+              type: "response",
+              text: cleanedText,
+              agent: action.agentName,
+              ts: Date.now(),
+            }));
+          }
+
+          if (pbCmds.length > 0) {
+            const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "ellie-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
+            executePlaybookCommands(pbCmds, pbCtx).catch(err => console.error("[playbook]", err));
+          }
+
+          resetEllieChatIdleTimer();
+        }, `[${verb} action]`);
+        return;
       }
     } catch {
       // Ignore parse errors
@@ -4333,44 +3820,70 @@ laCommsWss.on("connection", (ws: WebSocket) => {
 
   ws.on("close", () => {
     clearTimeout(authTimer);
-    laCommsClients.delete(ws);
+    ellieChatClients.delete(ws);
     if (authenticated) {
-      console.log(`[la-comms] Client disconnected (${laCommsClients.size} connected)`);
+      const dcUser = wsAppUserMap.get(ws);
+      // Clean up phone history if no other connections for this user (ELLIE-197)
+      const dcUserId = dcUser?.id || dcUser?.anonymous_id;
+      if (dcUserId) {
+        let hasOtherConn = false;
+        for (const client of ellieChatClients) {
+          const cu = wsAppUserMap.get(client);
+          if ((cu?.id || cu?.anonymous_id) === dcUserId) { hasOtherConn = true; break; }
+        }
+        if (!hasOtherConn) ellieChatPhoneHistories.delete(dcUserId);
+      }
+      console.log(`[ellie-chat] ${dcUser?.name || 'Client'} disconnected (${ellieChatClients.size} connected)`);
     }
   });
 
   ws.on("error", () => {
     clearTimeout(authTimer);
-    laCommsClients.delete(ws);
+    ellieChatClients.delete(ws);
   });
 });
 
-// Server-side ping every 30s
-setInterval(() => {
+// Server-side ping every 30s + token re-validation (ELLIE-196)
+setInterval(async () => {
   const ping = JSON.stringify({ type: "ping", ts: Date.now() });
-  for (const ws of laCommsClients) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(ping);
-    } else {
-      laCommsClients.delete(ws);
+  for (const ws of ellieChatClients) {
+    if (ws.readyState !== WebSocket.OPEN) {
+      ellieChatClients.delete(ws);
+      continue;
+    }
+    ws.send(ping);
+    // Re-validate session tokens (skip shared-key and anonymous clients)
+    const user = wsAppUserMap.get(ws);
+    if (user?.token) {
+      try {
+        const { getUserByToken } = await import("./api/app-auth.ts");
+        const current = await getUserByToken(user.token);
+        if (!current) {
+          console.log(`[ellie-chat] Token expired for ${user.name || user.id} — disconnecting`);
+          ws.close(4002, "Session expired");
+          ellieChatClients.delete(ws);
+        }
+      } catch { /* db hiccup — don't disconnect on transient errors */ }
     }
   }
 }, 30_000);
 
-// Phone mode conversation history (6-turn window, mirroring voice call pattern)
-const laCommsPhoneHistory: Array<{ role: string; content: string }> = [];
+// Phone mode history moved to per-user Map: ellieChatPhoneHistories (ELLIE-197)
 
-async function handleLaCommsMessage(
+async function handleEllieChatMessage(
   ws: WebSocket,
   text: string,
   phoneMode: boolean = false,
   image?: { data: string; mime_type: string; name: string },
 ): Promise<void> {
-  console.log(`[la-comms] User${phoneMode ? " (phone)" : ""}${image ? " [+image]" : ""}: ${text.substring(0, 80)}...`);
-  acknowledgeChannel("la-comms");
+  console.log(`[ellie-chat] User${phoneMode ? " (phone)" : ""}${image ? " [+image]" : ""}: ${text.substring(0, 80)}...`);
+  acknowledgeChannel("ellie-chat");
 
-  await saveMessage("user", text, image ? { image_name: image.name, image_mime: image.mime_type } : {}, "la-comms");
-  broadcastExtension({ type: "message_in", channel: "la-comms", preview: text.substring(0, 200) });
+  const ecUser = wsAppUserMap.get(ws);
+  const ecUserId = ecUser?.id || ecUser?.anonymous_id || undefined;
+
+  await saveMessage("user", text, image ? { image_name: image.name, image_mime: image.mime_type } : {}, "ellie-chat", ecUserId);
+  broadcastExtension({ type: "message_in", channel: "ellie-chat", preview: text.substring(0, 200) });
 
   // Write image to temp file if present (same pattern as Telegram photo handler)
   let imagePath: string | null = null;
@@ -4380,11 +3893,11 @@ async function handleLaCommsMessage(
         : image.mime_type === "image/gif" ? ".gif"
         : image.mime_type === "image/webp" ? ".webp"
         : ".jpg";
-      imagePath = join(UPLOADS_DIR, `la-comms_${Date.now()}${ext}`);
+      imagePath = join(UPLOADS_DIR, `ellie-chat_${Date.now()}${ext}`);
       await writeFile(imagePath, Buffer.from(image.data, "base64"));
-      console.log(`[la-comms] Image saved: ${imagePath} (${image.name})`);
+      console.log(`[ellie-chat] Image saved: ${imagePath} (${image.name})`);
     } catch (err) {
-      console.error("[la-comms] Failed to save image:", err);
+      console.error("[ellie-chat] Failed to save image:", err);
       imagePath = null;
     }
   }
@@ -4394,15 +3907,77 @@ async function handleLaCommsMessage(
     ws.send(JSON.stringify({ type: "typing", ts: Date.now() }));
   }
 
-  // ELLIE:: user-typed commands — bypass classifier, execute directly
-  const { cleanedText: laCommsPlaybookClean, commands: laCommsPlaybookCmds } = extractPlaybookCommands(text);
-  if (laCommsPlaybookCmds.length > 0) {
-    console.log(`[la-comms] ELLIE:: commands in user message: ${laCommsPlaybookCmds.map(c => c.type).join(", ")}`);
+  // /plan on|off — toggle planning mode
+  const ecPlanMatch = text.match(/^\/plan\s+(on|off)$/i);
+  if (ecPlanMatch) {
+    setPlanningMode(ecPlanMatch[1].toLowerCase() === "on");
+    const msg = getPlanningMode()
+      ? "Planning mode ON — conversation will persist for up to 60 minutes of idle time."
+      : "Planning mode OFF — reverting to 10-minute idle timeout.";
+    console.log(`[planning] ${msg}`);
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "response", text: `Processing ${laCommsPlaybookCmds.length} playbook command(s)...`, agent: "system", ts: Date.now() }));
+      ws.send(JSON.stringify({ type: "response", text: msg, agent: "system", ts: Date.now() }));
     }
-    const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "la-comms", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-    executePlaybookCommands(laCommsPlaybookCmds, pbCtx)
+    resetTelegramIdleTimer();
+    resetGchatIdleTimer();
+    resetEllieChatIdleTimer();
+    broadcastExtension({ type: "planning_mode", active: getPlanningMode() });
+    return;
+  }
+
+  // /ticket — create Plane ticket from context
+  if (text.startsWith("/ticket")) {
+    const ticketText = text.slice(7).trim();
+    (async () => {
+      try {
+        let contextMessages: string[];
+        if (ticketText) {
+          contextMessages = [ticketText];
+        } else if (supabase) {
+          const { data: recent } = await supabase.from("messages")
+            .select("role, content").in("channel", ["ellie-chat", "la-comms"])
+            .order("created_at", { ascending: false }).limit(5);
+          contextMessages = (recent || []).reverse().map((m: any) => `[${m.role}]: ${m.content}`);
+        } else {
+          contextMessages = ["No context available"];
+        }
+
+        const context = contextMessages.join("\n---\n");
+        const prompt = `Generate a Plane project ticket from this context. Return ONLY valid JSON with no markdown formatting:\n{"title": "concise title under 80 chars", "description": "detailed description with requirements as bullet points", "priority": "medium"}\n\nPriority must be one of: urgent, high, medium, low, none.\n\nContext:\n${context}`;
+
+        console.log(`[ticket] /ticket command — generating from ${ticketText ? "user text" : "last 5 messages"}...`);
+        const raw = await callClaude(prompt);
+        const jsonMatch = raw.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) throw new Error("Could not parse ticket JSON");
+        const ticket = JSON.parse(jsonMatch[0]);
+
+        const result = await createPlaneIssue("ELLIE", ticket.title, ticket.description, ticket.priority);
+        if (!result) throw new Error("Plane API failed");
+
+        const msg = `Created ${result.identifier}: ${ticket.title}`;
+        console.log(`[ticket] ${msg}`);
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "response", text: msg, agent: "system", ts: Date.now() }));
+        }
+      } catch (err: any) {
+        console.error("[ticket] /ticket error:", err?.message);
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "response", text: `Failed to create ticket: ${err?.message?.slice(0, 200) || "unknown error"}`, agent: "system", ts: Date.now() }));
+        }
+      }
+    })();
+    return;
+  }
+
+  // ELLIE:: user-typed commands — bypass classifier, execute directly
+  const { cleanedText: ellieChatPlaybookClean, commands: ellieChatPlaybookCmds } = extractPlaybookCommands(text);
+  if (ellieChatPlaybookCmds.length > 0) {
+    console.log(`[ellie-chat] ELLIE:: commands in user message: ${ellieChatPlaybookCmds.map(c => c.type).join(", ")}`);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "response", text: `Processing ${ellieChatPlaybookCmds.length} playbook command(s)...`, agent: "system", ts: Date.now() }));
+    }
+    const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "ellie-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
+    executePlaybookCommands(ellieChatPlaybookCmds, pbCtx)
       .then(() => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "response", text: `Playbook command(s) completed.`, agent: "system", ts: Date.now() }));
@@ -4417,12 +3992,95 @@ async function handleLaCommsMessage(
     return;
   }
 
+  // ── Verification code detection (ELLIE-176) ──
+  // If app user is in email_sent state and message looks like a 6-digit code, auto-verify
+  const appUser = wsAppUserMap.get(ws);
+  if (appUser && appUser.onboarding_state === 'email_sent' && /^\d{6}$/.test(text.trim())) {
+    await enqueueEllieChat(async () => {
+      try {
+        const { sql: forestSql } = await import("../../ellie-forest/src/index");
+        const code = text.trim();
+
+        // Find matching code for this user's email
+        const [codeRow] = await forestSql<{ id: string; attempts: number }[]>`
+          SELECT id, attempts FROM verification_codes
+          WHERE email = ${appUser.email} AND code = ${code}
+            AND used = FALSE AND expires_at > NOW()
+          ORDER BY created_at DESC LIMIT 1
+        `;
+
+        if (codeRow && codeRow.attempts < 5) {
+          // Mark code as used
+          await forestSql`UPDATE verification_codes SET used = TRUE WHERE id = ${codeRow.id}`;
+
+          // Upgrade user
+          const { getUserByToken, generateToken } = await import("./api/app-auth.ts");
+          const { createPerson } = await import("../../ellie-forest/src/people");
+          const token = generateToken();
+
+          // Create person record if needed
+          let personId: string | null = null;
+          if (appUser.name) {
+            try {
+              const person = await createPerson({ name: appUser.name, relationship_type: 'app-user', contact_methods: { email: appUser.email } });
+              personId = person.id;
+            } catch { /* person may already exist */ }
+          }
+
+          await forestSql`
+            UPDATE app_users SET
+              session_token = ${token},
+              onboarding_state = 'verified',
+              verified_at = NOW(),
+              person_id = COALESCE(person_id, ${personId}),
+              last_seen_at = NOW()
+            WHERE email = ${appUser.email}
+          `;
+
+          // Update wsAppUserMap
+          appUser.onboarding_state = 'verified';
+          wsAppUserMap.set(ws, appUser);
+
+          // Notify client
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "session_upgraded", ts: Date.now(), token, user: { id: appUser.id, name: appUser.name, onboarding_state: 'verified' } }));
+            ws.send(JSON.stringify({ type: "response", text: `Perfect, ${appUser.name || 'friend'}! Your account is verified. I'll remember our conversations from now on.`, agent: "general", ts: Date.now() }));
+          }
+          const verifyHistKey = ecUserId || 'anonymous';
+          if (!ellieChatPhoneHistories.has(verifyHistKey)) ellieChatPhoneHistories.set(verifyHistKey, []);
+          const verifyHist = ellieChatPhoneHistories.get(verifyHistKey)!;
+          verifyHist.push({ role: "user", content: text });
+          verifyHist.push({ role: "assistant", content: `Perfect, ${appUser.name || 'friend'}! Your account is verified. I'll remember our conversations from now on.` });
+          console.log(`[ellie-chat] Code verified for ${appUser.email} — session upgraded`);
+        } else {
+          // Wrong code — increment attempts, fall through to Claude
+          if (appUser.email) {
+            await forestSql`
+              UPDATE verification_codes SET attempts = attempts + 1
+              WHERE email = ${appUser.email} AND used = FALSE AND expires_at > NOW()
+            `;
+          }
+          // Let Claude handle it naturally — the onboarding context will remind about the code
+        }
+      } catch (err) {
+        console.error("[ellie-chat] Code detection error:", err);
+      }
+    }, "code-verify");
+    // If code was valid, we already sent the response — check if state changed
+    const updatedUser = wsAppUserMap.get(ws);
+    if (updatedUser && updatedUser.onboarding_state === 'verified') return;
+  }
+
   if (phoneMode) {
     // ── Phone mode fast path: 6-turn context, Haiku, brevity prompt, no agent routing ──
-    await enqueue(async () => {
-      laCommsPhoneHistory.push({ role: "user", content: text });
+    await enqueueEllieChat(async () => {
+      // Per-user phone history (ELLIE-197)
+      const phoneHistKey = ecUserId || 'anonymous';
+      if (!ellieChatPhoneHistories.has(phoneHistKey)) ellieChatPhoneHistories.set(phoneHistKey, []);
+      const phoneHistory = ellieChatPhoneHistories.get(phoneHistKey)!;
+      phoneHistory.push({ role: "user", content: text });
 
-      const conversationContext = laCommsPhoneHistory
+      const conversationContext = phoneHistory
         .slice(-6)
         .map(m => `${m.role}: ${m.content}`)
         .join("\n");
@@ -4430,39 +4088,146 @@ async function handleLaCommsMessage(
       // Lightweight context — skip structured context, recent messages, agent routing
       const [contextDocket, relevantContext, elasticContext] = await Promise.all([
         getContextDocket(),
-        getRelevantContext(supabase, text),
-        searchElastic(text, { limit: 3, recencyBoost: true }),
+        getRelevantContext(supabase, text, "ellie-chat", getActiveAgent("ellie-chat")),
+        searchElastic(text, { limit: 3, recencyBoost: true, channel: "ellie-chat", sourceAgent: getActiveAgent("ellie-chat") }),
       ]);
 
       const systemParts = [
-        "You are Ellie, Dave's AI assistant. You are in a VOICE CONVERSATION via the dashboard.",
+        "You are Ellie, a personal AI assistant. You are in a VOICE CONVERSATION via the phone app.",
         "Keep responses SHORT and natural for speech — 1-3 sentences max.",
         "No markdown, no bullet points, no formatting. Just spoken words.",
         "Be warm and conversational, like talking to a friend.",
       ];
-      if (USER_NAME) systemParts.push(`You are speaking with ${USER_NAME}.`);
+
+      // Onboarding context injection (ELLIE-176)
+      const wsUser = wsAppUserMap.get(ws);
+      if (wsUser) {
+        if (wsUser.name) systemParts.push(`You are speaking with ${wsUser.name}.`);
+        switch (wsUser.onboarding_state) {
+          case 'anonymous':
+            systemParts.push("\nThis is a new user you haven't met before. After 2-3 natural exchanges, ask what you should call them. Don't rush it — let the conversation flow first.");
+            break;
+          case 'named':
+            systemParts.push(`\n${wsUser.name} has told you their name but hasn't verified their email yet. After a few more exchanges, naturally suggest that you could remember conversations across sessions if they share their email. Frame it as a benefit, not a requirement.`);
+            break;
+          case 'email_sent':
+            systemParts.push(`\nYou sent a verification code to ${wsUser.email}. Gently remind them to check their email and type the 6-digit code here. Don't be pushy — just mention it if the conversation allows.`);
+            break;
+          case 'verified':
+            systemParts.push(`\n${wsUser.name || 'This user'} just verified their account! You can now remember conversations. Over the next few exchanges, learn their timezone and interests naturally. Don't interrogate — weave it into conversation.`);
+            systemParts.push(`\nWhen you learn their timezone, include ELLIE::SET_TIMEZONE <timezone> at the END of your response (e.g., ELLIE::SET_TIMEZONE America/Chicago). When you feel onboarding is complete, add ELLIE::ONBOARDING_COMPLETE at the end.`);
+            break;
+          default:
+            if (wsUser.name) systemParts.push(`You are speaking with ${wsUser.name}.`);
+        }
+        if (wsUser.onboarding_state === 'anonymous' || wsUser.onboarding_state === 'named') {
+          systemParts.push(`\nWhen the user tells you their name, include ELLIE::SET_NAME <name> at the END of your response.`);
+          systemParts.push(`When the user shares their email, include ELLIE::REQUEST_EMAIL <email> at the END of your response.`);
+          systemParts.push(`These ELLIE:: commands are invisible to the user — they trigger backend actions.`);
+        }
+      } else {
+        if (USER_NAME) systemParts.push(`You are speaking with ${USER_NAME}.`);
+      }
+
       if (contextDocket) systemParts.push(`\n${contextDocket}`);
-      if (relevantContext) systemParts.push(`\n${relevantContext}`);
-      if (elasticContext) systemParts.push(`\n${elasticContext}`);
+      const ellieChatSearchBlock = trimSearchContext([relevantContext || '', elasticContext || '']);
+      if (ellieChatSearchBlock) systemParts.push(`\n${ellieChatSearchBlock}`);
 
       const systemPrompt = systemParts.join("\n");
+      const userName = wsUser?.name || USER_NAME || "the user";
       const userPrompt = conversationContext
-        ? `Conversation so far:\n${conversationContext}\n\nDave just said: ${text}`
-        : `Dave said: ${text}`;
+        ? `Conversation so far:\n${conversationContext}\n\n${userName} just said: ${text}`
+        : `${userName} said: ${text}`;
 
       const startTime = Date.now();
       const rawResponse = await callClaudeVoice(systemPrompt, userPrompt);
       const durationMs = Date.now() - startTime;
 
-      const cleanedText = rawResponse.trim();
-      laCommsPhoneHistory.push({ role: "assistant", content: cleanedText });
+      // Process ELLIE:: onboarding commands (ELLIE-176)
+      let responseText = rawResponse.trim();
+      if (wsUser) {
+        const ellieCommands = responseText.match(/ELLIE::\S+.*$/gm) || [];
+        for (const cmd of ellieCommands) {
+          responseText = responseText.replace(cmd, '').trim();
+          try {
+            const { sql: forestSql } = await import("../../ellie-forest/src/index");
 
-      // Cap history at 20 entries to prevent memory growth
-      if (laCommsPhoneHistory.length > 20) laCommsPhoneHistory.splice(0, laCommsPhoneHistory.length - 20);
+            if (cmd.startsWith('ELLIE::SET_NAME ')) {
+              const name = cmd.replace('ELLIE::SET_NAME ', '').trim();
+              if (name) {
+                wsUser.name = name;
+                // Create or update app_user record
+                if (wsUser.anonymous_id && !wsUser.id) {
+                  const [existing] = await forestSql<{ id: string }[]>`SELECT id FROM app_users WHERE anonymous_id = ${wsUser.anonymous_id}`;
+                  if (existing) {
+                    await forestSql`UPDATE app_users SET name = ${name}, onboarding_state = 'named' WHERE id = ${existing.id}`;
+                    wsUser.id = existing.id;
+                  } else {
+                    const [newUser] = await forestSql<{ id: string }[]>`
+                      INSERT INTO app_users (name, anonymous_id, onboarding_state) VALUES (${name}, ${wsUser.anonymous_id}, 'named') RETURNING id
+                    `;
+                    wsUser.id = newUser.id;
+                  }
+                } else if (wsUser.id) {
+                  await forestSql`UPDATE app_users SET name = ${name}, onboarding_state = 'named' WHERE id = ${wsUser.id}`;
+                }
+                wsUser.onboarding_state = 'named';
+                wsAppUserMap.set(ws, wsUser);
+                console.log(`[ellie-chat] SET_NAME: ${name}`);
+              }
+            }
 
-      await saveMessage("assistant", cleanedText, {}, "la-comms");
+            if (cmd.startsWith('ELLIE::REQUEST_EMAIL ')) {
+              const email = cmd.replace('ELLIE::REQUEST_EMAIL ', '').trim().toLowerCase();
+              if (email && email.includes('@')) {
+                wsUser.email = email;
+                // Update user record with email
+                if (wsUser.id) {
+                  await forestSql`UPDATE app_users SET email = ${email}, onboarding_state = 'email_sent' WHERE id = ${wsUser.id}`;
+                }
+                // Generate and send verification code
+                const { sendVerificationCode } = await import("./email.ts");
+                const code = String(Math.floor(100000 + Math.random() * 900000));
+                const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+                await forestSql`INSERT INTO verification_codes (email, code, expires_at) VALUES (${email}, ${code}, ${expiresAt})`;
+                await sendVerificationCode(email, code);
+                wsUser.onboarding_state = 'email_sent';
+                wsAppUserMap.set(ws, wsUser);
+                console.log(`[ellie-chat] REQUEST_EMAIL: code sent to ${email}`);
+              }
+            }
+
+            if (cmd.startsWith('ELLIE::SET_TIMEZONE ')) {
+              const tz = cmd.replace('ELLIE::SET_TIMEZONE ', '').trim();
+              if (tz && wsUser.id) {
+                await forestSql`UPDATE app_users SET timezone = ${tz} WHERE id = ${wsUser.id}`;
+                console.log(`[ellie-chat] SET_TIMEZONE: ${tz}`);
+              }
+            }
+
+            if (cmd.startsWith('ELLIE::ONBOARDING_COMPLETE')) {
+              if (wsUser.id) {
+                await forestSql`UPDATE app_users SET onboarding_state = 'onboarded' WHERE id = ${wsUser.id}`;
+                wsUser.onboarding_state = 'onboarded';
+                wsAppUserMap.set(ws, wsUser);
+                console.log(`[ellie-chat] ONBOARDING_COMPLETE for ${wsUser.name}`);
+              }
+            }
+          } catch (err) {
+            console.error(`[ellie-chat] ELLIE:: command error (${cmd}):`, err);
+          }
+        }
+      }
+
+      const cleanedText = responseText;
+      phoneHistory.push({ role: "assistant", content: cleanedText });
+
+      // Cap per-user history at 20 entries to prevent memory growth
+      if (phoneHistory.length > 20) phoneHistory.splice(0, phoneHistory.length - 20);
+
+      await saveMessage("assistant", cleanedText, {}, "ellie-chat", ecUserId);
       broadcastExtension({
-        type: "message_out", channel: "la-comms",
+        type: "message_out", channel: "ellie-chat",
         agent: "general",
         preview: cleanedText.substring(0, 200),
       });
@@ -4477,24 +4242,24 @@ async function handleLaCommsMessage(
         }));
       }
 
-      resetLaCommsIdleTimer();
-    }, "la-comms", text.substring(0, 100));
+      resetEllieChatIdleTimer();
+    }, text.substring(0, 100));
     return;
   }
 
   // ── Normal text mode: full agent routing + context gathering (mirrors Google Chat) ──
-  await enqueue(async () => {
-    const laCommsWorkItem = text.match(/\b([A-Z]+-\d+)\b/)?.[1];
-    const agentResult = await routeAndDispatch(supabase, text, "la-comms", "dashboard", laCommsWorkItem);
+  await enqueueEllieChat(async () => {
+    const ellieChatWorkItem = text.match(/\b([A-Z]+-\d+)\b/)?.[1];
+    const agentResult = await routeAndDispatch(supabase, text, "ellie-chat", "dashboard", ellieChatWorkItem);
     let effectiveText = agentResult?.route.strippedMessage || text;
     // Prepend image file reference so Claude Code CLI can see the image
     if (imagePath) {
       effectiveText = `[Image: ${imagePath}]\n\n${effectiveText || "Analyze this image."}`;
     }
     if (agentResult) {
-      setActiveAgent("la-comms", agentResult.dispatch.agent.name);
+      setActiveAgent("ellie-chat", agentResult.dispatch.agent.name);
       broadcastExtension({
-        type: "route", channel: "la-comms",
+        type: "route", channel: "ellie-chat",
         agent: agentResult.dispatch.agent.name,
         mode: agentResult.route.execution_mode,
       });
@@ -4510,27 +4275,55 @@ async function handleLaCommsMessage(
       }
     }
 
-    const laCommsActiveAgent = getActiveAgent("la-comms");
-    const [contextDocket, relevantContext, elasticContext, structuredContext, recentMessages, forestContext, agentMemory] = await Promise.all([
+    // ── ASYNC SPECIALIST PATH: ack immediately, run in background ──
+    const ecRouteAgent = agentResult?.dispatch?.agent?.name || "general";
+    const isSpecialist = ecRouteAgent !== "general";
+    const isMultiStep = agentResult?.route.execution_mode !== "single" && agentResult?.route.skills?.length;
+
+    if (isSpecialist && !isMultiStep && agentResult) {
+      const ack = getSpecialistAck(ecRouteAgent);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "response", text: ack, agent: "general", ts: Date.now() }));
+      }
+      await saveMessage("assistant", ack, {}, "ellie-chat", ecUserId);
+      broadcastExtension({ type: "message_out", channel: "ellie-chat", agent: "general", preview: ack });
+
+      // Fire-and-forget: specialist runs outside the queue
+      runSpecialistAsync(ws, supabase, effectiveText, text, agentResult, imagePath, ellieChatWorkItem).catch(err => {
+        console.error(`[ellie-chat] specialist async error:`, err);
+      });
+
+      resetEllieChatIdleTimer();
+      return; // queue task done — queue is free for next message
+    }
+
+    const ellieChatActiveAgent = getActiveAgent("ellie-chat");
+    const ecConvoId = await getOrCreateConversation(supabase!, "ellie-chat") || undefined;
+    const [ecConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, ecQueueContext] = await Promise.all([
+      ecConvoId && supabase ? getConversationMessages(supabase, ecConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
       getContextDocket(),
-      getRelevantContext(supabase, effectiveText),
-      searchElastic(effectiveText, { limit: 5, recencyBoost: true }),
-      getAgentStructuredContext(supabase, laCommsActiveAgent),
-      getRecentMessages(supabase),
+      getRelevantContext(supabase, effectiveText, "ellie-chat", ellieChatActiveAgent, ecConvoId),
+      searchElastic(effectiveText, { limit: 5, recencyBoost: true, channel: "ellie-chat", sourceAgent: ellieChatActiveAgent, excludeConversationId: ecConvoId }),
+      getAgentStructuredContext(supabase, ellieChatActiveAgent),
       getForestContext(effectiveText),
-      getAgentMemoryContext(laCommsActiveAgent, laCommsWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model)),
+      getAgentMemoryContext(ellieChatActiveAgent, ellieChatWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model)),
+      agentResult?.dispatch.is_new ? getQueueContext(ellieChatActiveAgent) : Promise.resolve(""),
     ]);
+    const recentMessages = ecConvoContext.text;
+    if (agentResult?.dispatch.is_new && ecQueueContext) {
+      acknowledgeQueueItems(ellieChatActiveAgent).catch(() => {});
+    }
 
     // Detect work item mentions (ELLIE-5, EVE-3, etc.) — matches Telegram text handler
     let workItemContext = "";
     const workItemMatch = effectiveText.match(/\b([A-Z]+-\d+)\b/);
-    const isLaCommsWorkIntent = agentResult?.route.skill_name === "code_changes" ||
+    const isEllieChatWorkIntent = agentResult?.route.skill_name === "code_changes" ||
       agentResult?.route.skill_name === "code_review" ||
       agentResult?.route.skill_name === "debugging";
     if (workItemMatch && isPlaneConfigured()) {
       const details = await fetchWorkItemDetails(workItemMatch[1]);
       if (details) {
-        const label = isLaCommsWorkIntent ? "ACTIVE WORK ITEM" : "REFERENCED WORK ITEM";
+        const label = isEllieChatWorkIntent ? "ACTIVE WORK ITEM" : "REFERENCED WORK ITEM";
         workItemContext = `\n${label}: ${workItemMatch[1]}\n` +
           `Title: ${details.name}\n` +
           `Priority: ${details.priority}\n` +
@@ -4559,12 +4352,12 @@ async function handleLaCommsMessage(
           ts: Date.now(),
         }));
       }
-      broadcastExtension({ type: "pipeline_start", channel: "la-comms", mode: execMode, steps: steps.length });
+      broadcastExtension({ type: "pipeline_start", channel: "ellie-chat", mode: execMode, steps: steps.length });
 
       try {
         const result = await executeOrchestrated(execMode, steps, effectiveText, {
           supabase,
-          channel: "la-comms",
+          channel: "ellie-chat",
           userId: "dashboard",
           anthropicClient: anthropic,
           contextDocket, relevantContext, elasticContext,
@@ -4575,22 +4368,22 @@ async function handleLaCommsMessage(
 
         const orcAgent = result.finalDispatch?.agent?.name || agentResult.dispatch.agent.name || "general";
         const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, orcAgent, "shared", agentMemory.sessionIds);
-        const { cleanedText: laOrcPlaybookClean, commands: laOrcPlaybookCmds } = extractPlaybookCommands(pipelineResponse);
-        const { cleanedText } = extractApprovalTags(laOrcPlaybookClean);
+        const { cleanedText: ellieChatOrcPlaybookClean, commands: ellieChatOrcPlaybookCmds } = extractPlaybookCommands(pipelineResponse);
+        const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, ellieChatOrcPlaybookClean, session.sessionId, orcAgent);
 
-        await saveMessage("assistant", cleanedText, {}, "la-comms");
+        await saveMessage("assistant", cleanedText, {}, "ellie-chat", ecUserId);
         broadcastExtension({
-          type: "message_out", channel: "la-comms", agent: orcAgent,
+          type: "message_out", channel: "ellie-chat", agent: orcAgent,
           preview: cleanedText.substring(0, 200),
         });
         broadcastExtension({
-          type: "pipeline_complete", channel: "la-comms",
+          type: "pipeline_complete", channel: "ellie-chat",
           mode: execMode, steps: result.stepResults.length,
           duration_ms: result.artifacts.total_duration_ms,
           cost_usd: result.artifacts.total_cost_usd,
         });
 
-        if (ws.readyState === WebSocket.OPEN) {
+        if (!hadConfirmations && ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({
             type: "response",
             text: cleanedText,
@@ -4607,12 +4400,12 @@ async function handleLaCommsMessage(
         }
 
         // Fire playbook commands async (ELLIE:: tags)
-        if (laOrcPlaybookCmds.length > 0) {
-          const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "la-comms", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-          executePlaybookCommands(laOrcPlaybookCmds, pbCtx).catch(err => console.error("[playbook]", err));
+        if (ellieChatOrcPlaybookCmds.length > 0) {
+          const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "ellie-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
+          executePlaybookCommands(ellieChatOrcPlaybookCmds, pbCtx).catch(err => console.error("[playbook]", err));
         }
       } catch (err) {
-        console.error("[la-comms] Multi-step failed:", err);
+        console.error("[ellie-chat] Multi-step failed:", err);
         const errMsg = err instanceof PipelineStepError && err.partialOutput
           ? err.partialOutput + "\n\n(Execution incomplete.)"
           : "Sorry, I ran into an error processing your multi-step request.";
@@ -4630,13 +4423,13 @@ async function handleLaCommsMessage(
       // Cleanup temp image file
       if (imagePath) unlink(imagePath).catch(() => {});
 
-      resetLaCommsIdleTimer();
+      resetEllieChatIdleTimer();
       return;
     }
 
     // ── Single-agent path ──
     const enrichedPrompt = buildPrompt(
-      effectiveText, contextDocket, relevantContext, elasticContext, "la-comms",
+      effectiveText, contextDocket, relevantContext, elasticContext, "ellie-chat",
       agentResult?.dispatch.agent ? {
         system_prompt: agentResult.dispatch.agent.system_prompt,
         name: agentResult.dispatch.agent.name,
@@ -4647,6 +4440,11 @@ async function handleLaCommsMessage(
       forestContext,
       agentMemory.memoryContext || undefined,
       agentMemory.sessionIds,
+      await getArchetypeContext(),
+      await getPsyContext(),
+      await getPhaseContext(),
+      await getHealthContext(),
+      ecQueueContext || undefined,
     );
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -4666,6 +4464,7 @@ async function handleLaCommsMessage(
         resume: true,
         allowedTools: agentTools?.length ? agentTools : undefined,
         model: agentModel || undefined,
+        timeoutMs: 600_000, // 10 min — async coordinator needs time for multi-step work
       });
     } finally {
       clearInterval(typingInterval);
@@ -4708,32 +4507,33 @@ async function handleLaCommsMessage(
               entity_id: entity.id,
               work_item_id: tree.work_item_id,
             };
-            console.log(`[la-comms] Late-resolved sessionIds: tree=${tree.id.slice(0, 8)}, creature=${creature?.id?.slice(0, 8) || 'none'}`);
+            console.log(`[ellie-chat] Late-resolved sessionIds: tree=${tree.id.slice(0, 8)}, creature=${creature?.id?.slice(0, 8) || 'none'}`);
           }
         }
       } catch (err: any) {
-        console.warn(`[la-comms] Late-resolve sessionIds failed:`, err?.message || err);
+        console.warn(`[ellie-chat] Late-resolve sessionIds failed:`, err?.message || err);
       }
     } else if (!effectiveSessionIds) {
-      console.log(`[la-comms] No sessionIds and no agent to late-resolve (agent=${agentResult?.dispatch.agent.name})`);
+      console.log(`[ellie-chat] No sessionIds and no agent to late-resolve (agent=${agentResult?.dispatch.agent.name})`);
     }
 
     const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general", "shared", effectiveSessionIds);
-    const { cleanedText: laPlaybookClean, commands: laPlaybookCmds } = extractPlaybookCommands(response);
-    const { cleanedText } = extractApprovalTags(laPlaybookClean);
+    const { cleanedText: ecPlaybookClean, commands: ecPlaybookCmds } = extractPlaybookCommands(response);
+    const ecAgent = agentResult?.dispatch.agent.name || "general";
+    const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, ecPlaybookClean, session.sessionId, ecAgent);
 
-    await saveMessage("assistant", cleanedText, {}, "la-comms");
+    await saveMessage("assistant", cleanedText, {}, "ellie-chat", ecUserId);
     broadcastExtension({
-      type: "message_out", channel: "la-comms",
-      agent: agentResult?.dispatch.agent.name || "general",
+      type: "message_out", channel: "ellie-chat",
+      agent: ecAgent,
       preview: cleanedText.substring(0, 200),
     });
 
-    if (ws.readyState === WebSocket.OPEN) {
+    if (!hadConfirmations && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         type: "response",
         text: cleanedText,
-        agent: agentResult?.dispatch.agent.name || "general",
+        agent: ecAgent,
         ts: Date.now(),
         duration_ms: durationMs,
       }));
@@ -4746,16 +4546,175 @@ async function handleLaCommsMessage(
     }
 
     // Fire playbook commands async (ELLIE:: tags)
-    if (laPlaybookCmds.length > 0) {
-      const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "la-comms", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-      executePlaybookCommands(laPlaybookCmds, pbCtx).catch(err => console.error("[playbook]", err));
+    if (ecPlaybookCmds.length > 0) {
+      const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "ellie-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
+      executePlaybookCommands(ecPlaybookCmds, pbCtx).catch(err => console.error("[playbook]", err));
     }
 
     // Cleanup temp image file
     if (imagePath) unlink(imagePath).catch(() => {});
 
-    resetLaCommsIdleTimer();
-  }, "la-comms", text.substring(0, 100));
+    resetEllieChatIdleTimer();
+  }, text.substring(0, 100));
+}
+
+// getSpecialistAck is imported from relay-utils.ts
+
+/** Run a specialist agent asynchronously (outside the ellie-chat queue). */
+async function runSpecialistAsync(
+  ws: WebSocket,
+  supabase: SupabaseClient | null,
+  effectiveText: string,
+  originalText: string,
+  agentResult: { route: RouteResult; dispatch: DispatchResult },
+  imagePath: string | undefined,
+  workItemId: string | undefined,
+): Promise<void> {
+  const agentName = agentResult.dispatch.agent.name;
+  const specUser = wsAppUserMap.get(ws);
+  const ecUserId = specUser?.id || specUser?.anonymous_id || undefined;
+  const startTime = Date.now();
+  console.log(`[ellie-chat] Specialist ${agentName} starting async`);
+
+  try {
+    // Typing heartbeat while specialist works
+    const heartbeat = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "typing", ts: Date.now() }));
+      } else {
+        clearInterval(heartbeat);
+      }
+    }, 4_000);
+
+    // Gather context (same sources as sync path)
+    const ellieChatActiveAgent = getActiveAgent("ellie-chat");
+    const specConvoId = await getOrCreateConversation(supabase!, "ellie-chat") || undefined;
+    const [specConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, specQueueContext] = await Promise.all([
+      specConvoId && supabase ? getConversationMessages(supabase, specConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
+      getContextDocket(),
+      getRelevantContext(supabase, effectiveText, "ellie-chat", ellieChatActiveAgent, specConvoId),
+      searchElastic(effectiveText, { limit: 5, recencyBoost: true, channel: "ellie-chat", sourceAgent: ellieChatActiveAgent, excludeConversationId: specConvoId }),
+      getAgentStructuredContext(supabase, ellieChatActiveAgent),
+      getForestContext(effectiveText),
+      getAgentMemoryContext(ellieChatActiveAgent, workItemId, getMaxMemoriesForModel(agentResult.dispatch.agent.model)),
+      agentResult.dispatch.is_new ? getQueueContext(ellieChatActiveAgent) : Promise.resolve(""),
+    ]);
+    const recentMessages = specConvoContext.text;
+    if (agentResult.dispatch.is_new && specQueueContext) {
+      acknowledgeQueueItems(ellieChatActiveAgent).catch(() => {});
+    }
+
+    // Work item context
+    let workItemContext = "";
+    const workItemMatch = effectiveText.match(/\b([A-Z]+-\d+)\b/);
+    const isWorkIntent = agentResult.route.skill_name === "code_changes" ||
+      agentResult.route.skill_name === "code_review" ||
+      agentResult.route.skill_name === "debugging";
+    if (workItemMatch && isPlaneConfigured()) {
+      const details = await fetchWorkItemDetails(workItemMatch[1]);
+      if (details) {
+        const label = isWorkIntent ? "ACTIVE WORK ITEM" : "REFERENCED WORK ITEM";
+        workItemContext = `\n${label}: ${workItemMatch[1]}\n` +
+          `Title: ${details.name}\n` +
+          `Priority: ${details.priority}\n` +
+          `Description: ${details.description}\n`;
+      }
+    }
+
+    const enrichedPrompt = buildPrompt(
+      effectiveText, contextDocket, relevantContext, elasticContext, "ellie-chat",
+      {
+        system_prompt: agentResult.dispatch.agent.system_prompt,
+        name: agentResult.dispatch.agent.name,
+        tools_enabled: agentResult.dispatch.agent.tools_enabled,
+      },
+      workItemContext || undefined, structuredContext, recentMessages,
+      agentResult.dispatch.skill_context,
+      forestContext,
+      agentMemory.memoryContext || undefined,
+      agentMemory.sessionIds,
+      await getArchetypeContext(),
+      await getPsyContext(),
+      await getPhaseContext(),
+      await getHealthContext(),
+      specQueueContext || undefined,
+    );
+
+    const agentTools = agentResult.dispatch.agent.tools_enabled;
+    const agentModel = agentResult.dispatch.agent.model;
+
+    let rawResponse: string;
+    try {
+      rawResponse = await callClaude(enrichedPrompt, {
+        resume: false, // own session — doesn't pollute the general agent's context
+        allowedTools: agentTools?.length ? agentTools : undefined,
+        model: agentModel || undefined,
+        timeoutMs: 600_000, // 10 min — specialists may do multi-step tool use
+      });
+    } finally {
+      clearInterval(heartbeat);
+    }
+
+    const durationMs = Date.now() - startTime;
+    console.log(`[ellie-chat] Specialist ${agentName} completed in ${durationMs}ms`);
+
+    const response = await processMemoryIntents(supabase, rawResponse, agentName, "shared", agentMemory.sessionIds);
+    const { cleanedText: playClean, commands: playCmds } = extractPlaybookCommands(response);
+    const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, playClean, session.sessionId, agentName);
+
+    await saveMessage("assistant", cleanedText, {}, "ellie-chat", ecUserId);
+    broadcastExtension({
+      type: "message_out", channel: "ellie-chat",
+      agent: agentName,
+      preview: cleanedText.substring(0, 200),
+    });
+
+    if (!hadConfirmations && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "response",
+        text: cleanedText,
+        agent: agentName,
+        ts: Date.now(),
+        duration_ms: durationMs,
+      }));
+    } else if (!hadConfirmations) {
+      // Original WS closed — send to same user's other connections only (ELLIE-197)
+      const payload = JSON.stringify({
+        type: "response", text: cleanedText, agent: agentName,
+        ts: Date.now(), duration_ms: durationMs,
+      });
+      for (const client of ellieChatClients) {
+        if (client.readyState === WebSocket.OPEN) {
+          const clientUser = wsAppUserMap.get(client);
+          const clientId = clientUser?.id || clientUser?.anonymous_id;
+          if (clientId && clientId === ecUserId) {
+            client.send(payload);
+          }
+        }
+      }
+    }
+
+    syncResponse(supabase, agentResult.dispatch.session_id, cleanedText, {
+      duration_ms: durationMs,
+    }).catch(() => {});
+
+    // Fire playbook commands async (ELLIE:: tags)
+    if (playCmds.length > 0) {
+      const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "ellie-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
+      executePlaybookCommands(playCmds, pbCtx).catch(err => console.error("[playbook]", err));
+    }
+
+    // Cleanup temp image file
+    if (imagePath) unlink(imagePath).catch(() => {});
+  } catch (err) {
+    const durationMs = Date.now() - startTime;
+    console.error(`[ellie-chat] Specialist ${agentName} failed after ${durationMs}ms:`, err);
+    const errorMsg = `Sorry, the ${agentName} specialist ran into an issue. You can try again or rephrase.`;
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "response", text: errorMsg, agent: agentName, ts: Date.now() }));
+    }
+    await saveMessage("assistant", errorMsg, {}, "ellie-chat", ecUserId).catch(() => {});
+  }
 }
 
 /** Fire-and-forget broadcast to all connected extension clients. */
@@ -4775,6 +4734,14 @@ function broadcastExtension(event: Record<string, any>): void {
 // ============================================================
 // START
 // ============================================================
+
+// Register external dependencies for extracted modules (ELLIE-205, ELLIE-206, ELLIE-207, ELLIE-211)
+setBroadcastExtension(broadcastExtension);
+setNotifyCtx(getNotifyCtx);
+setAnthropicClient(anthropic);
+setQueueBroadcast(broadcastExtension);
+setSenderDeps({ supabase, getActiveAgent });
+setVoicePipelineDeps({ supabase, getActiveAgent, broadcastExtension, getContextDocket, triggerConsolidation });
 
 // Init Google Chat (optional — skips gracefully if not configured)
 const gchatEnabled = await initGoogleChat();
@@ -4813,7 +4780,7 @@ httpServer.listen(HTTP_PORT, () => {
   console.log(`[http] Server listening on port ${HTTP_PORT}`);
   console.log(`[voice] WebSocket: ws://localhost:${HTTP_PORT}/media-stream`);
   console.log(`[extension] WebSocket: ws://localhost:${HTTP_PORT}/extension`);
-  console.log(`[la-comms] WebSocket: ws://localhost:${HTTP_PORT}/la-comms`);
+  console.log(`[ellie-chat] WebSocket: ws://localhost:${HTTP_PORT}/ws/ellie-chat`);
   console.log(`[voice] TwiML webhook: http://localhost:${HTTP_PORT}/voice`);
   if (PUBLIC_URL) {
     console.log(`[voice] Public URL: ${PUBLIC_URL}`);
