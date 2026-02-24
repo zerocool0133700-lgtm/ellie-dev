@@ -46,7 +46,7 @@ export interface ClassificationResult {
 
 interface AgentDescription {
   name: string;
-  type: string;
+  species: string;
   capabilities: string[];
   anti_patterns: string[];
 }
@@ -147,6 +147,13 @@ export async function classifyIntent(
     return llmResult;
   }
 
+  // Short messages ("Yes", "Do it", "Ok", "Go ahead") should never break session continuity.
+  // They carry too little semantic signal for the LLM to reliably detect a domain switch.
+  if (message.trim().length < 12) {
+    console.log(`[classifier] Session continuity held (short message): ${continuity.agent_name}`);
+    return continuity;
+  }
+
   // Active session exists — decide whether LLM should override
   if (
     llmResult.agent_name !== continuity.agent_name &&
@@ -176,7 +183,7 @@ export async function classifyIntent(
 // Tier 1: Slash commands
 // ────────────────────────────────────────────────────────────────
 
-function parseSlashCommand(
+export function parseSlashCommand(
   message: string,
 ): { agent: string; strippedMessage: string } | null {
   const trimmed = message.trimStart();
@@ -370,9 +377,9 @@ function buildClassifierPrompt(
       const skillList = agentSkills
         .map((s) => `  - ${s.name}: ${s.description}`)
         .join("\n");
-      lines.push(`${agent.name} (${agent.type})${antiStr}:\n${skillList}`);
+      lines.push(`${agent.name} (${agent.species})${antiStr}:\n${skillList}`);
     } else {
-      lines.push(`${agent.name} (${agent.type}): [${agent.capabilities.join(", ")}]${antiStr}`);
+      lines.push(`${agent.name} (${agent.species}): [${agent.capabilities.join(", ")}]${antiStr}`);
     }
   }
 
@@ -436,7 +443,7 @@ async function getAgentDescriptions(): Promise<AgentDescription[]> {
     const agents = await listAgents({ status: 'active' });
     _agentCache = agents.map((a) => ({
       name: a.name,
-      type: a.type,
+      species: a.species,
       capabilities: a.capabilities || [],
       anti_patterns: a.anti_patterns || [],
     }));
@@ -452,12 +459,12 @@ async function getAgentDescriptions(): Promise<AgentDescription[]> {
 
   const { data: agents } = await _supabase
     .from("agents")
-    .select("name, type, capabilities")
+    .select("name, species, capabilities")
     .eq("status", "active");
 
   _agentCache = (agents || []).map((a) => ({
     name: a.name,
-    type: a.type,
+    species: a.species ?? 'ant',
     capabilities: a.capabilities || [],
     anti_patterns: [],
   }));

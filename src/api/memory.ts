@@ -25,6 +25,7 @@ import {
   tryAutoResolve,
   dispatchCreature,
   writeCreatureMemory,
+  createArc, getArc, updateArc, addMemoryToArc, listArcs, getArcsForMemory,
   sql,
 } from '../../../ellie-forest/src/index';
 import { classifyEntailment } from "../entailment-classifier.ts";
@@ -61,6 +62,15 @@ export async function writeMemoryEndpoint(req: any, res: any, bot: Bot) {
 
     if (!content) {
       return res.status(400).json({ error: 'Missing required field: content' });
+    }
+
+    if (opts.duration === 'working') {
+      return res.status(400).json({ error: 'Working memory cannot be persisted — use short_term or long_term' });
+    }
+
+    // Default short_term to 14-day expiry if none provided
+    if (opts.duration === 'short_term' && !opts.expires_at) {
+      opts.expires_at = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
     }
 
     // Always write the memory first
@@ -326,6 +336,56 @@ export async function creatureWriteMemoryEndpoint(req: any, res: any, _bot: Bot)
 
   } catch (error) {
     console.error('[memory:creature-write] Error:', error);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+}
+
+/**
+ * POST /api/forest-memory/arcs
+ *
+ * Body: { "action": "create"|"get"|"update"|"add_memory"|"list"|"for_memory", ...params }
+ */
+export async function arcsEndpoint(req: any, res: any, _bot: Bot) {
+  try {
+    const { action, ...params } = req.body;
+
+    switch (action) {
+      case 'create': {
+        if (!params.name) return res.status(400).json({ error: 'Missing required field: name' });
+        const arc = await createArc(params);
+        return res.json({ success: true, arc });
+      }
+      case 'get': {
+        if (!params.arc_id) return res.status(400).json({ error: 'Missing required field: arc_id' });
+        const arc = await getArc(params.arc_id);
+        if (!arc) return res.status(404).json({ error: 'Arc not found' });
+        return res.json({ success: true, arc });
+      }
+      case 'update': {
+        if (!params.arc_id) return res.status(400).json({ error: 'Missing required field: arc_id' });
+        const { arc_id, ...opts } = params;
+        const arc = await updateArc(arc_id, opts);
+        return res.json({ success: true, arc });
+      }
+      case 'add_memory': {
+        if (!params.arc_id || !params.memory_id) return res.status(400).json({ error: 'Missing required fields: arc_id, memory_id' });
+        const arc = await addMemoryToArc(params.arc_id, params.memory_id);
+        return res.json({ success: true, arc });
+      }
+      case 'list': {
+        const arcs = await listArcs(params);
+        return res.json({ success: true, count: arcs.length, arcs });
+      }
+      case 'for_memory': {
+        if (!params.memory_id) return res.status(400).json({ error: 'Missing required field: memory_id' });
+        const arcs = await getArcsForMemory(params.memory_id);
+        return res.json({ success: true, count: arcs.length, arcs });
+      }
+      default:
+        return res.status(400).json({ error: `Unknown arcs action: ${action}` });
+    }
+  } catch (error) {
+    console.error('[memory:arcs] Error:', error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }

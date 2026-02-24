@@ -158,7 +158,7 @@ export async function searchForest(
         functions: [
           {
             gauss: {
-              created_at: { origin: "now", scale: "7d", decay: 0.5 },
+              created_at: { origin: "now", scale: "3d", decay: 0.5 },
             },
           },
         ],
@@ -170,6 +170,7 @@ export async function searchForest(
   const result = await esRequest("POST", `/${indexStr}/_search`, {
     query: queryBody,
     size: limit,
+    min_score: 2.0,
     highlight: {
       fields: {
         summary: { number_of_fragments: 2 },

@@ -118,6 +118,7 @@ export async function indexMessage(doc: {
   created_at: string;
   conversation_id?: string;
   summarized?: boolean;
+  source_agent?: string;
 }): Promise<void> {
   if (!(await checkHealth())) return;
 
@@ -225,13 +226,17 @@ export async function searchElastic(
   options?: {
     domains?: string[];
     types?: string[];
+    channel?: string;
+    sourceAgent?: string;
+    excludeConversationId?: string;
     limit?: number;
     recencyBoost?: boolean;
   }
 ): Promise<string> {
   if (!(await checkHealth())) return "";
+  if (query.trim().length < 10) return ""; // Short messages don't need search context
 
-  const { domains, types, limit = 5, recencyBoost = true } = options || {};
+  const { domains, types, channel, sourceAgent, excludeConversationId, limit = 5, recencyBoost = true } = options || {};
 
   try {
     const filters: object[] = [];
@@ -240,6 +245,16 @@ export async function searchElastic(
     }
     if (types?.length) {
       filters.push({ terms: { type: types } });
+    }
+    if (channel) {
+      filters.push({ term: { channel } });
+    }
+    if (sourceAgent) {
+      filters.push({ term: { source_agent: sourceAgent } });
+    }
+    // ELLIE-202: Exclude current conversation from search (it's already loaded in full)
+    if (excludeConversationId) {
+      filters.push({ bool: { must_not: { term: { conversation_id: excludeConversationId } } } });
     }
 
     let queryBody: any = {
@@ -268,7 +283,7 @@ export async function searchElastic(
               gauss: {
                 created_at: {
                   origin: "now",
-                  scale: "7d",
+                  scale: "3d",
                   decay: 0.5,
                 },
               },
@@ -283,7 +298,7 @@ export async function searchElastic(
     const result = await esRequest(
       "POST",
       "/ellie-messages,ellie-memory,ellie-conversations/_search",
-      { query: queryBody, size: limit }
+      { query: queryBody, size: limit, min_score: 2.0 }
     );
 
     const hits = result.hits?.hits;
@@ -292,14 +307,15 @@ export async function searchElastic(
     const lines = hits.map((hit: any) => {
       const src = hit._source;
       const index = hit._index;
+      const score = hit._score?.toFixed(1) || "?";
 
       if (index === "ellie-conversations") {
-        return `[conversation, ${src.channel}, ${src.domain}] ${src.summary}`;
+        return `[conversation, ${src.channel}, ${src.domain}, score:${score}] ${src.summary}`;
       }
       if (index === "ellie-memory") {
-        return `[${src.type}, ${src.domain}] ${src.content}`;
+        return `[${src.type}, ${src.domain}, score:${score}] ${src.content}`;
       }
-      return `[${src.role}, ${src.channel}, ${src.domain}] ${src.content}`;
+      return `[${src.role}, ${src.channel}, ${src.domain}, score:${score}] ${src.content}`;
     });
 
     return "ELASTICSEARCH RESULTS:\n" + lines.join("\n");

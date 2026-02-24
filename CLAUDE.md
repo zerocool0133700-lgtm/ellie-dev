@@ -425,6 +425,76 @@ All endpoints at `http://localhost:3001`:
 | `POST /api/work-session/decision` | Architectural decision with reasoning |
 | `POST /api/work-session/complete` | Session completion, Plane state update |
 
+---
+
+## Forest Bridge Protocol
+
+> Feed the forest. As you work, write discoveries, decisions, and findings to the knowledge tree so future sessions can build on them.
+
+### Bridge Key
+
+```
+x-bridge-key: bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e740f6577a
+```
+
+### When to Write
+
+Write to the bridge on **significant learnings** — not every small step, but things future sessions would benefit from knowing:
+
+- **Decisions** (`type: "decision"`) — architectural choices with reasoning ("Chose X over Y because Z")
+- **Findings** (`type: "finding"`) — discoveries about the codebase, gotchas, patterns ("postgres.js sql.array() is for ANY(), not INSERTs")
+- **Facts** (`type: "fact"`) — stable truths about the system ("Relay listens on port 3001, dashboard on 3000")
+- **Hypotheses** (`type: "hypothesis"`) — educated guesses that need validation
+
+### How to Write
+
+```bash
+curl -s -X POST http://localhost:3001/api/bridge/write \
+  -H "x-bridge-key: bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e740f6577a" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "Description of what was learned",
+    "type": "decision",
+    "scope_path": "2/1",
+    "work_item_id": "ELLIE-177"
+  }'
+```
+
+### Scope Paths
+
+Pick the most specific scope that fits:
+
+| Path | Name | Use for |
+|------|------|---------|
+| `2` | Projects | Cross-project knowledge |
+| `2/1` | ellie-dev | Relay, agents, integrations |
+| `2/2` | ellie-forest | Forest lib, DB, migrations |
+| `2/3` | ellie-home | Dashboard, Nuxt, themes |
+| `2/4` | ellie-os-app | Mobile/desktop app |
+
+Sub-scopes exist under each project (e.g. `2/1/1` = agents, `2/1/2` = finance). Use `/api/bridge/scopes` to browse.
+
+### How to Read (pull context before working)
+
+```bash
+# Semantic search
+curl -s -X POST http://localhost:3001/api/bridge/read \
+  -H "x-bridge-key: bk_d81869ef..." \
+  -H "Content-Type: application/json" \
+  -d '{"query": "how does the agent router work", "scope_path": "2/1"}'
+
+# List recent memories in a scope
+curl -s "http://localhost:3001/api/bridge/list?scope_path=2/1&limit=10" \
+  -H "x-bridge-key: bk_d81869ef..."
+```
+
+### Guidelines
+
+- Write **after** completing a task or making a decision, not while still exploring
+- Keep content concise but self-contained — future sessions won't have your context
+- Include `work_item_id` when the knowledge relates to a specific ticket
+- Don't duplicate what's already in CLAUDE.md — the bridge is for dynamic knowledge
+
 ## Project Architecture
 
 - **Relay:** `src/relay.ts` — Telegram bot + HTTP server + voice calls + Google Chat webhook

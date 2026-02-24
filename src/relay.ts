@@ -99,7 +99,7 @@ import {
   formatForestMetrics,
   estimateTokens,
 } from "./relay-utils.ts";
-import { getStructuredContext, getAgentStructuredContext, getAgentMemoryContext, getMaxMemoriesForModel, getGoogleTasksJSON } from "./context-sources.ts";
+import { getStructuredContext, getAgentStructuredContext, getAgentMemoryContext, getMaxMemoriesForModel, getGoogleTasksJSON, getLiveForestContext } from "./context-sources.ts";
 import { syncAllCalendars } from "./calendar-sync.ts";
 import {
   initOutlook,
@@ -166,7 +166,7 @@ const RELAY_DIR = process.env.RELAY_DIR || join(process.env.HOME || "~", ".claud
 // Agent mode: gives Claude access to tools (Read, Write, Bash, etc.)
 const AGENT_MODE = process.env.AGENT_MODE !== "false"; // on by default
 const DEFAULT_TOOLS = "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch";
-const MCP_TOOLS = "mcp__google-workspace__*,mcp__github__*,mcp__memory__*,mcp__sequential-thinking__*,mcp__plane__*,mcp__claude_ai_Miro__*,mcp__brave-search__*,mcp__excalidraw__*";
+const MCP_TOOLS = "mcp__google-workspace__*,mcp__github__*,mcp__memory__*,mcp__sequential-thinking__*,mcp__plane__*,mcp__claude_ai_Miro__*,mcp__brave-search__*,mcp__excalidraw__*,mcp__forest-bridge__*";
 const ALLOWED_TOOLS = (process.env.ALLOWED_TOOLS || `${DEFAULT_TOOLS},${MCP_TOOLS}`).split(",").map(t => t.trim());
 
 // Voice call config
@@ -631,7 +631,7 @@ bot.on("message:text", withQueue(async (ctx) => {
   // Gather context: full conversation (primary) + docket + search (excluding current conversation) + structured + forest + agent memory + queue
   const activeAgent = getActiveAgent("telegram");
   const activeConvoId = await getOrCreateConversation(supabase!, "telegram") || undefined;
-  const [conversationContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext] = await Promise.all([
+  const [conversationContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext, liveForest] = await Promise.all([
     activeConvoId && supabase ? getConversationMessages(supabase, activeConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
     getContextDocket(),
     getRelevantContext(supabase, effectiveText, "telegram", activeAgent, activeConvoId),
@@ -640,6 +640,7 @@ bot.on("message:text", withQueue(async (ctx) => {
     getForestContext(effectiveText),
     getAgentMemoryContext(activeAgent, detectedWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model)),
     agentResult?.dispatch.is_new ? getQueueContext(activeAgent) : Promise.resolve(""),
+    getLiveForestContext(effectiveText),
   ]);
   const recentMessages = conversationContext.text;
   // Auto-acknowledge queue items on new session (fire-and-forget)
@@ -744,6 +745,8 @@ bot.on("message:text", withQueue(async (ctx) => {
           await getPhaseContext(),
           await getHealthContext(),
           queueContext || undefined,
+          liveForest.incidents || undefined,
+          liveForest.awareness || undefined,
         );
         const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
         const fallbackAgentName = agentResult?.dispatch.agent.name || "general";
@@ -772,6 +775,8 @@ bot.on("message:text", withQueue(async (ctx) => {
     await getPhaseContext(),
     await getHealthContext(),
     queueContext || undefined,
+    liveForest.incidents || undefined,
+    liveForest.awareness || undefined,
   );
 
   const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -897,7 +902,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
 
     const voiceActiveAgent = getActiveAgent("telegram");
     const voiceConvoId = await getOrCreateConversation(supabase!, "telegram") || undefined;
-    const [voiceConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, voiceQueueContext] = await Promise.all([
+    const [voiceConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, voiceQueueContext, liveForest] = await Promise.all([
       voiceConvoId && supabase ? getConversationMessages(supabase, voiceConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
       getContextDocket(),
       getRelevantContext(supabase, effectiveTranscription, "telegram", voiceActiveAgent, voiceConvoId),
@@ -906,6 +911,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
       getForestContext(effectiveTranscription),
       getAgentMemoryContext(voiceActiveAgent, voiceWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model)),
       agentResult?.dispatch.is_new ? getQueueContext(voiceActiveAgent) : Promise.resolve(""),
+      getLiveForestContext(effectiveTranscription),
     ]);
     const recentMessages = voiceConvoContext.text;
     if (agentResult?.dispatch.is_new && voiceQueueContext) {
@@ -982,6 +988,8 @@ bot.on("message:voice", withQueue(async (ctx) => {
             await getPhaseContext(),
             await getHealthContext(),
             voiceQueueContext || undefined,
+            liveForest.incidents || undefined,
+            liveForest.awareness || undefined,
           );
           const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
           const voiceFallbackAgent = agentResult?.dispatch.agent.name || "general";
@@ -1014,6 +1022,8 @@ bot.on("message:voice", withQueue(async (ctx) => {
       await getPhaseContext(),
       await getHealthContext(),
       voiceQueueContext || undefined,
+      liveForest.incidents || undefined,
+      liveForest.awareness || undefined,
     );
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -1498,7 +1508,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
 
             const gchatActiveAgent = getActiveAgent("google-chat");
             const gchatConvoId = await getOrCreateConversation(supabase!, "google-chat") || undefined;
-            const [gchatConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, gchatQueueContext] = await Promise.all([
+            const [gchatConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, gchatQueueContext, liveForest] = await Promise.all([
               gchatConvoId && supabase ? getConversationMessages(supabase, gchatConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
               getContextDocket(),
               getRelevantContext(supabase, effectiveGchatText, "google-chat", gchatActiveAgent, gchatConvoId),
@@ -1507,6 +1517,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               getForestContext(effectiveGchatText),
               getAgentMemoryContext(gchatActiveAgent, gchatWorkItem, getMaxMemoriesForModel(gchatAgentResult?.dispatch.agent.model)),
               gchatAgentResult?.dispatch.is_new ? getQueueContext(gchatActiveAgent) : Promise.resolve(""),
+              getLiveForestContext(effectiveGchatText),
             ]);
             const recentMessages = gchatConvoContext.text;
             if (gchatAgentResult?.dispatch.is_new && gchatQueueContext) {
@@ -1604,6 +1615,8 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               await getPhaseContext(),
               await getHealthContext(),
               gchatQueueContext || undefined,
+              liveForest.incidents || undefined,
+              liveForest.awareness || undefined,
             );
 
             const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
@@ -1778,7 +1791,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
             // Gather context with correct active agent
             const alexaActiveAgent = getActiveAgent("alexa");
             const alexaConvoId = await getOrCreateConversation(supabase!, "alexa") || undefined;
-            const [alexaConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, alexaQueueContext] = await Promise.all([
+            const [alexaConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, alexaQueueContext, liveForest] = await Promise.all([
               alexaConvoId && supabase ? getConversationMessages(supabase, alexaConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
               getContextDocket(),
               getRelevantContext(supabase, effectiveQuery, "alexa", alexaActiveAgent, alexaConvoId),
@@ -1787,6 +1800,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               getForestContext(effectiveQuery),
               getAgentMemoryContext(alexaActiveAgent, alexaWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model)),
               agentResult?.dispatch.is_new ? getQueueContext(alexaActiveAgent) : Promise.resolve(""),
+              getLiveForestContext(effectiveQuery),
             ]);
             const recentMessages = alexaConvoContext.text;
             if (agentResult?.dispatch.is_new && alexaQueueContext) {
@@ -1809,6 +1823,8 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               await getPhaseContext(),
               await getHealthContext(),
               alexaQueueContext || undefined,
+              liveForest.incidents || undefined,
+              liveForest.awareness || undefined,
             );
 
             const ALEXA_TIMEOUT_MS = 6_000;
@@ -2742,7 +2758,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         const {
           bridgeReadEndpoint, bridgeWriteEndpoint,
           bridgeListEndpoint, bridgeScopesEndpoint,
-          bridgeWhoamiEndpoint,
+          bridgeWhoamiEndpoint, bridgeTagsEndpoint,
         } = await import("./api/bridge.ts");
 
         const queryParams: Record<string, string> = {};
@@ -2787,6 +2803,10 @@ If no actionable ideas are found, return: { "ideas": [] }`;
           case "whoami":
             if (isPost) { res.writeHead(405); res.end(); return; }
             await bridgeWhoamiEndpoint(mockReq, mockRes);
+            break;
+          case "tags":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await bridgeTagsEndpoint(mockReq, mockRes);
             break;
           default:
             res.writeHead(404, { "Content-Type": "application/json" });
@@ -4299,7 +4319,7 @@ async function handleEllieChatMessage(
 
     const ellieChatActiveAgent = getActiveAgent("ellie-chat");
     const ecConvoId = await getOrCreateConversation(supabase!, "ellie-chat") || undefined;
-    const [ecConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, ecQueueContext] = await Promise.all([
+    const [ecConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, ecQueueContext, liveForest] = await Promise.all([
       ecConvoId && supabase ? getConversationMessages(supabase, ecConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
       getContextDocket(),
       getRelevantContext(supabase, effectiveText, "ellie-chat", ellieChatActiveAgent, ecConvoId),
@@ -4308,6 +4328,7 @@ async function handleEllieChatMessage(
       getForestContext(effectiveText),
       getAgentMemoryContext(ellieChatActiveAgent, ellieChatWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model)),
       agentResult?.dispatch.is_new ? getQueueContext(ellieChatActiveAgent) : Promise.resolve(""),
+      getLiveForestContext(effectiveText),
     ]);
     const recentMessages = ecConvoContext.text;
     if (agentResult?.dispatch.is_new && ecQueueContext) {
@@ -4445,6 +4466,8 @@ async function handleEllieChatMessage(
       await getPhaseContext(),
       await getHealthContext(),
       ecQueueContext || undefined,
+      liveForest.incidents || undefined,
+      liveForest.awareness || undefined,
     );
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -4589,7 +4612,7 @@ async function runSpecialistAsync(
     // Gather context (same sources as sync path)
     const ellieChatActiveAgent = getActiveAgent("ellie-chat");
     const specConvoId = await getOrCreateConversation(supabase!, "ellie-chat") || undefined;
-    const [specConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, specQueueContext] = await Promise.all([
+    const [specConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, specQueueContext, liveForest] = await Promise.all([
       specConvoId && supabase ? getConversationMessages(supabase, specConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
       getContextDocket(),
       getRelevantContext(supabase, effectiveText, "ellie-chat", ellieChatActiveAgent, specConvoId),
@@ -4598,6 +4621,7 @@ async function runSpecialistAsync(
       getForestContext(effectiveText),
       getAgentMemoryContext(ellieChatActiveAgent, workItemId, getMaxMemoriesForModel(agentResult.dispatch.agent.model)),
       agentResult.dispatch.is_new ? getQueueContext(ellieChatActiveAgent) : Promise.resolve(""),
+      getLiveForestContext(effectiveText),
     ]);
     const recentMessages = specConvoContext.text;
     if (agentResult.dispatch.is_new && specQueueContext) {
@@ -4638,6 +4662,8 @@ async function runSpecialistAsync(
       await getPhaseContext(),
       await getHealthContext(),
       specQueueContext || undefined,
+      liveForest.incidents || undefined,
+      liveForest.awareness || undefined,
     );
 
     const agentTools = agentResult.dispatch.agent.tools_enabled;

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "forest-bridge": {
+      "type": "stdio",
+      "command": "bun",
+      "args": [
+        "/home/ellie/ellie-dev/mcp-forest-bridge.ts"
+      ],
+      "env": {
+        "BRIDGE_KEY": "bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e740f6577a",
+        "BRIDGE_URL": "http://localhost:3001/api/bridge"
+      }
+    }
+  }
+}

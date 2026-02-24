@@ -21,7 +21,7 @@ const RELAY_DIR = process.env.RELAY_DIR || join(process.env.HOME || "~", ".claud
 const AGENT_MODE = process.env.AGENT_MODE !== "false";
 const AGENT_MODEL_OVERRIDE = process.env.AGENT_MODEL_OVERRIDE === "true";
 const DEFAULT_TOOLS = "Read,Edit,Write,Bash,Glob,Grep,WebSearch,WebFetch";
-const MCP_TOOLS = "mcp__google-workspace__*,mcp__github__*,mcp__memory__*,mcp__sequential-thinking__*,mcp__plane__*,mcp__claude_ai_Miro__*,mcp__brave-search__*,mcp__excalidraw__*";
+const MCP_TOOLS = "mcp__google-workspace__*,mcp__github__*,mcp__memory__*,mcp__sequential-thinking__*,mcp__plane__*,mcp__claude_ai_Miro__*,mcp__brave-search__*,mcp__excalidraw__*,mcp__forest-bridge__*";
 const ALLOWED_TOOLS = (process.env.ALLOWED_TOOLS || `${DEFAULT_TOOLS},${MCP_TOOLS}`).split(",").map(t => t.trim());
 const SESSION_FILE = join(RELAY_DIR, "session.json");
 const LOCK_FILE = join(RELAY_DIR, "bot.lock");

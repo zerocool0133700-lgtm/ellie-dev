@@ -86,8 +86,125 @@ export async function routeMessage(
 }
 
 /**
+ * Local dispatch — queries Supabase tables directly, bypassing the edge function.
+ * Mirrors the logic in supabase/functions/agent-dispatch/index.ts.
+ */
+async function localDispatch(
+  supabase: SupabaseClient,
+  agentName: string,
+  userId: string,
+  channel: string,
+  message: string,
+  workItemId?: string,
+  skillName?: string,
+): Promise<DispatchResult | null> {
+  // 1. Look up agent
+  const { data: agent, error: agentError } = await supabase
+    .from("agents")
+    .select("id, name, type, system_prompt, model, tools_enabled, capabilities")
+    .eq("name", agentName)
+    .eq("status", "active")
+    .single();
+
+  if (agentError || !agent) {
+    console.error(`[agent-router] Local dispatch: agent not found: ${agentName}`);
+    return null;
+  }
+
+  // 1b. Look up matched skill
+  let skillContext: { name: string; description: string } | undefined;
+  if (skillName) {
+    const { data: skill } = await supabase
+      .from("skills")
+      .select("name, description")
+      .eq("agent_id", agent.id)
+      .eq("name", skillName)
+      .eq("enabled", true)
+      .single();
+
+    if (skill) {
+      skillContext = { name: skill.name, description: skill.description };
+    }
+  }
+
+  // 2. Check for existing active session
+  const { data: existingSession } = await supabase
+    .from("agent_sessions")
+    .select("id, context_summary")
+    .eq("agent_id", agent.id)
+    .eq("user_id", userId || "")
+    .eq("channel", channel || "telegram")
+    .eq("state", "active")
+    .order("last_activity", { ascending: false })
+    .limit(1)
+    .single();
+
+  let sessionId: string;
+  let isNew: boolean;
+  let contextSummary: string | undefined;
+
+  if (existingSession) {
+    sessionId = existingSession.id;
+    isNew = false;
+    contextSummary = existingSession.context_summary ?? undefined;
+
+    await supabase
+      .from("agent_sessions")
+      .update({ last_activity: new Date().toISOString() })
+      .eq("id", sessionId);
+  } else {
+    const { data: newSession, error: sessionError } = await supabase
+      .from("agent_sessions")
+      .insert({
+        agent_id: agent.id,
+        user_id: userId || "",
+        channel: channel || "telegram",
+        work_item_id: workItemId || null,
+        state: "active",
+        last_activity: new Date().toISOString(),
+      })
+      .select("id")
+      .single();
+
+    if (sessionError || !newSession) {
+      console.error("[agent-router] Local dispatch: session creation failed:", sessionError?.message);
+      return null;
+    }
+
+    sessionId = newSession.id;
+    isNew = true;
+  }
+
+  // 3. Insert user message
+  await supabase.from("agent_messages").insert({
+    session_id: sessionId,
+    role: "user",
+    content: message,
+  });
+
+  console.log(
+    `[agent-router] Local dispatch: ${isNew ? "New" : "Resumed"} session ${sessionId.slice(0, 8)} for ${agentName}`,
+  );
+
+  return {
+    session_id: sessionId,
+    agent: {
+      name: agent.name,
+      type: agent.type,
+      system_prompt: agent.system_prompt,
+      model: agent.model,
+      tools_enabled: agent.tools_enabled || [],
+      capabilities: agent.capabilities || [],
+    },
+    is_new: isNew,
+    context_summary: contextSummary,
+    skill_context: skillContext,
+  };
+}
+
+/**
  * Dispatch: create/resume an agent session and get agent config.
- * Returns null if dispatch is unavailable.
+ * Tries edge function first, falls back to local dispatch on failure.
  */
 export async function dispatchAgent(
   supabase: SupabaseClient | null,
@@ -113,8 +230,8 @@ export async function dispatchAgent(
     });
 
     if (error || !data?.session_id) {
-      console.error("[agent-router] Dispatch error:", error || "no session_id");
-      return null;
+      console.warn("[agent-router] Edge dispatch failed, trying local fallback:", error || "no session_id");
+      return localDispatch(supabase, agentName, userId, channel, message, workItemId, skillName);
     }
 
     console.log(
@@ -122,14 +239,74 @@ export async function dispatchAgent(
     );
     return data as DispatchResult;
   } catch (err) {
-    console.error("[agent-router] Dispatch unavailable:", err);
-    return null;
+    console.warn("[agent-router] Edge dispatch unavailable, trying local fallback:", err);
+    return localDispatch(supabase, agentName, userId, channel, message, workItemId, skillName);
   }
 }
 
 /**
+ * Local sync — logs assistant response and updates session directly via Supabase.
+ * Mirrors the logic in supabase/functions/agent-sync/index.ts (sans handoffs).
+ */
+async function localSync(
+  supabase: SupabaseClient,
+  sessionId: string,
+  assistantMessage: string,
+  options?: {
+    tokens?: number;
+    duration_ms?: number;
+    status?: "completed" | "failed";
+    agent_name?: string;
+  },
+): Promise<SyncResult | null> {
+  // 1. Insert assistant message
+  await supabase.from("agent_messages").insert({
+    session_id: sessionId,
+    role: "assistant",
+    content: assistantMessage,
+    tokens: options?.tokens || 0,
+    duration_ms: options?.duration_ms || null,
+  });
+
+  // 2. Get current session
+  const { data: session, error: sessionError } = await supabase
+    .from("agent_sessions")
+    .select("id, agent_id, turn_count")
+    .eq("id", sessionId)
+    .single();
+
+  if (sessionError || !session) {
+    console.error("[agent-router] Local sync: session not found:", sessionId);
+    return null;
+  }
+
+  // 3. Update session
+  const sessionUpdate: Record<string, unknown> = {
+    turn_count: (session.turn_count || 0) + 1,
+    last_activity: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  if (options?.tokens) sessionUpdate.output_tokens = options.tokens;
+  if (options?.duration_ms) sessionUpdate.duration_ms = options.duration_ms;
+
+  if (options?.status === "completed" || options?.status === "failed") {
+    sessionUpdate.state = options.status;
+    sessionUpdate.completed_at = new Date().toISOString();
+  }
+
+  await supabase
+    .from("agent_sessions")
+    .update(sessionUpdate)
+    .eq("id", sessionId);
+
+  return { success: true };
+}
+
+/**
  * Sync: log assistant response and update session stats.
- * Returns null if sync is unavailable (non-fatal — message already sent).
+ * Tries edge function first, falls back to local sync on failure.
+ * Non-fatal — message is already sent by the time sync runs.
  */
 export async function syncResponse(
   supabase: SupabaseClient | null,
@@ -159,14 +336,14 @@ export async function syncResponse(
     });
 
     if (error) {
-      console.error("[agent-router] Sync error:", error);
-      return null;
+      console.warn("[agent-router] Edge sync failed, trying local fallback:", error);
+      return localSync(supabase, sessionId, assistantMessage, options);
     }
 
     return data as SyncResult;
   } catch (err) {
-    console.error("[agent-router] Sync unavailable:", err);
-    return null;
+    console.warn("[agent-router] Edge sync unavailable, trying local fallback:", err);
+    return localSync(supabase, sessionId, assistantMessage, options);
   }
 }
 

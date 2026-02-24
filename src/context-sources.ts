@@ -297,13 +297,13 @@ export async function getActivitySnapshot(
 const GAPI_CLIENT_ID = process.env.GOOGLE_CALENDAR_CLIENT_ID || process.env.GOOGLE_CHAT_OAUTH_CLIENT_ID || "";
 const GAPI_CLIENT_SECRET = process.env.GOOGLE_CALENDAR_CLIENT_SECRET || process.env.GOOGLE_CHAT_OAUTH_CLIENT_SECRET || "";
 
-interface GoogleAccount {
+export interface GoogleAccount {
   label: string;
   refreshToken: string;
   tokenCache: { accessToken: string; expiresAt: number } | null;
 }
 
-const googleAccounts: GoogleAccount[] = [];
+export const googleAccounts: GoogleAccount[] = [];
 
 const personalToken = process.env.GOOGLE_API_REFRESH_TOKEN || process.env.GOOGLE_CALENDAR_REFRESH_TOKEN || "";
 if (personalToken) {
@@ -315,7 +315,7 @@ if (workspaceToken) {
   googleAccounts.push({ label: "workspace", refreshToken: workspaceToken, tokenCache: null });
 }
 
-async function getAccessTokenForAccount(account: GoogleAccount): Promise<string | null> {
+export async function getAccessTokenForAccount(account: GoogleAccount): Promise<string | null> {
   if (!GAPI_CLIENT_ID || !GAPI_CLIENT_SECRET) return null;
 
   if (account.tokenCache && Date.now() < account.tokenCache.expiresAt - 60_000) {
@@ -856,6 +856,7 @@ export async function getAgentMemoryContext(
   try {
     const {
       getAgentContext, getEntity, getWorkSessionByPlaneId,
+      getCrossAgentContext, getOrGenerateDigest, getAgent,
     } = await import('../../ellie-forest/src/index');
 
     // Resolve entity
@@ -916,6 +917,42 @@ export async function getAgentMemoryContext(
         `\n${lines.join('\n')}`;
     }
 
+    // Cross-agent pull (ELLIE-178)
+    try {
+      const agent = await getAgent(agentName);
+      const crossMemories = await getCrossAgentContext({
+        tree_id: tree.id,
+        entity_id: entity.id,
+        species: agent?.species,
+        max_memories: 10,
+      });
+
+      if (crossMemories.length > 0) {
+        const crossLines = crossMemories.map((m: any) => {
+          const species = m.source_agent_species ? `[${m.source_agent_species}]` : '[agent]';
+          const conf = m.confidence ? ` (confidence: ${m.confidence.toFixed(1)})` : '';
+          return `  ${species} ${m.content}${conf}`;
+        });
+        memoryContext += `\n\nTEAM CONTEXT (what other agents have learned):\n${crossLines.join('\n')}`;
+      }
+
+      // Session digest (ELLIE-178 Layer 2)
+      const digest = await getOrGenerateDigest({ tree_id: tree.id });
+      if (digest) {
+        const dc = digest.digest_content as any;
+        const parts: string[] = [];
+        if (dc.decisions?.length) parts.push(`  Decisions: ${dc.decisions.join('; ')}`);
+        if (dc.facts_learned?.length) parts.push(`  Facts learned: ${dc.facts_learned.join('; ')}`);
+        if (dc.hypotheses?.length) parts.push(`  Hypotheses: ${dc.hypotheses.join('; ')}`);
+        if (dc.active_threads?.length) parts.push(`  Active threads: ${dc.active_threads.slice(0, 5).join('; ')}`);
+        if (parts.length > 0) {
+          memoryContext += `\n\nSESSION DIGEST (recent team activity):\n${parts.join('\n')}`;
+        }
+      }
+    } catch (err) {
+      console.warn(`[context] Cross-agent context failed for ${agentName}:`, err);
+    }
+
     return {
       memoryContext,
       sessionIds: {
@@ -930,4 +967,129 @@ export async function getAgentMemoryContext(
     console.warn(`[context] Agent memory context failed for ${agentName}:`, err);
     return empty;
   }
+}
+
+// ============================================================
+// LIVE FOREST CONTEXT — Active incidents, contradictions,
+// creature status, person mentions
+// ============================================================
+
+/**
+ * Active incidents (P0/P1/P2). Surfaced at high priority so
+ * every agent knows when something is on fire.
+ */
+export async function getActiveIncidentContext(): Promise<string> {
+  try {
+    const { listIncidents, getIncidentSummary } = await import("../../ellie-forest/src/incidents");
+    const incidents = await listIncidents({ state: ["active", "investigating"] });
+    if (!incidents.length) return "";
+
+    const parts: string[] = [];
+    for (const inc of incidents.slice(0, 3)) {
+      const severity = (inc.metadata as any)?.severity || "unknown";
+      const summary = await getIncidentSummary(inc.id);
+      const desc = summary?.status || (inc.metadata as any)?.description || "Active incident";
+      parts.push(`[${String(severity).toUpperCase()}] ${inc.name}: ${desc}`);
+    }
+    return `ACTIVE INCIDENTS (${incidents.length}):\n${parts.join("\n")}`;
+  } catch (err) {
+    console.warn("[context] Active incident context failed:", err);
+    return "";
+  }
+}
+
+/**
+ * Unresolved contradictions in the forest knowledge graph.
+ * Helps agents avoid repeating conflicting information.
+ */
+export async function getContradictionContext(): Promise<string> {
+  try {
+    const { listUnresolvedContradictions } = await import("../../ellie-forest/src/shared-memory");
+    const contradictions = await listUnresolvedContradictions();
+    if (!contradictions.length) return "";
+
+    const items = contradictions.slice(0, 5).map(
+      (c) => `- ${c.content} (confidence: ${c.confidence ?? "?"})`
+    );
+    return `UNRESOLVED CONTRADICTIONS (${contradictions.length} total):\n${items.join("\n")}`;
+  } catch (err) {
+    console.warn("[context] Contradiction context failed:", err);
+    return "";
+  }
+}
+
+/**
+ * Active creatures — tasks currently being worked on across the forest.
+ * Gives the agent awareness of what's in flight.
+ */
+export async function getCreatureStatusContext(): Promise<string> {
+  try {
+    const { getActiveCreatures } = await import("../../ellie-forest/src/creatures");
+    const creatures = await getActiveCreatures();
+    if (!creatures.length) return "";
+
+    const items = creatures.slice(0, 8).map((c) => {
+      const state = c.state || "unknown";
+      const entity = (c as any).entity_name || c.entity_id?.substring(0, 8) || "unassigned";
+      return `- [${state}] ${c.intent || c.species} (${entity})`;
+    });
+    return `ACTIVE WORK (${creatures.length} creatures):\n${items.join("\n")}`;
+  } catch (err) {
+    console.warn("[context] Creature status context failed:", err);
+    return "";
+  }
+}
+
+/**
+ * Detect person names mentioned in the user message and pull their
+ * forest context (groups, notes). Only fires if a known person
+ * name appears in the text.
+ */
+export async function getPersonMentionContext(text: string): Promise<string> {
+  try {
+    const { listPeople, getPersonGroups } = await import("../../ellie-forest/src/people");
+    const people = await listPeople();
+    if (!people.length) return "";
+
+    const lower = text.toLowerCase();
+    const mentioned = people.filter(
+      (p) => p.name && p.name.length > 2 && lower.includes(p.name.toLowerCase())
+    );
+    if (!mentioned.length) return "";
+
+    const parts: string[] = [];
+    for (const person of mentioned.slice(0, 3)) {
+      const groups = await getPersonGroups(person.id);
+      const groupNames = groups.map((g: any) => g.name).filter(Boolean).join(", ");
+      const note = (person as any).notes || "";
+      parts.push(`${person.name}${groupNames ? ` (${groupNames})` : ""}${note ? `: ${note}` : ""}`);
+    }
+    return `MENTIONED PEOPLE:\n${parts.join("\n")}`;
+  } catch (err) {
+    console.warn("[context] Person mention context failed:", err);
+    return "";
+  }
+}
+
+/**
+ * Combined live forest context. Fetches all four sources in parallel.
+ * Returns { incidents, awareness } so callers can inject at different priorities.
+ *   - incidents: P0/P1 alerts → high priority (always visible)
+ *   - awareness: contradictions + creatures + person mentions → normal priority
+ */
+export async function getLiveForestContext(
+  userMessage?: string,
+): Promise<{ incidents: string; awareness: string }> {
+  const [incidents, contradictions, creatures, personMentions] = await Promise.all([
+    getActiveIncidentContext(),
+    getContradictionContext(),
+    getCreatureStatusContext(),
+    userMessage ? getPersonMentionContext(userMessage) : Promise.resolve(""),
+  ]);
+
+  const awarenessParts = [contradictions, creatures, personMentions].filter(Boolean);
+  return {
+    incidents,
+    awareness: awarenessParts.join("\n\n"),
+  };
 }

@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS messages (
   delivery_status TEXT DEFAULT 'pending' CHECK (delivery_status IN ('pending', 'sent', 'failed', 'fallback')),
   external_id TEXT, -- Platform message ID (gchat resource name or telegram message_id)
   sent_at TIMESTAMPTZ,
-  delivery_channel TEXT -- Actual channel delivered on (may differ from channel if fallback used)
+  delivery_channel TEXT, -- Actual channel delivered on (may differ from channel if fallback used)
+  user_id TEXT -- Who sent/received this message (ELLIE-195)
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at DESC);
@@ -55,6 +56,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel);
 CREATE INDEX IF NOT EXISTS idx_messages_summarized ON messages(summarized) WHERE summarized = FALSE;
 CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_messages_delivery_status ON messages(delivery_status) WHERE delivery_status != 'sent';
+CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id) WHERE user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_channel_user_id ON messages(channel, user_id);
 
 -- ============================================================
 -- MEMORY TABLE (Facts & Goals)

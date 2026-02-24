@@ -577,17 +577,30 @@ export async function getMemoryContext(
  */
 export async function getRecentMessages(
   supabase: SupabaseClient | null,
-  limit: number = 10
+  limit: number = 10,
+  channel?: string,
+  userId?: string,
 ): Promise<string> {
   if (!supabase) return "";
 
   try {
-    const { data, error } = await supabase
+    let query = supabase
       .from("messages")
       .select("role, content, created_at")
-      .in("channel", ["telegram", "voice", "google-chat"])
       .order("created_at", { ascending: false })
       .limit(limit);
+
+    if (channel) {
+      query = query.eq("channel", channel);
+    } else {
+      query = query.in("channel", ["telegram", "voice", "google-chat"]);
+    }
+
+    if (userId) {
+      query = query.eq("user_id", userId);
+    }
+
+    const { data, error } = await query;
 
     if (error || !data?.length) return "";
 
@@ -612,20 +625,41 @@ export async function getRecentMessages(
  */
 export async function getRelevantContext(
   supabase: SupabaseClient | null,
-  query: string
+  query: string,
+  channel?: string,
+  sourceAgent?: string,
+  excludeConversationId?: string,
 ): Promise<string> {
   if (!supabase) return "";
+  if (query.trim().length < 10) return ""; // Short messages don't need search context
 
   try {
-    const { data, error } = await supabase.functions.invoke("search", {
-      body: { query, match_count: 5, table: "messages" },
-    });
+    // Request extra results so we still get enough after channel filtering
+    const matchCount = channel ? 8 : 3;
+    const body: Record<string, unknown> = {
+      query, match_count: matchCount, match_threshold: 0.75, table: "messages",
+    };
+    if (sourceAgent) body.source_agent = sourceAgent;
+    const { data, error } = await supabase.functions.invoke("search", { body });
 
     if (error || !data?.length) return "";
 
+    // Filter out results older than 14 days and scope to current channel
+    const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+    let recent = data.filter((m: any) => !m.created_at || new Date(m.created_at).getTime() > cutoff);
+    if (channel) {
+      recent = recent.filter((m: any) => m.channel === channel);
+    }
+    // ELLIE-202: Exclude messages from current conversation (already loaded in full)
+    if (excludeConversationId) {
+      recent = recent.filter((m: any) => m.conversation_id !== excludeConversationId);
+    }
+    recent = recent.slice(0, 3); // Keep top 3
+    if (recent.length === 0) return "";
+
     return (
       "RELEVANT PAST MESSAGES:\n" +
-      data
+      recent
         .map((m: any) => `[${m.role}]: ${m.content}`)
         .join("\n")
     );

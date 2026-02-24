@@ -283,6 +283,8 @@ export function buildPrompt(
   phaseContext?: string,
   healthContext?: string,
   queueContext?: string,
+  incidentContext?: string,
+  awarenessContext?: string,
 ): string {
   const channelLabel = channel === "google-chat" ? "Google Chat" : channel === "ellie-chat" ? "Ellie Chat (dashboard)" : "Telegram";
 
@@ -334,6 +336,10 @@ export function buildPrompt(
       "- Plane (project management — workspace: evelife at plane.ellie-labs.dev)\n" +
       "- Brave Search (mcp__brave-search__brave_web_search, mcp__brave-search__brave_local_search)\n" +
       "- Miro (diagrams, docs, tables), Excalidraw (drawings, diagrams)\n" +
+      "- Forest Bridge (mcp__forest-bridge__forest_read, forest_write, forest_list, forest_scopes):\n" +
+      "  Your persistent knowledge graph. Use forest_read to search past decisions/findings/facts.\n" +
+      "  Use forest_write to record important discoveries, decisions, or facts that should persist.\n" +
+      "  Scopes: 2/1=ellie-dev, 2/2=ellie-forest, 2/3=ellie-home, 2/4=ellie-os-app\n" +
       (isOutlookConfigured()
         ? "- Microsoft Outlook (" + getOutlookEmail() + "):\n" +
           "  Available via HTTP API (use curl from Bash):\n" +
@@ -421,6 +427,9 @@ export function buildPrompt(
   // Priority 3: Full conversation thread (ELLIE-202 — primary context source, ground truth)
   if (recentMessages) sections.push({ label: "conversation", content: `\n${recentMessages}`, priority: 3 });
 
+  // Priority 3: Active incidents — always visible when something is on fire
+  if (incidentContext) sections.push({ label: "incidents", content: `\n${incidentContext}`, priority: 3 });
+
   // Priority 4: Queue items for this agent (ELLIE-201 — injected on new session)
   if (queueContext) sections.push({ label: "queue", content: `\n${queueContext}`, priority: 4 });
 
@@ -429,6 +438,7 @@ export function buildPrompt(
   if (structuredContext) sections.push({ label: "structured-context", content: `\n${structuredContext}`, priority: 5 });
   if (contextDocket) sections.push({ label: "context-docket", content: `\nCONTEXT:\n${contextDocket}`, priority: 6 });
   if (agentMemoryContext) sections.push({ label: "agent-memory", content: agentMemoryContext, priority: 5 });
+  if (awarenessContext) sections.push({ label: "forest-awareness", content: `\n${awarenessContext}`, priority: 5 });
 
   // Priority 7: Search results (already trimmed by trimSearchContext, lowest variable priority)
   const searchBlock = trimSearchContext([relevantContext || '', elasticContext || '', forestContext || '']);

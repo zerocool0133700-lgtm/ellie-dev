@@ -178,7 +178,7 @@ export async function startWorkSession(req: any, res: any, bot: Bot, supabase?: 
  */
 export async function updateWorkSession(req: any, res: any, bot: Bot) {
   try {
-    const { work_item_id, message, agent } = req.body;
+    const { work_item_id, message, agent, git_sha } = req.body;
 
     if (!work_item_id || !message) {
       return res.status(400).json({
@@ -196,7 +196,7 @@ export async function updateWorkSession(req: any, res: any, bot: Bot) {
     const entity = agent ? await getEntity(agent) : null;
 
     // Add progress commit (replaces Supabase insert)
-    await forestAddUpdate(tree.id, entity?.id, message);
+    await forestAddUpdate(tree.id, entity?.id, message, undefined, git_sha || undefined);
 
     // Notify via policy engine (Google Chat only by default — Telegram disabled for updates)
     const escapeMarkdown = (text: string) => text.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');

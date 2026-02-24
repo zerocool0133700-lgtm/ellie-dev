@@ -440,6 +440,71 @@ ${transcript}`;
 }
 
 /**
+ * Load full conversation messages for the active conversation (ELLIE-202).
+ * This is the primary context source — the ground-truth thread.
+ *
+ * Smart truncation for long conversations:
+ *  - Short (≤40 messages): return all
+ *  - Medium (≤100): first 5 + last 35
+ *  - Long (>100): first 5 + rolling summary + last 35
+ */
+export async function getConversationMessages(
+  supabase: SupabaseClient,
+  conversationId: string,
+): Promise<{ text: string; messageCount: number; conversationId: string }> {
+  try {
+    // Fetch conversation metadata (for summary fallback)
+    const { data: convo } = await supabase
+      .from("conversations")
+      .select("summary, message_count")
+      .eq("id", conversationId)
+      .single();
+
+    if (!convo) return { text: "", messageCount: 0, conversationId };
+
+    // Fetch all messages in the conversation
+    const { data: messages, error } = await supabase
+      .from("messages")
+      .select("role, content, created_at")
+      .eq("conversation_id", conversationId)
+      .order("created_at", { ascending: true });
+
+    if (error || !messages?.length) return { text: "", messageCount: 0, conversationId };
+
+    const total = messages.length;
+
+    const fmt = (m: { role: string; content: string }) =>
+      `[${m.role}]: ${m.content}`;
+
+    let lines: string[];
+
+    if (total <= 40) {
+      // Short conversation — include everything
+      lines = messages.map(fmt);
+    } else if (total <= 100) {
+      // Medium — first 5 (for context anchoring) + last 35
+      const head = messages.slice(0, 5).map(fmt);
+      const tail = messages.slice(-35).map(fmt);
+      lines = [...head, `\n[... ${total - 40} earlier messages omitted ...]\n`, ...tail];
+    } else {
+      // Long — first 5 + rolling summary (if available) + last 35
+      const head = messages.slice(0, 5).map(fmt);
+      const tail = messages.slice(-35).map(fmt);
+      const summaryLine = convo.summary
+        ? `\n[CONVERSATION SUMMARY (${total - 40} earlier messages): ${convo.summary}]\n`
+        : `\n[... ${total - 40} earlier messages omitted ...]\n`;
+      lines = [...head, summaryLine, ...tail];
+    }
+
+    const text = "CURRENT CONVERSATION:\n" + lines.join("\n");
+    return { text, messageCount: total, conversationId };
+  } catch (err) {
+    console.error("[conversation] getConversationMessages error:", err);
+    return { text: "", messageCount: 0, conversationId };
+  }
+}
+
+/**
  * Get conversation context for ELLIE-50 classifier.
  * Returns structured info about the active conversation on a channel.
  */
