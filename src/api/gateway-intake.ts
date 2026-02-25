@@ -88,7 +88,7 @@ async function handleGatewayEvent(
 
   // Write to Forest Bridge as a finding
   try {
-    const { writeMemory } = await import("../../ellie-forest/src/index");
+    const { writeMemory } = await import("../../../ellie-forest/src/index");
     await writeMemory({
       content: `[${source}] ${summary}${payload?.url ? ` — ${payload.url}` : ""}`,
       type: "finding",
@@ -176,7 +176,7 @@ async function handleGatewayEmail(
       );
 
       // Write to Bridge as awareness
-      const { writeMemory } = await import("../../ellie-forest/src/index");
+      const { writeMemory } = await import("../../../ellie-forest/src/index");
       await writeMemory({
         content: `[email] ${change_type}: "${message.subject}" from ${message.from?.emailAddress?.name || message.from?.emailAddress?.address || "unknown"}`,
         type: "finding",
