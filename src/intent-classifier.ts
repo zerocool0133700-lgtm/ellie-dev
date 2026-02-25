@@ -25,6 +25,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type Anthropic from "@anthropic-ai/sdk";
 import { getConversationContext } from "./conversations.ts";
+import { matchSkillCommand } from "./skills/commands.ts";
 
 export type ExecutionMode = "single" | "pipeline" | "fan-out" | "critic-loop";
 
@@ -123,6 +124,26 @@ export async function classifyIntent(
       execution_mode: "single",
       strippedMessage: slash.strippedMessage,
     };
+  }
+
+  // Tier 1.5: SKILL.md slash commands (ELLIE-217)
+  try {
+    const skillMatch = await matchSkillCommand(message);
+    if (skillMatch) {
+      const agent = skillMatch.command.agent || "general";
+      console.log(`[classifier] Skill command /${skillMatch.command.name} → "${agent}"`);
+      return {
+        agent_name: agent,
+        rule_name: "skill_command",
+        confidence: 1.0,
+        execution_mode: "single",
+        strippedMessage: skillMatch.args || message,
+        skill_name: skillMatch.command.skillName,
+        skill_description: skillMatch.command.description,
+      };
+    }
+  } catch (err) {
+    console.warn("[classifier] Skill command match failed:", err);
   }
 
   // Tier 2+3: Run session continuity and LLM classification in parallel

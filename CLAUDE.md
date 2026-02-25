@@ -495,12 +495,26 @@ curl -s "http://localhost:3001/api/bridge/list?scope_path=2/1&limit=10" \
 - Include `work_item_id` when the knowledge relates to a specific ticket
 - Don't duplicate what's already in CLAUDE.md — the bridge is for dynamic knowledge
 
+## Skills System (ELLIE-217)
+
+Agent capabilities are defined as `SKILL.md` files in `skills/*/SKILL.md`. Each has YAML frontmatter (name, triggers, requirements) and markdown instructions injected into agent prompts.
+
+- **Location:** `skills/` (bundled), `~/.ellie/skills/` (personal), `<workspace>/skills/` (project overrides)
+- **Core modules:** `src/skills/` — loader, eligibility, snapshot, commands, watcher
+- **Always-on skills:** `briefing` (Forest pre-work search), `forest` (knowledge library)
+- **Env-gated skills:** `plane`, `github`, `google-workspace`, `miro`, `memory`
+- **Hot-reload:** Edit any SKILL.md and the relay picks it up automatically
+- **Slash commands:** User-invocable skills become `/command` (e.g., `/plane list issues`)
+
+To add a new skill: create `skills/<name>/SKILL.md` with frontmatter + instructions.
+
 ## Project Architecture
 
 - **Relay:** `src/relay.ts` — Telegram bot + HTTP server + voice calls + Google Chat webhook
 - **Google Chat:** `src/google-chat.ts` — Service account auth, message sending, webhook parsing
 - **Memory:** `src/memory.ts` — Supabase-backed conversation history + semantic search
 - **Agents:** `src/agent-router.ts` — multi-agent routing via Supabase edge functions
+- **Skills:** `src/skills/` — SKILL.md loader, eligibility filter, prompt injection, slash commands (ELLIE-217)
 - **Work Sessions:** `src/api/work-session.ts` — session lifecycle management (notifies Telegram + Google Chat)
 - **Plane:** `src/plane.ts` — work item state sync
 - **Voice:** Local Whisper transcription + ElevenLabs TTS streaming

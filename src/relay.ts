@@ -93,6 +93,7 @@ import {
 } from "./agent-router.ts";
 import { initClassifier } from "./intent-classifier.ts";
 import { initEntailmentClassifier } from "./entailment-classifier.ts";
+import { startSkillWatcher, getSkillSnapshot } from "./skills/index.ts";
 import {
   trimSearchContext,
   getSpecialistAck,
@@ -753,6 +754,7 @@ bot.on("message:text", withQueue(async (ctx) => {
           queueContext || undefined,
           liveForest.incidents || undefined,
           liveForest.awareness || undefined,
+          (await getSkillSnapshot()).prompt || undefined,
         );
         const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
         const fallbackAgentName = agentResult?.dispatch.agent.name || "general";
@@ -783,6 +785,7 @@ bot.on("message:text", withQueue(async (ctx) => {
     queueContext || undefined,
     liveForest.incidents || undefined,
     liveForest.awareness || undefined,
+    (await getSkillSnapshot()).prompt || undefined,
   );
 
   const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -996,6 +999,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
             voiceQueueContext || undefined,
             liveForest.incidents || undefined,
             liveForest.awareness || undefined,
+            (await getSkillSnapshot()).prompt || undefined,
           );
           const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
           const voiceFallbackAgent = agentResult?.dispatch.agent.name || "general";
@@ -1030,6 +1034,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
       voiceQueueContext || undefined,
       liveForest.incidents || undefined,
       liveForest.awareness || undefined,
+      (await getSkillSnapshot()).prompt || undefined,
     );
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -1254,6 +1259,12 @@ if (anthropic && supabase) {
 if (anthropic) {
   initEntailmentClassifier(anthropic);
 }
+
+// Initialize SKILL.md watcher for hot-reload (ELLIE-217)
+startSkillWatcher();
+getSkillSnapshot().then(s => {
+  console.log(`[skills] Initial snapshot: ${s.skills.length} skills, ${s.totalChars} chars`);
+}).catch(err => console.warn("[skills] Initial snapshot failed:", err));
 
 // ES forest sync listener started via initForestSync() at boot (ELLIE-104/ELLIE-107)
 
@@ -1623,6 +1634,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               gchatQueueContext || undefined,
               liveForest.incidents || undefined,
               liveForest.awareness || undefined,
+              (await getSkillSnapshot()).prompt || undefined,
             );
 
             const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
@@ -1831,6 +1843,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
               alexaQueueContext || undefined,
               liveForest.incidents || undefined,
               liveForest.awareness || undefined,
+              (await getSkillSnapshot()).prompt || undefined,
             );
 
             const ALEXA_TIMEOUT_MS = 6_000;
@@ -2504,6 +2517,195 @@ If no actionable ideas are found, return: { "ideas": [] }`;
   // Tool approval endpoint (called by PreToolUse hook — ELLIE-213)
   if (url.pathname === "/internal/tool-approval" && req.method === "POST") {
     handleToolApprovalHTTP(req, res);
+    return;
+  }
+
+  // Skills snapshot endpoint (ELLIE-219 — dashboard reads live skill state)
+  if (url.pathname === "/api/skills/snapshot" && req.method === "GET") {
+    (async () => {
+      try {
+        const { loadSkillEntries } = await import("./skills/loader.ts");
+        const { filterEligibleSkills } = await import("./skills/eligibility.ts");
+        const { getSkillSnapshot } = await import("./skills/snapshot.ts");
+        const { SKILL_LIMITS } = await import("./skills/types.ts");
+
+        const allSkills = await loadSkillEntries();
+        const eligible = await filterEligibleSkills(allSkills);
+        const snapshot = await getSkillSnapshot();
+        const eligibleNames = new Set(eligible.map(s => s.name));
+
+        // Build per-requirement met/unmet status for dashboard
+        // Fetch vault domains for credential status
+        let vaultDomains: Set<string> = new Set();
+        try {
+          const { data } = await supabase!.from("credentials").select("domain");
+          if (data) vaultDomains = new Set(data.map((r: any) => r.domain));
+        } catch {}
+
+        const skills = allSkills.map(s => {
+          const reqs: Array<{ type: string; key: string; met: boolean }> = [];
+          if (s.frontmatter.requires?.env) {
+            for (const envKey of s.frontmatter.requires.env) {
+              reqs.push({ type: "env", key: envKey, met: !!process.env[envKey] });
+            }
+          }
+          if (s.frontmatter.requires?.bins) {
+            for (const bin of s.frontmatter.requires.bins) {
+              reqs.push({ type: "binary", key: bin, met: true }); // if we got this far, bins were checked
+            }
+          }
+          if (s.frontmatter.requires?.credentials) {
+            for (const domain of s.frontmatter.requires.credentials) {
+              reqs.push({ type: "credential", key: domain, met: vaultDomains.has(domain) });
+            }
+          }
+
+          return {
+            name: s.name,
+            description: s.description,
+            eligible: eligibleNames.has(s.name),
+            always: s.frontmatter.always || false,
+            userInvocable: s.frontmatter.userInvocable || false,
+            agent: s.frontmatter.agent || null,
+            mcp: s.frontmatter.mcp || null,
+            triggers: s.frontmatter.triggers || [],
+            requires: reqs.length > 0 ? reqs : null,
+            os: s.frontmatter.os || null,
+            source: s.sourcePriority === 1 ? "workspace" : s.sourcePriority === 2 ? "personal" : "bundled",
+            sourceDir: s.sourceDir,
+            charCount: s.instructions.length,
+            instructions: s.instructions,
+            help: s.frontmatter.help || null,
+          };
+        });
+
+        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+        res.end(JSON.stringify({
+          skills,
+          stats: {
+            total: allSkills.length,
+            eligible: eligible.length,
+            promptChars: snapshot.totalChars,
+            maxChars: SKILL_LIMITS.maxSkillsPromptChars,
+            maxSkills: SKILL_LIMITS.maxSkillsInPrompt,
+            version: snapshot.version,
+          },
+        }));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Failed to load skills" }));
+      }
+    })();
+    return;
+  }
+
+  // Skill import endpoint (ELLIE-220)
+  if (url.pathname === "/api/skills/import" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", () => {
+      (async () => {
+        try {
+          const data = body ? JSON.parse(body) : {};
+          const { bumpSnapshotVersion } = await import("./skills/snapshot.ts");
+          const { parseFrontmatter } = await import("./skills/frontmatter.ts");
+          const { join } = await import("path");
+          const { mkdir, writeFile } = await import("fs/promises");
+
+          const skillsDir = join(process.cwd(), "skills");
+          let skillName: string;
+          let files: Array<{ path: string; content: string }> = [];
+          let meta: Record<string, unknown> | null = null;
+
+          if (data.zip) {
+            // Base64-encoded zip — extract in memory
+            const zipBuf = Buffer.from(data.zip, "base64");
+            const JSZip = (await import("jszip")).default;
+            const zip = await JSZip.loadAsync(zipBuf);
+
+            let skillMd = "";
+            const extraFiles: Array<{ path: string; content: string }> = [];
+
+            for (const [name, entry] of Object.entries(zip.files)) {
+              if (entry.dir) continue;
+              const content = await entry.async("string");
+              if (name === "SKILL.md" || name.endsWith("/SKILL.md")) {
+                skillMd = content;
+              } else if (name === "_meta.json" || name.endsWith("/_meta.json")) {
+                try { meta = JSON.parse(content); } catch {}
+              } else {
+                extraFiles.push({ path: name, content });
+              }
+            }
+
+            if (!skillMd) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "No SKILL.md found in zip" }));
+              return;
+            }
+
+            const parsed = parseFrontmatter(skillMd);
+            if (!parsed) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "Invalid SKILL.md frontmatter" }));
+              return;
+            }
+
+            skillName = parsed.frontmatter.name;
+            files.push({ path: "SKILL.md", content: skillMd });
+            if (meta) files.push({ path: "_meta.json", content: JSON.stringify(meta, null, 2) });
+            files.push(...extraFiles);
+
+          } else if (data.markdown) {
+            // Raw markdown paste
+            const parsed = parseFrontmatter(data.markdown);
+            if (!parsed) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "Invalid SKILL.md frontmatter — needs --- name --- block" }));
+              return;
+            }
+            skillName = parsed.frontmatter.name;
+            files.push({ path: "SKILL.md", content: data.markdown });
+
+          } else {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Provide 'zip' (base64) or 'markdown' (string)" }));
+            return;
+          }
+
+          // Sanitize skill name for directory
+          const safeName = skillName.replace(/[^a-zA-Z0-9_-]/g, "-").toLowerCase();
+          const installDir = join(skillsDir, safeName);
+
+          // Write all files
+          for (const f of files) {
+            const filePath = join(installDir, f.path);
+            const dir = filePath.substring(0, filePath.lastIndexOf("/"));
+            await mkdir(dir, { recursive: true });
+
+            // Replace {baseDir} placeholder with actual install path in text files
+            const resolved = f.content.replace(/\{baseDir\}/g, installDir);
+            await writeFile(filePath, resolved, "utf-8");
+          }
+
+          // Bump snapshot so new skill is picked up
+          bumpSnapshotVersion();
+
+          console.log(`[skills] Imported "${skillName}" (${files.length} files) → ${installDir}`);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            name: skillName,
+            dir: installDir,
+            files: files.map(f => f.path),
+            meta,
+          }));
+        } catch (err: any) {
+          console.error("[skills] Import error:", err);
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err?.message || "Failed to import skill" }));
+        }
+      })();
+    });
     return;
   }
 
@@ -4492,6 +4694,7 @@ async function handleEllieChatMessage(
       ecQueueContext || undefined,
       liveForest.incidents || undefined,
       liveForest.awareness || undefined,
+      (await getSkillSnapshot()).prompt || undefined,
     );
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -4688,6 +4891,7 @@ async function runSpecialistAsync(
       specQueueContext || undefined,
       liveForest.incidents || undefined,
       liveForest.awareness || undefined,
+      (await getSkillSnapshot()).prompt || undefined,
     );
 
     const agentTools = agentResult.dispatch.agent.tools_enabled;

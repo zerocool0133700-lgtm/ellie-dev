@@ -285,6 +285,7 @@ export function buildPrompt(
   queueContext?: string,
   incidentContext?: string,
   awarenessContext?: string,
+  skillsPrompt?: string,
 ): string {
   const channelLabel = channel === "google-chat" ? "Google Chat" : channel === "ellie-chat" ? "Ellie Chat (dashboard)" : "Telegram";
 
@@ -429,6 +430,9 @@ export function buildPrompt(
 
   // Priority 3: Active incidents — always visible when something is on fire
   if (incidentContext) sections.push({ label: "incidents", content: `\n${incidentContext}`, priority: 3 });
+
+  // Priority 4: Skills prompt block (ELLIE-217 — eligible skills from SKILL.md files)
+  if (skillsPrompt) sections.push({ label: "skills", content: `\n${skillsPrompt}`, priority: 4 });
 
   // Priority 4: Queue items for this agent (ELLIE-201 — injected on new session)
   if (queueContext) sections.push({ label: "queue", content: `\n${queueContext}`, priority: 4 });
