@@ -132,11 +132,15 @@ import {
   resolveToolApproval,
   clearSessionApprovals,
 } from "./tool-approval.ts";
+import { handleGatewayRoute } from "./api/gateway-intake.ts";
 
 export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
   const { bot, anthropic, supabase } = getRelayDeps();
 
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
+
+  // Gateway intake endpoints (ELLIE-151) — forwarded from ellie-gateway
+  if (req.method === "POST" && handleGatewayRoute(req, res, url.pathname)) return;
 
   // Twilio TwiML webhook — tells Twilio to open a media stream
   if (url.pathname === "/voice" && req.method === "POST") {
