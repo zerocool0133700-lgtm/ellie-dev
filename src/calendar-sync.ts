@@ -8,6 +8,7 @@
 import { sql } from "../../ellie-forest/src/index.ts";
 import { googleAccounts, getAccessTokenForAccount, type GoogleAccount } from "./context-sources.ts";
 import { isOutlookConfigured } from "./outlook.ts";
+import ICAL from "ical.js";
 
 // ============================================================
 // TYPES
@@ -328,6 +329,162 @@ async function syncO365Calendar(): Promise<number> {
 }
 
 // ============================================================
+// APPLE CALENDAR (iCloud CalDAV)
+// ============================================================
+
+const APPLE_CALDAV_SERVER = "https://caldav.icloud.com";
+
+// Calendars to skip (not real event calendars)
+const APPLE_SKIP_CALENDARS = new Set(["Reminders ⚠️"]);
+
+function isAppleConfigured(): boolean {
+  return !!(process.env.APPLE_CALENDAR_USERNAME && process.env.APPLE_CALENDAR_APP_PASSWORD);
+}
+
+async function fetchAppleEvents(): Promise<CalendarEvent[]> {
+  const { createDAVClient } = await import("tsdav");
+
+  const client = await createDAVClient({
+    serverUrl: APPLE_CALDAV_SERVER,
+    credentials: {
+      username: process.env.APPLE_CALENDAR_USERNAME!,
+      password: process.env.APPLE_CALENDAR_APP_PASSWORD!,
+    },
+    authMethod: "Basic",
+    defaultAccountType: "caldav",
+  });
+
+  const calendars = await client.fetchCalendars();
+  const now = new Date();
+  const windowEnd = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const allEvents: CalendarEvent[] = [];
+
+  for (const cal of calendars) {
+    if (APPLE_SKIP_CALENDARS.has(cal.displayName || "")) continue;
+
+    try {
+      const objects = await client.fetchCalendarObjects({
+        calendar: cal,
+        timeRange: {
+          start: now.toISOString(),
+          end: windowEnd.toISOString(),
+        },
+      });
+
+      for (const obj of objects) {
+        if (!obj.data) continue;
+        try {
+          const events = parseICalEvents(obj.data, cal.displayName || "Apple");
+          allEvents.push(...events);
+        } catch (err: any) {
+          console.error(`[calendar-sync] Apple iCal parse error:`, err?.message);
+        }
+      }
+    } catch (err: any) {
+      console.error(`[calendar-sync] Apple fetch error for ${cal.displayName}:`, err?.message);
+    }
+  }
+
+  return allEvents;
+}
+
+function parseICalEvents(icalData: string, calendarName: string): CalendarEvent[] {
+  const jcal = ICAL.parse(icalData);
+  const comp = new ICAL.Component(jcal);
+  const vevents = comp.getAllSubcomponents("vevent");
+  const results: CalendarEvent[] = [];
+
+  for (const vevent of vevents) {
+    const event = new ICAL.Event(vevent);
+    const dtstart = vevent.getFirstProperty("dtstart");
+    const isAllDay = dtstart?.type === "date";
+
+    let startTime: string;
+    let endTime: string | undefined;
+
+    if (isAllDay) {
+      // All-day: bare date → anchor to CST
+      const startDate = event.startDate.toString(); // "YYYY-MM-DD"
+      startTime = `${startDate}T00:00:00-06:00`;
+      if (event.endDate) {
+        endTime = `${event.endDate.toString()}T00:00:00-06:00`;
+      }
+    } else {
+      startTime = event.startDate.toJSDate().toISOString();
+      endTime = event.endDate ? event.endDate.toJSDate().toISOString() : undefined;
+    }
+
+    // Extract location (strip Apple's structured location artifacts)
+    let location = vevent.getFirstPropertyValue("location") as string | null;
+    if (location) {
+      location = location.replace(/\\n/g, ", ").replace(/\\,/g, ",").trim();
+    }
+
+    // Check for meeting URL
+    const urlProp = vevent.getFirstPropertyValue("url") as string | null;
+    const meetingUrl = urlProp && urlProp.length > 5 ? urlProp : undefined;
+
+    // Handle recurring events
+    const rrule = vevent.getFirstPropertyValue("rrule");
+    const isRecurring = !!rrule;
+
+    // Attendees
+    const attendees = vevent.getAllProperties("attendee").map((prop: any) => {
+      const cn = prop.getParameter("cn") || "";
+      const partstat = prop.getParameter("partstat") || "NEEDS-ACTION";
+      const val = prop.getFirstValue() || "";
+      const email = val.replace(/^mailto:/i, "");
+      return { name: cn, email, status: partstat.toLowerCase() };
+    });
+
+    const organizer = vevent.getFirstProperty("organizer");
+    const organizerEmail = organizer
+      ? (organizer.getFirstValue() || "").replace(/^mailto:/i, "")
+      : undefined;
+
+    results.push({
+      external_id: event.uid,
+      provider: "apple",
+      calendar_id: calendarName.toLowerCase().replace(/\s+/g, "-"),
+      calendar_name: calendarName,
+      account_label: "apple",
+      title: event.summary || "(no title)",
+      description: event.description || undefined,
+      location: location || undefined,
+      start_time: startTime,
+      end_time: endTime,
+      timezone: dtstart?.getParameter("tzid") || USER_TIMEZONE,
+      all_day: isAllDay,
+      status: "confirmed",
+      recurring: isRecurring,
+      recurrence_rule: rrule ? rrule.toString() : undefined,
+      attendees,
+      organizer: organizerEmail || undefined,
+      meeting_url: meetingUrl,
+      color: undefined,
+      reminders: [],
+      raw_data: { ical: icalData.substring(0, 2000) },
+      last_synced: new Date().toISOString(),
+    });
+  }
+
+  return results;
+}
+
+async function syncAppleCalendar(): Promise<number> {
+  if (!isAppleConfigured()) return 0;
+
+  try {
+    const events = await fetchAppleEvents();
+    if (!events.length) return 0;
+    return upsertEvents(events);
+  } catch (err: any) {
+    console.error("[calendar-sync] Apple CalDAV error:", err?.message);
+    return 0;
+  }
+}
+
+// ============================================================
 // MASTER SYNC
 // ============================================================
 
@@ -351,6 +508,14 @@ export async function syncAllCalendars(): Promise<void> {
     totalEvents += count;
   } catch (err: any) {
     console.error("[calendar-sync] O365 error:", err?.message);
+  }
+
+  // Apple (iCloud CalDAV)
+  try {
+    const count = await syncAppleCalendar();
+    totalEvents += count;
+  } catch (err: any) {
+    console.error("[calendar-sync] Apple error:", err?.message);
   }
 
   // Clean up old events (ended > 7 days ago)

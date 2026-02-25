@@ -150,6 +150,12 @@ import {
   getAndAcknowledgeReadouts,
 } from "./api/agent-queue.ts";
 import { onBridgeWrite } from "./api/bridge.ts";
+import {
+  handleToolApprovalHTTP,
+  resolveToolApproval,
+  setBroadcastToEllieChat,
+  clearSessionApprovals,
+} from "./tool-approval.ts";
 
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
 
@@ -2495,6 +2501,12 @@ If no actionable ideas are found, return: { "ideas": [] }`;
     return;
   }
 
+  // Tool approval endpoint (called by PreToolUse hook — ELLIE-213)
+  if (url.pathname === "/internal/tool-approval" && req.method === "POST") {
+    handleToolApprovalHTTP(req, res);
+    return;
+  }
+
   // Work session endpoints
   if (url.pathname.startsWith("/api/work-session/") && req.method === "POST") {
     let body = "";
@@ -3775,6 +3787,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
             }
             // Clear per-user phone history
             if (ncUserId) ellieChatPhoneHistories.delete(ncUserId);
+            clearSessionApprovals(); // Reset tool approvals for new chat (ELLIE-213)
             ws.send(JSON.stringify({ type: "new_chat_ok", ts: Date.now() }));
             console.log(`[ellie-chat] New chat started for ${ncUser?.name || ncUserId || 'unknown'}`);
           } catch (err: any) {
@@ -3831,6 +3844,17 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
 
           resetEllieChatIdleTimer();
         }, `[${verb} action]`);
+        return;
+      }
+
+      // Tool approval response from frontend (ELLIE-213)
+      if (msg.type === "tool_approval_response" && msg.id && typeof msg.approved === "boolean") {
+        const resolved = resolveToolApproval(msg.id, msg.approved, msg.remember === true);
+        if (!resolved) {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "response", text: "That tool approval has expired.", agent: "system", ts: Date.now() }));
+          }
+        }
         return;
       }
     } catch {
@@ -4768,6 +4792,7 @@ setAnthropicClient(anthropic);
 setQueueBroadcast(broadcastExtension);
 setSenderDeps({ supabase, getActiveAgent });
 setVoicePipelineDeps({ supabase, getActiveAgent, broadcastExtension, getContextDocket, triggerConsolidation });
+setBroadcastToEllieChat(broadcastToEllieChatClients);
 
 // Init Google Chat (optional — skips gracefully if not configured)
 const gchatEnabled = await initGoogleChat();
