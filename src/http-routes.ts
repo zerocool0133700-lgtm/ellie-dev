@@ -1432,7 +1432,9 @@ Extract knowledge candidates from this conversation:
 
 **Seeds** (new knowledge): Decisions with reasoning, findings about codebase/architecture, new facts about the system, hypotheses, new patterns/conventions, new integrations/features added.
 
-**Rain** (enrichment to existing knowledge): Updates to existing decisions, deeper context for known facts, corrections to prior assumptions, new evidence for/against existing hypotheses.
+**Rain** (enrichment to existing knowledge): Updates to existing decisions, deeper context for known facts, new evidence for/against existing hypotheses.
+
+**Corrections** (user corrected the AI): The user explicitly told the AI it was wrong and provided the correct information. These are the highest-value captures — ground truth from the user. Look for patterns like "no, that's wrong", "actually it's X not Y", "I meant...", or any explicit disagreement where the user provides the right answer.
 
 **Discard** (compost): Greetings, debugging dead-ends, session logistics, repeated info, temporary state.
 
@@ -1440,8 +1442,8 @@ For each candidate, determine:
 - content: Concise, standalone description (must make sense without this conversation)
 - type: decision | finding | fact | hypothesis
 - scope_path: Which project area (2/1=ellie-dev, 2/2=ellie-forest, 2/3=ellie-home, 2/4=ellie-os-app, 2=all projects)
-- confidence: 0.0-1.0
-- category: seed or rain
+- confidence: 0.0-1.0 (corrections should be 1.0 since the user stated the correct fact)
+- category: seed, rain, or correction
 - tags: relevant topic tags (array of strings)
 
 Quality over quantity — 3 high-value entries beat 15 mediocre ones.
@@ -1454,7 +1456,7 @@ Return ONLY valid JSON (no markdown, no explanation):
       "type": "decision|finding|fact|hypothesis",
       "scope_path": "2/1",
       "confidence": 0.85,
-      "category": "seed",
+      "category": "seed|rain|correction",
       "tags": ["tag1", "tag2"]
     }
   ]
@@ -1503,7 +1505,8 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         const candidates = parsed.candidates || [];
         const seeds = candidates.filter(c => c.category === "seed");
         const rain = candidates.filter(c => c.category === "rain");
-        console.log(`[harvest] Extracted ${candidates.length} candidates (${seeds.length} seeds, ${rain.length} rain)`);
+        const corrections = candidates.filter(c => c.category === "correction");
+        console.log(`[harvest] Extracted ${candidates.length} candidates (${seeds.length} seeds, ${rain.length} rain, ${corrections.length} corrections)`);
 
         // Check Forest for duplicates and write results
         const { readMemories, writeMemory } = await import("../../ellie-forest/src/index");
@@ -1529,18 +1532,24 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           }
 
           // Write to Forest with harvest metadata
+          const isCorrection = candidate.category === "correction";
           const memory = await writeMemory({
             content: candidate.content,
-            type: candidate.type as any,
+            type: isCorrection ? "fact" : candidate.type as any,
             scope_path: candidate.scope_path,
-            confidence: candidate.confidence,
-            tags: [...(candidate.tags || []), `harvest:${candidate.category}`, `conversation:${conversationId}`],
+            confidence: isCorrection ? 1.0 : candidate.confidence,
+            tags: [
+              ...(candidate.tags || []),
+              `harvest:${candidate.category}`,
+              `conversation:${conversationId}`,
+              ...(isCorrection ? ["correction:ground_truth", "source:user_correction"] : []),
+            ],
             metadata: {
               harvest_source: "dashboard",
               harvest_category: candidate.category,
               conversation_id: conversationId,
               conversation_channel: convo.channel,
-              work_item_id: "ELLIE-249",
+              work_item_id: "ELLIE-250",
             },
             category: candidate.category === "rain" ? "work" : "general",
           });
@@ -1555,8 +1564,9 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
 
         const seedCount = written.filter(w => w.category === "seed").length;
         const rainCount = written.filter(w => w.category === "rain").length;
+        const correctionCount = written.filter(w => w.category === "correction").length;
 
-        console.log(`[harvest] Complete — ${seedCount} seeds planted, ${rainCount} rain applied`);
+        console.log(`[harvest] Complete — ${seedCount} seeds planted, ${rainCount} rain applied, ${correctionCount} corrections captured`);
 
         // Broadcast to ellie-chat clients
         if (written.length > 0) {
@@ -1564,6 +1574,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
             type: "harvest",
             seeds: seedCount,
             rain: rainCount,
+            corrections: correctionCount,
             conversationId,
             items: written,
             ts: Date.now(),
@@ -1575,6 +1586,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           ok: true,
           seeds: written.filter(w => w.category === "seed"),
           rain: written.filter(w => w.category === "rain"),
+          corrections: written.filter(w => w.category === "correction"),
           total: written.length,
         }));
       } catch (err) {

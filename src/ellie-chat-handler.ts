@@ -87,6 +87,8 @@ import {
   getQueueContext,
   acknowledgeQueueItems,
 } from "./api/agent-queue.ts";
+import { detectAndCaptureCorrection } from "./correction-detector.ts";
+import { detectAndLinkCalendarEvents } from "./calendar-linker.ts";
 
 export async function handleEllieChatMessage(
   ws: WebSocket,
@@ -103,6 +105,32 @@ export async function handleEllieChatMessage(
 
   await saveMessage("user", text, image ? { image_name: image.name, image_mime: image.mime_type } : {}, "ellie-chat", ecUserId);
   broadcastExtension({ type: "message_in", channel: "ellie-chat", preview: text.substring(0, 200) });
+
+  // Correction detection + calendar linking (ELLIE-250)
+  if (supabase) {
+    const convId = await getOrCreateConversation(supabase, "ellie-chat");
+    if (convId) {
+      // Correction detection — check if user is correcting last assistant response
+      supabase.from("messages")
+        .select("content")
+        .eq("conversation_id", convId)
+        .eq("role", "assistant")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .single()
+        .then(({ data }) => {
+          if (data?.content) {
+            detectAndCaptureCorrection(text, data.content, anthropic, "ellie-chat", convId)
+              .catch(err => logger.warn("Correction detection failed", err));
+          }
+        })
+        .catch(() => {});
+
+      // Calendar-conversation linking — detect event mentions
+      detectAndLinkCalendarEvents(text, supabase, convId)
+        .catch(err => logger.warn("Calendar linking failed", err));
+    }
+  }
 
   // Write image to temp file if present (same pattern as Telegram photo handler)
   let imagePath: string | null = null;

@@ -88,6 +88,8 @@ import {
   getQueueContext,
   acknowledgeQueueItems,
 } from "./api/agent-queue.ts";
+import { detectAndCaptureCorrection } from "./correction-detector.ts";
+import { detectAndLinkCalendarEvents } from "./calendar-linker.ts";
 
 const logger = log.child("telegram");
 
@@ -132,6 +134,32 @@ bot.on("message:text", withQueue(async (ctx) => {
 
   await saveMessage("user", text, undefined, "telegram", userId);
   broadcastExtension({ type: "message_in", channel: "telegram", preview: text.substring(0, 200) });
+
+  // Correction detection + calendar linking (ELLIE-250)
+  if (supabase) {
+    const convId = await getOrCreateConversation(supabase, "telegram");
+    if (convId) {
+      // Correction detection — check if user is correcting last assistant response
+      supabase.from("messages")
+        .select("content")
+        .eq("conversation_id", convId)
+        .eq("role", "assistant")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .single()
+        .then(({ data }) => {
+          if (data?.content) {
+            detectAndCaptureCorrection(text, data.content, anthropic, "telegram", convId)
+              .catch(err => logger.warn("Correction detection failed", err));
+          }
+        })
+        .catch(() => {});
+
+      // Calendar-conversation linking — detect event mentions
+      detectAndLinkCalendarEvents(text, supabase, convId)
+        .catch(err => logger.warn("Calendar linking failed", err));
+    }
+  }
 
   // Slash commands — direct responses, bypass Claude pipeline (ELLIE-113)
   if (text.startsWith("/search ")) {
