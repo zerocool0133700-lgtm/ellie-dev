@@ -314,3 +314,31 @@ bot.start({
     console.log("Telegram bot is running!");
   },
 });
+
+// ── Graceful shutdown (ELLIE-225) ───────────────────────────
+
+let shutdownInProgress = false;
+
+async function gracefulShutdown(signal: string): Promise<void> {
+  if (shutdownInProgress) return;
+  shutdownInProgress = true;
+  console.log(`[relay] ${signal} received — shutting down gracefully...`);
+
+  // 1. Stop accepting new Telegram messages
+  try { await bot.stop(); } catch {}
+  console.log("[relay] Telegram bot stopped");
+
+  // 2. Close HTTP server (stop accepting new connections)
+  httpServer.close();
+  console.log("[relay] HTTP server closed");
+
+  // 3. Release lock file
+  const { releaseLock } = await import("./claude-cli.ts");
+  await releaseLock();
+
+  console.log("[relay] Shutdown complete");
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
