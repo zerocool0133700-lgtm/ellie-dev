@@ -6,6 +6,7 @@
  */
 
 import { log } from "./logger.ts";
+import { breakers, withRetry, isTransientError } from "./resilience.ts";
 
 const logger = log.child("plane");
 
@@ -51,19 +52,27 @@ export function _resetTimeoutRecoveryForTesting() {
 }
 
 async function planeRequest(path: string, options?: RequestInit) {
-  const res = await fetch(`${PLANE_BASE_URL}/api/v1/workspaces/${PLANE_WORKSPACE_SLUG}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": PLANE_API_KEY!,
-      ...options?.headers,
-    },
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Plane API ${res.status}: ${body}`);
-  }
-  return res.json();
+  return breakers.plane.call(
+    () => withRetry(
+      async () => {
+        const res = await fetch(`${PLANE_BASE_URL}/api/v1/workspaces/${PLANE_WORKSPACE_SLUG}${path}`, {
+          ...options,
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": PLANE_API_KEY!,
+            ...options?.headers,
+          },
+        });
+        if (!res.ok) {
+          const body = await res.text();
+          throw new Error(`Plane API ${res.status}: ${body}`);
+        }
+        return res.json();
+      },
+      { maxRetries: 2, baseDelayMs: 1000, retryOn: isTransientError },
+    ),
+    null,
+  );
 }
 
 /** Parse "ELLIE-7" into { projectIdentifier: "ELLIE", sequenceId: 7 } */
