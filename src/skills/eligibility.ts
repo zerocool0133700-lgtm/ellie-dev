@@ -1,8 +1,11 @@
 /**
- * Eligibility Filter — ELLIE-217
+ * Eligibility Filter — ELLIE-217 / ELLIE-253
  *
  * Determines which loaded skills are eligible to run on this system.
- * Checks: OS, required binaries, required env vars, vault credentials.
+ * Checks: OS, required binaries, required env vars, credential domains.
+ *
+ * ELLIE-253: Credential lookup now uses The Hollow (Forest DB) instead of
+ * the old Supabase Credential Vault.
  */
 
 import type { SkillEntry } from "./types.ts";
@@ -12,17 +15,17 @@ const logger = log.child("skill-eligibility");
 
 /**
  * Filter skills to only those eligible on this system.
- * Fetches vault domains once and checks each skill against them.
+ * Fetches credential domains once and checks each skill against them.
  */
 export async function filterEligibleSkills(skills: SkillEntry[]): Promise<SkillEntry[]> {
-  const vaultDomains = await getVaultDomains();
-  return skills.filter(s => isSkillEligible(s, vaultDomains));
+  const credentialDomains = await getCredentialDomains();
+  return skills.filter(s => isSkillEligible(s, credentialDomains));
 }
 
 /**
  * Check if a single skill is eligible to run.
  */
-export function isSkillEligible(entry: SkillEntry, vaultDomains?: Set<string>): boolean {
+export function isSkillEligible(entry: SkillEntry, credentialDomains?: Set<string>): boolean {
   const { requires, os: osList, always } = entry.frontmatter;
 
   // Always-on skills bypass all checks
@@ -47,11 +50,11 @@ export function isSkillEligible(entry: SkillEntry, vaultDomains?: Set<string>): 
     }
   }
 
-  // Required vault credentials (check by domain)
+  // Required credentials (check by domain)
   if (requires?.credentials) {
-    if (!vaultDomains) return false; // no vault available — fail closed
+    if (!credentialDomains) return false; // no hollow available — fail closed
     for (const domain of requires.credentials) {
-      if (!vaultDomains.has(domain)) return false;
+      if (!credentialDomains.has(domain)) return false;
     }
   }
 
@@ -59,48 +62,31 @@ export function isSkillEligible(entry: SkillEntry, vaultDomains?: Set<string>): 
 }
 
 /**
- * Fetch all domains that have credentials in the vault.
+ * Fetch all domains that have credentials in the Hollow.
  * Cached for 60s to avoid hammering the DB on every snapshot rebuild.
  */
-let vaultDomainCache: Set<string> | null = null;
-let vaultCacheTime = 0;
-const VAULT_CACHE_TTL = 60_000;
+let domainCache: Set<string> | null = null;
+let domainCacheTime = 0;
+const CACHE_TTL = 60_000;
 
-async function getVaultDomains(): Promise<Set<string>> {
+async function getCredentialDomains(): Promise<Set<string>> {
   const now = Date.now();
-  if (vaultDomainCache && now - vaultCacheTime < VAULT_CACHE_TTL) {
-    return vaultDomainCache;
+  if (domainCache && now - domainCacheTime < CACHE_TTL) {
+    return domainCache;
   }
 
   try {
-    const { createClient } = await import("@supabase/supabase-js");
-    const url = process.env.SUPABASE_URL;
-    const key = process.env.SUPABASE_ANON_KEY;
-    if (!url || !key) {
-      vaultDomainCache = new Set();
-      vaultCacheTime = now;
-      return vaultDomainCache;
-    }
-
-    const supabase = createClient(url, key);
-    const { data, error } = await supabase
-      .from("credentials")
-      .select("domain");
-
-    if (error || !data) {
-      logger.warn("Vault domain lookup failed", { error: error?.message });
-      vaultDomainCache = new Set();
-    } else {
-      vaultDomainCache = new Set(data.map((r: { domain: string }) => r.domain));
-      console.log(`[skills] Vault domains: ${[...vaultDomainCache].join(", ") || "(none)"}`);
-    }
+    const { listCredentialDomains } = await import("../../../ellie-forest/src/hollow");
+    const domains = await listCredentialDomains();
+    domainCache = new Set(domains);
+    console.log(`[skills] Credential domains: ${domains.join(", ") || "(none)"}`);
   } catch (err: any) {
-    logger.warn("Vault domain lookup error", { error: err?.message });
-    vaultDomainCache = new Set();
+    logger.warn("Credential domain lookup error", { error: err?.message });
+    domainCache = new Set();
   }
 
-  vaultCacheTime = now;
-  return vaultDomainCache;
+  domainCacheTime = now;
+  return domainCache;
 }
 
 /**
@@ -127,6 +113,6 @@ function commandExists(bin: string): boolean {
  */
 export function clearBinCache(): void {
   binCache.clear();
-  vaultDomainCache = null;
-  vaultCacheTime = 0;
+  domainCache = null;
+  domainCacheTime = 0;
 }

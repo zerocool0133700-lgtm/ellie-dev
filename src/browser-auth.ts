@@ -1,18 +1,14 @@
 /**
  * Browser Authentication Helper
  *
- * Uses stored vault credentials to authenticate via Playwright headless browser,
+ * Uses stored credentials to authenticate via Playwright headless browser,
  * then returns the resulting cookies for authenticated requests.
  *
- * ELLIE-32: Credentials are fetched from vault, never logged.
+ * ELLIE-32 / ELLIE-253: Credentials fetched from The Hollow, never logged.
  */
 
-import type { SupabaseClient } from "@supabase/supabase-js";
 import { log } from "./logger.ts";
-import {
-  getCredentialForDomain,
-  type PasswordPayload,
-} from "./vault.ts";
+import { getCredentialByDomain } from "../../ellie-forest/src/hollow";
 
 const logger = log.child("browser-auth");
 
@@ -30,7 +26,7 @@ export interface AuthResult {
  * 4. Extract and return cookies
  */
 export async function getAuthenticatedSession(
-  supabase: SupabaseClient,
+  _supabase: unknown,
   domain: string,
   options?: {
     loginUrl?: string;
@@ -41,11 +37,11 @@ export async function getAuthenticatedSession(
     timeout?: number;
   },
 ): Promise<AuthResult | null> {
-  // Get credential from vault
-  const cred = await getCredentialForDomain(supabase, domain, "password");
+  // Get credential from the Hollow (ELLIE-253)
+  const cred = await getCredentialByDomain(domain, "password");
   if (!cred) return null;
 
-  const payload = cred.payload as PasswordPayload;
+  const payload = cred.payload as { username: string; password: string };
 
   // Dynamic import — Playwright only loaded when needed
   const { chromium } = await import("playwright-core");
@@ -103,14 +99,14 @@ export async function getAuthenticatedSession(
  * Returns appropriate headers based on credential type.
  */
 export async function getAuthHeaders(
-  supabase: SupabaseClient,
+  _supabase: unknown,
   domain: string,
   type?: "api_key" | "bearer_token",
 ): Promise<Record<string, string> | null> {
-  const cred = await getCredentialForDomain(supabase, domain, type);
+  const cred = await getCredentialByDomain(domain, type);
   if (!cred) return null;
 
-  switch (cred.record.credential_type) {
+  switch (cred.entry.credential_type) {
     case "bearer_token":
       return { Authorization: `Bearer ${(cred.payload as any).token}` };
     case "api_key":

@@ -1677,11 +1677,12 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         const eligibleNames = new Set(eligible.map(s => s.name));
 
         // Build per-requirement met/unmet status for dashboard
-        // Fetch vault domains for credential status
-        let vaultDomains: Set<string> = new Set();
+        // Fetch credential domains from The Hollow (ELLIE-253)
+        let credentialDomains: Set<string> = new Set();
         try {
-          const { data } = await supabase!.from("credentials").select("domain");
-          if (data) vaultDomains = new Set(data.map((r: any) => r.domain));
+          const { listCredentialDomains } = await import("../../ellie-forest/src/hollow");
+          const domains = await listCredentialDomains();
+          credentialDomains = new Set(domains);
         } catch {}
 
         const skills = allSkills.map(s => {
@@ -1698,7 +1699,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           }
           if (s.frontmatter.requires?.credentials) {
             for (const domain of s.frontmatter.requires.credentials) {
-              reqs.push({ type: "credential", key: domain, met: vaultDomains.has(domain) });
+              reqs.push({ type: "credential", key: domain, met: credentialDomains.has(domain) });
             }
           }
 

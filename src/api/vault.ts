@@ -1,26 +1,40 @@
 /**
- * Vault API Endpoints
+ * Vault API Endpoints — ELLIE-253 Unified via The Hollow
  *
- * ELLIE-32: Credential CRUD + domain lookup + authenticated fetch.
- * All responses strip encrypted_data except /resolve (internal only).
- * Credentials are NEVER logged in plaintext.
+ * All credential operations now go through The Hollow (Forest DB).
+ * API shape preserved for backward compatibility with dashboard.
+ *
+ * ELLIE-32: Original implementation.
+ * ELLIE-253: Rewritten to use Hollow instead of Supabase credentials table.
  */
 
-import type { SupabaseClient } from "@supabase/supabase-js";
-import {
-  createCredential,
-  listCredentials,
-  getCredential,
-  getDecryptedPayload,
-  getCredentialForDomain,
-  updateCredential,
-  deleteCredential,
-  type CredentialType,
-  type CredentialPayload,
-} from "../vault.ts";
 import { log } from "../logger.ts";
+import {
+  storeCredential, getCredentialByDomain, getCredentialById,
+  listCredentials, updateCredential, deleteCredential,
+  listAllEntries,
+  type CredentialType, type HollowEntry,
+} from "../../../ellie-forest/src/hollow";
 
 const logger = log.child("vault");
+
+// Dave's keychain — single user system
+const KEYCHAIN_ID = '568c0a6a-0c98-4784-87f3-d909139d8c35';
+
+// Map HollowEntry to the old Credential shape for API compatibility
+function toCredentialRecord(entry: HollowEntry) {
+  return {
+    id: entry.id,
+    label: entry.label,
+    domain: entry.domain || '',
+    credential_type: entry.credential_type || 'api_key',
+    notes: entry.notes,
+    last_used_at: entry.last_used_at,
+    expires_at: entry.expires_at,
+    created_at: entry.created_at,
+    updated_at: entry.created_at,  // Hollow doesn't have updated_at separately
+  };
+}
 
 // ============================================================
 // CRUD ENDPOINTS
@@ -30,39 +44,25 @@ const logger = log.child("vault");
  * POST /api/vault/credentials
  * Body: { label, domain, credential_type, payload, notes?, expires_at? }
  */
-export async function createVaultCredential(
-  req: any,
-  res: any,
-  supabase: SupabaseClient,
-) {
+export async function createVaultCredential(req: any, res: any, _supabase: any) {
   try {
-    const { label, domain, credential_type, payload, notes, expires_at } =
-      req.body;
+    const { label, domain, credential_type, payload, notes, expires_at } = req.body;
 
     if (!label || !domain || !credential_type || !payload) {
-      return res
-        .status(400)
-        .json({ error: "Missing required fields: label, domain, credential_type, payload" });
+      return res.status(400).json({ error: "Missing required fields: label, domain, credential_type, payload" });
     }
 
-    const validTypes = ["password", "api_key", "bearer_token", "cookie", "oauth"];
-    if (!validTypes.includes(credential_type)) {
-      return res
-        .status(400)
-        .json({ error: `Invalid credential_type. Must be one of: ${validTypes.join(", ")}` });
-    }
-
-    const record = await createCredential(supabase, {
-      label,
+    const entry = await storeCredential(KEYCHAIN_ID, {
+      label: normalizeLabel(label),
       domain,
       credential_type: credential_type as CredentialType,
-      payload: payload as CredentialPayload,
+      value: JSON.stringify(payload),
       notes,
-      expires_at,
+      expires_at: expires_at ? new Date(expires_at) : undefined,
     });
 
     console.log(`[vault] Created credential "${label}" for ${domain}`);
-    return res.json(record);
+    return res.json(toCredentialRecord(entry));
   } catch (err: any) {
     logger.error("Create failed", err);
     return res.status(500).json({ error: err.message });
@@ -73,17 +73,13 @@ export async function createVaultCredential(
  * GET /api/vault/credentials
  * Query: ?domain=x&type=y
  */
-export async function listVaultCredentials(
-  req: any,
-  res: any,
-  supabase: SupabaseClient,
-) {
+export async function listVaultCredentials(req: any, res: any, _supabase: any) {
   try {
-    const records = await listCredentials(supabase, {
+    const entries = await listCredentials({
       domain: req.query?.domain,
       credential_type: req.query?.type as CredentialType | undefined,
     });
-    return res.json(records);
+    return res.json(entries.map(toCredentialRecord));
   } catch (err: any) {
     logger.error("List failed", err);
     return res.status(500).json({ error: err.message });
@@ -93,14 +89,11 @@ export async function listVaultCredentials(
 /**
  * GET /api/vault/credentials/:id
  */
-export async function getVaultCredential(
-  req: any,
-  res: any,
-  supabase: SupabaseClient,
-) {
+export async function getVaultCredential(req: any, res: any, _supabase: any) {
   try {
-    const record = await getCredential(supabase, req.params.id);
-    return res.json(record);
+    const result = await getCredentialById(req.params.id);
+    if (!result) return res.status(404).json({ error: "Credential not found" });
+    return res.json(toCredentialRecord(result.entry));
   } catch (err: any) {
     logger.error("Get failed", err);
     return res.status(500).json({ error: err.message });
@@ -109,17 +102,20 @@ export async function getVaultCredential(
 
 /**
  * PATCH /api/vault/credentials/:id
- * Body: { label?, domain?, credential_type?, payload?, notes?, expires_at? }
  */
-export async function updateVaultCredential(
-  req: any,
-  res: any,
-  supabase: SupabaseClient,
-) {
+export async function updateVaultCredential(req: any, res: any, _supabase: any) {
   try {
-    const record = await updateCredential(supabase, req.params.id, req.body);
+    const updates: any = {};
+    if (req.body.label !== undefined) updates.label = req.body.label;
+    if (req.body.domain !== undefined) updates.domain = req.body.domain;
+    if (req.body.credential_type !== undefined) updates.credential_type = req.body.credential_type;
+    if (req.body.notes !== undefined) updates.notes = req.body.notes;
+    if (req.body.expires_at !== undefined) updates.expires_at = req.body.expires_at ? new Date(req.body.expires_at) : null;
+    if (req.body.payload !== undefined) updates.value = JSON.stringify(req.body.payload);
+
+    const entry = await updateCredential(req.params.id, updates);
     console.log(`[vault] Updated credential ${req.params.id}`);
-    return res.json(record);
+    return res.json(toCredentialRecord(entry));
   } catch (err: any) {
     logger.error("Update failed", err);
     return res.status(500).json({ error: err.message });
@@ -129,13 +125,9 @@ export async function updateVaultCredential(
 /**
  * DELETE /api/vault/credentials/:id
  */
-export async function deleteVaultCredential(
-  req: any,
-  res: any,
-  supabase: SupabaseClient,
-) {
+export async function deleteVaultCredential(req: any, res: any, _supabase: any) {
   try {
-    await deleteCredential(supabase, req.params.id);
+    await deleteCredential(req.params.id);
     console.log(`[vault] Deleted credential ${req.params.id}`);
     return res.json({ success: true });
   } catch (err: any) {
@@ -150,14 +142,10 @@ export async function deleteVaultCredential(
 
 /**
  * POST /api/vault/resolve
- * Body: { domain: "github.com", type?: "api_key" }
+ * Body: { domain: "github.com", type?: "api_key" } or { id: "uuid" }
  * Returns decrypted credential payload. Internal use only.
  */
-export async function resolveVaultCredential(
-  req: any,
-  res: any,
-  supabase: SupabaseClient,
-) {
+export async function resolveVaultCredential(req: any, res: any, _supabase: any) {
   try {
     const { domain, type, id } = req.body;
 
@@ -167,23 +155,17 @@ export async function resolveVaultCredential(
 
     let result;
     if (id) {
-      result = await getDecryptedPayload(supabase, id);
+      result = await getCredentialById(id);
     } else {
-      result = await getCredentialForDomain(
-        supabase,
-        domain,
-        type as CredentialType | undefined,
-      );
+      result = await getCredentialByDomain(domain, type as CredentialType | undefined);
     }
 
     if (!result) {
-      return res
-        .status(404)
-        .json({ error: `No credential found for domain: ${domain}` });
+      return res.status(404).json({ error: `No credential found for ${domain || id}` });
     }
 
     return res.json({
-      record: result.record,
+      record: toCredentialRecord(result.entry),
       payload: result.payload,
     });
   } catch (err: any) {
@@ -194,15 +176,9 @@ export async function resolveVaultCredential(
 
 /**
  * POST /api/vault/fetch
- * Body: { url, method?, headers?, body? }
- * Looks up credentials for the URL's domain, injects auth, returns response.
- * Credentials never appear in the response — only the fetched content.
+ * Authenticated fetch with credential injection.
  */
-export async function authenticatedFetch(
-  req: any,
-  res: any,
-  supabase: SupabaseClient,
-) {
+export async function authenticatedFetch(req: any, res: any, _supabase: any) {
   try {
     const { url, method = "GET", headers = {}, body } = req.body;
 
@@ -220,51 +196,38 @@ export async function authenticatedFetch(
     const domain = targetUrl.hostname;
     const fetchHeaders: Record<string, string> = { ...headers };
 
-    // Try API-based auth (bearer_token, api_key, cookie types)
-    const cred = await getCredentialForDomain(supabase, domain);
-    if (cred) {
-      switch (cred.record.credential_type) {
-        case "bearer_token":
-          fetchHeaders["Authorization"] =
-            `Bearer ${(cred.payload as any).token}`;
-          break;
-        case "api_key":
-          fetchHeaders["Authorization"] =
-            `Bearer ${(cred.payload as any).key}`;
-          break;
-        case "cookie":
-          fetchHeaders["Cookie"] = (cred.payload as any).cookie;
-          break;
-        case "oauth":
-          if ((cred.payload as any).access_token) {
-            fetchHeaders["Authorization"] =
-              `Bearer ${(cred.payload as any).access_token}`;
-          }
-          break;
-        case "password": {
-          // For password credentials, try browser auth
-          try {
-            const { getAuthenticatedSession } = await import(
-              "../browser-auth.ts"
-            );
-            const session = await getAuthenticatedSession(supabase, domain);
-            if (session) {
-              fetchHeaders["Cookie"] = session.cookies
-                .map((c: any) => `${c.name}=${c.value}`)
-                .join("; ");
-            }
-          } catch (err) {
-            logger.error("Browser auth failed", err);
-          }
-          break;
-        }
-      }
+    const cred = await getCredentialByDomain(domain);
+    if (!cred) {
+      return res.status(404).json({ error: `No credentials found for domain: ${domain}` });
     }
 
-    if (!cred) {
-      return res
-        .status(404)
-        .json({ error: `No credentials found for domain: ${domain}` });
+    switch (cred.entry.credential_type) {
+      case "bearer_token":
+        fetchHeaders["Authorization"] = `Bearer ${(cred.payload as any).token}`;
+        break;
+      case "api_key":
+        fetchHeaders["Authorization"] = `Bearer ${(cred.payload as any).key}`;
+        break;
+      case "cookie":
+        fetchHeaders["Cookie"] = (cred.payload as any).cookie;
+        break;
+      case "oauth":
+        if ((cred.payload as any).access_token) {
+          fetchHeaders["Authorization"] = `Bearer ${(cred.payload as any).access_token}`;
+        }
+        break;
+      case "password": {
+        try {
+          const { getAuthenticatedSession } = await import("../browser-auth.ts");
+          const session = await getAuthenticatedSession(null, domain);
+          if (session) {
+            fetchHeaders["Cookie"] = session.cookies.map((c: any) => `${c.name}=${c.value}`).join("; ");
+          }
+        } catch (err) {
+          logger.error("Browser auth failed", err);
+        }
+        break;
+      }
     }
 
     console.log(`[vault] Authenticated fetch: ${method} ${domain}${targetUrl.pathname}`);
@@ -293,4 +256,11 @@ export async function authenticatedFetch(
     logger.error("Fetch failed", err);
     return res.status(500).json({ error: err.message });
   }
+}
+
+/**
+ * Normalize a label to hollow convention (snake_case).
+ */
+function normalizeLabel(label: string): string {
+  return label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
 }
