@@ -12,14 +12,14 @@ RestartSec=10
 
 # Environment
 Environment=HOME=/home/ellie
-Environment=PATH=/home/ellie/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/home/ellie/.local/bin:/home/ellie/.bun/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=/home/ellie/ellie-dev/.env
 
 # Resource limits (ELLIE-240)
 MemoryMax=3G
 MemoryHigh=2G
 CPUQuota=300%
-TasksMax=128
+TasksMax=512
 OOMPolicy=kill
 
 # Logging
