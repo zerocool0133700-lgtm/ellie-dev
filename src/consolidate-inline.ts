@@ -104,15 +104,21 @@ async function callClaudeCLI(prompt: string): Promise<string> {
 
   const TIMEOUT_MS = 60_000;
   let timedOut = false;
+  let killTimer: ReturnType<typeof setTimeout> | null = null;
   const timeout = setTimeout(() => {
     timedOut = true;
-    logger.error("CLI timeout — killing", { timeoutSeconds: TIMEOUT_MS / 1000 });
+    logger.error("CLI timeout — sending SIGTERM", { timeoutMs: TIMEOUT_MS });
     proc.kill();
+    // SIGKILL fallback if SIGTERM doesn't work (ELLIE-239)
+    killTimer = setTimeout(() => {
+      try { process.kill(proc.pid, 0); proc.kill(9); } catch {}
+    }, 5_000);
   }, TIMEOUT_MS);
 
   const output = await new Response(proc.stdout).text();
   const stderr = await new Response(proc.stderr).text();
   clearTimeout(timeout);
+  if (killTimer) clearTimeout(killTimer);
 
   const exitCode = await proc.exited;
 

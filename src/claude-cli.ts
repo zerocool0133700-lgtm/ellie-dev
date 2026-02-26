@@ -28,6 +28,8 @@ const MCP_TOOLS = "mcp__google-workspace__*,mcp__github__*,mcp__memory__*,mcp__s
 const ALLOWED_TOOLS = (process.env.ALLOWED_TOOLS || `${DEFAULT_TOOLS},${MCP_TOOLS}`).split(",").map(t => t.trim());
 const SESSION_FILE = join(RELAY_DIR, "session.json");
 const LOCK_FILE = join(RELAY_DIR, "bot.lock");
+// ELLIE-239: Configurable CLI timeout (default 300s agent, 60s non-agent)
+const CLI_TIMEOUT_MS = parseInt(process.env.CLI_TIMEOUT_MS || (AGENT_MODE ? "300000" : "60000"));
 
 // ── External dependency setters ─────────────────────────────
 // These are registered by relay.ts at startup since the actual
@@ -153,7 +155,7 @@ export async function callClaude(
       },
     });
 
-    const TIMEOUT_MS = options?.timeoutMs ?? (AGENT_MODE ? 420_000 : 60_000);
+    const TIMEOUT_MS = options?.timeoutMs ?? CLI_TIMEOUT_MS;
     let timedOut = false;
     let forceKilled = false;
     let killTimer: ReturnType<typeof setTimeout> | null = null;

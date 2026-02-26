@@ -3,9 +3,17 @@
  *
  * Extracted from relay.ts — ELLIE-206.
  * Two independent queues: main (Telegram + GChat) and ellie-chat.
+ *
+ * ELLIE-239: Queue-level timeout guard prevents deadlocks if a task
+ * hangs beyond the CLI timeout. Tasks are auto-killed after QUEUE_TASK_TIMEOUT_MS.
  */
 
 import type { Context } from "grammy";
+import { log } from "./logger.ts";
+
+const logger = log.child("queue");
+
+const QUEUE_TASK_TIMEOUT_MS = parseInt(process.env.QUEUE_TASK_TIMEOUT_MS || "480000"); // 8 min (above CLI 420s + buffer)
 
 // ── External dependency (registered by relay.ts at startup) ──
 
@@ -21,6 +29,44 @@ interface QueueItem {
   enqueuedAt: number;
 }
 
+// ── Queue-level timeout wrapper (ELLIE-239) ─────────────────
+
+/**
+ * Wraps a task with a timeout. If the task doesn't resolve/reject
+ * within QUEUE_TASK_TIMEOUT_MS, the wrapper resolves (doesn't throw)
+ * so the queue can advance. The underlying task continues running
+ * but the queue is no longer blocked.
+ */
+async function withTimeout(task: () => Promise<void>, channel: string, preview: string): Promise<void> {
+  let resolved = false;
+
+  const timeoutPromise = new Promise<void>((resolve) => {
+    setTimeout(() => {
+      if (!resolved) {
+        logger.error("Queue task timeout — unblocking queue", {
+          channel,
+          preview,
+          timeoutMs: QUEUE_TASK_TIMEOUT_MS,
+        });
+        _broadcastExtension({
+          type: "error",
+          source: "queue",
+          message: `Task timed out after ${QUEUE_TASK_TIMEOUT_MS / 1000}s on ${channel}`,
+        });
+        resolve();
+      }
+    }, QUEUE_TASK_TIMEOUT_MS);
+  });
+
+  try {
+    await Promise.race([task(), timeoutPromise]);
+  } catch (err) {
+    logger.error("Queue task error", { channel, preview }, err);
+  } finally {
+    resolved = true;
+  }
+}
+
 // ── Main queue (Telegram + Google Chat) ──────────────────────
 
 let busy = false;
@@ -30,9 +76,13 @@ const messageQueue: QueueItem[] = [];
 async function processQueue(): Promise<void> {
   while (messageQueue.length > 0) {
     const next = messageQueue.shift()!;
+    const waitMs = Date.now() - next.enqueuedAt;
+    if (waitMs > 60_000) {
+      logger.warn("Queue item waited too long", { channel: next.channel, preview: next.preview, waitMs });
+    }
     currentItem = { channel: next.channel, preview: next.preview, startedAt: Date.now() };
     _broadcastExtension({ type: "queue_status", busy: true, queueLength: messageQueue.length, current: currentItem });
-    await next.task();
+    await withTimeout(next.task, next.channel, next.preview);
   }
   currentItem = null;
   busy = false;
@@ -83,9 +133,13 @@ const ellieChatMessageQueue: QueueItem[] = [];
 async function processEllieChatQueue(): Promise<void> {
   while (ellieChatMessageQueue.length > 0) {
     const next = ellieChatMessageQueue.shift()!;
+    const waitMs = Date.now() - next.enqueuedAt;
+    if (waitMs > 60_000) {
+      logger.warn("Queue item waited too long", { channel: next.channel, preview: next.preview, waitMs });
+    }
     ellieChatCurrentItem = { channel: next.channel, preview: next.preview, startedAt: Date.now() };
     _broadcastExtension({ type: "queue_status", busy: busy || ellieChatQueueBusy, queueLength: messageQueue.length + ellieChatMessageQueue.length, current: ellieChatCurrentItem });
-    await next.task();
+    await withTimeout(next.task, next.channel, next.preview);
   }
   ellieChatCurrentItem = null;
   ellieChatQueueBusy = false;
@@ -146,7 +200,7 @@ export function withQueue(
     busy = true;
     currentItem = { channel: "telegram", preview, startedAt: Date.now() };
     try {
-      await handler(ctx);
+      await withTimeout(() => handler(ctx), "telegram", preview);
     } finally {
       await processQueue();
     }
