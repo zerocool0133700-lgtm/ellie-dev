@@ -9,7 +9,10 @@ import type { Context } from "grammy";
 import { InputFile, InlineKeyboard } from "grammy";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { WebSocket } from "ws";
+import { log } from "./logger.ts";
 import { indexMessage } from "./elasticsearch.ts";
+
+const logger = log.child("message-sender");
 import { getOrCreateConversation, attachMessage, maybeGenerateSummary } from "./conversations.ts";
 import { extractApprovalTags, storePendingAction } from "./approval.ts";
 
@@ -78,7 +81,7 @@ export async function saveMessage(
 
     return data?.id || null;
   } catch (error) {
-    console.error("Supabase save error:", error);
+    logger.error("Supabase save error", error);
     return null;
   }
 }

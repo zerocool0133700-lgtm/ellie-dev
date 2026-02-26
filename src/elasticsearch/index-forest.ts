@@ -10,6 +10,9 @@
  */
 
 import "dotenv/config";
+import { log } from "../logger.ts";
+
+const logger = log.child("es-forest");
 
 const ES_URL = process.env.ELASTICSEARCH_URL || "";
 
@@ -32,7 +35,7 @@ async function checkHealth(): Promise<boolean> {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return true;
   } catch {
-    console.warn("[es-forest] Elasticsearch unreachable, disabling for 60s");
+    logger.warn("Elasticsearch unreachable, disabling for 60s");
     esAvailable = false;
     disabledUntil = Date.now() + 60_000;
     return false;
@@ -218,7 +221,7 @@ export async function indexForestEvent(event: ForestEventRow): Promise<void> {
       created_at: event.created_at,
     });
   } catch (err) {
-    console.error("[es-forest] Failed to index event:", err);
+    logger.error("Failed to index event", err);
   }
 }
 
@@ -248,7 +251,7 @@ export async function indexForestCommit(commit: ForestCommitRow): Promise<void> 
       created_at: commit.created_at,
     });
   } catch (err) {
-    console.error("[es-forest] Failed to index commit:", err);
+    logger.error("Failed to index commit", err);
   }
 }
 
@@ -287,7 +290,7 @@ export async function indexForestCreature(creature: ForestCreatureRow): Promise<
       retry_count: creature.retry_count,
     });
   } catch (err) {
-    console.error("[es-forest] Failed to index creature:", err);
+    logger.error("Failed to index creature", err);
   }
 }
 
@@ -329,7 +332,7 @@ export async function indexForestTree(tree: ForestTreeRow): Promise<void> {
       archived_at: tree.archived_at || undefined,
     });
   } catch (err) {
-    console.error("[es-forest] Failed to index tree:", err);
+    logger.error("Failed to index tree", err);
   }
 }
 

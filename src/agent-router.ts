@@ -8,6 +8,9 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { classifyIntent, type ExecutionMode } from "./intent-classifier.ts";
+import { log } from "./logger.ts";
+
+const logger = log.child("agent-router");
 
 export interface AgentConfig {
   name: string;
@@ -71,7 +74,7 @@ export async function routeMessage(
     });
 
     if (error || !data?.agent_name) {
-      console.error("[agent-router] Route error:", error || "no agent_name");
+      logger.error("Route error", error || "no agent_name");
       return null;
     }
 
@@ -80,7 +83,7 @@ export async function routeMessage(
     );
     return data as RouteResult;
   } catch (err) {
-    console.error("[agent-router] Route unavailable:", err);
+    logger.error("Route unavailable", err);
     return null;
   }
 }
@@ -107,7 +110,7 @@ async function localDispatch(
     .single();
 
   if (agentError || !agent) {
-    console.error(`[agent-router] Local dispatch: agent not found: ${agentName}`);
+    logger.error("Local dispatch: agent not found", { agentName });
     return null;
   }
 
@@ -167,7 +170,7 @@ async function localDispatch(
       .single();
 
     if (sessionError || !newSession) {
-      console.error("[agent-router] Local dispatch: session creation failed:", sessionError?.message);
+      logger.error("Local dispatch: session creation failed", sessionError?.message);
       return null;
     }
 
@@ -230,7 +233,7 @@ export async function dispatchAgent(
     });
 
     if (error || !data?.session_id) {
-      console.warn("[agent-router] Edge dispatch failed, trying local fallback:", error || "no session_id");
+      logger.warn("Edge dispatch failed, trying local fallback", error || "no session_id");
       return localDispatch(supabase, agentName, userId, channel, message, workItemId, skillName);
     }
 
@@ -239,7 +242,7 @@ export async function dispatchAgent(
     );
     return data as DispatchResult;
   } catch (err) {
-    console.warn("[agent-router] Edge dispatch unavailable, trying local fallback:", err);
+    logger.warn("Edge dispatch unavailable, trying local fallback", err);
     return localDispatch(supabase, agentName, userId, channel, message, workItemId, skillName);
   }
 }
@@ -276,7 +279,7 @@ async function localSync(
     .single();
 
   if (sessionError || !session) {
-    console.error("[agent-router] Local sync: session not found:", sessionId);
+    logger.error("Local sync: session not found", { sessionId });
     return null;
   }
 
@@ -336,13 +339,13 @@ export async function syncResponse(
     });
 
     if (error) {
-      console.warn("[agent-router] Edge sync failed, trying local fallback:", error);
+      logger.warn("Edge sync failed, trying local fallback", error);
       return localSync(supabase, sessionId, assistantMessage, options);
     }
 
     return data as SyncResult;
   } catch (err) {
-    console.warn("[agent-router] Edge sync unavailable, trying local fallback:", err);
+    logger.warn("Edge sync unavailable, trying local fallback", err);
     return localSync(supabase, sessionId, assistantMessage, options);
   }
 }
@@ -369,7 +372,7 @@ export async function routeAndDispatch(
     const classification = await classifyIntent(message, channel, userId);
     route = { ...classification };
   } catch (err) {
-    console.error("[agent-router] classifyIntent failed, trying edge function fallback:", err);
+    logger.error("classifyIntent failed, trying edge function fallback", err);
     const edgeRoute = await routeMessage(supabase, message, channel, userId);
     if (!edgeRoute) return null;
     route = { ...edgeRoute, confidence: edgeRoute.confidence || 0.5, execution_mode: edgeRoute.execution_mode || "single" as const };

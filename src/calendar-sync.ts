@@ -8,7 +8,10 @@
 import { sql } from "../../ellie-forest/src/index.ts";
 import { googleAccounts, getAccessTokenForAccount, type GoogleAccount } from "./context-sources.ts";
 import { isOutlookConfigured } from "./outlook.ts";
+import { log } from "./logger.ts";
 import ICAL from "ical.js";
+
+const logger = log.child("calendar");
 
 // ============================================================
 // TYPES
@@ -64,14 +67,14 @@ async function fetchGoogleEvents(token: string, calendarId = "primary"): Promise
     );
 
     if (!res.ok) {
-      console.error(`[calendar-sync] Google fetch failed (${res.status}) for ${calendarId}`);
+      logger.error("Google fetch failed", { status: res.status, calendarId });
       return [];
     }
 
     const data = await res.json();
     return data.items || [];
   } catch (err: any) {
-    console.error(`[calendar-sync] Google fetch error:`, err?.message);
+    logger.error("Google fetch error", err);
     return [];
   }
 }
@@ -164,7 +167,7 @@ async function upsertEvents(events: CalendarEvent[]): Promise<number> {
       `;
       count++;
     } catch (err: any) {
-      console.error(`[calendar-sync] Upsert error for ${e.external_id}:`, err?.message);
+      logger.error("Upsert error", { external_id: e.external_id }, err);
     }
   }
   return count;
@@ -173,7 +176,7 @@ async function upsertEvents(events: CalendarEvent[]): Promise<number> {
 async function syncGoogleAccount(account: GoogleAccount): Promise<number> {
   const token = await getAccessTokenForAccount(account);
   if (!token) {
-    console.error(`[calendar-sync] No token for Google/${account.label}`);
+    logger.error("No token for Google account", { account: account.label });
     return 0;
   }
 
@@ -225,7 +228,7 @@ async function getMsCalendarToken(): Promise<string | null> {
 
     if (!res.ok) {
       const body = await res.text();
-      console.error(`[calendar-sync] O365 token refresh failed (${res.status}): ${body.substring(0, 200)}`);
+      logger.error("O365 token refresh failed", { status: res.status, body: body.substring(0, 200) });
       return null;
     }
 
@@ -236,7 +239,7 @@ async function getMsCalendarToken(): Promise<string | null> {
     };
     return msCalendarToken.accessToken;
   } catch (err: any) {
-    console.error("[calendar-sync] O365 token error:", err?.message);
+    logger.error("O365 token error", err);
     return null;
   }
 }
@@ -265,14 +268,14 @@ async function fetchO365Events(token: string): Promise<any[]> {
     );
 
     if (!res.ok) {
-      console.error(`[calendar-sync] O365 fetch failed (${res.status})`);
+      logger.error("O365 fetch failed", { status: res.status });
       return [];
     }
 
     const data = await res.json();
     return data.value || [];
   } catch (err: any) {
-    console.error("[calendar-sync] O365 fetch error:", err?.message);
+    logger.error("O365 fetch error", err);
     return [];
   }
 }
@@ -317,7 +320,7 @@ async function syncO365Calendar(): Promise<number> {
 
   const token = await getMsCalendarToken();
   if (!token) {
-    console.error("[calendar-sync] O365 token refresh failed");
+    logger.error("O365 token refresh failed");
     return 0;
   }
 
@@ -377,11 +380,11 @@ async function fetchAppleEvents(): Promise<CalendarEvent[]> {
           const events = parseICalEvents(obj.data, cal.displayName || "Apple");
           allEvents.push(...events);
         } catch (err: any) {
-          console.error(`[calendar-sync] Apple iCal parse error:`, err?.message);
+          logger.error("Apple iCal parse error", err);
         }
       }
     } catch (err: any) {
-      console.error(`[calendar-sync] Apple fetch error for ${cal.displayName}:`, err?.message);
+      logger.error("Apple fetch error", { calendar: cal.displayName }, err);
     }
   }
 
@@ -479,7 +482,7 @@ async function syncAppleCalendar(): Promise<number> {
     if (!events.length) return 0;
     return upsertEvents(events);
   } catch (err: any) {
-    console.error("[calendar-sync] Apple CalDAV error:", err?.message);
+    logger.error("Apple CalDAV error", err);
     return 0;
   }
 }
@@ -498,7 +501,7 @@ export async function syncAllCalendars(): Promise<void> {
       const count = await syncGoogleAccount(account);
       totalEvents += count;
     } catch (err: any) {
-      console.error(`[calendar-sync] Google/${account.label} error:`, err?.message);
+      logger.error("Google sync error", { account: account.label }, err);
     }
   }
 
@@ -507,7 +510,7 @@ export async function syncAllCalendars(): Promise<void> {
     const count = await syncO365Calendar();
     totalEvents += count;
   } catch (err: any) {
-    console.error("[calendar-sync] O365 error:", err?.message);
+    logger.error("O365 error", err);
   }
 
   // Apple (iCloud CalDAV)
@@ -515,7 +518,7 @@ export async function syncAllCalendars(): Promise<void> {
     const count = await syncAppleCalendar();
     totalEvents += count;
   } catch (err: any) {
-    console.error("[calendar-sync] Apple error:", err?.message);
+    logger.error("Apple error", err);
   }
 
   // Clean up old events (ended > 7 days ago)

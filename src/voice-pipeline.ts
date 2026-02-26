@@ -16,6 +16,9 @@ import { searchElastic } from "./elasticsearch.ts";
 import { getForestContext } from "./elasticsearch/context.ts";
 import { trimSearchContext } from "./relay-utils.ts";
 import { USER_NAME } from "./prompt-builder.ts";
+import { log } from "./logger.ts";
+
+const logger = log.child("voice-pipeline");
 
 // ── Config ───────────────────────────────────────────────────
 
@@ -133,7 +136,7 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
     _deps.broadcastExtension({ type: "message_out", channel: "voice", agent: "voice", preview: cleanResponse.substring(0, 200) });
 
     if (!session.streamSid) {
-      console.error("[voice] No stream SID");
+      logger.error("No stream SID");
       session.processing = false;
       return;
     }
@@ -152,7 +155,7 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
       console.log("[voice] Streaming failed, falling back to buffered TTS");
       const audioBase64 = await textToSpeechMulaw(cleanResponse);
       if (!audioBase64) {
-        console.error("[voice] No audio from fallback TTS");
+        logger.error("No audio from fallback TTS");
         session.speaking = false;
         session.processing = false;
         return;
@@ -178,7 +181,7 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
 
     console.log(`[voice] Total pipeline: ${Date.now() - pipelineStart}ms`);
   } catch (error) {
-    console.error("[voice] Processing error:", error);
+    logger.error("Processing error", error);
   }
 
   session.processing = false;
@@ -270,7 +273,7 @@ export function handleVoiceConnection(ws: WebSocket): void {
           break;
       }
     } catch (error) {
-      console.error("[voice] Message parse error:", error);
+      logger.error("Message parse error", error);
     }
   });
 
@@ -285,5 +288,5 @@ export function handleVoiceConnection(ws: WebSocket): void {
     }
   });
 
-  ws.on("error", (error) => console.error("[voice] WebSocket error:", error));
+  ws.on("error", (error) => logger.error("WebSocket error", error));
 }

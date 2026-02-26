@@ -5,6 +5,10 @@
  * Used by work session endpoints to update work items on session start/complete.
  */
 
+import { log } from "./logger.ts";
+
+const logger = log.child("plane");
+
 const PLANE_API_KEY = process.env.PLANE_API_KEY;
 const PLANE_BASE_URL = (process.env.PLANE_BASE_URL || "https://plane.ellie-labs.dev").replace(/\/api\/v1\/?$/, "");
 const PLANE_WORKSPACE_SLUG = process.env.PLANE_WORKSPACE_SLUG || process.env.PLANE_WORKSPACE || "evelife";
@@ -142,7 +146,7 @@ export async function updateWorkItemOnSessionStart(workItemId: string, sessionId
 
   const resolved = await resolveWorkItemId(workItemId);
   if (!resolved) {
-    console.warn(`[plane] Could not resolve work item: ${workItemId}`);
+    logger.warn("Could not resolve work item", { workItemId });
     return;
   }
 
@@ -185,7 +189,7 @@ export async function updateWorkItemOnSessionComplete(
 
   const resolved = await resolveWorkItemId(workItemId);
   if (!resolved) {
-    console.warn(`[plane] Could not resolve work item: ${workItemId}`);
+    logger.warn("Could not resolve work item", { workItemId });
     return;
   }
 
@@ -255,7 +259,7 @@ export async function fetchWorkItemDetails(workItemId: string): Promise<WorkItem
       projectIdentifier: parsed.projectIdentifier,
     };
   } catch (error) {
-    console.warn(`[plane] Failed to fetch work item ${workItemId}:`, error);
+    logger.warn("Failed to fetch work item", { workItemId }, error);
     return null;
   }
 }
@@ -288,7 +292,7 @@ export async function listOpenIssues(projectIdentifier: string, limit: number = 
 
     return issues;
   } catch (error) {
-    console.warn(`[plane] Failed to list issues for ${projectIdentifier}:`, error);
+    logger.warn("Failed to list issues", { projectIdentifier }, error);
     return [];
   }
 }
@@ -322,7 +326,7 @@ export async function createPlaneIssue(
     console.log(`[plane] Created issue: ${identifier} — ${name}`);
     return { id: issue.id, sequenceId: issue.sequence_id, identifier };
   } catch (error) {
-    console.warn(`[plane] Failed to create issue in ${projectIdentifier}:`, error);
+    logger.warn("Failed to create issue", { projectIdentifier }, error);
     return null;
   }
 }

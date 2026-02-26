@@ -8,6 +8,9 @@
  */
 
 import verifier from "alexa-verifier";
+import { log } from "./logger.ts";
+
+const logger = log.child("alexa");
 
 const DASHBOARD_URL = process.env.DASHBOARD_URL || "http://localhost:3000";
 const ALEXA_SKILL_ID = process.env.ALEXA_SKILL_ID || "";
@@ -25,7 +28,7 @@ export async function verifyAlexaRequest(
     await verifier(certUrl, signature, rawBody);
     return true;
   } catch (err) {
-    console.error("[alexa] Signature verification failed:", err);
+    logger.error("Signature verification failed", err);
     return false;
   }
 }
@@ -126,7 +129,7 @@ export async function handleAddTodo(slots: Record<string, string>): Promise<stri
     });
     return `Got it. I added "${todoText}" to your todo list.`;
   } catch (err) {
-    console.error("[alexa] Failed to add todo:", err);
+    logger.error("Failed to add todo", err);
     return "Sorry, I couldn't add that todo right now. Try again in a moment.";
   }
 }
@@ -146,7 +149,7 @@ export async function handleGetTodos(): Promise<string> {
 
     return `${intro} <break time="300ms"/> ${items.join(' <break time="200ms"/> ')}`;
   } catch (err) {
-    console.error("[alexa] Failed to fetch todos:", err);
+    logger.error("Failed to fetch todos", err);
     return "Sorry, I couldn't load your todos right now.";
   }
 }
@@ -196,7 +199,7 @@ export async function handleGetBriefing(): Promise<string> {
 
     return parts.join(' <break time="300ms"/> ');
   } catch (err) {
-    console.error("[alexa] Failed to fetch briefing:", err);
+    logger.error("Failed to fetch briefing", err);
     return "Sorry, I couldn't load your briefing right now.";
   }
 }

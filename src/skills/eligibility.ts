@@ -6,6 +6,9 @@
  */
 
 import type { SkillEntry } from "./types.ts";
+import { log } from "../logger.ts";
+
+const logger = log.child("skill-eligibility");
 
 /**
  * Filter skills to only those eligible on this system.
@@ -85,14 +88,14 @@ async function getVaultDomains(): Promise<Set<string>> {
       .select("domain");
 
     if (error || !data) {
-      console.warn("[skills] Vault domain lookup failed:", error?.message);
+      logger.warn("Vault domain lookup failed", { error: error?.message });
       vaultDomainCache = new Set();
     } else {
       vaultDomainCache = new Set(data.map((r: { domain: string }) => r.domain));
       console.log(`[skills] Vault domains: ${[...vaultDomainCache].join(", ") || "(none)"}`);
     }
   } catch (err: any) {
-    console.warn("[skills] Vault domain lookup error:", err?.message);
+    logger.warn("Vault domain lookup error", { error: err?.message });
     vaultDomainCache = new Set();
   }
 

@@ -10,6 +10,9 @@
  */
 
 import type Anthropic from "@anthropic-ai/sdk";
+import { log } from "./logger.ts";
+
+const logger = log.child("entailment");
 
 export type EntailmentLabel = "entails" | "contradicts" | "neutral";
 
@@ -74,7 +77,7 @@ Respond with ONLY a JSON object (no markdown fences):
       reasoning: parsed.reasoning || "",
     };
   } catch (err) {
-    console.error("[entailment] Classification failed:", err);
+    logger.error("Classification failed", err);
     return { label: "contradicts", confidence: 0.5, reasoning: "Classification error — defaulting to contradiction" };
   }
 }

@@ -14,6 +14,9 @@
 
 import { sendGoogleChatMessage } from "./google-chat.ts";
 import type { Bot } from "grammy";
+import { log } from "./logger.ts";
+
+const logger = log.child("notify");
 
 // ============================================================
 // TYPES
@@ -232,7 +235,7 @@ export async function notify(ctx: NotifyContext, options: NotifyOptions): Promis
       sends.push(
         ctx.bot.api.sendMessage(ctx.telegramUserId, telegramMessage, { parse_mode: "Markdown" })
           .then(() => { console.log(`[notify] telegram/${event}/${workItemId}: sent`); })
-          .catch((err) => { console.error(`[notify] telegram/${event}/${workItemId}: failed:`, err.message); }),
+          .catch((err) => { logger.error("Telegram send failed", { channel: "telegram", event, work_item_id: workItemId }, err); }),
       );
     } else {
       // Schedule a batched send when the throttle window expires
@@ -248,7 +251,7 @@ export async function notify(ctx: NotifyContext, options: NotifyOptions): Promis
       sends.push(
         sendGoogleChatMessage(ctx.gchatSpaceName, msg)
           .then(() => { console.log(`[notify] gchat/${event}/${workItemId}: sent`); })
-          .catch((err) => { console.error(`[notify] gchat/${event}/${workItemId}: failed:`, err.message); }),
+          .catch((err) => { logger.error("Google Chat send failed", { channel: "google-chat", event, work_item_id: workItemId }, err); }),
       );
     } else {
       scheduleBatchedSend(ctx, event, "google-chat", workItemId, msg);
@@ -295,7 +298,7 @@ function scheduleBatchedSend(
       }
       console.log(`[notify] ${channel}/${event}/${workItemId}: batched send`);
     } catch (err: any) {
-      console.error(`[notify] ${channel}/${event}/${workItemId}: batched send failed:`, err.message);
+      logger.error("Batched send failed", { channel, event, work_item_id: workItemId }, err);
     }
   }, delaySec * 1000);
 

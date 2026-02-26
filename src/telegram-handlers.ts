@@ -7,6 +7,7 @@
 import { InputFile, type Bot, type Context } from "grammy";
 import { writeFile, readFile, unlink } from "fs/promises";
 import { join } from "path";
+import { log } from "./logger.ts";
 import {
   BOT_TOKEN, ALLOWED_USER_ID, GCHAT_SPACE_NOTIFY, UPLOADS_DIR,
   getContextDocket,
@@ -87,6 +88,8 @@ import {
   acknowledgeQueueItems,
 } from "./api/agent-queue.ts";
 
+const logger = log.child("telegram");
+
 export function registerTelegramHandlers(bot: Bot): void {
   const { anthropic, supabase } = getRelayDeps();
 
@@ -134,7 +137,7 @@ bot.on("message:text", withQueue(async (ctx) => {
       const results = await searchForestSafe(query, { limit: 10 });
       await sendResponse(ctx, results || "No results found.");
     } catch (err) {
-      console.error("[/search] Error:", err);
+      logger.error("/search failed", err);
       await ctx.reply("Search failed — ES may be unavailable.");
     }
     return;
@@ -150,7 +153,7 @@ bot.on("message:text", withQueue(async (ctx) => {
       });
       await sendResponse(ctx, formatForestMetrics(metrics));
     } catch (err) {
-      console.error("[/forest-metrics] Error:", err);
+      logger.error("/forest-metrics failed", err);
       await ctx.reply("Metrics failed — ES may be unavailable.");
     }
     return;
@@ -178,7 +181,7 @@ bot.on("message:text", withQueue(async (ctx) => {
     console.log(`[telegram] ELLIE:: commands in user message: ${userPlaybookCmds.map(c => c.type).join(", ")}`);
     await ctx.reply(`Processing ${userPlaybookCmds.length} playbook command(s)...`);
     const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "telegram", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-    executePlaybookCommands(userPlaybookCmds, pbCtx).catch(err => console.error("[playbook]", err));
+    executePlaybookCommands(userPlaybookCmds, pbCtx).catch(err => logger.error("Playbook command execution failed", err));
     return;
   }
 
@@ -198,7 +201,7 @@ bot.on("message:text", withQueue(async (ctx) => {
         workItemId: agentName,
         telegramMessage: `🤖 ${agentName} agent`,
         gchatMessage: `🤖 ${agentName} agent dispatched`,
-      }).catch((err) => console.error("[notify] dispatch_confirm:", err.message));
+      }).catch((err) => logger.error("Dispatch confirm notification failed", err));
     }
   }
 
@@ -277,7 +280,7 @@ bot.on("message:text", withQueue(async (ctx) => {
       const { cleanedText: playbookClean, commands: playbookCommands } = extractPlaybookCommands(pipelineResponse);
       const cleanedPipelineResponse = await sendWithApprovals(ctx, playbookClean, session.sessionId, agentName);
       await saveMessage("assistant", cleanedPipelineResponse, undefined, "telegram", userId);
-      runPostMessageAssessment(text, cleanedPipelineResponse, anthropic).catch(err => console.error("[assessment]", err));
+      runPostMessageAssessment(text, cleanedPipelineResponse, anthropic).catch(err => logger.error("Post-message assessment failed", err));
       broadcastExtension({ type: "pipeline_complete", channel: "telegram", mode: execMode, steps: result.stepResults.length, duration_ms: result.artifacts.total_duration_ms, cost_usd: result.artifacts.total_cost_usd });
 
       if (result.finalDispatch) {
@@ -289,7 +292,7 @@ bot.on("message:text", withQueue(async (ctx) => {
       // Fire playbook commands async (ELLIE:: tags)
       if (playbookCommands.length > 0) {
         const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "telegram", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-        executePlaybookCommands(playbookCommands, pbCtx).catch(err => console.error("[playbook]", err));
+        executePlaybookCommands(playbookCommands, pbCtx).catch(err => logger.error("Playbook command execution failed", err));
       }
 
       console.log(
@@ -299,13 +302,13 @@ bot.on("message:text", withQueue(async (ctx) => {
     } catch (err) {
       clearInterval(typingInterval);
       if (err instanceof PipelineStepError && err.partialOutput) {
-        console.error(`[orchestrator] Step ${err.stepIndex} failed (${err.errorType}), sending partial results`);
+        logger.error("Pipeline step failed, sending partial results", { stepIndex: err.stepIndex, errorType: err.errorType });
         const partialResponse = await processMemoryIntents(supabase, err.partialOutput, agentResult?.dispatch.agent.name || "general", "shared", agentMemory.sessionIds);
         await sendResponse(ctx, partialResponse + "\n\n(Execution incomplete \u2014 showing partial results.)");
         await saveMessage("assistant", partialResponse, undefined, "telegram", userId);
-        runPostMessageAssessment(text, partialResponse, anthropic).catch(err2 => console.error("[assessment]", err2));
+        runPostMessageAssessment(text, partialResponse, anthropic).catch(err2 => logger.error("Post-message assessment failed", err2));
       } else {
-        console.error("[orchestrator] Multi-step failed, falling back to single agent:", err);
+        logger.error("Multi-step failed, falling back to single agent", err);
         const fallbackPrompt = buildPrompt(
           effectiveText, contextDocket, relevantContext, elasticContext, "telegram",
           agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
@@ -328,7 +331,7 @@ bot.on("message:text", withQueue(async (ctx) => {
         const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw, fallbackAgentName, "shared", agentMemory.sessionIds);
         const cleaned = await sendWithApprovals(ctx, fallbackResponse, session.sessionId, fallbackAgentName);
         await saveMessage("assistant", cleaned, undefined, "telegram", userId);
-        runPostMessageAssessment(text, cleaned, anthropic).catch(err2 => console.error("[assessment]", err2));
+        runPostMessageAssessment(text, cleaned, anthropic).catch(err2 => logger.error("Post-message assessment failed", err2));
       }
     }
 
@@ -393,7 +396,7 @@ bot.on("message:text", withQueue(async (ctx) => {
         }
       }
     } catch (err: any) {
-      console.warn(`[telegram] Late-resolve sessionIds failed:`, err?.message || err);
+      logger.warn("Late-resolve sessionIds failed", err);
     }
   }
 
@@ -406,7 +409,7 @@ bot.on("message:text", withQueue(async (ctx) => {
   const cleanedResponse = await sendWithApprovals(ctx, playbookCleanedResponse, session.sessionId, agentResult?.dispatch.agent.name);
 
   await saveMessage("assistant", cleanedResponse, undefined, "telegram", userId);
-  runPostMessageAssessment(text, cleanedResponse, anthropic).catch(err => console.error("[assessment]", err));
+  runPostMessageAssessment(text, cleanedResponse, anthropic).catch(err => logger.error("Post-message assessment failed", err));
   broadcastExtension({ type: "message_out", channel: "telegram", agent: agentResult?.dispatch.agent.name || "general", preview: cleanedResponse.substring(0, 200) });
 
   // Sync response to agent session (fire-and-forget)
@@ -422,7 +425,7 @@ bot.on("message:text", withQueue(async (ctx) => {
   // Fire playbook commands async (ELLIE:: tags)
   if (tgPlaybookCommands.length > 0) {
     const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "telegram", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-    executePlaybookCommands(tgPlaybookCommands, pbCtx).catch(err => console.error("[playbook]", err));
+    executePlaybookCommands(tgPlaybookCommands, pbCtx).catch(err => logger.error("Playbook command execution failed", err));
   }
 
   resetTelegramIdleTimer();
@@ -472,7 +475,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
           workItemId: agentName,
           telegramMessage: `🤖 ${agentName} agent`,
           gchatMessage: `🤖 ${agentName} agent dispatched`,
-        }).catch((err) => console.error("[notify] dispatch_confirm:", err.message));
+        }).catch((err) => logger.error("Dispatch confirm notification failed", err));
       }
     }
 
@@ -529,7 +532,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
         const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, voiceAgentName, "shared", agentMemory.sessionIds);
         const cleaned = await sendWithApprovals(ctx, pipelineResponse, session.sessionId, voiceAgentName);
         await saveMessage("assistant", cleaned, undefined, "telegram", voiceUserId);
-        runPostMessageAssessment(transcription, cleaned, anthropic).catch(err => console.error("[assessment]", err));
+        runPostMessageAssessment(transcription, cleaned, anthropic).catch(err => logger.error("Post-message assessment failed", err));
 
         if (result.finalDispatch) {
           syncResponse(supabase, result.finalDispatch.session_id, cleaned, {
@@ -546,9 +549,9 @@ bot.on("message:voice", withQueue(async (ctx) => {
           const partialResponse = await processMemoryIntents(supabase, err.partialOutput, agentResult?.dispatch.agent.name || "general", "shared", agentMemory.sessionIds);
           await sendResponse(ctx, partialResponse + "\n\n(Execution incomplete \u2014 showing partial results.)");
           await saveMessage("assistant", partialResponse, undefined, "telegram", voiceUserId);
-          runPostMessageAssessment(transcription, partialResponse, anthropic).catch(err2 => console.error("[assessment]", err2));
+          runPostMessageAssessment(transcription, partialResponse, anthropic).catch(err2 => logger.error("Post-message assessment failed", err2));
         } else {
-          console.error("[orchestrator] Voice multi-step failed:", err);
+          logger.error("Voice multi-step failed", err);
           await ctx.reply("Multi-step execution failed \u2014 processing as single request.");
           const fallbackPrompt = buildPrompt(
             `[Voice message transcribed]: ${effectiveTranscription}`,
@@ -573,7 +576,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
           const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw, voiceFallbackAgent, "shared", agentMemory.sessionIds);
           const cleaned = await sendWithApprovals(ctx, fallbackResponse, session.sessionId, voiceFallbackAgent);
           await saveMessage("assistant", cleaned, undefined, "telegram", voiceUserId);
-          runPostMessageAssessment(transcription, cleaned, anthropic).catch(err2 => console.error("[assessment]", err2));
+          runPostMessageAssessment(transcription, cleaned, anthropic).catch(err2 => logger.error("Post-message assessment failed", err2));
         }
       }
 
@@ -626,7 +629,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
         await ctx.replyWithVoice(new InputFile(audioBuffer, "response.ogg"));
         await sendResponse(ctx, cleanedText);
         await saveMessage("assistant", cleanedText, undefined, "telegram", voiceUserId);
-        runPostMessageAssessment(transcription, cleanedText, anthropic).catch(err => console.error("[assessment]", err));
+        runPostMessageAssessment(transcription, cleanedText, anthropic).catch(err => logger.error("Post-message assessment failed", err));
 
         if (agentResult) {
           syncResponse(supabase, agentResult.dispatch.session_id, cleanedText, {
@@ -643,7 +646,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
     const cleanedResponse = await sendWithApprovals(ctx, claudeResponse, session.sessionId, agentResult?.dispatch.agent.name);
 
     await saveMessage("assistant", cleanedResponse, undefined, "telegram", voiceUserId);
-    runPostMessageAssessment(transcription, cleanedResponse, anthropic).catch(err => console.error("[assessment]", err));
+    runPostMessageAssessment(transcription, cleanedResponse, anthropic).catch(err => logger.error("Post-message assessment failed", err));
 
     if (agentResult) {
       syncResponse(supabase, agentResult.dispatch.session_id, cleanedResponse, {
@@ -653,7 +656,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
 
     resetTelegramIdleTimer();
   } catch (error) {
-    console.error("Voice error:", error);
+    logger.error("Voice processing failed", error);
     await ctx.reply("Could not process voice message. Check logs for details.");
   }
 }, (ctx) => `[Voice ${ctx.message?.voice?.duration ?? 0}s]`));
@@ -698,7 +701,7 @@ bot.on("message:photo", withQueue(async (ctx) => {
     await saveMessage("assistant", finalResponse, undefined, "telegram", imgUserId);
     resetTelegramIdleTimer();
   } catch (error) {
-    console.error("Image error:", error);
+    logger.error("Image processing failed", error);
     await ctx.reply("Could not process image.");
   }
 }, (ctx) => ctx.message?.caption?.substring(0, 50) ?? "[Photo]"));
@@ -737,7 +740,7 @@ bot.on("message:document", withQueue(async (ctx) => {
     await saveMessage("assistant", finalResponse, undefined, "telegram", docUserId);
     resetTelegramIdleTimer();
   } catch (error) {
-    console.error("Document error:", error);
+    logger.error("Document processing failed", error);
     await ctx.reply("Could not process document.");
   }
 }, (ctx) => ctx.message?.document?.file_name ?? "[Document]"));

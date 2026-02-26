@@ -7,6 +7,9 @@
 import { spawn } from "bun";
 import { writeFile, readFile, unlink } from "fs/promises";
 import { join } from "path";
+import { log } from "./logger.ts";
+
+const logger = log.child("transcribe");
 
 const VOICE_PROVIDER = process.env.VOICE_PROVIDER || "";
 
@@ -25,7 +28,7 @@ export async function transcribe(audioBuffer: Buffer): Promise<string> {
     return transcribeLocal(audioBuffer);
   }
 
-  console.error(`Unknown VOICE_PROVIDER: ${VOICE_PROVIDER}`);
+  logger.error("Unknown VOICE_PROVIDER", { provider: VOICE_PROVIDER });
   return "";
 }
 

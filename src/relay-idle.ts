@@ -10,6 +10,9 @@ import { getRelayDeps } from "./relay-state.ts";
 import { closeActiveConversation, closeConversation } from "./conversations.ts";
 import { consolidateNow } from "./consolidate-inline.ts";
 import { getPlanningMode } from "./prompt-builder.ts";
+import { log } from "./logger.ts";
+
+const logger = log.child("relay-idle");
 
 // ── Idle timing constants ──────────────────────────────────
 
@@ -54,7 +57,7 @@ export async function triggerConsolidation(channel?: string): Promise<void> {
       console.log(`[consolidate] Conversation ended (${channel || "all"}) — context cache cleared`);
     }
   } catch (err) {
-    console.error("[consolidate] Consolidation error:", err);
+    logger.error("Consolidation error", err);
   }
 }
 

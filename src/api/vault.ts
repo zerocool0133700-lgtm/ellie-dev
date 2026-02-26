@@ -18,6 +18,9 @@ import {
   type CredentialType,
   type CredentialPayload,
 } from "../vault.ts";
+import { log } from "../logger.ts";
+
+const logger = log.child("vault");
 
 // ============================================================
 // CRUD ENDPOINTS
@@ -61,7 +64,7 @@ export async function createVaultCredential(
     console.log(`[vault] Created credential "${label}" for ${domain}`);
     return res.json(record);
   } catch (err: any) {
-    console.error("[vault] Create error:", err.message);
+    logger.error("Create failed", err);
     return res.status(500).json({ error: err.message });
   }
 }
@@ -82,7 +85,7 @@ export async function listVaultCredentials(
     });
     return res.json(records);
   } catch (err: any) {
-    console.error("[vault] List error:", err.message);
+    logger.error("List failed", err);
     return res.status(500).json({ error: err.message });
   }
 }
@@ -99,7 +102,7 @@ export async function getVaultCredential(
     const record = await getCredential(supabase, req.params.id);
     return res.json(record);
   } catch (err: any) {
-    console.error("[vault] Get error:", err.message);
+    logger.error("Get failed", err);
     return res.status(500).json({ error: err.message });
   }
 }
@@ -118,7 +121,7 @@ export async function updateVaultCredential(
     console.log(`[vault] Updated credential ${req.params.id}`);
     return res.json(record);
   } catch (err: any) {
-    console.error("[vault] Update error:", err.message);
+    logger.error("Update failed", err);
     return res.status(500).json({ error: err.message });
   }
 }
@@ -136,7 +139,7 @@ export async function deleteVaultCredential(
     console.log(`[vault] Deleted credential ${req.params.id}`);
     return res.json({ success: true });
   } catch (err: any) {
-    console.error("[vault] Delete error:", err.message);
+    logger.error("Delete failed", err);
     return res.status(500).json({ error: err.message });
   }
 }
@@ -184,7 +187,7 @@ export async function resolveVaultCredential(
       payload: result.payload,
     });
   } catch (err: any) {
-    console.error("[vault] Resolve error:", err.message);
+    logger.error("Resolve failed", err);
     return res.status(500).json({ error: err.message });
   }
 }
@@ -251,7 +254,7 @@ export async function authenticatedFetch(
                 .join("; ");
             }
           } catch (err) {
-            console.error("[vault] Browser auth failed:", (err as Error).message);
+            logger.error("Browser auth failed", err);
           }
           break;
         }
@@ -287,7 +290,7 @@ export async function authenticatedFetch(
       body: responseBody,
     });
   } catch (err: any) {
-    console.error("[vault] Fetch error:", err.message);
+    logger.error("Fetch failed", err);
     return res.status(500).json({ error: err.message });
   }
 }

@@ -26,6 +26,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type Anthropic from "@anthropic-ai/sdk";
 import { getConversationContext } from "./conversations.ts";
 import { matchSkillCommand } from "./skills/commands.ts";
+import { log } from "./logger.ts";
+
+const logger = log.child("intent");
 
 export type ExecutionMode = "single" | "pipeline" | "fan-out" | "critic-loop";
 
@@ -143,7 +146,7 @@ export async function classifyIntent(
       };
     }
   } catch (err) {
-    console.warn("[classifier] Skill command match failed:", err);
+    logger.warn("Skill command match failed", err);
   }
 
   // Tier 2+3: Run session continuity and LLM classification in parallel
@@ -154,7 +157,7 @@ export async function classifyIntent(
       console.log(`[classifier] Session continuity (no LLM) → "${continuity.agent_name}"`);
       return continuity;
     }
-    console.warn("[classifier] No Anthropic client — falling back to general");
+    logger.warn("No Anthropic client — falling back to general");
     return { agent_name: "general", rule_name: "no_anthropic_fallback", confidence: 0, execution_mode: "single" };
   }
 
@@ -332,7 +335,7 @@ async function classifyWithHaiku(
     // Validate agent name
     const valid = agents.find((a) => a.name === agentName);
     if (!valid) {
-      console.warn(`[classifier] Unknown agent "${agentName}" — falling back`);
+      logger.warn("Unknown agent — falling back", { agent: agentName });
       return { agent_name: "general", rule_name: "unknown_agent_fallback", confidence: 0, execution_mode: "single" };
     }
 
@@ -366,7 +369,7 @@ async function classifyWithHaiku(
       skills: parsedSkills,
     };
   } catch (err) {
-    console.error("[classifier] Haiku classification failed:", err);
+    logger.error("Haiku classification failed", err);
     return { agent_name: "general", rule_name: "error_fallback", confidence: 0, execution_mode: "single" };
   }
 }
@@ -472,7 +475,7 @@ async function getAgentDescriptions(): Promise<AgentDescription[]> {
     console.log(`[classifier] Agent cache refreshed from forest: ${_agentCache.length} agents`);
     return _agentCache;
   } catch (err) {
-    console.warn(`[classifier] Forest agent lookup failed, falling back to Supabase:`, err);
+    logger.warn("Forest agent lookup failed, falling back to Supabase", err);
   }
 
   // Fallback: Supabase agents table (operational)

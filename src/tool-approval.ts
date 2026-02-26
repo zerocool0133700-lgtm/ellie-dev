@@ -11,6 +11,9 @@
 
 import { randomUUID } from "crypto";
 import type { IncomingMessage, ServerResponse } from "http";
+import { log } from "./logger.ts";
+
+const logger = log.child("tool-approval");
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -235,7 +238,7 @@ export async function handleToolApprovalHTTP(req: IncomingMessage, res: ServerRe
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
     } catch (err: any) {
-      console.error("[tool-approval] HTTP error:", err.message);
+      logger.error("HTTP error", err);
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ approved: true, reason: "Error in approval check — allowing by default" }));
     }

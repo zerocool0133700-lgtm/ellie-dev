@@ -13,8 +13,11 @@
 
 import { spawn } from "bun";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { log } from "./logger.ts";
 import { indexConversation, indexMemory, classifyDomain } from "./elasticsearch.ts";
 import { insertMemoryWithDedup } from "./memory.ts";
+
+const logger = log.child("consolidate");
 
 interface RawMessage {
   id: string;
@@ -58,7 +61,7 @@ export async function consolidateNow(
   const { data: messages, error } = await query;
 
   if (error) {
-    console.error("[consolidate] Failed to fetch messages:", error);
+    logger.error("Failed to fetch messages", error);
     return false;
   }
 
@@ -103,7 +106,7 @@ async function callClaudeCLI(prompt: string): Promise<string> {
   let timedOut = false;
   const timeout = setTimeout(() => {
     timedOut = true;
-    console.error(`[consolidate] CLI timeout after ${TIMEOUT_MS / 1000}s — killing`);
+    logger.error("CLI timeout — killing", { timeoutSeconds: TIMEOUT_MS / 1000 });
     proc.kill();
   }, TIMEOUT_MS);
 
@@ -167,7 +170,7 @@ async function processBlock(
     .single();
 
   if (convoErr || !convo) {
-    console.error("[consolidate] Failed to create conversation:", convoErr);
+    logger.error("Failed to create conversation", convoErr);
     return;
   }
 
@@ -212,7 +215,7 @@ ${transcript}`;
   try {
     responseText = await callClaudeCLI(prompt);
   } catch (err) {
-    console.error("[consolidate] CLI call failed:", err);
+    logger.error("CLI call failed", err);
     // Rollback: unlink messages and delete conversation so they can be retried
     await supabase.from("messages").update({ conversation_id: null }).in("id", block.messageIds);
     await supabase.from("conversations").delete().eq("id", conversationId);
@@ -238,10 +241,7 @@ ${transcript}`;
       parsed = JSON.parse(jsonMatch[0]);
     }
   } catch {
-    console.error(
-      "[consolidate] Failed to parse response:",
-      responseText.substring(0, 200)
-    );
+    logger.error("Failed to parse response", { preview: responseText.substring(0, 200) });
     // Rollback: unlink messages and delete conversation so they can be retried
     await supabase.from("messages").update({ conversation_id: null }).in("id", block.messageIds);
     await supabase.from("conversations").delete().eq("id", conversationId);

@@ -18,6 +18,9 @@
  */
 
 import { sql, writeMemory } from '../../../ellie-forest/src/index'
+import { log } from "../logger.ts";
+
+const logger = log.child("agent-queue");
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -63,7 +66,7 @@ export async function createQueueItem(req: any, res: any) {
     console.log(`[agent-queue] Created: ${source} → ${target} [${prio}] ${category}: ${title}`)
     return res.json({ ok: true, item })
   } catch (error) {
-    console.error('[agent-queue:create] Error:', error)
+    logger.error("Create failed", error)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }
@@ -111,7 +114,7 @@ export async function listQueueItems(req: any, res: any) {
 
     return res.json({ ok: true, count: items.length, items })
   } catch (error) {
-    console.error('[agent-queue:list] Error:', error)
+    logger.error("List failed", error)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }
@@ -145,13 +148,13 @@ export async function updateQueueStatus(req: any, res: any, id: string) {
     // On completion, summarize to Bridge memory then delete (fire-and-forget)
     if (status === 'completed') {
       summarizeCompletedItem(item).catch(err =>
-        console.error('[agent-queue] Bridge summarize failed:', err)
+        logger.error("Bridge summarize failed", err)
       )
     }
 
     return res.json({ ok: true, item })
   } catch (error) {
-    console.error('[agent-queue:status] Error:', error)
+    logger.error("Status update failed", error)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }
@@ -171,7 +174,7 @@ export async function deleteQueueItem(req: any, res: any, id: string) {
     console.log(`[agent-queue] Deleted: ${id.slice(0, 8)}`)
     return res.json({ ok: true })
   } catch (error) {
-    console.error('[agent-queue:delete] Error:', error)
+    logger.error("Delete failed", error)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }
@@ -309,7 +312,7 @@ export async function getQueueStats(req: any, res: any) {
       recent,
     })
   } catch (error) {
-    console.error('[agent-queue:stats] Error:', error)
+    logger.error("Stats failed", error)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }

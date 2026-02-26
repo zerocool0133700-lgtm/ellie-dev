@@ -233,12 +233,14 @@ describe("POST /api/work-session/complete", () => {
     expect(data.success).toBe(true)
   })
 
-  test("returns 404 after session is already completed", async () => {
-    const { status } = await post("complete", {
+  test("returns 200 (idempotent) after session is already completed", async () => {
+    const { status, data } = await post("complete", {
       work_item_id: "TEST-E94-1",
-      summary: "Should fail",
+      summary: "Should succeed idempotently",
     })
 
-    expect(status).toBe(404)
+    // completeWorkSession is idempotent — dormant trees are found and returned
+    expect(status).toBe(200)
+    expect(data.success).toBe(true)
   })
 })

@@ -5,6 +5,9 @@
 import "dotenv/config";
 import { spawn } from "bun";
 import { createClient } from "@supabase/supabase-js";
+import { log } from "./logger.ts";
+
+const logger = log.child("summarize-backfill");
 
 const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_ANON_KEY!);
 const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
@@ -84,11 +87,11 @@ async function run() {
 
       console.log(`  -> ${summary.substring(0, 100)}...`);
     } catch (err) {
-      console.error(`  -> Failed: ${err}`);
+      logger.error("Failed to summarize conversation", { conversationId: convo.id }, err);
     }
   }
 
   console.log("\nDone.");
 }
 
-run().catch(console.error);
+run().catch((err) => logger.error("Fatal error", err));

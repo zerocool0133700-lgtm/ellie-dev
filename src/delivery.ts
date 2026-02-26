@@ -10,6 +10,9 @@
 
 import { SupabaseClient } from "@supabase/supabase-js";
 import { sendGoogleChatMessage, type GchatSendResult } from "./google-chat.ts";
+import { log } from "./logger.ts";
+
+const logger = log.child("delivery");
 
 // ============================================================
 // TYPES
@@ -111,7 +114,7 @@ async function updateDeliveryStatus(
       .update({ metadata })
       .eq("id", messageId);
   } catch (err) {
-    console.error("[delivery] Failed to update delivery status:", err);
+    logger.error("Failed to update delivery status", err);
   }
 }
 
@@ -184,7 +187,7 @@ export async function deliverMessage(
     throw new Error(`Unknown channel: ${options.channel}`);
   } catch (primaryErr) {
     const errMsg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
-    console.error(`[delivery] Primary channel ${options.channel} failed after ${maxRetries} attempts: ${errMsg}`);
+    logger.error("Primary channel failed after retries", { channel: options.channel, maxRetries, error: errMsg });
 
     // Try fallback channel
     if (options.fallback) {
@@ -255,7 +258,7 @@ async function attemptFallback(
     throw new Error(`Fallback channel ${fallbackChannel} not configured`);
   } catch (fallbackErr) {
     const fbErrMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
-    console.error(`[delivery] Fallback also failed: ${fbErrMsg}`);
+    logger.error("Fallback also failed", { error: fbErrMsg });
 
     const delivery: DeliveryResult = {
       status: "failed",

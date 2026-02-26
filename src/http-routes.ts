@@ -134,6 +134,9 @@ import {
   clearSessionApprovals,
 } from "./tool-approval.ts";
 import { handleGatewayRoute } from "./api/gateway-intake.ts";
+import { log } from "./logger.ts";
+
+const logger = log.child("http");
 
 export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
   const { bot, anthropic, supabase } = getRelayDeps();
@@ -150,7 +153,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
     req.on("data", (chunk: Buffer) => { voiceBody += chunk.toString(); });
     req.on("end", () => {
       if (!validateTwilioSignature(req, voiceBody)) {
-        console.warn("[voice] Invalid Twilio signature — rejecting request");
+        logger.warn("Invalid Twilio signature — rejecting request");
         res.writeHead(403);
         res.end("Forbidden");
         return;
@@ -161,7 +164,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         const params = new URLSearchParams(voiceBody);
         const caller = (params.get("From") || "").replace(/\D/g, "");
         if (!ALLOWED_CALLERS.has(caller)) {
-          console.warn(`[voice] Rejected call from ${params.get("From")} — not in whitelist`);
+          logger.warn("Rejected call — not in whitelist", { from: params.get("From") });
           const rejectTwiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response><Say>Sorry, this number is not authorized.</Say><Hangup/></Response>`;
           res.writeHead(200, { "Content-Type": "application/xml" });
@@ -248,12 +251,12 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
                 // Send follow-up via REST API to the correct space
                 if (pending.spaceName) {
                   await sendGoogleChatMessage(pending.spaceName, cleanFollowUp).catch((err) => {
-                    console.error(`[gchat] Failed to send approval follow-up:`, err);
+                    logger.error("Failed to send approval follow-up", err);
                   });
                 }
                 console.log(`[gchat] Approval follow-up sent: ${cleanFollowUp.substring(0, 80)}...`);
               }).catch((err) => {
-                console.error(`[gchat] Approval Claude call failed:`, err);
+                logger.error("Approval Claude call failed", err);
                 // Try to notify the user about the error
                 if (pending.spaceName) {
                   sendGoogleChatMessage(pending.spaceName, "Sorry, I ran into an error processing that approval. Please try again.").catch(() => {});
@@ -330,7 +333,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               const { searchForestSafe } = await import("./elasticsearch/search-forest.ts");
               responseText = (await searchForestSafe(query, { limit: 10 })) || "No results found.";
             } catch (err) {
-              console.error("[gchat /search] Error:", err);
+              logger.error("gchat /search error", err);
               responseText = "Search failed — ES may be unavailable.";
             }
           }
@@ -352,7 +355,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
             });
             responseText = formatForestMetrics(metrics);
           } catch (err) {
-            console.error("[gchat /forest-metrics] Error:", err);
+            logger.error("gchat /forest-metrics error", err);
             responseText = "Metrics failed — ES may be unavailable.";
           }
           res.writeHead(200, { "Content-Type": "application/json" });
@@ -387,7 +390,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
                   workItemId: agentName,
                   telegramMessage: `🤖 ${agentName} agent`,
                   gchatMessage: `🤖 ${agentName} agent dispatched`,
-                }).catch((err) => console.error("[notify] dispatch_confirm:", err.message));
+                }).catch((err) => logger.error("dispatch_confirm failed", err));
               }
             }
 
@@ -481,7 +484,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               // Fire playbook commands async (ELLIE:: tags)
               if (gchatOrcPlaybookCmds.length > 0) {
                 const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "google-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-                executePlaybookCommands(gchatOrcPlaybookCmds, pbCtx).catch(err => console.error("[playbook]", err));
+                executePlaybookCommands(gchatOrcPlaybookCmds, pbCtx).catch(err => logger.error("Playbook execution failed", err));
               }
               return;
             }
@@ -545,16 +548,16 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
             } else if (gchatDeliverResult.status === "fallback") {
               console.log(`[gchat] Async delivery via fallback (${gchatDeliverResult.channel}) → ${gchatDeliverResult.externalId}`);
             } else {
-              console.error(`[gchat] Async delivery FAILED: ${gchatDeliverResult.error}`);
+              logger.error("Async delivery failed", { error: gchatDeliverResult.error });
             }
 
             // Fire playbook commands async (ELLIE:: tags)
             if (gchatPlaybookCmds.length > 0) {
               const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "google-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-              executePlaybookCommands(gchatPlaybookCmds, pbCtx).catch(err => console.error("[playbook]", err));
+              executePlaybookCommands(gchatPlaybookCmds, pbCtx).catch(err => logger.error("Playbook execution failed", err));
             }
           } catch (err) {
-            console.error("[gchat] Async processing error:", err);
+            logger.error("Async processing error", err);
             const errMsg = err instanceof PipelineStepError && err.partialOutput
               ? err.partialOutput + "\n\n(Execution incomplete.)"
               : "Sorry, I ran into an error while processing your request. Please try again.";
@@ -571,7 +574,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         })();
 
       } catch (err) {
-        console.error("[gchat] Webhook error:", err);
+        logger.error("Webhook error", err);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({
           hostAppDataAction: {
@@ -745,10 +748,10 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
                   try {
                     await bot.api.sendMessage(ALLOWED_USER_ID, `[From Alexa] ${clean}`);
                   } catch (tgErr) {
-                    console.error("[alexa] Telegram fallback failed:", tgErr);
+                    logger.error("Telegram fallback failed", tgErr);
                   }
                 })
-                .catch((err) => console.error("[alexa] Async Claude error:", err));
+                .catch((err) => logger.error("Async Claude error", err));
             } else {
               const clean = raceResult.response.replace(/<[^>]+>/g, "").substring(0, 6000);
               await saveMessage("assistant", clean, {}, "alexa", parsed.userId);
@@ -777,7 +780,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(resp));
       } catch (err) {
-        console.error("[alexa] Webhook error:", err);
+        logger.error("Webhook error", err);
         const { buildAlexaErrorResponse } = await import("./alexa.ts");
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(buildAlexaErrorResponse()));
@@ -840,7 +843,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         });
         res.end(audioBuffer);
       } catch (err: any) {
-        console.error("[tts] API error:", err);
+        logger.error("TTS API error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: String(err) }));
       }
@@ -875,7 +878,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ text }));
       } catch (err: any) {
-        console.error("[stt] API error:", err);
+        logger.error("STT API error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: String(err) }));
       }
@@ -980,7 +983,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
       } catch (err) {
-        console.error("[consolidate] API error:", err);
+        logger.error("Consolidate API error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: String(err) }));
       }
@@ -1038,7 +1041,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ success: true, identifier: result.identifier, title: ticket.title, description: ticket.description }));
       } catch (err: any) {
-        console.error("[ticket] Error:", err?.message || err);
+        logger.error("Ticket creation error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: err?.message || "Failed to create ticket" }));
       }
@@ -1075,7 +1078,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
 
       const { data, error } = await query;
       if (error) {
-        console.error("[relay] execution-plans query error:", error);
+        logger.error("Execution-plans query error", error);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
         return;
@@ -1136,7 +1139,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
       } catch (err) {
-        console.error("[conversation] Close API error:", err);
+        logger.error("Conversation close API error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: String(err) }));
       }
@@ -1158,7 +1161,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, context }));
       } catch (err) {
-        console.error("[conversation] Context API error:", err);
+        logger.error("Conversation context API error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: String(err) }));
       }
@@ -1256,7 +1259,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         let timedOut = false;
         const timeout = setTimeout(() => {
           timedOut = true;
-          console.error("[extract-ideas] CLI timeout — killing");
+          logger.error("CLI timeout — killing");
           proc.kill();
         }, TIMEOUT_MS);
 
@@ -1316,7 +1319,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, ideas }));
       } catch (err) {
-        console.error("[extract-ideas] Error:", err);
+        logger.error("Extract-ideas error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: String(err) }));
       }
@@ -1374,7 +1377,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
             res.end(JSON.stringify({ error: "Unknown memory endpoint" }));
         }
       } catch (err) {
-        console.error("[memory-analytics] Error:", err);
+        logger.error("Memory-analytics error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -1568,7 +1571,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
             meta,
           }));
         } catch (err: any) {
-          console.error("[skills] Import error:", err);
+          logger.error("Skills import error", err);
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: err?.message || "Failed to import skill" }));
         }
@@ -1587,7 +1590,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         try {
           data = JSON.parse(body);
         } catch (parseErr) {
-          console.error("[work-session] JSON parse error:", parseErr, "body:", body.substring(0, 200));
+          logger.error("JSON parse error", { body: body.substring(0, 200) }, parseErr);
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Invalid JSON body" }));
           return;
@@ -1637,7 +1640,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
             res.end(JSON.stringify({ error: "Unknown work-session endpoint" }));
         }
       } catch (err) {
-        console.error("[work-session] Error:", err);
+        logger.error("Work-session error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -1681,7 +1684,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, sent_to: sentCount }));
       } catch (err) {
-        console.error("[ellie-chat] Error:", err);
+        logger.error("Ellie-chat error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -1699,7 +1702,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         try {
           data = JSON.parse(body);
         } catch (parseErr) {
-          console.error("[incident] JSON parse error:", parseErr, "body:", body.substring(0, 200));
+          logger.error("JSON parse error", { body: body.substring(0, 200) }, parseErr);
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Invalid JSON body" }));
           return;
@@ -1738,7 +1741,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
             res.end(JSON.stringify({ error: "Unknown incident endpoint" }));
         }
       } catch (err) {
-        console.error("[incident] Error:", err);
+        logger.error("Incident error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -1756,7 +1759,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         try {
           data = JSON.parse(body);
         } catch (parseErr) {
-          console.error("[forest-memory] JSON parse error:", parseErr, "body:", body.substring(0, 200));
+          logger.error("JSON parse error", { body: body.substring(0, 200) }, parseErr);
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Invalid JSON body" }));
           return;
@@ -1809,7 +1812,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
             res.end(JSON.stringify({ error: "Unknown forest-memory endpoint" }));
         }
       } catch (err) {
-        console.error("[forest-memory] Error:", err);
+        logger.error("Forest-memory error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -1828,7 +1831,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
           try {
             data = JSON.parse(body);
           } catch (parseErr) {
-            console.error("[bridge] JSON parse error:", parseErr);
+            logger.error("JSON parse error", parseErr);
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "Invalid JSON body" }));
             return;
@@ -1895,7 +1898,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
             res.end(JSON.stringify({ error: "Unknown bridge endpoint" }));
         }
       } catch (err) {
-        console.error("[bridge] Error:", err);
+        logger.error("Bridge error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -1973,7 +1976,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
             res.end(JSON.stringify({ error: "Unknown app-auth endpoint" }));
         }
       } catch (err) {
-        console.error("[app-auth] Error:", err);
+        logger.error("App-auth error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -2022,7 +2025,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
           res.end(JSON.stringify({ error: "Unknown queue endpoint" }));
         }
       } catch (err) {
-        console.error("[agent-queue] Error:", err);
+        logger.error("Agent-queue error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -2113,7 +2116,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
             res.end(JSON.stringify({ error: "Unknown forest API endpoint" }));
         }
       } catch (err) {
-        console.error("[forest-api] Error:", err);
+        logger.error("Forest API error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -2163,7 +2166,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
           res.end(JSON.stringify({ error: "Unknown agents endpoint" }));
         }
       } catch (err) {
-        console.error("[agents-api] Error:", err);
+        logger.error("Agents API error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -2247,7 +2250,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
           res.end(JSON.stringify({ error: "Unknown vault endpoint" }));
         }
       } catch (err) {
-        console.error("[vault] Error:", err);
+        logger.error("Vault error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -2308,7 +2311,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
           }
         }
       } catch (err) {
-        console.error("[rollup] Error:", err);
+        logger.error("Rollup error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -2352,7 +2355,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
           res.end(JSON.stringify({ error: "Unknown rollup endpoint" }));
         }
       } catch (err) {
-        console.error("[rollup] Error:", err);
+        logger.error("Rollup error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -2391,7 +2394,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
 
         await generateWeeklyReview(mockReq, mockRes, supabase, bot);
       } catch (err) {
-        console.error("[weekly-review] Error:", err);
+        logger.error("Weekly-review error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
@@ -2408,7 +2411,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(result));
       } catch (err) {
-        console.error("[security-sweep] Error:", err);
+        logger.error("Security-sweep error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: String(err) }));
       }
@@ -2531,7 +2534,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(html);
       } catch (err) {
-        console.error("[memory-dashboard] Error serving dashboard:", err);
+        logger.error("Error serving dashboard", err);
         res.writeHead(500);
         res.end("Error loading dashboard");
       }

@@ -6,6 +6,10 @@
  * extracted here so they can be tested independently.
  */
 
+import { log } from "./logger.ts";
+
+const logger = log.child("relay-utils");
+
 /**
  * Enforce a combined character budget across search sources.
  * Sources are in priority order — earlier sources get preference.
@@ -123,9 +127,9 @@ export function applyTokenBudget(
   // Over budget — need to trim
   const overBy = totalTokens - maxTokens;
   const overChars = overBy * 4; // convert back to chars for trimming
-  console.warn(
-    `[token-budget] Prompt exceeds budget: ~${totalTokens.toLocaleString()} tokens (max ${maxTokens.toLocaleString()}). ` +
-    `Trimming ~${overBy.toLocaleString()} tokens from lower-priority sections.`
+  logger.warn(
+    `Prompt exceeds budget — trimming lower-priority sections`,
+    { totalTokens, maxTokens, overBy }
   );
 
   // Sort trimmable sections: highest priority number first, then largest first
@@ -145,7 +149,7 @@ export function applyTokenBudget(
       // Remove this section entirely
       trimmed.add(section.index);
       charsToTrim -= section.content.length;
-      console.warn(`[token-budget] Dropped: ${section.label} (~${estimateTokens(section.content).toLocaleString()} tokens)`);
+      logger.warn("Dropped section", { label: section.label, tokens: estimateTokens(section.content) });
     } else {
       // Truncate this section to fit
       const keepChars = section.content.length - charsToTrim;
@@ -154,7 +158,7 @@ export function applyTokenBudget(
       const lastNewline = truncatedText.lastIndexOf('\n');
       const cleanCut = lastNewline > keepChars * 0.5 ? truncatedText.slice(0, lastNewline) : truncatedText;
       truncatedContent.set(section.index, cleanCut + `\n[...truncated — ${section.label}]`);
-      console.warn(`[token-budget] Truncated: ${section.label} (${section.content.length} → ${cleanCut.length} chars)`);
+      logger.warn("Truncated section", { label: section.label, originalChars: section.content.length, truncatedChars: cleanCut.length });
       charsToTrim = 0;
     }
   }
@@ -171,7 +175,7 @@ export function applyTokenBudget(
   }
 
   const finalTokens = estimateTokens(result.join('\n'));
-  console.warn(`[token-budget] Final prompt: ~${finalTokens.toLocaleString()} tokens after trimming`);
+  logger.warn("Final prompt after trimming", { tokens: finalTokens });
 
   return result.join('\n');
 }

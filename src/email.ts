@@ -5,12 +5,16 @@
  * Uses native fetch() — no npm dependency.
  */
 
+import { log } from "./logger.ts";
+
+const logger = log.child("email");
+
 const RESEND_API_KEY = process.env.RESEND_API_KEY || ''
 const FROM_EMAIL = process.env.FROM_EMAIL || 'Ellie <ellie@ellie-labs.dev>'
 
 export async function sendVerificationCode(email: string, code: string): Promise<boolean> {
   if (!RESEND_API_KEY) {
-    console.error('[email] RESEND_API_KEY not set')
+    logger.error('RESEND_API_KEY not set')
     return false
   }
 
@@ -43,14 +47,14 @@ export async function sendVerificationCode(email: string, code: string): Promise
 
     if (!res.ok) {
       const body = await res.text()
-      console.error(`[email] Resend error ${res.status}: ${body}`)
+      logger.error('Resend error', { status: res.status, body })
       return false
     }
 
     console.log(`[email] Verification code sent to ${email}`)
     return true
   } catch (err) {
-    console.error('[email] Failed to send:', err)
+    logger.error('Failed to send', err)
     return false
   }
 }

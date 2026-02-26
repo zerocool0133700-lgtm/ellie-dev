@@ -14,6 +14,9 @@ import {
   listAgents,
   findAgentsForCapability,
 } from '../../../ellie-forest/src/index';
+import { log } from "../logger.ts";
+
+const logger = log.child("agents");
 
 /**
  * GET /api/agents
@@ -38,7 +41,7 @@ export async function listAgentsEndpoint(req: any, res: any, _supabase: Supabase
       })),
     });
   } catch (error) {
-    console.error('[agents:list] Error:', error);
+    logger.error("List failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -60,7 +63,7 @@ export async function getAgentEndpoint(req: any, res: any, _supabase: SupabaseCl
 
     return res.json({ success: true, agent });
   } catch (error) {
-    console.error('[agents:get] Error:', error);
+    logger.error("Get failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -117,7 +120,7 @@ export async function getAgentSkillsEndpoint(req: any, res: any, supabase: Supab
       skills,
     });
   } catch (error) {
-    console.error('[agents:skills] Error:', error);
+    logger.error("Skills lookup failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -145,7 +148,7 @@ export async function findCapabilityEndpoint(req: any, res: any, _supabase: Supa
       })),
     });
   } catch (error) {
-    console.error('[agents:capabilities] Error:', error);
+    logger.error("Capabilities lookup failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }

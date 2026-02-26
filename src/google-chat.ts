@@ -13,6 +13,9 @@
 
 import { readFile } from "fs/promises";
 import { createSign } from "crypto";
+import { log } from "./logger.ts";
+
+const logger = log.child("gchat");
 
 // ============================================================
 // TYPES
@@ -128,7 +131,7 @@ export async function initGoogleChat(): Promise<boolean> {
     console.log("[gchat] Service account loaded:", serviceAccount!.client_email);
     return true;
   } catch (err) {
-    console.error("[gchat] Failed to load service account key:", err);
+    logger.error("Failed to load service account key", err);
     return false;
   }
 }
@@ -304,7 +307,7 @@ export async function sendGoogleChatMessage(
 
       if (!res.ok) {
         const errBody = await res.text();
-        console.error(`[gchat] Send failed (${res.status}):`, errBody);
+        logger.error("Send failed", { status: res.status, body: errBody });
         throw new Error(`Google Chat send failed: ${res.status}`);
       }
 
@@ -387,7 +390,7 @@ export function parseGoogleChatEvent(event: GoogleChatEvent): ParsedGoogleChatMe
 export function isAllowedSender(email: string): boolean {
   const allowed = process.env.GOOGLE_CHAT_ALLOWED_EMAIL;
   if (!allowed) {
-    console.warn("[gchat] GOOGLE_CHAT_ALLOWED_EMAIL not set — rejecting all messages");
+    logger.warn("GOOGLE_CHAT_ALLOWED_EMAIL not set — rejecting all messages");
     return false;
   }
   return email.toLowerCase() === allowed.toLowerCase();

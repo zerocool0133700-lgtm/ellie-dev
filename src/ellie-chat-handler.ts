@@ -46,6 +46,9 @@ import {
   getRelevantContext,
 } from "./memory.ts";
 import { searchElastic } from "./elasticsearch.ts";
+import { log } from "./logger.ts";
+
+const logger = log.child("ellie-chat");
 import { getForestContext } from "./elasticsearch/context.ts";
 import { acknowledgeChannel } from "./delivery.ts";
 import {
@@ -113,7 +116,7 @@ export async function handleEllieChatMessage(
       await writeFile(imagePath, Buffer.from(image.data, "base64"));
       console.log(`[ellie-chat] Image saved: ${imagePath} (${image.name})`);
     } catch (err) {
-      console.error("[ellie-chat] Failed to save image:", err);
+      logger.error("Failed to save image", err);
       imagePath = null;
     }
   }
@@ -176,7 +179,7 @@ export async function handleEllieChatMessage(
           ws.send(JSON.stringify({ type: "response", text: msg, agent: "system", ts: Date.now() }));
         }
       } catch (err: any) {
-        console.error("[ticket] /ticket error:", err?.message);
+        logger.error("/ticket error", { detail: err?.message });
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "response", text: `Failed to create ticket: ${err?.message?.slice(0, 200) || "unknown error"}`, agent: "system", ts: Date.now() }));
         }
@@ -200,7 +203,7 @@ export async function handleEllieChatMessage(
         }
       })
       .catch(err => {
-        console.error("[playbook]", err);
+        logger.error("Playbook execution failed", err);
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "response", text: `Playbook error: ${err?.message?.slice(0, 200) || "unknown"}`, agent: "system", ts: Date.now() }));
         }
@@ -279,7 +282,7 @@ export async function handleEllieChatMessage(
           // Let Claude handle it naturally — the onboarding context will remind about the code
         }
       } catch (err) {
-        console.error("[ellie-chat] Code detection error:", err);
+        logger.error("Code detection error", err);
       }
     }, "code-verify");
     // If code was valid, we already sent the response — check if state changed
@@ -430,7 +433,7 @@ export async function handleEllieChatMessage(
               }
             }
           } catch (err) {
-            console.error(`[ellie-chat] ELLIE:: command error (${cmd}):`, err);
+            logger.error("ELLIE:: command error", { cmd }, err);
           }
         }
       }
@@ -487,7 +490,7 @@ export async function handleEllieChatMessage(
           workItemId: agentResult.dispatch.agent.name,
           telegramMessage: `🤖 ${agentResult.dispatch.agent.name} agent`,
           gchatMessage: `🤖 ${agentResult.dispatch.agent.name} agent dispatched`,
-        }).catch((err) => console.error("[notify] dispatch_confirm:", err.message));
+        }).catch((err) => logger.error("dispatch_confirm notification failed", { detail: err.message }));
       }
     }
 
@@ -506,7 +509,7 @@ export async function handleEllieChatMessage(
 
       // Fire-and-forget: specialist runs outside the queue
       runSpecialistAsync(ws, supabase, effectiveText, text, agentResult, imagePath, ellieChatWorkItem).catch(err => {
-        console.error(`[ellie-chat] specialist async error:`, err);
+        logger.error("Specialist async error", err);
       });
 
       resetEllieChatIdleTimer();
@@ -619,10 +622,10 @@ export async function handleEllieChatMessage(
         // Fire playbook commands async (ELLIE:: tags)
         if (ellieChatOrcPlaybookCmds.length > 0) {
           const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "ellie-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-          executePlaybookCommands(ellieChatOrcPlaybookCmds, pbCtx).catch(err => console.error("[playbook]", err));
+          executePlaybookCommands(ellieChatOrcPlaybookCmds, pbCtx).catch(err => logger.error("Playbook execution failed", err));
         }
       } catch (err) {
-        console.error("[ellie-chat] Multi-step failed:", err);
+        logger.error("Multi-step failed", err);
         const errMsg = err instanceof PipelineStepError && err.partialOutput
           ? err.partialOutput + "\n\n(Execution incomplete.)"
           : "Sorry, I ran into an error processing your multi-step request.";
@@ -731,7 +734,7 @@ export async function handleEllieChatMessage(
           }
         }
       } catch (err: any) {
-        console.warn(`[ellie-chat] Late-resolve sessionIds failed:`, err?.message || err);
+        logger.warn("Late-resolve sessionIds failed", { detail: err?.message || String(err) });
       }
     } else if (!effectiveSessionIds) {
       console.log(`[ellie-chat] No sessionIds and no agent to late-resolve (agent=${agentResult?.dispatch.agent.name})`);
@@ -768,7 +771,7 @@ export async function handleEllieChatMessage(
     // Fire playbook commands async (ELLIE:: tags)
     if (ecPlaybookCmds.length > 0) {
       const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "ellie-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-      executePlaybookCommands(ecPlaybookCmds, pbCtx).catch(err => console.error("[playbook]", err));
+      executePlaybookCommands(ecPlaybookCmds, pbCtx).catch(err => logger.error("Playbook execution failed", err));
     }
 
     // Cleanup temp image file
@@ -926,14 +929,14 @@ export async function runSpecialistAsync(
     // Fire playbook commands async (ELLIE:: tags)
     if (playCmds.length > 0) {
       const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "ellie-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-      executePlaybookCommands(playCmds, pbCtx).catch(err => console.error("[playbook]", err));
+      executePlaybookCommands(playCmds, pbCtx).catch(err => logger.error("Playbook execution failed", err));
     }
 
     // Cleanup temp image file
     if (imagePath) unlink(imagePath).catch(() => {});
   } catch (err) {
     const durationMs = Date.now() - startTime;
-    console.error(`[ellie-chat] Specialist ${agentName} failed after ${durationMs}ms:`, err);
+    logger.error("Specialist failed", { agent: agentName, durationMs }, err);
     const errorMsg = `Sorry, the ${agentName} specialist ran into an issue. You can try again or rephrase.`;
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "response", text: errorMsg, agent: agentName, ts: Date.now() }));

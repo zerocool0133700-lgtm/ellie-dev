@@ -10,6 +10,9 @@
 import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
 import { classifyDomain, bulkIndex } from "./elasticsearch.ts";
+import { log } from "./logger.ts";
+
+const logger = log.child("sync-es");
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -32,7 +35,7 @@ async function syncMessages() {
       .range(offset, offset + BATCH_SIZE - 1);
 
     if (error) {
-      console.error("[sync] Messages fetch error:", error);
+      logger.error("Messages fetch error", error);
       break;
     }
     if (!data || data.length === 0) break;
@@ -54,7 +57,7 @@ async function syncMessages() {
 
     const result = await bulkIndex(ops);
     if (result.errors > 0) {
-      console.error(`[sync] ${result.errors} message indexing errors`);
+      logger.error("Message indexing errors", { count: result.errors });
     }
 
     count += data.length;
@@ -79,7 +82,7 @@ async function syncMemory() {
       .range(offset, offset + BATCH_SIZE - 1);
 
     if (error) {
-      console.error("[sync] Memory fetch error:", error);
+      logger.error("Memory fetch error", error);
       break;
     }
     if (!data || data.length === 0) break;
@@ -102,7 +105,7 @@ async function syncMemory() {
 
     const result = await bulkIndex(ops);
     if (result.errors > 0) {
-      console.error(`[sync] ${result.errors} memory indexing errors`);
+      logger.error("Memory indexing errors", { count: result.errors });
     }
 
     count += data.length;
@@ -127,7 +130,7 @@ async function syncConversations() {
       .range(offset, offset + BATCH_SIZE - 1);
 
     if (error) {
-      console.error("[sync] Conversations fetch error:", error);
+      logger.error("Conversations fetch error", error);
       break;
     }
     if (!data || data.length === 0) break;
@@ -148,7 +151,7 @@ async function syncConversations() {
 
     const result = await bulkIndex(ops);
     if (result.errors > 0) {
-      console.error(`[sync] ${result.errors} conversation indexing errors`);
+      logger.error("Conversation indexing errors", { count: result.errors });
     }
 
     count += data.length;
@@ -167,7 +170,7 @@ async function run() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     console.log("[sync] Elasticsearch connected\n");
   } catch {
-    console.error("[sync] Cannot reach Elasticsearch");
+    logger.error("Cannot reach Elasticsearch");
     process.exit(1);
   }
 
@@ -195,6 +198,6 @@ async function run() {
 }
 
 run().catch((err) => {
-  console.error("[sync] Fatal:", err);
+  logger.error("Fatal error", err);
   process.exit(1);
 });

@@ -19,6 +19,9 @@ import {
   listOpenBranches,
 } from '../../../ellie-forest/src/index';
 import { notify, type NotifyContext } from "../notification-policy.ts";
+import { log } from "../logger.ts";
+
+const logger = log.child("incident");
 
 const TELEGRAM_USER_ID = process.env.TELEGRAM_USER_ID!;
 const GCHAT_SPACE = process.env.GOOGLE_CHAT_SPACE_NAME;
@@ -96,7 +99,7 @@ export async function raiseIncident(req: any, res: any, bot: Bot) {
     });
 
   } catch (error) {
-    console.error('[incident:raise] Error:', error);
+    logger.error("Raise failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -159,7 +162,7 @@ export async function updateIncident(req: any, res: any, bot: Bot) {
     });
 
   } catch (error) {
-    console.error('[incident:update] Error:', error);
+    logger.error("Update failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -250,7 +253,7 @@ export async function resolveIncident(req: any, res: any, bot: Bot) {
     });
 
   } catch (error) {
-    console.error('[incident:resolve] Error:', error);
+    logger.error("Resolve failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }

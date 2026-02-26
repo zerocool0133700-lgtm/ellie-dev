@@ -12,6 +12,9 @@ import type { Context } from "grammy";
 import type Anthropic from "@anthropic-ai/sdk";
 import { setTimeoutRecoveryLock } from "./plane.ts";
 import { notify, type NotifyContext } from "./notification-policy.ts";
+import { log } from "./logger.ts";
+
+const logger = log.child("claude-cli");
 
 // ── Config (from env) ───────────────────────────────────────
 
@@ -81,7 +84,7 @@ export async function acquireLock(): Promise<boolean> {
     await writeFile(LOCK_FILE, process.pid.toString());
     return true;
   } catch (error) {
-    console.error("Lock error:", error);
+    logger.error("Lock error", error);
     return false;
   }
 }
@@ -158,13 +161,13 @@ export async function callClaude(
     const timeout = setTimeout(() => {
       timedOut = true;
       const timeoutSec = TIMEOUT_MS / 1000;
-      console.error(`[claude] Timeout after ${timeoutSec}s — sending SIGTERM (pid ${proc.pid})`);
+      logger.error("Timeout — sending SIGTERM", { timeoutSec, pid: proc.pid });
       proc.kill();
 
       killTimer = setTimeout(() => {
         try {
           process.kill(proc.pid, 0);
-          console.error(`[claude] Process ${proc.pid} survived SIGTERM — sending SIGKILL`);
+          logger.error("Process survived SIGTERM — sending SIGKILL", { pid: proc.pid });
           proc.kill(9);
           forceKilled = true;
         } catch {
@@ -181,17 +184,17 @@ export async function callClaude(
     const exitCode = await proc.exited;
 
     if (exitCode !== 0) {
-      console.error(
-        `[claude] Exit code ${exitCode}` +
-        `${timedOut ? " (timed out)" : ""}` +
-        `${forceKilled ? " (force-killed)" : ""}` +
-        `${stderr ? ` — stderr: ${stderr.substring(0, 500)}` : " — no stderr"}` +
-        `${output ? ` — stdout preview: ${output.substring(0, 200)}` : ""}`
-      );
+      logger.error("Non-zero exit code", {
+        exitCode,
+        timedOut,
+        forceKilled,
+        stderr: stderr ? stderr.substring(0, 500) : undefined,
+        stdoutPreview: output ? output.substring(0, 200) : undefined,
+      });
 
       const combined = (stderr + output).toLowerCase();
       if (options?.resume && resumeSessionId && combined.includes("tool_use.name")) {
-        console.warn("[claude] Corrupted session history — retrying without --resume");
+        logger.warn("Corrupted session history — retrying without --resume");
         return callClaude(prompt, { ...options, resume: false, sessionId: undefined });
       }
 
@@ -211,7 +214,7 @@ export async function callClaude(
           workItemId: "timeout",
           telegramMessage: `⚠️ Task timed out after ${timeoutSec}s${forceKilled ? " (force-killed)" : ""}`,
           gchatMessage: `⚠️ Task timed out after ${timeoutSec}s. ${processStatus}${partialOutput ? `\nPartial: ${partialOutput.substring(0, 300)}` : ""}`,
-        }).catch((err) => console.error("[notify] timeout error:", err.message));
+        }).catch((err) => logger.error("Timeout notification failed", { detail: err.message }));
 
         let message = `Task timed out after ${timeoutSec}s. ${processStatus}`;
 
@@ -236,7 +239,7 @@ export async function callClaude(
           workItemId: "sigterm",
           telegramMessage: "⚠️ Process interrupted (SIGTERM)",
           gchatMessage: `⚠️ Process interrupted (SIGTERM — exit 143).${partialOutput ? `\nPartial: ${partialOutput.substring(0, 300)}` : ""}`,
-        }).catch((err) => console.error("[notify] sigterm error:", err.message));
+        }).catch((err) => logger.error("SIGTERM notification failed", { detail: err.message }));
 
         let message = "I got interrupted while working on this (the service was restarted or the process was terminated externally).";
         if (partialOutput) {
@@ -254,10 +257,10 @@ export async function callClaude(
         workItemId: "exit-error",
         telegramMessage: `⚠️ Claude exited with code ${exitCode}`,
         gchatMessage: `⚠️ Claude exited with code ${exitCode}${stderr ? `: ${stderr.substring(0, 200)}` : ""}`,
-      }).catch((err) => console.error("[notify] exit error:", err.message));
+      }).catch((err) => logger.error("Exit error notification failed", { detail: err.message }));
 
       if (session.sessionId && options?.resume !== false) {
-        console.warn(`[claude] Resetting session ${session.sessionId.slice(0, 8)} after exit code ${exitCode}`);
+        logger.warn("Resetting session after exit error", { sessionId: session.sessionId.slice(0, 8), exitCode });
         session.sessionId = null;
         session.lastActivity = new Date().toISOString();
         await saveSession(session);
@@ -286,7 +289,7 @@ export async function callClaude(
 
     return output.trim();
   } catch (error) {
-    console.error(`[claude] Spawn error:`, error);
+    logger.error("Spawn error", error);
     return `Error: Could not run Claude CLI`;
   }
 }
@@ -329,7 +332,7 @@ export async function callClaudeVoice(systemPrompt: string, userMessage: string)
       console.log(`[voice] API responded in ${Date.now() - start}ms`);
       return text.trim();
     } catch (err) {
-      console.error("[voice] API error, falling back to CLI:", err);
+      logger.error("Voice API error, falling back to CLI", err);
     }
   }
 
@@ -352,7 +355,7 @@ export async function callClaudeVoice(systemPrompt: string, userMessage: string)
   clearTimeout(timeout);
 
   if (await proc.exited !== 0) {
-    console.error("[voice] Claude CLI error:", stderr);
+    logger.error("Voice CLI error", { stderr });
     return "Sorry, I had trouble processing that. Could you repeat?";
   }
 

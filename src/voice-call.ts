@@ -17,6 +17,9 @@ import { writeFile, readFile, unlink, mkdir } from "fs/promises";
 import { join, dirname } from "path";
 import { ElevenLabsClient } from "elevenlabs";
 import Twilio from "twilio";
+import { log } from "./logger.ts";
+
+const logger = log.child("voice-call");
 
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
 
@@ -94,7 +97,7 @@ async function callClaude(prompt: string): Promise<string> {
 
   const exitCode = await proc.exited;
   if (exitCode !== 0) {
-    console.error("[voice] Claude error:", stderr);
+    logger.error("Claude error", { stderr });
     return "Sorry, I had trouble processing that. Could you repeat?";
   }
 
@@ -127,7 +130,7 @@ async function transcribeMulaw(mulawChunks: Buffer[]): Promise<string> {
     const ffmpegExit = await ffmpeg.exited;
     if (ffmpegExit !== 0) {
       const stderr = await new Response(ffmpeg.stderr).text();
-      console.error("[voice] ffmpeg error:", stderr);
+      logger.error("ffmpeg error", { stderr });
       return "";
     }
 
@@ -150,7 +153,7 @@ async function transcribeMulaw(mulawChunks: Buffer[]): Promise<string> {
     const whisperBinary = process.env.WHISPER_BINARY || "whisper-cpp";
     const modelPath = process.env.WHISPER_MODEL_PATH || "";
     if (!modelPath) {
-      console.error("[voice] WHISPER_MODEL_PATH not set");
+      logger.error("WHISPER_MODEL_PATH not set");
       return "";
     }
 
@@ -165,7 +168,7 @@ async function transcribeMulaw(mulawChunks: Buffer[]): Promise<string> {
     const whisperExit = await whisper.exited;
     if (whisperExit !== 0) {
       const stderr = await new Response(whisper.stderr).text();
-      console.error("[voice] whisper error:", stderr);
+      logger.error("whisper error", { stderr });
       return "";
     }
 
@@ -184,7 +187,7 @@ async function transcribeMulaw(mulawChunks: Buffer[]): Promise<string> {
 
 async function textToSpeechMulaw(text: string): Promise<string> {
   if (!ELEVENLABS_API_KEY) {
-    console.error("[voice] No ElevenLabs API key");
+    logger.error("No ElevenLabs API key");
     return "";
   }
 
@@ -211,7 +214,7 @@ async function textToSpeechMulaw(text: string): Promise<string> {
 
   if (!response.ok) {
     const err = await response.text();
-    console.error("[voice] ElevenLabs error:", response.status, err);
+    logger.error("ElevenLabs error", { status: response.status, body: err });
     return "";
   }
 
@@ -320,7 +323,7 @@ async function processAudio(session: CallSession): Promise<void> {
     const audioBase64 = await textToSpeechMulaw(cleanResponse);
 
     if (!audioBase64 || !session.streamSid) {
-      console.error("[voice] No audio or no stream SID");
+      logger.error("No audio or no stream SID");
       session.processing = false;
       return;
     }
@@ -355,7 +358,7 @@ async function processAudio(session: CallSession): Promise<void> {
     }));
 
   } catch (error) {
-    console.error("[voice] Processing error:", error);
+    logger.error("Processing error", error);
   }
 
   session.processing = false;
@@ -494,7 +497,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
           console.log(`[voice] Unknown event: ${msg.event}`);
       }
     } catch (error) {
-      console.error("[voice] Message parse error:", error);
+      logger.error("Message parse error", error);
     }
   });
 
@@ -504,7 +507,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   });
 
   ws.on("error", (error) => {
-    console.error("[voice] WebSocket error:", error);
+    logger.error("WebSocket error", error);
   });
 });
 
@@ -529,7 +532,7 @@ export async function initiateCall(toNumber?: string): Promise<string> {
     console.log(`[voice] Outbound call initiated: ${call.sid}`);
     return `Calling ${to}... (SID: ${call.sid})`;
   } catch (error: any) {
-    console.error("[voice] Call error:", error);
+    logger.error("Call error", error);
     return `Failed to call: ${error.message}`;
   }
 }

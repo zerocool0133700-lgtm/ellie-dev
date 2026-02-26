@@ -8,6 +8,10 @@
  * in .env. Run `bun scripts/oauth-microsoft.ts` to get the refresh token.
  */
 
+import { log } from "./logger.ts";
+
+const logger = log.child("outlook");
+
 // ============================================================
 // TYPES
 // ============================================================
@@ -74,7 +78,7 @@ export async function initOutlook(): Promise<boolean> {
     console.log(`[outlook] Initialized (account: ${getOutlookEmail() || "unknown"})`);
     return true;
   }
-  console.error("[outlook] Token refresh failed at init");
+  logger.error("Token refresh failed at init");
   return false;
 }
 
@@ -99,7 +103,7 @@ async function getAccessToken(): Promise<string | null> {
 
     if (!res.ok) {
       const body = await res.text();
-      console.error(`[outlook] Token refresh failed (${res.status}): ${body.substring(0, 300)}`);
+      logger.error("Token refresh failed", { status: res.status, body: body.substring(0, 300) });
       return null;
     }
 
@@ -110,7 +114,7 @@ async function getAccessToken(): Promise<string | null> {
     };
     return cachedToken.accessToken;
   } catch (err) {
-    console.error("[outlook] Token refresh error:", err);
+    logger.error("Token refresh error", err);
     return null;
   }
 }

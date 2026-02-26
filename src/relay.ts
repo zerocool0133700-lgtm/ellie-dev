@@ -12,6 +12,9 @@ import { mkdir } from "fs/promises";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { createServer } from "http";
 import Anthropic from "@anthropic-ai/sdk";
+import { log } from "./logger.ts";
+
+const logger = log.child("relay");
 
 // Relay modules (ELLIE-184)
 import {
@@ -58,7 +61,7 @@ import { setBroadcastToEllieChat } from "./tool-approval.ts";
 // ============================================================
 
 if (!BOT_TOKEN) {
-  console.error("TELEGRAM_BOT_TOKEN not set!");
+  logger.error("TELEGRAM_BOT_TOKEN not set!");
   console.log("\nTo set up:");
   console.log("1. Message @BotFather on Telegram");
   console.log("2. Create a new bot with /newbot");
@@ -81,7 +84,7 @@ const supabase: SupabaseClient | null =
 
 // Acquire lock
 if (!(await acquireLock())) {
-  console.error("Could not acquire lock. Another instance may be running.");
+  logger.error("Could not acquire lock. Another instance may be running.");
   process.exit(1);
 }
 
@@ -109,7 +112,7 @@ setInterval(async () => {
         }
       }
     } catch (err: any) {
-      console.error("[conversation] Stale conversation cleanup error:", err?.message);
+      logger.error("Stale conversation cleanup error", { error: err?.message });
     }
     expireStaleAgentSessions(supabase).catch(() => {});
   }
@@ -128,17 +131,17 @@ setInterval(async () => {
   try {
     await syncAllCalendars();
   } catch (err: any) {
-    console.error("[calendar-sync] Periodic sync error:", err?.message);
+    logger.error("Periodic sync error", { error: err?.message });
   }
 }, 5 * 60_000);
 
 // Stale queue item expiry — every hour (ELLIE-201)
 setInterval(() => {
-  expireStaleItems().catch(err => console.error("[agent-queue] Stale expiry error:", err));
+  expireStaleItems().catch(err => logger.error("Stale expiry error", err));
 }, 60 * 60_000);
 // Run once on startup (10s delay)
 setTimeout(() => {
-  expireStaleItems().catch(err => console.error("[agent-queue] Initial stale expiry error:", err));
+  expireStaleItems().catch(err => logger.error("Initial stale expiry error", err));
 }, 10_000);
 
 // Bridge write notifications — Telegram + ellie-chat (ELLIE-199)
@@ -153,7 +156,7 @@ onBridgeWrite(({ collaborator, content, memoryId, type, workItemId }) => {
     workItemId: memoryId,
     telegramMessage: `📋 *${collaborator}* ${label}${ticket}: ${preview}`,
     gchatMessage: `${collaborator} ${label}${ticket}: ${preview}`,
-  }).catch(err => console.error("[bridge-notify]", err.message));
+  }).catch(err => logger.error("Bridge notify failed", err));
 
   // Push to ellie-chat clients (lazy ref — ellieChatClients defined later in file)
   broadcastToEllieChatClients({
@@ -173,7 +176,7 @@ setTimeout(async () => {
     await syncAllCalendars();
     console.log("[calendar-sync] Initial sync complete");
   } catch (err: any) {
-    console.error("[calendar-sync] Initial sync error:", err?.message);
+    logger.error("Initial sync error", { error: err?.message });
   }
 }, 10_000);
 
@@ -184,7 +187,7 @@ setInterval(async () => {
     const expired = await expireShortTermMemories();
     if (expired > 0) console.log(`[memory-maintenance] Expired ${expired} short-term memories`);
   } catch (err: any) {
-    console.error("[memory-maintenance] Short-term expiry error:", err?.message);
+    logger.error("Short-term expiry error", { error: err?.message });
   }
 }, 15 * 60_000);
 
@@ -195,7 +198,7 @@ setInterval(async () => {
     const refreshed = await refreshWeights({ limit: 500 });
     if (refreshed > 0) console.log(`[memory-maintenance] Refreshed weights for ${refreshed} memories`);
   } catch (err: any) {
-    console.error("[memory-maintenance] Weight refresh error:", err?.message);
+    logger.error("Weight refresh error", { error: err?.message });
   }
 }, 60 * 60_000);
 
@@ -213,7 +216,7 @@ async function expireStaleAgentSessions(sb: SupabaseClient): Promise<void> {
     .select("id");
 
   if (error) {
-    console.error("[session-cleanup] agent_sessions expire error:", error);
+    logger.error("agent_sessions expire error", error);
     return;
   }
   if (data && data.length > 0) {
@@ -247,7 +250,7 @@ if (anthropic) initEntailmentClassifier(anthropic);
 startSkillWatcher();
 getSkillSnapshot().then(s => {
   console.log(`[skills] Initial snapshot: ${s.skills.length} skills, ${s.totalChars} chars`);
-}).catch(err => console.warn("[skills] Initial snapshot failed:", err));
+}).catch(err => logger.warn("Initial snapshot failed", err));
 
 // Register Telegram handlers + create HTTP server
 registerTelegramHandlers(bot);
@@ -271,7 +274,7 @@ startNudgeChecker(async (channel, count) => {
       await bot.api.sendMessage(ALLOWED_USER_ID, nudgeText);
     }
   } catch (err) {
-    console.error(`[delivery] Nudge failed on ${channel}:`, err);
+    logger.error("Nudge failed", { channel }, err);
   }
 });
 

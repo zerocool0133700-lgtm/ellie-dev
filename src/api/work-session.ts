@@ -8,6 +8,9 @@
  */
 
 import type { Bot } from "grammy";
+import { log } from "../logger.ts";
+
+const logger = log.child("work-session");
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { updateWorkItemOnSessionStart, updateWorkItemOnSessionComplete } from "../plane.ts";
 import {
@@ -135,7 +138,7 @@ export async function startWorkSession(req: any, res: any, bot: Bot, supabase?: 
       try {
         await updateWorkItemOnSessionStart(work_item_id, tree.id);
       } catch (planeError) {
-        console.warn('[work-session:start] Plane update failed (non-fatal):', planeError);
+        logger.warn("Plane update failed (non-fatal)", planeError);
       }
     } else {
       console.log(`[work-session:start] Skipping Plane update — resumed session`);
@@ -160,7 +163,7 @@ export async function startWorkSession(req: any, res: any, bot: Bot, supabase?: 
     });
 
   } catch (error) {
-    console.error('[work-session:start] Error:', error);
+    logger.error("Start handler failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -232,7 +235,7 @@ export async function updateWorkSession(req: any, res: any, bot: Bot) {
     });
 
   } catch (error) {
-    console.error('[work-session:update] Error:', error);
+    logger.error("Update handler failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -304,7 +307,7 @@ export async function logDecision(req: any, res: any, bot: Bot) {
     });
 
   } catch (error) {
-    console.error('[work-session:decision] Error:', error);
+    logger.error("Decision handler failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -360,7 +363,7 @@ export async function completeWorkSession(req: any, res: any, bot: Bot) {
         console.log(`[work-session:complete] Auto-deploy: build is current, skipping`);
       }
     } catch (deployErr: any) {
-      console.warn('[work-session:complete] Auto-deploy failed (non-fatal):', deployErr?.message?.slice(0, 200));
+      logger.warn("Auto-deploy failed (non-fatal)", { message: deployErr?.message?.slice(0, 200) });
     }
 
     // Only update Plane if the most recent creature session had meaningful duration (>= 2 min)
@@ -378,7 +381,7 @@ export async function completeWorkSession(req: any, res: any, bot: Bot) {
       try {
         await updateWorkItemOnSessionComplete(work_item_id, summary, "completed");
       } catch (planeError) {
-        console.warn('[work-session:complete] Plane update failed (non-fatal):', planeError);
+        logger.warn("Plane update failed (non-fatal)", planeError);
       }
     } else {
       console.log(`[work-session:complete] Skipping Plane update — session too short (${duration}min)`);
@@ -421,7 +424,7 @@ export async function completeWorkSession(req: any, res: any, bot: Bot) {
     });
 
   } catch (error) {
-    console.error('[work-session:complete] Error:', error);
+    logger.error("Complete handler failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -489,7 +492,7 @@ export async function pauseWorkSession(req: any, res: any, bot: Bot) {
     });
 
   } catch (error) {
-    console.error('[work-session:pause] Error:', error);
+    logger.error("Pause handler failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -561,7 +564,7 @@ export async function resumeWorkSession(req: any, res: any, bot: Bot) {
     });
 
   } catch (error) {
-    console.error('[work-session:resume] Error:', error);
+    logger.error("Resume handler failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }

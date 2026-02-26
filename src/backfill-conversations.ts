@@ -4,6 +4,9 @@
  */
 import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
+import { log } from "./logger.ts";
+
+const logger = log.child("backfill-conversations");
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -21,7 +24,7 @@ async function backfill() {
     .order("created_at", { ascending: true });
 
   if (error || !messages) {
-    console.error("[backfill] Failed:", error);
+    logger.error("Failed to fetch orphaned messages", error);
     return;
   }
 
@@ -80,7 +83,7 @@ async function backfill() {
       .single();
 
     if (err || !convo) {
-      console.error(`[backfill] Failed to create conversation ${i + 1}:`, err);
+      logger.error("Failed to create conversation", { index: i + 1 }, err);
       continue;
     }
 
@@ -136,4 +139,4 @@ async function backfill() {
   console.log("[backfill] Done.");
 }
 
-backfill().catch(console.error);
+backfill().catch((err) => logger.error("Fatal error", err));

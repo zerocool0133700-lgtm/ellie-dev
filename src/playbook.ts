@@ -15,6 +15,9 @@
 import type { Bot } from "grammy";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { notify, type NotifyContext } from "./notification-policy.ts";
+import { log } from "./logger.ts";
+
+const logger = log.child("playbook");
 import {
   fetchWorkItemDetails,
   createPlaneIssue,
@@ -146,7 +149,7 @@ export async function executePlaybookCommands(
           break;
       }
     } catch (err: any) {
-      console.error(`[playbook] ${cmd.type} failed:`, err?.message || err);
+      logger.error("Command execution failed", { command: cmd.type, ticket: cmd.ticketId }, err);
       await notify(getNotifyCtx(ctx), {
         event: "error",
         workItemId: cmd.ticketId || "playbook",
@@ -196,10 +199,10 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
     });
     sessionResult = await resp.json();
     if (!sessionResult?.success) {
-      console.warn(`[playbook] Work session start returned:`, sessionResult);
+      logger.warn("Work session start returned unexpected result", { result: sessionResult });
     }
   } catch (err: any) {
-    console.warn(`[playbook] Work session start failed (non-fatal):`, err?.message);
+    logger.warn("Work session start failed (non-fatal)", err);
   }
 
   // 3b. Extract sessionIds from work-session/start response
@@ -297,7 +300,7 @@ async function handleClose(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<
   const result = await resp.json();
 
   if (!result?.success) {
-    console.warn(`[playbook] close ${ticketId} response:`, result);
+    logger.warn("Close ticket returned unexpected result", { ticket: ticketId, result });
     // Endpoint already sends its own notifications on success,
     // so only notify on unexpected failure
     if (result?.error) {

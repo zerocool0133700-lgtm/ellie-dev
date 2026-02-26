@@ -20,6 +20,9 @@ import {
   sql,
 } from '../../../ellie-forest/src/index'
 import { createQueueItemDirect } from './agent-queue'
+import { log } from "../logger.ts";
+
+const logger = log.child("bridge");
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -119,7 +122,7 @@ export async function bridgeReadEndpoint(req: any, res: any) {
 
     return res.json({ success: true, count: results.length, memories: results })
   } catch (error) {
-    console.error('[bridge:read] Error:', error)
+    logger.error("Read failed", error)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }
@@ -200,7 +203,7 @@ export async function bridgeWriteEndpoint(req: any, res: any) {
           metadata: { bridge_memory_id: memory.id },
         })
       } catch (err) {
-        console.error('[bridge:write] Queue auto-create failed:', err)
+        logger.error("Queue auto-create failed", err)
       }
     }
 
@@ -220,7 +223,7 @@ export async function bridgeWriteEndpoint(req: any, res: any) {
           metadata: { bridge_memory_id: memory.id, readout: true },
         })
       } catch (err) {
-        console.error('[bridge:write] Readout queue auto-create failed:', err)
+        logger.error("Readout queue auto-create failed", err)
       }
     }
 
@@ -246,7 +249,7 @@ export async function bridgeWriteEndpoint(req: any, res: any) {
       ...(queueItem ? { queue_item_id: queueItem.id } : {}),
     })
   } catch (error) {
-    console.error('[bridge:write] Error:', error)
+    logger.error("Write failed", error)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }
@@ -289,7 +292,7 @@ export async function bridgeListEndpoint(req: any, res: any) {
 
     return res.json({ success: true, count: results.length, memories: results })
   } catch (error) {
-    console.error('[bridge:list] Error:', error)
+    logger.error("List failed", error)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }
@@ -324,7 +327,7 @@ export async function bridgeScopesEndpoint(req: any, res: any) {
     }
     return res.json({ success: true, scopes })
   } catch (error) {
-    console.error('[bridge:scopes] Error:', error)
+    logger.error("Scopes failed", error)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }
@@ -361,7 +364,7 @@ export async function bridgeTagsEndpoint(req: any, res: any) {
 
     return res.json({ success: true, tags: results })
   } catch (error) {
-    console.error('[bridge:tags] Error:', error)
+    logger.error("Tags failed", error)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }

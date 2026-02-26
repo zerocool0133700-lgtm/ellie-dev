@@ -30,6 +30,9 @@ import {
 } from '../../../ellie-forest/src/index';
 import { classifyEntailment } from "../entailment-classifier.ts";
 import { notify, type NotifyContext } from "../notification-policy.ts";
+import { log } from "../logger.ts";
+
+const logger = log.child("memory-api");
 
 const TELEGRAM_USER_ID = process.env.TELEGRAM_USER_ID!;
 const GCHAT_SPACE = process.env.GOOGLE_CHAT_SPACE_NAME;
@@ -176,7 +179,7 @@ export async function writeMemoryEndpoint(req: any, res: any, bot: Bot) {
     });
 
   } catch (error) {
-    console.error('[memory:write] Error:', error);
+    logger.error("Write failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -196,7 +199,7 @@ export async function readMemoryEndpoint(req: any, res: any, _bot: Bot) {
     return res.json({ success: true, count: results.length, memories: results });
 
   } catch (error) {
-    console.error('[memory:read] Error:', error);
+    logger.error("Read failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -216,7 +219,7 @@ export async function agentContextEndpoint(req: any, res: any, _bot: Bot) {
     return res.json({ success: true, count: memories.length, memories });
 
   } catch (error) {
-    console.error('[memory:context] Error:', error);
+    logger.error("Context failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -252,7 +255,7 @@ export async function resolveContradictionEndpoint(req: any, res: any, _bot: Bot
     return res.json({ success: true, memory_id, resolution });
 
   } catch (error) {
-    console.error('[memory:resolve] Error:', error);
+    logger.error("Resolve failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -315,7 +318,7 @@ export async function askCriticEndpoint(req: any, res: any, _bot: Bot) {
     return res.json({ success: true, creature_id: creature.id, status: 'dispatched' });
 
   } catch (error) {
-    console.error('[memory:ask-critic] Error:', error);
+    logger.error("Ask critic failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -335,7 +338,7 @@ export async function creatureWriteMemoryEndpoint(req: any, res: any, _bot: Bot)
     return res.json({ success: true, memory_id: memory.id, scope: memory.scope });
 
   } catch (error) {
-    console.error('[memory:creature-write] Error:', error);
+    logger.error("Creature write failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }
@@ -385,7 +388,7 @@ export async function arcsEndpoint(req: any, res: any, _bot: Bot) {
         return res.status(400).json({ error: `Unknown arcs action: ${action}` });
     }
   } catch (error) {
-    console.error('[memory:arcs] Error:', error);
+    logger.error("Arcs failed", error);
     return res.status(500).json({ error: 'Internal server error' });
   }
 }

@@ -8,8 +8,11 @@
 import { readdir, readFile, stat } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
+import { log } from "../logger.ts";
 import { parseFrontmatter } from "./frontmatter.ts";
 import { SKILL_LIMITS, type SkillEntry } from "./types.ts";
+
+const logger = log.child("skill-loader");
 
 // Scan order (lower number = higher priority, wins dedup)
 const SEARCH_DIRS = [
@@ -59,14 +62,14 @@ async function scanSkillDir(dirPath: string, priority: number): Promise<SkillEnt
 
         // Size limit check
         if (fileStat.size > SKILL_LIMITS.maxSkillFileBytes) {
-          console.warn(`[skills] Skipping ${item.name}: SKILL.md exceeds ${SKILL_LIMITS.maxSkillFileBytes / 1000}KB`);
+          logger.warn(`Skipping skill: SKILL.md exceeds size limit`, { skill: item.name, limitKB: SKILL_LIMITS.maxSkillFileBytes / 1000 });
           continue;
         }
 
         const raw = await readFile(skillMdPath, "utf-8");
         const parsed = parseFrontmatter(raw);
         if (!parsed) {
-          console.warn(`[skills] Skipping ${item.name}: invalid frontmatter`);
+          logger.warn("Skipping skill: invalid frontmatter", { skill: item.name });
           continue;
         }
 

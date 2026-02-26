@@ -11,6 +11,9 @@
 import { spawn } from "bun";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { indexConversation, indexMemory, classifyDomain } from "./elasticsearch.ts";
+import { log } from "./logger.ts";
+
+const logger = log.child("conversation");
 
 const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
 const USER_TIMEZONE = process.env.USER_TIMEZONE || "UTC";
@@ -49,13 +52,13 @@ export async function getOrCreateConversation(
     });
 
     if (error) {
-      console.error("[conversation] get_or_create error:", error);
+      logger.error("get_or_create error", error);
       return null;
     }
 
     return data as string;
   } catch (err) {
-    console.error("[conversation] get_or_create failed:", err);
+    logger.error("get_or_create failed", err);
     return null;
   }
 }
@@ -94,7 +97,7 @@ export async function attachMessage(
         .eq("id", conversationId);
     }
   } catch (err) {
-    console.error("[conversation] attachMessage error:", err);
+    logger.error("attachMessage error", err);
   }
 }
 
@@ -132,7 +135,7 @@ export async function maybeGenerateSummary(
 
     await generateAndStoreSummary(supabase, conversationId, messages, convo.summary, convo.channel);
   } catch (err) {
-    console.error("[conversation] maybeGenerateSummary error:", err);
+    logger.error("maybeGenerateSummary error", err);
   }
 }
 
@@ -180,7 +183,7 @@ Return ONLY the summary text, nothing else.`;
       console.log(`[conversation] Summary updated: ${summary.substring(0, 80)}...`);
     }
   } catch (err) {
-    console.error("[conversation] Summary generation failed:", err);
+    logger.error("summary generation failed", { conversationId }, err);
     // Non-fatal — conversation tracking continues without summary
   }
 }
@@ -226,7 +229,7 @@ export async function closeConversation(
 
     console.log(`[conversation] Closed: ${conversationId}`);
   } catch (err) {
-    console.error("[conversation] closeConversation error:", err);
+    logger.error("closeConversation error", { conversationId }, err);
   }
 }
 
@@ -324,7 +327,7 @@ ${transcript}`;
     try {
       responseText = await callClaudeCLI(prompt);
     } catch (err) {
-      console.error("[conversation] Memory extraction CLI failed:", err);
+      logger.error("memory extraction CLI failed", { conversationId }, err);
       return;
     }
 
@@ -345,7 +348,7 @@ ${transcript}`;
         parsed = JSON.parse(jsonMatch[0]);
       }
     } catch {
-      console.error("[conversation] Failed to parse memory extraction:", responseText.substring(0, 200));
+      logger.error("failed to parse memory extraction", { conversationId, responsePreview: responseText.substring(0, 200) });
       return;
     }
 
@@ -435,7 +438,7 @@ ${transcript}`;
 
     console.log(`[conversation] Memories extracted for ${conversationId}: ${validMemories.length} memories`);
   } catch (err) {
-    console.error("[conversation] extractMemories error:", err);
+    logger.error("extractMemories error", { conversationId }, err);
   }
 }
 
@@ -499,7 +502,7 @@ export async function getConversationMessages(
     const text = "CURRENT CONVERSATION:\n" + lines.join("\n");
     return { text, messageCount: total, conversationId };
   } catch (err) {
-    console.error("[conversation] getConversationMessages error:", err);
+    logger.error("getConversationMessages error", { conversationId }, err);
     return { text: "", messageCount: 0, conversationId };
   }
 }
@@ -545,7 +548,7 @@ export async function getConversationContext(
       recentMessages: (recentMsgs || []).reverse(),
     };
   } catch (err) {
-    console.error("[conversation] getConversationContext error:", err);
+    logger.error("getConversationContext error", { channel }, err);
     return null;
   }
 }
@@ -563,7 +566,7 @@ export async function expireIdleConversations(
     });
 
     if (error) {
-      console.error("[conversation] expire error:", error);
+      logger.error("expire error", error);
       return 0;
     }
 
@@ -573,7 +576,7 @@ export async function expireIdleConversations(
     }
     return count;
   } catch (err) {
-    console.error("[conversation] expireIdleConversations error:", err);
+    logger.error("expireIdleConversations error", err);
     return 0;
   }
 }
@@ -598,7 +601,7 @@ async function callClaudeCLI(prompt: string): Promise<string> {
   let timedOut = false;
   const timeout = setTimeout(() => {
     timedOut = true;
-    console.error(`[conversation] CLI timeout after ${TIMEOUT_MS / 1000}s — killing`);
+    logger.error(`CLI timeout after ${TIMEOUT_MS / 1000}s — killing`);
     proc.kill();
   }, TIMEOUT_MS);
 

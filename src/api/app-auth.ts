@@ -15,6 +15,9 @@ import { randomBytes } from 'crypto'
 import { sql } from '../../../ellie-forest/src/index'
 import { createPerson } from '../../../ellie-forest/src/people'
 import { sendVerificationCode } from '../email'
+import { log } from "../logger.ts";
+
+const logger = log.child("app-auth");
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -95,7 +98,7 @@ export async function sendCodeEndpoint(req: any, res: any) {
     console.log(`[app-auth] Code sent to ${normalizedEmail}`)
     return res.json({ ok: true })
   } catch (error) {
-    console.error('[app-auth:send-code] Error:', error)
+    logger.error("Send code failed", error)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }
@@ -169,7 +172,7 @@ export async function verifyCodeEndpoint(req: any, res: any) {
           })
           personId = person.id
         } catch (err) {
-          console.error('[app-auth] Failed to create person:', err)
+          logger.error("Failed to create person", err)
         }
       }
 
@@ -200,7 +203,7 @@ export async function verifyCodeEndpoint(req: any, res: any) {
       },
     })
   } catch (error) {
-    console.error('[app-auth:verify-code] Error:', error)
+    logger.error("Verify code failed", error)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }
@@ -234,7 +237,7 @@ export async function meEndpoint(req: any, res: any) {
       },
     })
   } catch (error) {
-    console.error('[app-auth:me] Error:', error)
+    logger.error("Me endpoint failed", error)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }
@@ -291,7 +294,7 @@ export async function updateProfileEndpoint(req: any, res: any) {
       },
     })
   } catch (error) {
-    console.error('[app-auth:update-profile] Error:', error)
+    logger.error("Update profile failed", error)
     return res.status(500).json({ error: 'Internal server error' })
   }
 }

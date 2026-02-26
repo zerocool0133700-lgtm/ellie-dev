@@ -8,6 +8,9 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { listOpenIssues, isPlaneConfigured } from "./plane.ts";
+import { log } from "./logger.ts";
+
+const logger = log.child("context");
 
 const USER_TIMEZONE = process.env.USER_TIMEZONE || "America/Chicago";
 
@@ -33,7 +36,7 @@ export async function getOpenWorkItems(): Promise<string> {
 
     return "OPEN WORK ITEMS:\n" + lines.join("\n");
   } catch (error) {
-    console.error("[context] Failed to fetch open work items:", error);
+    logger.error("Failed to fetch open work items", error);
     return "";
   }
 }
@@ -133,7 +136,7 @@ export async function getRecentWorkSessions(
 
     return "RECENT WORK SESSIONS:\n" + lines.join("\n");
   } catch (error) {
-    console.error("[context] Failed to fetch work sessions:", error);
+    logger.error("Failed to fetch work sessions", error);
     return "";
   }
 }
@@ -188,7 +191,7 @@ export async function getGoalsAndFacts(
 
     return parts.join("\n\n");
   } catch (error) {
-    console.error("[context] Failed to fetch goals/facts:", error);
+    logger.error("Failed to fetch goals/facts", error);
     return "";
   }
 }
@@ -241,7 +244,7 @@ export async function getRecentConversations(
 
     return "RECENT CONVERSATIONS:\n" + lines.join("\n");
   } catch (error) {
-    console.error("[context] Failed to fetch recent conversations:", error);
+    logger.error("Failed to fetch recent conversations", error);
     return "";
   }
 }
@@ -284,7 +287,7 @@ export async function getActivitySnapshot(
 
     return "LAST 24H ACTIVITY:\n" + lines.join("\n");
   } catch (error) {
-    console.error("[context] Failed to fetch activity snapshot:", error);
+    logger.error("Failed to fetch activity snapshot", error);
     return "";
   }
 }
@@ -419,7 +422,7 @@ export async function getUpcomingCalendarEvents(): Promise<string> {
     if (!allLines.length) return "";
     return "UPCOMING CALENDAR (next 3 days):\n" + allLines.join("\n");
   } catch (error) {
-    console.error("[context] Failed to fetch calendar events:", error);
+    logger.error("Failed to fetch calendar events", error);
     return "";
   }
 }
@@ -494,7 +497,7 @@ export async function getGmailSignal(): Promise<string> {
     if (!parts.length) return "GMAIL: No unread messages.";
     return "GMAIL:\n" + parts.join("\n") + "\n(Use mcp__google-workspace tools for full email content)";
   } catch (error) {
-    console.error("[context] Failed to fetch Gmail signal:", error);
+    logger.error("Failed to fetch Gmail signal", error);
     return "";
   }
 }
@@ -536,7 +539,7 @@ export async function getOutlookSignal(): Promise<string> {
     const label = email || "outlook";
     return `OUTLOOK (${label}, ${unreadCount} unread):\n${lines.join("\n")}\n(Use /api/outlook/* endpoints via curl for full email content)`;
   } catch (error) {
-    console.error("[context] Failed to fetch Outlook signal:", error);
+    logger.error("Failed to fetch Outlook signal", error);
     return "";
   }
 }
@@ -594,7 +597,7 @@ export async function getGoogleTasks(): Promise<string> {
     if (!parts.length) return "";
     return "GOOGLE TASKS (pending):\n" + parts.join("\n");
   } catch (error) {
-    console.error("[context] Failed to fetch Google Tasks:", error);
+    logger.error("Failed to fetch Google Tasks", error);
     return "";
   }
 }
@@ -649,7 +652,7 @@ export async function getGoogleTasksJSON(): Promise<{ accounts: { label: string;
     const accounts = await Promise.all(googleAccounts.map(getGoogleTasksJSONForAccount));
     return { accounts };
   } catch (error) {
-    console.error("[context] Failed to fetch Google Tasks JSON:", error);
+    logger.error("Failed to fetch Google Tasks JSON", error);
     return { accounts: [] };
   }
 }
@@ -715,7 +718,7 @@ export async function getPendingActionItems(
     if (!parts.length) return "";
     return "PENDING ACTION ITEMS:\n" + parts.join("\n");
   } catch (error) {
-    console.error("[context] Failed to fetch action items:", error);
+    logger.error("Failed to fetch action items", error);
     return "";
   }
 }
@@ -950,7 +953,7 @@ export async function getAgentMemoryContext(
         }
       }
     } catch (err) {
-      console.warn(`[context] Cross-agent context failed for ${agentName}:`, err);
+      logger.warn("Cross-agent context failed", { agent: agentName }, err);
     }
 
     return {
@@ -964,7 +967,7 @@ export async function getAgentMemoryContext(
       },
     };
   } catch (err) {
-    console.warn(`[context] Agent memory context failed for ${agentName}:`, err);
+    logger.warn("Agent memory context failed", { agent: agentName }, err);
     return empty;
   }
 }
@@ -993,7 +996,7 @@ export async function getActiveIncidentContext(): Promise<string> {
     }
     return `ACTIVE INCIDENTS (${incidents.length}):\n${parts.join("\n")}`;
   } catch (err) {
-    console.warn("[context] Active incident context failed:", err);
+    logger.warn("Active incident context failed", err);
     return "";
   }
 }
@@ -1013,7 +1016,7 @@ export async function getContradictionContext(): Promise<string> {
     );
     return `UNRESOLVED CONTRADICTIONS (${contradictions.length} total):\n${items.join("\n")}`;
   } catch (err) {
-    console.warn("[context] Contradiction context failed:", err);
+    logger.warn("Contradiction context failed", err);
     return "";
   }
 }
@@ -1035,7 +1038,7 @@ export async function getCreatureStatusContext(): Promise<string> {
     });
     return `ACTIVE WORK (${creatures.length} creatures):\n${items.join("\n")}`;
   } catch (err) {
-    console.warn("[context] Creature status context failed:", err);
+    logger.warn("Creature status context failed", err);
     return "";
   }
 }
@@ -1066,7 +1069,7 @@ export async function getPersonMentionContext(text: string): Promise<string> {
     }
     return `MENTIONED PEOPLE:\n${parts.join("\n")}`;
   } catch (err) {
-    console.warn("[context] Person mention context failed:", err);
+    logger.warn("Person mention context failed", err);
     return "";
   }
 }

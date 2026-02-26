@@ -20,6 +20,9 @@ import { dispatchAgent, syncResponse, type DispatchResult } from "./agent-router
 import { processMemoryIntents } from "./memory.ts";
 import { extractApprovalTags } from "./approval.ts";
 import type { ExecutionMode } from "./intent-classifier.ts";
+import { log } from "./logger.ts";
+
+const logger = log.child("orchestrator");
 
 // ────────────────────────────────────────────────────────────────
 // Types
@@ -222,9 +225,9 @@ export async function executeOrchestrated(
 
     // Cost enforcement
     if (artifacts.total_cost_usd > MAX_COST_PER_EXECUTION) {
-      console.error(`[orchestrator] Cost limit exceeded: $${artifacts.total_cost_usd.toFixed(4)} > $${MAX_COST_PER_EXECUTION.toFixed(2)}`);
+      logger.error("Cost limit exceeded", { cost: artifacts.total_cost_usd, limit: MAX_COST_PER_EXECUTION });
     } else if (artifacts.total_cost_usd > COST_WARN_THRESHOLD) {
-      console.warn(`[orchestrator] High cost: $${artifacts.total_cost_usd.toFixed(4)} for ${mode} (${effectiveSteps.length} steps)`);
+      logger.warn("High cost", { cost: artifacts.total_cost_usd, mode, steps: effectiveSteps.length });
     }
 
     console.log(
@@ -266,7 +269,7 @@ async function executePipeline(
 
     // Check total pipeline timeout
     if (Date.now() - pipelineStart > MAX_PIPELINE_TIMEOUT_MS) {
-      console.error(`[orchestrator] Pipeline timeout after ${i} steps (${Date.now() - pipelineStart}ms)`);
+      logger.error("Pipeline timeout", { completedSteps: i, elapsed_ms: Date.now() - pipelineStart });
       throw new PipelineStepError(i, step, "timeout", previousOutput);
     }
 
@@ -286,7 +289,7 @@ async function executePipeline(
 
     // Cost guard — abort if running total exceeds hard limit
     if (artifacts.total_cost_usd > MAX_COST_PER_EXECUTION) {
-      console.error(`[orchestrator] Pipeline aborted: cost $${artifacts.total_cost_usd.toFixed(4)} exceeds limit $${MAX_COST_PER_EXECUTION.toFixed(2)}`);
+      logger.error("Pipeline aborted: cost exceeds limit", { cost: artifacts.total_cost_usd, limit: MAX_COST_PER_EXECUTION });
       throw new PipelineStepError(i, step, "cost_exceeded", previousOutput || stepResult.output);
     }
 
@@ -342,7 +345,7 @@ async function executeFanOut(
         );
         return { stepIndex: i, stepResult, dispatch, error: null };
       } catch (err) {
-        console.error(`[orchestrator] Fan-out step ${i} failed:`, err);
+        logger.error("Fan-out step failed", { step: i }, err);
         return {
           stepIndex: i,
           stepResult: null,
@@ -467,7 +470,7 @@ async function executeCriticLoop(
 
     // Cost guard — flag partial result so the caller knows refinement was cut short
     if (artifacts.total_cost_usd > MAX_COST_PER_EXECUTION) {
-      console.error(`[orchestrator] Critic-loop aborted: cost $${artifacts.total_cost_usd.toFixed(4)} exceeds limit`);
+      logger.error("Critic-loop aborted: cost exceeds limit", { cost: artifacts.total_cost_usd, limit: MAX_COST_PER_EXECUTION });
       costTruncated = true;
       break;
     }
@@ -553,10 +556,9 @@ export function parseCriticVerdict(output: string, round: number): CriticVerdict
     // Log the raw output so malformed critic responses are debuggable
     const truncatedRaw = output.length > 500 ? output.substring(0, 500) + "..." : output;
     const isFinalRound = round >= MAX_CRITIC_ROUNDS - 1;
-    console.warn(
-      `[orchestrator] Could not parse critic verdict (round ${round + 1}/${MAX_CRITIC_ROUNDS}), ` +
-      `${isFinalRound ? "accepting (final round)" : "rejecting for retry"}. ` +
-      `Raw output: ${truncatedRaw}`,
+    logger.warn(
+      `Could not parse critic verdict, ${isFinalRound ? "accepting (final round)" : "rejecting for retry"}`,
+      { round: round + 1, maxRounds: MAX_CRITIC_ROUNDS, rawOutput: truncatedRaw },
     );
     return {
       accepted: isFinalRound,
@@ -639,7 +641,7 @@ async function executeStep(
 
   // 5. Check for error
   if (rawOutput.startsWith("Error:")) {
-    console.error(`[orchestrator] Step ${stepIndex + 1} returned error: ${rawOutput.substring(0, 200)}`);
+    logger.error("Step returned error", { step: stepIndex + 1, output: rawOutput.substring(0, 200) });
     throw new PipelineStepError(stepIndex, step, "claude_error", previousOutput);
   }
 
@@ -823,7 +825,7 @@ async function getSkillComplexity(
         .eq("enabled", true);
 
       if (error) {
-        console.warn(`[orchestrator] Skill cache refresh failed: ${error.message ?? error.code ?? "unknown"}. Using fallback.`);
+        logger.warn("Skill cache refresh failed, using fallback", { error: error.message ?? error.code ?? "unknown" });
         // Return cached value if available, otherwise default to heavy
         return _skillComplexityCache?.get(skillName) || "heavy";
       }
@@ -835,9 +837,7 @@ async function getSkillComplexity(
       _skillComplexityCacheTime = now;
     } catch (err) {
       // Table may not exist on first run, or network error — log and fallback gracefully
-      console.warn(
-        `[orchestrator] Skill cache query error (table may not exist): ${err instanceof Error ? err.message : String(err)}. Defaulting to heavy.`,
-      );
+      logger.warn("Skill cache query error (table may not exist), defaulting to heavy", err);
       return _skillComplexityCache?.get(skillName) || "heavy";
     }
   }
@@ -921,7 +921,7 @@ async function createExecutionPlan(
       .single();
 
     if (error) {
-      console.error("[orchestrator] Failed to create execution plan:", error);
+      logger.error("Failed to create execution plan", error);
       return null;
     }
 

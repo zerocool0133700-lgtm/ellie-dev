@@ -10,6 +10,9 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
+import { log } from "../logger.ts";
+
+const logger = log.child("gateway-intake");
 import { notify } from "../notification-policy.ts";
 import { getNotifyCtx, getRelayDeps } from "../relay-state.ts";
 import { syncAllCalendars } from "../calendar-sync.ts";
@@ -65,7 +68,7 @@ export function handleGatewayRoute(
           res.end(JSON.stringify({ error: "Unknown gateway endpoint" }));
       }
     } catch (err: any) {
-      console.error(`[gateway-intake] Error on ${endpoint}:`, err?.message);
+      logger.error("Error on endpoint", { endpoint, message: err?.message });
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: err?.message || "Internal error" }));
     }
@@ -104,7 +107,7 @@ async function handleGatewayEvent(
       },
     });
   } catch (err: any) {
-    console.error("[gateway-intake] Bridge write error:", err?.message);
+    logger.error("Bridge write error", { message: err?.message });
   }
 
   res.writeHead(200, { "Content-Type": "application/json" });
@@ -132,7 +135,7 @@ async function handleGatewayAlert(
       gchatMessage: `Gateway Alert (${source}): ${summary}`,
     });
   } catch (err: any) {
-    console.error("[gateway-intake] Notification error:", err?.message);
+    logger.error("Notification error", { message: err?.message });
   }
 
   // Create agent queue item for the dev agent to review
@@ -149,7 +152,7 @@ async function handleGatewayAlert(
       metadata: { envelope_id, gateway_source: source },
     });
   } catch (err: any) {
-    console.error("[gateway-intake] Queue item creation error:", err?.message);
+    logger.error("Queue item creation error", { message: err?.message });
   }
 
   res.writeHead(200, { "Content-Type": "application/json" });
@@ -192,7 +195,7 @@ async function handleGatewayEmail(
       });
     }
   } catch (err: any) {
-    console.error("[gateway-intake] Email fetch error:", err?.message);
+    logger.error("Email fetch error", { message: err?.message });
   }
 
   res.writeHead(200, { "Content-Type": "application/json" });
@@ -212,7 +215,7 @@ async function handleGatewayCalendarSync(
     await syncAllCalendars();
     console.log("[gateway-intake] Calendar sync complete");
   } catch (err: any) {
-    console.error("[gateway-intake] Calendar sync error:", err?.message);
+    logger.error("Calendar sync error", { message: err?.message });
   }
 
   res.writeHead(200, { "Content-Type": "application/json" });

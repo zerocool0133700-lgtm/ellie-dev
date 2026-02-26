@@ -13,6 +13,10 @@
  * and log warnings. The bot never breaks because ES is down.
  */
 
+import { log } from "./logger.ts";
+
+const logger = log.child("es");
+
 const ES_URL = process.env.ELASTICSEARCH_URL || "";
 
 let esAvailable = true;
@@ -30,7 +34,7 @@ async function checkHealth(): Promise<boolean> {
     });
     return res.ok;
   } catch {
-    console.warn("[es] Elasticsearch unreachable, disabling for 60s");
+    logger.warn("Elasticsearch unreachable, disabling for 60s");
     esAvailable = false;
     setTimeout(() => {
       esAvailable = true;
@@ -128,7 +132,7 @@ export async function indexMessage(doc: {
       domain: classifyDomain(doc.content),
     });
   } catch (err) {
-    console.error("[es] Failed to index message:", err);
+    logger.error("Failed to index message", err);
   }
 }
 
@@ -152,7 +156,7 @@ export async function indexMemory(doc: {
       domain: doc.domain || classifyDomain(doc.content),
     });
   } catch (err) {
-    console.error("[es] Failed to index memory:", err);
+    logger.error("Failed to index memory", err);
   }
 }
 
@@ -175,7 +179,7 @@ export async function indexConversation(doc: {
       domain: doc.summary ? classifyDomain(doc.summary) : "general",
     });
   } catch (err) {
-    console.error("[es] Failed to index conversation:", err);
+    logger.error("Failed to index conversation", err);
   }
 }
 
@@ -320,7 +324,7 @@ export async function searchElastic(
 
     return "ELASTICSEARCH RESULTS:\n" + lines.join("\n");
   } catch (err) {
-    console.error("[es] Search error:", err);
+    logger.error("Search error", err);
     return "";
   }
 }

@@ -9,6 +9,10 @@
  * Periodically retests to auto-recover when ES comes back.
  */
 
+import { log } from "../logger.ts";
+
+const logger = log.child("es-circuit");
+
 type BreakerState = "closed" | "open" | "half_open";
 
 interface BreakerConfig {
@@ -50,7 +54,7 @@ function recordFailure(): void {
   lastFailure = Date.now();
   if (failureCount >= config.failureThreshold) {
     state = "open";
-    console.warn(`[es-breaker] Circuit OPEN after ${failureCount} failures, pausing for ${config.resetTimeout}ms`);
+    logger.warn("Circuit OPEN, pausing", { failures: failureCount, pauseMs: config.resetTimeout });
   }
 }
 
@@ -80,7 +84,7 @@ export async function withBreaker<T>(
   } catch (err) {
     recordFailure();
     if (currentState === "half_open") {
-      console.warn("[es-breaker] Half-open test failed, re-opening circuit");
+      logger.warn("Half-open test failed, re-opening circuit");
     }
     return fallback;
   }

@@ -20,6 +20,9 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { indexMemory, classifyDomain } from "./elasticsearch.ts";
+import { log } from "./logger.ts";
+
+const logger = log.child("memory");
 
 // ────────────────────────────────────────────────────────────────
 // Conflict Resolution Types & Constants
@@ -98,7 +101,7 @@ export async function checkMemoryConflict(
     };
   } catch (err) {
     // Search Edge Function unavailable — skip dedup, allow insert
-    console.warn("[memory] Conflict check unavailable:", err);
+    logger.warn("Conflict check unavailable", err);
     return null;
   }
 }
@@ -276,7 +279,7 @@ async function doInsert(
   const { data, error } = await supabase.from("memory").insert(row).select("id").single();
 
   if (error || !data?.id) {
-    console.error("[memory] Insert failed:", error);
+    logger.error("Insert failed", error);
     return { id: null, action: "error", resolution };
   }
 
@@ -348,7 +351,7 @@ async function doMerge(
     .eq("id", existing.id);
 
   if (error) {
-    console.error("[memory] Merge update failed:", error);
+    logger.error("Merge update failed", error);
     // Fallback to regular insert
     return await doInsert(supabase, params, resolution);
   }
@@ -390,7 +393,7 @@ async function doFlag(
     .eq("id", existing.id);
 
   if (error) {
-    console.error("[memory] Flag update failed:", error);
+    logger.error("Flag update failed", error);
     // Fallback to regular insert
     return await doInsert(supabase, params, resolution);
   }
@@ -517,7 +520,7 @@ export async function processMemoryIntents(
         });
         console.log(`[memory] Forest memory: [${memType}:${confidence}] ${content.slice(0, 60)}...`);
       } catch (err) {
-        console.warn('[memory] Forest memory write failed:', err);
+        logger.warn("Forest memory write failed", err);
       }
       clean = clean.replace(match[0], '');
     }
@@ -565,7 +568,7 @@ export async function getMemoryContext(
 
     return parts.join("\n\n");
   } catch (error) {
-    console.error("Memory context error:", error);
+    logger.error("Memory context error", error);
     return "";
   }
 }
@@ -614,7 +617,7 @@ export async function getRecentMessages(
         .join("\n")
     );
   } catch (error) {
-    console.error("Recent messages error:", error);
+    logger.error("Recent messages error", error);
     return "";
   }
 }

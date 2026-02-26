@@ -7,6 +7,9 @@
 import { createHmac } from "crypto";
 import { join, dirname } from "path";
 import type { IncomingMessage } from "http";
+import { log } from "./logger.ts";
+
+const logger = log.child("relay-config");
 
 export const PROJECT_ROOT = dirname(dirname(import.meta.path));
 
@@ -98,7 +101,7 @@ export async function getContextDocket(): Promise<string> {
     console.log("[context] Loaded context docket");
     return data.document;
   } catch (err) {
-    console.error("[context] Failed to fetch context docket:", err);
+    logger.error("Failed to fetch context docket", err);
     return cachedContext?.document || "";
   }
 }

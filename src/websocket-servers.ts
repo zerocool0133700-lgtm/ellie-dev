@@ -7,6 +7,7 @@
 import { appendFile } from "fs/promises";
 import type { Server as HttpServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
+import { log } from "./logger.ts";
 import { EXTENSION_API_KEY } from "./relay-config.ts";
 import {
   extensionClients, ellieChatClients, wsAppUserMap, ellieChatPhoneHistories,
@@ -36,6 +37,8 @@ import {
   resolveToolApproval,
   clearSessionApprovals,
 } from "./tool-approval.ts";
+
+const logger = log.child("ws");
 
 export function createWebSocketServers(httpServer: HttpServer): void {
   const { bot, supabase } = getRelayDeps();
@@ -105,7 +108,7 @@ extensionWss.on("connection", (ws: WebSocket) => {
         const header = `\n--- Feed saved ${new Date().toISOString()} ---\n`;
         appendFile(logPath, header + msg.content + "\n")
           .then(() => console.log(`[extension] Feed saved to ${logPath}`))
-          .catch((err) => console.error(`[extension] Failed to save feed:`, err.message));
+          .catch((err) => logger.error("Failed to save feed", err));
         return;
       }
     } catch {
@@ -172,7 +175,7 @@ async function deliverPendingReadouts(ws: WebSocket): Promise<void> {
 
     console.log(`[ellie-chat] Delivered ${items.length} readout finding(s) on connect`);
   } catch (err) {
-    console.error("[ellie-chat] Readout delivery error:", err);
+    logger.error("Readout delivery error", err);
   }
 }
 
@@ -220,7 +223,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
               console.log(`[ellie-chat] App user authenticated: ${user.name || user.id} (${ellieChatClients.size} connected)`);
               deliverPendingReadouts(ws).catch(() => {});
             } catch (err) {
-              console.error("[ellie-chat] Token auth error:", err);
+              logger.error("Token auth error", err);
               ws.close(4003, "Auth error");
             }
           })();
@@ -258,7 +261,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
             ws.send(JSON.stringify({ type: "session_upgraded", ts: Date.now(), user: { id: user.id, name: user.name, onboarding_state: user.onboarding_state } }));
             console.log(`[ellie-chat] Session upgraded: ${user.name || user.id}`);
           } catch (err) {
-            console.error("[ellie-chat] Session upgrade error:", err);
+            logger.error("Session upgrade error", err);
           }
         })();
         return;
@@ -299,7 +302,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
             ws.send(JSON.stringify({ type: "new_chat_ok", ts: Date.now() }));
             console.log(`[ellie-chat] New chat started for ${ncUser?.name || ncUserId || 'unknown'}`);
           } catch (err: any) {
-            console.error("[ellie-chat] New chat error:", err?.message);
+            logger.error("New chat error", err);
           }
         })();
         return;
@@ -347,7 +350,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
 
           if (pbCmds.length > 0) {
             const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "ellie-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-            executePlaybookCommands(pbCmds, pbCtx).catch(err => console.error("[playbook]", err));
+            executePlaybookCommands(pbCmds, pbCtx).catch(err => logger.error("Playbook execution failed", err));
           }
 
           resetEllieChatIdleTimer();

@@ -10,6 +10,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Bot } from "grammy";
 import { sendGoogleChatMessage, isGoogleChatEnabled } from "../google-chat.ts";
+import { log } from "../logger.ts";
+
+const logger = log.child("rollup");
 
 const TELEGRAM_USER_ID = process.env.TELEGRAM_USER_ID!;
 const GOOGLE_CHAT_SPACE = process.env.GOOGLE_CHAT_SPACE_NAME || "";
@@ -52,7 +55,7 @@ async function buildDigestForDate(
     .order("completed_at", { ascending: true });
 
   if (error) {
-    console.error("[rollup] Failed to fetch sessions:", error);
+    logger.error("Failed to fetch sessions", error);
     return null;
   }
 
@@ -238,7 +241,7 @@ export async function generateRollup(req: any, res: any, supabase: SupabaseClien
       );
 
     if (upsertError) {
-      console.error("[rollup] Failed to store digest:", upsertError);
+      logger.error("Failed to store digest", upsertError);
       return res.status(500).json({ error: "Failed to store rollup" });
     }
 
@@ -251,7 +254,7 @@ export async function generateRollup(req: any, res: any, supabase: SupabaseClien
         const tgSummary = `\u{1F4CA} Daily Rollup — ${digest.sessionsCount} sessions, ${digest.totalDurationMin} min total. Full digest sent to Google Chat.`;
         await bot.api.sendMessage(TELEGRAM_USER_ID, tgSummary);
       } catch (tgErr) {
-        console.warn("[rollup] Telegram notification failed:", tgErr);
+        logger.warn("Telegram notification failed", tgErr);
       }
 
       // Google Chat: full digest (better formatting for longer content)
@@ -259,7 +262,7 @@ export async function generateRollup(req: any, res: any, supabase: SupabaseClien
         try {
           await sendGoogleChatMessage(GOOGLE_CHAT_SPACE, text);
         } catch (gchatErr) {
-          console.warn("[rollup] Google Chat notification failed:", gchatErr);
+          logger.warn("Google Chat notification failed", gchatErr);
         }
       }
     }
@@ -276,7 +279,7 @@ export async function generateRollup(req: any, res: any, supabase: SupabaseClien
       digest: digest.sessions,
     });
   } catch (error) {
-    console.error("[rollup] Error:", error);
+    logger.error("Generate failed", error);
     return res.status(500).json({ error: "Internal server error" });
   }
 }
@@ -301,7 +304,7 @@ export async function getLatestRollup(req: any, res: any, supabase: SupabaseClie
 
     return res.json({ success: true, rollup: data });
   } catch (error) {
-    console.error("[rollup] Error fetching latest:", error);
+    logger.error("Failed to fetch latest rollup", error);
     return res.status(500).json({ error: "Internal server error" });
   }
 }
@@ -331,7 +334,7 @@ export async function getRollupByDate(req: any, res: any, supabase: SupabaseClie
 
     return res.json({ success: true, rollup: data });
   } catch (error) {
-    console.error("[rollup] Error fetching by date:", error);
+    logger.error("Failed to fetch rollup by date", error);
     return res.status(500).json({ error: "Internal server error" });
   }
 }

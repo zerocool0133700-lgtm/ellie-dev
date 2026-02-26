@@ -11,6 +11,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Bot } from "grammy";
 import { sendGoogleChatMessage, isGoogleChatEnabled } from "../google-chat.ts";
 import { listOpenIssues, isPlaneConfigured } from "../plane.ts";
+import { log } from "../logger.ts";
+
+const logger = log.child("weekly-review");
 
 const TELEGRAM_USER_ID = process.env.TELEGRAM_USER_ID!;
 const GOOGLE_CHAT_SPACE = process.env.GOOGLE_CHAT_SPACE_NAME || "";
@@ -83,7 +86,7 @@ async function gatherReviewData(supabase: SupabaseClient): Promise<WeeklyReviewD
     try {
       planeIssues = await listOpenIssues("ELLIE", 30);
     } catch (err) {
-      console.warn("[weekly-review] Failed to fetch Plane issues:", err);
+      logger.warn("Failed to fetch Plane issues", err);
     }
   }
 
@@ -257,7 +260,7 @@ export async function generateWeeklyReview(
       );
 
     if (upsertError) {
-      console.warn("[weekly-review] Failed to store review:", upsertError);
+      logger.warn("Failed to store review", upsertError);
     }
 
     if (notify) {
@@ -266,7 +269,7 @@ export async function generateWeeklyReview(
         const tgSummary = `🔄 Weekly Review: ${data.openTodos.length} open, ${data.waitingFor.length} waiting, ${data.overdueTodos.length} overdue, ${data.completedThisWeek.length} done this week. Full review sent to Google Chat.`;
         await bot.api.sendMessage(TELEGRAM_USER_ID, tgSummary);
       } catch (tgErr) {
-        console.warn("[weekly-review] Telegram notification failed:", tgErr);
+        logger.warn("Telegram notification failed", tgErr);
       }
 
       // Google Chat: full review
@@ -274,7 +277,7 @@ export async function generateWeeklyReview(
         try {
           await sendGoogleChatMessage(GOOGLE_CHAT_SPACE, text);
         } catch (gchatErr) {
-          console.warn("[weekly-review] Google Chat notification failed:", gchatErr);
+          logger.warn("Google Chat notification failed", gchatErr);
         }
       }
     }
@@ -297,7 +300,7 @@ export async function generateWeeklyReview(
       text,
     });
   } catch (error) {
-    console.error("[weekly-review] Error:", error);
+    logger.error("Generate failed", error);
     return res.status(500).json({ error: "Internal server error" });
   }
 }

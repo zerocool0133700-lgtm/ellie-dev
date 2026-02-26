@@ -8,10 +8,13 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { log } from "./logger.ts";
 import {
   getCredentialForDomain,
   type PasswordPayload,
 } from "./vault.ts";
+
+const logger = log.child("browser-auth");
 
 export interface AuthResult {
   cookies: any[];
@@ -88,10 +91,7 @@ export async function getAuthenticatedSession(
 
     return { cookies, source: "fresh_login" };
   } catch (err) {
-    console.error(
-      `[browser-auth] Login failed for ${domain}:`,
-      (err as Error).message,
-    );
+    logger.error("Login failed", { domain }, err);
     return null;
   } finally {
     await browser.close();

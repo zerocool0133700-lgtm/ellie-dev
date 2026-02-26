@@ -14,6 +14,9 @@
 
 import "dotenv/config";
 import postgres from "postgres";
+import { log } from "../logger.ts";
+
+const logger = log.child("es-sync");
 import {
   indexForestEvent,
   indexForestCommit,
@@ -159,7 +162,7 @@ async function handleNotification(payload: string): Promise<void> {
   try {
     notification = JSON.parse(payload);
   } catch {
-    console.warn("[es-sync] Bad notification payload:", payload);
+    logger.warn("Bad notification payload", { payload });
     stats.errors++;
     return;
   }
@@ -196,12 +199,12 @@ async function handleNotification(payload: string): Promise<void> {
         break;
       }
       default:
-        console.warn(`[es-sync] Unknown notification type: ${type}`);
+        logger.warn("Unknown notification type", { type });
         stats.skipped++;
     }
     stats.indexed++;
   } catch (err) {
-    console.error(`[es-sync] Failed to index ${type} ${id}:`, err);
+    logger.error("Failed to index entity", { type, id }, err);
     stats.errors++;
   }
 }
@@ -213,7 +216,7 @@ async function handleNotification(payload: string): Promise<void> {
 export async function startSyncListener(): Promise<void> {
   if (running) return;
   if (!ES_URL) {
-    console.warn("[es-sync] ELASTICSEARCH_URL not set, sync listener disabled");
+    logger.warn("ELASTICSEARCH_URL not set, sync listener disabled");
     return;
   }
 
@@ -228,7 +231,7 @@ export async function startSyncListener(): Promise<void> {
     await sql`SELECT 1`;
     console.log("[es-sync] Connected to Postgres");
   } catch (err) {
-    console.error("[es-sync] Failed to connect to Postgres:", err);
+    logger.error("Failed to connect to Postgres", err);
     sql = null;
     return;
   }
@@ -239,7 +242,7 @@ export async function startSyncListener(): Promise<void> {
   // Start listening
   await sql.listen("forest_index_queue", (payload) => {
     handleNotification(payload).catch((err) => {
-      console.error("[es-sync] Notification handler error:", err);
+      logger.error("Notification handler error", err);
     });
   });
 
@@ -254,7 +257,7 @@ export async function stopSyncListener(): Promise<void> {
     await sql.end({ timeout: 5 });
     console.log("[es-sync] Listener stopped");
   } catch (err) {
-    console.error("[es-sync] Error stopping listener:", err);
+    logger.error("Error stopping listener", err);
   }
   sql = null;
 }

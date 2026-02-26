@@ -9,6 +9,9 @@ import { spawn } from "bun";
 import { writeFile, readFile, unlink } from "fs/promises";
 import { join } from "path";
 import type { WebSocket } from "ws";
+import { log } from "./logger.ts";
+
+const logger = log.child("tts");
 
 // ── Config (from env) ───────────────────────────────────────
 
@@ -55,7 +58,7 @@ export async function transcribeMulaw(mulawChunks: Buffer[]): Promise<string> {
     ], { stdout: "pipe", stderr: "pipe" });
 
     if (await ffmpeg.exited !== 0) {
-      console.error("[voice] ffmpeg error:", await new Response(ffmpeg.stderr).text());
+      logger.error("ffmpeg error", { detail: await new Response(ffmpeg.stderr).text() });
       return "";
     }
 
@@ -72,7 +75,7 @@ export async function transcribeMulaw(mulawChunks: Buffer[]): Promise<string> {
 
     const whisperBinary = process.env.WHISPER_BINARY || "whisper-cpp";
     const modelPath = process.env.WHISPER_MODEL_PATH || "";
-    if (!modelPath) { console.error("[voice] WHISPER_MODEL_PATH not set"); return ""; }
+    if (!modelPath) { logger.error("WHISPER_MODEL_PATH not set"); return ""; }
 
     const txtPath = join(TMP_DIR, `call_${timestamp}.txt`);
     const whisper = spawn([
@@ -83,7 +86,7 @@ export async function transcribeMulaw(mulawChunks: Buffer[]): Promise<string> {
     ], { stdout: "pipe", stderr: "pipe" });
 
     if (await whisper.exited !== 0) {
-      console.error("[voice] whisper error:", await new Response(whisper.stderr).text());
+      logger.error("whisper error", { detail: await new Response(whisper.stderr).text() });
       return "";
     }
 
@@ -107,7 +110,7 @@ export async function streamTTSToTwilio(
   ws: WebSocket,
   streamSid: string,
 ): Promise<boolean> {
-  if (!ELEVENLABS_API_KEY) { console.error("[voice] No ElevenLabs API key"); return false; }
+  if (!ELEVENLABS_API_KEY) { logger.error("No ElevenLabs API key"); return false; }
 
   const start = Date.now();
 
@@ -125,7 +128,7 @@ export async function streamTTSToTwilio(
   );
 
   if (!response.ok || !response.body) {
-    console.error("[voice] ElevenLabs stream error:", response.status, await response.text());
+    logger.error("ElevenLabs stream error", { status: response.status, body: await response.text() });
     return false;
   }
 
@@ -171,7 +174,7 @@ export async function streamTTSToTwilio(
 
 /** Non-streaming mulaw TTS (fallback for when streaming not possible). */
 export async function textToSpeechMulaw(text: string): Promise<string> {
-  if (!ELEVENLABS_API_KEY) { console.error("[voice] No ElevenLabs API key"); return ""; }
+  if (!ELEVENLABS_API_KEY) { logger.error("No ElevenLabs API key"); return ""; }
 
   const response = await fetch(
     `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}?output_format=ulaw_8000`,
@@ -187,7 +190,7 @@ export async function textToSpeechMulaw(text: string): Promise<string> {
   );
 
   if (!response.ok) {
-    console.error("[voice] ElevenLabs error:", response.status, await response.text());
+    logger.error("ElevenLabs error", { status: response.status, body: await response.text() });
     return "";
   }
 
@@ -212,7 +215,7 @@ export async function textToSpeechOgg(text: string): Promise<Buffer | null> {
   );
 
   if (!response.ok) {
-    console.error("[tts] ElevenLabs error:", response.status, await response.text());
+    logger.error("ElevenLabs error", { status: response.status, body: await response.text() });
     return null;
   }
 
@@ -237,7 +240,7 @@ export async function textToSpeechFast(text: string): Promise<Buffer | null> {
   );
 
   if (!response.ok) {
-    console.error("[tts] ElevenLabs fast error:", response.status, await response.text());
+    logger.error("ElevenLabs fast error", { status: response.status, body: await response.text() });
     return null;
   }
 

@@ -9,7 +9,10 @@
 
 import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
+import { log } from "./logger.ts";
 import { consolidateNow } from "./consolidate-inline.ts";
+
+const logger = log.child("consolidate-memory");
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
@@ -23,6 +26,6 @@ async function run() {
 }
 
 run().catch((err) => {
-  console.error("[batch] Fatal error:", err);
+  logger.error("Fatal error", err);
   process.exit(1);
 });

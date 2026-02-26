@@ -7,6 +7,9 @@
  */
 
 import { readFile } from "fs/promises";
+import { log } from "./logger.ts";
+
+const logger = log.child("prompt-builder");
 import { join, dirname } from "path";
 import type Anthropic from "@anthropic-ai/sdk";
 import { isOutlookConfigured, getOutlookEmail } from "./outlook.ts";
@@ -185,10 +188,10 @@ export async function runPostMessageAssessment(
           .join("");
         claudeResult = parseAssessmentResult(text);
         if (!claudeResult) {
-          console.warn("[assessment] Failed to parse haiku response:", text.substring(0, 200));
+          logger.warn("Failed to parse haiku response", { response: text.substring(0, 200) });
         }
       } catch (err: any) {
-        console.error("[assessment] Haiku call failed:", err?.message || err);
+        logger.error("Haiku call failed", err);
       }
     }
 
@@ -223,7 +226,7 @@ export async function runPostMessageAssessment(
           });
         }
       } catch (memErr: any) {
-        console.warn('[assessment] Health memory write failed:', memErr?.message);
+        logger.warn("Health memory write failed", memErr);
       }
     }
 
@@ -247,7 +250,7 @@ export async function runPostMessageAssessment(
           });
         }
       } catch (memErr: any) {
-        console.warn('[assessment] Memory perception write failed:', memErr?.message);
+        logger.warn("Memory perception write failed", memErr);
       }
     }
 
@@ -258,7 +261,7 @@ export async function runPostMessageAssessment(
     console.log(`[assessment] Completed in ${Date.now() - start}ms` +
       (claudeResult ? ` (mbti:${claudeResult.mbti.length} enn:${claudeResult.enneagram.length} health:${claudeResult.health.length} mem:${claudeResult.memories.length})` : " (rules only)"));
   } catch (err: any) {
-    console.error("[assessment] Failed:", err?.message || err);
+    logger.error("Assessment failed", err);
   }
 }
 
