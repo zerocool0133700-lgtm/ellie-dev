@@ -15,19 +15,25 @@ import {
 } from "./relay-config.ts";
 import {
   getActiveAgent, setActiveAgent,
-  wsAppUserMap, ellieChatPhoneHistories,
+  wsAppUserMap, ellieChatPhoneHistories, ellieChatClients,
   broadcastExtension, getRelayDeps, getNotifyCtx,
 } from "./relay-state.ts";
-import { resetEllieChatIdleTimer } from "./relay-idle.ts";
+import { resetEllieChatIdleTimer, resetTelegramIdleTimer, resetGchatIdleTimer } from "./relay-idle.ts";
 import { textToSpeechFast } from "./tts.ts";
 import {
   buildPrompt,
   runPostMessageAssessment,
   getPlanningMode,
   setPlanningMode,
+  USER_NAME,
+  getArchetypeContext,
+  getPsyContext,
+  getPhaseContext,
+  getHealthContext,
 } from "./prompt-builder.ts";
 import {
   callClaude,
+  callClaudeVoice,
   session,
 } from "./claude-cli.ts";
 import { enqueueEllieChat } from "./message-queue.ts";
@@ -52,6 +58,7 @@ import { getSkillSnapshot } from "./skills/index.ts";
 import {
   getSpecialistAck,
   estimateTokens,
+  trimSearchContext,
 } from "./relay-utils.ts";
 import {
   getAgentStructuredContext, getAgentMemoryContext, getMaxMemoriesForModel,
@@ -65,6 +72,7 @@ import {
 import {
   isPlaneConfigured,
   fetchWorkItemDetails,
+  createPlaneIssue,
 } from "./plane.ts";
 import { extractPlaybookCommands, executePlaybookCommands, type PlaybookContext } from "./playbook.ts";
 import { notify } from "./notification-policy.ts";

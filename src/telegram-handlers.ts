@@ -4,7 +4,7 @@
  * Extracted from relay.ts — ELLIE-184 Phase 2.
  */
 
-import type { Bot, Context } from "grammy";
+import { InputFile, type Bot, type Context } from "grammy";
 import { writeFile, readFile, unlink } from "fs/promises";
 import { join } from "path";
 import {
@@ -25,6 +25,10 @@ import {
   runPostMessageAssessment,
   getPlanningMode,
   setPlanningMode,
+  getArchetypeContext,
+  getPsyContext,
+  getPhaseContext,
+  getHealthContext,
 } from "./prompt-builder.ts";
 import {
   callClaude,
@@ -64,6 +68,7 @@ import {
   type PipelineStep,
 } from "./orchestrator.ts";
 import {
+  extractApprovalTags,
   getPendingAction,
   removePendingAction,
 } from "./approval.ts";

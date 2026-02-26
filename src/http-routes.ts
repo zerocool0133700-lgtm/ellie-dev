@@ -24,7 +24,7 @@ import {
   broadcastExtension, broadcastToEllieChatClients,
   getRelayDeps, getNotifyCtx,
 } from "./relay-state.ts";
-import { triggerConsolidation } from "./relay-idle.ts";
+import { triggerConsolidation, resetTelegramIdleTimer, resetGchatIdleTimer } from "./relay-idle.ts";
 import {
   textToSpeechOgg,
   textToSpeechFast,
@@ -41,6 +41,7 @@ import {
   USER_NAME,
   USER_TIMEZONE,
 } from "./prompt-builder.ts";
+import { transcribe } from "./transcribe.ts";
 import {
   callClaude,
   session,
