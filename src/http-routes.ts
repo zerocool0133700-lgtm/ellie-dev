@@ -72,6 +72,7 @@ import {
   deliverMessage,
   acknowledgeChannel,
 } from "./delivery.ts";
+import { checkMessageRate } from "./rate-limiter.ts";
 import {
   routeAndDispatch,
   syncResponse,
@@ -299,6 +300,16 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         }
 
         console.log(`[gchat] ${parsed.senderName}: ${parsed.text.substring(0, 80)}...`);
+
+        // Rate limit check (ELLIE-228)
+        const gchatRateLimited = checkMessageRate(parsed.senderEmail, "google-chat");
+        if (gchatRateLimited) {
+          const gchatRateResponse = { text: gchatRateLimited };
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(gchatRateResponse));
+          return;
+        }
+
         acknowledgeChannel("google-chat"); // User responded — clear pending responses
 
         await saveMessage("user", parsed.text, {

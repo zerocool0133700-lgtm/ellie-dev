@@ -38,6 +38,7 @@ import {
   session,
 } from "./claude-cli.ts";
 import { withQueue } from "./message-queue.ts";
+import { checkMessageRate, checkVoiceRate } from "./rate-limiter.ts";
 import {
   saveMessage,
   sendResponse,
@@ -121,6 +122,10 @@ bot.on("message:text", withQueue(async (ctx) => {
   const text = ctx.message.text;
   const userId = ctx.from?.id.toString() || "";
   console.log(`Message: ${text.substring(0, 50)}...`);
+
+  // Rate limit check (ELLIE-228)
+  const rateLimited = checkMessageRate(userId, "telegram");
+  if (rateLimited) { await ctx.reply(rateLimited); return; }
 
   await ctx.replyWithChatAction("typing");
   acknowledgeChannel("telegram"); // User responded — clear pending responses
@@ -435,6 +440,12 @@ bot.on("message:text", withQueue(async (ctx) => {
 bot.on("message:voice", withQueue(async (ctx) => {
   const voice = ctx.message.voice;
   console.log(`Voice message: ${voice.duration}s`);
+
+  // Rate limit check — voice is more expensive (ELLIE-228)
+  const userId = ctx.from?.id.toString() || "";
+  const rateLimited = checkVoiceRate(userId);
+  if (rateLimited) { await ctx.reply(rateLimited); return; }
+
   await ctx.replyWithChatAction("typing");
 
   if (!process.env.VOICE_PROVIDER) {
