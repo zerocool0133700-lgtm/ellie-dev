@@ -1354,6 +1354,238 @@ If no actionable ideas are found, return: { "ideas": [] }`;
     return;
   }
 
+  // Harvest conversation to Forest — extract seeds (new knowledge) and rain (enrichments) (ELLIE-249)
+  if (url.pathname === "/api/harvest" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        if (!supabase) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Supabase not configured" }));
+          return;
+        }
+
+        const data = body ? JSON.parse(body) : {};
+        const conversationId = data?.conversation_id;
+
+        if (!conversationId) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Missing conversation_id" }));
+          return;
+        }
+
+        console.log(`[harvest] Starting harvest for conversation ${conversationId}`);
+
+        // Fetch conversation metadata
+        const { data: convo, error: convoErr } = await supabase
+          .from("conversations")
+          .select("id, channel, agent, summary, started_at, last_message_at, message_count")
+          .eq("id", conversationId)
+          .single();
+
+        if (convoErr || !convo) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Conversation not found" }));
+          return;
+        }
+
+        if ((convo.message_count || 0) < 5) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Conversation too short (need at least 5 messages)" }));
+          return;
+        }
+
+        // Fetch messages
+        const { data: msgs } = await supabase
+          .from("messages")
+          .select("role, content, created_at")
+          .eq("conversation_id", conversationId)
+          .order("created_at", { ascending: true });
+
+        if (!msgs?.length) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, seeds: [], rain: [], message: "No messages found" }));
+          return;
+        }
+
+        const transcript = msgs
+          .map((m: any) => `${m.role === "user" ? "Dave" : "Ellie"}: ${m.content}`)
+          .join("\n");
+
+        // Build extraction prompt
+        const prompt = `You are the Conversation Harvester — an agent that extracts institutional knowledge from conversations for storage in the Forest (a knowledge graph).
+
+## Conversation Metadata
+- Channel: ${convo.channel || "unknown"}
+- Date: ${convo.started_at}
+- Messages: ${msgs.length}
+- Summary: ${convo.summary || "No summary"}
+
+## Transcript
+
+${transcript}
+
+## Instructions
+
+Extract knowledge candidates from this conversation:
+
+**Seeds** (new knowledge): Decisions with reasoning, findings about codebase/architecture, new facts about the system, hypotheses, new patterns/conventions, new integrations/features added.
+
+**Rain** (enrichment to existing knowledge): Updates to existing decisions, deeper context for known facts, corrections to prior assumptions, new evidence for/against existing hypotheses.
+
+**Discard** (compost): Greetings, debugging dead-ends, session logistics, repeated info, temporary state.
+
+For each candidate, determine:
+- content: Concise, standalone description (must make sense without this conversation)
+- type: decision | finding | fact | hypothesis
+- scope_path: Which project area (2/1=ellie-dev, 2/2=ellie-forest, 2/3=ellie-home, 2/4=ellie-os-app, 2=all projects)
+- confidence: 0.0-1.0
+- category: seed or rain
+- tags: relevant topic tags (array of strings)
+
+Quality over quantity — 3 high-value entries beat 15 mediocre ones.
+
+Return ONLY valid JSON (no markdown, no explanation):
+{
+  "candidates": [
+    {
+      "content": "...",
+      "type": "decision|finding|fact|hypothesis",
+      "scope_path": "2/1",
+      "confidence": 0.85,
+      "category": "seed",
+      "tags": ["tag1", "tag2"]
+    }
+  ]
+}
+
+If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
+
+        // Call Claude CLI
+        const cliArgs = [CLAUDE_PATH, "-p", prompt, "--output-format", "text"];
+        const proc = spawn(cliArgs, {
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+          env: { ...process.env, CLAUDECODE: "", ANTHROPIC_API_KEY: "" },
+        });
+
+        const TIMEOUT_MS = 90_000;
+        let timedOut = false;
+        const timeout = setTimeout(() => {
+          timedOut = true;
+          logger.error("[harvest] CLI timeout — killing");
+          proc.kill();
+        }, TIMEOUT_MS);
+
+        const output = await new Response(proc.stdout).text();
+        const stderr = await new Response(proc.stderr).text();
+        clearTimeout(timeout);
+
+        const exitCode = await proc.exited;
+        if (exitCode !== 0) {
+          const msg = timedOut ? "timed out" : stderr || `exit code ${exitCode}`;
+          throw new Error(`Claude CLI failed: ${msg}`);
+        }
+
+        // Parse JSON response
+        const cleaned = output.trim();
+        let parsed: { candidates: Array<{ content: string; type: string; scope_path: string; confidence: number; category: string; tags?: string[] }> };
+        try {
+          parsed = JSON.parse(cleaned);
+        } catch {
+          const jsonMatch = cleaned.match(/\{[\s\S]*"candidates"[\s\S]*\}/);
+          if (!jsonMatch) throw new Error("No JSON found in CLI response");
+          parsed = JSON.parse(jsonMatch[0]);
+        }
+
+        const candidates = parsed.candidates || [];
+        const seeds = candidates.filter(c => c.category === "seed");
+        const rain = candidates.filter(c => c.category === "rain");
+        console.log(`[harvest] Extracted ${candidates.length} candidates (${seeds.length} seeds, ${rain.length} rain)`);
+
+        // Check Forest for duplicates and write results
+        const { readMemories, writeMemory } = await import("../../ellie-forest/src/index");
+        const written: Array<{ id: string; content: string; type: string; category: string }> = [];
+
+        for (const candidate of candidates) {
+          // Check Forest for existing similar knowledge
+          const existing = await readMemories({
+            query: candidate.content,
+            scope_path: candidate.scope_path,
+            limit: 3,
+          });
+
+          const topMatch = existing[0];
+          const isDuplicate = topMatch && (topMatch.similarity ?? 0) > 0.8;
+
+          if (isDuplicate) {
+            // Reclassify as rain if it was a seed
+            if (candidate.category === "seed") {
+              candidate.category = "rain";
+            }
+            console.log(`[harvest] Duplicate detected (similarity ${topMatch.similarity?.toFixed(2)}), marking as rain`);
+          }
+
+          // Write to Forest with harvest metadata
+          const memory = await writeMemory({
+            content: candidate.content,
+            type: candidate.type as any,
+            scope_path: candidate.scope_path,
+            confidence: candidate.confidence,
+            tags: [...(candidate.tags || []), `harvest:${candidate.category}`, `conversation:${conversationId}`],
+            metadata: {
+              harvest_source: "dashboard",
+              harvest_category: candidate.category,
+              conversation_id: conversationId,
+              conversation_channel: convo.channel,
+              work_item_id: "ELLIE-249",
+            },
+            category: candidate.category === "rain" ? "work" : "general",
+          });
+
+          written.push({
+            id: memory.id,
+            content: candidate.content,
+            type: candidate.type,
+            category: candidate.category,
+          });
+        }
+
+        const seedCount = written.filter(w => w.category === "seed").length;
+        const rainCount = written.filter(w => w.category === "rain").length;
+
+        console.log(`[harvest] Complete — ${seedCount} seeds planted, ${rainCount} rain applied`);
+
+        // Broadcast to ellie-chat clients
+        if (written.length > 0) {
+          broadcastToEllieChatClients({
+            type: "harvest",
+            seeds: seedCount,
+            rain: rainCount,
+            conversationId,
+            items: written,
+            ts: Date.now(),
+          });
+        }
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          ok: true,
+          seeds: written.filter(w => w.category === "seed"),
+          rain: written.filter(w => w.category === "rain"),
+          total: written.length,
+        }));
+      } catch (err) {
+        logger.error("Harvest error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: String(err) }));
+      }
+    });
+    return;
+  }
+
   // Memory analytics endpoints (GET requests)
   if (url.pathname.startsWith("/api/memory/") && req.method === "GET") {
     (async () => {
