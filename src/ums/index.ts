@@ -129,3 +129,7 @@ export type { ActivityReport, ChannelVolume, HourlyDistribution } from "./consum
 export { getStaleThreads, getActiveThreads } from "./consumers/comms.ts";
 export { getCalendarInsights, getCalendarAlerts, clearInsights } from "./consumers/calendar-intel.ts";
 export type { CalendarInsight } from "./consumers/calendar-intel.ts";
+
+// ── Summary Bar (ELLIE-315) ──────────────────────────────────
+export { getSummaryState } from "./consumers/summary.ts";
+export type { SummaryState, ModuleSummary, ModuleStatus } from "./consumers/summary.ts";

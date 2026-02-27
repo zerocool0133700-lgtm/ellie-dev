@@ -56,6 +56,7 @@ import { expireStaleItems } from "./api/agent-queue.ts";
 import { startPlaneQueueWorker, purgeCompleted as purgePlaneQueue } from "./plane-queue.ts";
 import { onBridgeWrite } from "./api/bridge.ts";
 import { setBroadcastToEllieChat } from "./tool-approval.ts";
+import { getSummaryState } from "./ums/consumers/summary.ts";
 
 // ============================================================
 // SETUP
@@ -198,6 +199,24 @@ setInterval(async () => {
     logger.error("Weight refresh error", { error: err instanceof Error ? err.message : String(err) });
   }
 }, 60 * 60_000);
+
+// Summary Bar push — broadcast module summary state to Ellie Chat clients (ELLIE-315)
+// Runs every 30 seconds when clients are connected; skips if no listeners.
+setInterval(async () => {
+  if (!supabase) return;
+  // Only compute if someone is listening (check done inside broadcastToEllieChatClients)
+  try {
+    const summary = await getSummaryState(supabase);
+    broadcastToEllieChatClients({
+      type: "summary_update",
+      summary,
+      ts: Date.now(),
+    });
+  } catch (err: unknown) {
+    // Non-critical — don't spam logs
+    logger.debug("Summary push error", { error: err instanceof Error ? err.message : String(err) });
+  }
+}, 30_000);
 
 // Note: expireStaleWorkSessions (old Supabase work_sessions table) removed in ELLIE-88.
 // Forest is now the source of truth for work sessions. See ellie-forest/src/work-sessions.ts.

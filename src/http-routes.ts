@@ -140,6 +140,7 @@ import {
 } from "./tool-approval.ts";
 import { handleGatewayRoute } from "./api/gateway-intake.ts";
 import { handleGtdRoute } from "./api/gtd.ts";
+import { getSummaryState } from "./ums/consumers/summary.ts";
 import { log } from "./logger.ts";
 import type { ApiRequest, ApiResponse } from "./api/types.ts";
 
@@ -849,6 +850,22 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
   if (url.pathname === "/queue-status") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(getQueueStatus()));
+    return;
+  }
+
+  // Summary Bar — module status for Ellie Chat (ELLIE-315)
+  if (url.pathname === "/api/summary" && req.method === "GET") {
+    (async () => {
+      try {
+        const summary = await getSummaryState(supabase);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(summary));
+      } catch (err) {
+        logger.error("Summary endpoint error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Failed to build summary" }));
+      }
+    })();
     return;
   }
 
