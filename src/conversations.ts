@@ -38,6 +38,10 @@ interface ConversationRecord {
  * Get or create the active conversation for a channel.
  * Uses the DB function which handles idle expiry atomically.
  * Returns the conversation_id.
+ *
+ * ELLIE-232: After the RPC returns, checks for conversations that the RPC
+ * silently expired (set status='expired' without memory extraction) and
+ * queues extraction for them in the background.
  */
 export async function getOrCreateConversation(
   supabase: SupabaseClient,
@@ -56,10 +60,48 @@ export async function getOrCreateConversation(
       return null;
     }
 
-    return data as string;
+    const conversationId = data as string;
+
+    // ELLIE-232: Check for conversations the RPC just expired that need extraction.
+    // The RPC sets status='expired' for idle conversations, skipping memory extraction.
+    // Fire-and-forget: don't block the new message on old conversation cleanup.
+    extractRecentlyExpired(supabase, channel, conversationId).catch((err) => {
+      logger.error("extractRecentlyExpired failed", { channel }, err);
+    });
+
+    return conversationId;
   } catch (err) {
     logger.error("get_or_create failed", err);
     return null;
+  }
+}
+
+/**
+ * ELLIE-232: Extract memories from conversations that were silently expired
+ * by the get_or_create_conversation RPC (which can't do memory extraction).
+ * Only processes conversations with >= 2 messages and no existing extraction.
+ */
+async function extractRecentlyExpired(
+  supabase: SupabaseClient,
+  channel: string,
+  excludeId: string,
+): Promise<void> {
+  // Find conversations expired in the last 2 minutes on this channel
+  const cutoff = new Date(Date.now() - 2 * 60_000).toISOString();
+  const { data: expired } = await supabase
+    .from("conversations")
+    .select("id, message_count")
+    .eq("channel", channel)
+    .eq("status", "expired")
+    .gte("ended_at", cutoff)
+    .neq("id", excludeId);
+
+  for (const convo of expired || []) {
+    if (convo.message_count >= 2) {
+      // extractMemories is idempotent — safe to call even if already extracted
+      await extractMemories(supabase, convo.id);
+      console.log(`[conversation] Extracted memories from RPC-expired ${convo.id}`);
+    }
   }
 }
 
@@ -191,23 +233,35 @@ Return ONLY the summary text, nothing else.`;
 /**
  * Close a conversation explicitly (e.g., from dashboard button or API).
  * Triggers final consolidation (memory extraction).
+ *
+ * ELLIE-232: Uses atomic claim pattern to prevent race conditions.
+ * Multiple callers (relay interval, idle timers, RPC) may try to close
+ * the same conversation simultaneously. The UPDATE ... WHERE status='active'
+ * is atomic — only one caller wins and proceeds with memory extraction.
  */
 export async function closeConversation(
   supabase: SupabaseClient,
   conversationId: string,
 ): Promise<void> {
   try {
-    // Generate final summary if we don't have one
-    const { data: convo } = await supabase
+    // Atomic claim: close the conversation, only succeeds if status is still 'active'.
+    // This prevents duplicate memory extraction when multiple paths race to close.
+    const { data: claimed } = await supabase
       .from("conversations")
-      .select("summary, channel, message_count")
+      .update({ status: "closed", ended_at: new Date().toISOString() })
       .eq("id", conversationId)
+      .eq("status", "active")
+      .select("id, summary, channel, message_count")
       .single();
 
-    if (!convo) return;
+    if (!claimed) {
+      // Someone else already closed/expired it — skip
+      logger.info("Close skipped — already claimed by another path", { conversationId });
+      return;
+    }
 
-    // If conversation has messages but no summary, generate one
-    if (convo.message_count > 2 && !convo.summary) {
+    // We won the claim — generate final summary if needed
+    if (claimed.message_count > 2 && !claimed.summary) {
       const { data: messages } = await supabase
         .from("messages")
         .select("role, content, created_at")
@@ -215,16 +269,11 @@ export async function closeConversation(
         .order("created_at", { ascending: true });
 
       if (messages?.length) {
-        await generateAndStoreSummary(supabase, conversationId, messages, null, convo.channel);
+        await generateAndStoreSummary(supabase, conversationId, messages, null, claimed.channel);
       }
     }
 
-    // Close the conversation
-    await supabase.rpc("close_conversation", {
-      p_conversation_id: conversationId,
-    });
-
-    // Run memory extraction on the closed conversation
+    // Run memory extraction (idempotent — checks for existing memories)
     await extractMemories(supabase, conversationId);
 
     console.log(`[conversation] Closed: ${conversationId}`);
@@ -236,6 +285,8 @@ export async function closeConversation(
 /**
  * Close the active conversation for a channel.
  * Used by idle timers and consolidation triggers.
+ *
+ * ELLIE-232: Delegates to closeConversation() which has atomic claim protection.
  */
 export async function closeActiveConversation(
   supabase: SupabaseClient,
@@ -255,11 +306,15 @@ export async function closeActiveConversation(
 
     // Skip conversations with very few messages (not worth summarizing)
     if (convo.message_count < 2) {
-      // Just close it without extraction
-      await supabase.rpc("close_conversation", {
-        p_conversation_id: convo.id,
-      });
-      return true;
+      // Atomic close without extraction — same pattern, just no extraction step
+      const { data: claimed } = await supabase
+        .from("conversations")
+        .update({ status: "closed", ended_at: new Date().toISOString() })
+        .eq("id", convo.id)
+        .eq("status", "active")
+        .select("id")
+        .single();
+      return !!claimed;
     }
 
     await closeConversation(supabase, convo.id);
@@ -273,12 +328,27 @@ export async function closeActiveConversation(
  * Extract memories (facts, action items) from a closed conversation.
  * This replaces the old consolidation memory extraction for conversations
  * that were tracked live.
+ *
+ * ELLIE-232: Idempotent — checks for existing extracted memories before running.
+ * Safe to call multiple times for the same conversation.
  */
 async function extractMemories(
   supabase: SupabaseClient,
   conversationId: string,
 ): Promise<void> {
   try {
+    // Idempotency guard: check if memories were already extracted
+    const { count: existingMemories } = await supabase
+      .from("memory")
+      .select("id", { count: "exact", head: true })
+      .eq("conversation_id", conversationId)
+      .eq("type", "summary");
+
+    if (existingMemories && existingMemories > 0) {
+      logger.info("Extraction skipped — memories already exist", { conversationId });
+      return;
+    }
+
     const { data: convo } = await supabase
       .from("conversations")
       .select("channel, agent, summary, started_at, last_message_at")
@@ -556,21 +626,43 @@ export async function getConversationContext(
 /**
  * Expire all idle conversations across all channels.
  * Called periodically as a safety net.
+ *
+ * ELLIE-232: No longer uses the blind expire_idle_conversations RPC which
+ * skipped memory extraction. Instead queries for stale conversations and
+ * closes them properly via closeConversation() (which has atomic claim
+ * protection and runs memory extraction).
  */
 export async function expireIdleConversations(
   supabase: SupabaseClient,
 ): Promise<number> {
   try {
-    const { data, error } = await supabase.rpc("expire_idle_conversations", {
-      p_idle_minutes: IDLE_TIMEOUT_MINUTES,
-    });
+    const cutoff = new Date(Date.now() - IDLE_TIMEOUT_MINUTES * 60_000).toISOString();
+    const { data: stale } = await supabase
+      .from("conversations")
+      .select("id, message_count")
+      .eq("status", "active")
+      .lt("last_message_at", cutoff);
 
-    if (error) {
-      logger.error("expire error", error);
-      return 0;
+    if (!stale?.length) return 0;
+
+    let count = 0;
+    for (const convo of stale) {
+      if (convo.message_count >= 2) {
+        await closeConversation(supabase, convo.id);
+      } else {
+        // Low-message conversations: close without extraction
+        const { data: claimed } = await supabase
+          .from("conversations")
+          .update({ status: "closed", ended_at: new Date().toISOString() })
+          .eq("id", convo.id)
+          .eq("status", "active")
+          .select("id")
+          .single();
+        if (!claimed) continue;
+      }
+      count++;
     }
 
-    const count = data as number;
     if (count > 0) {
       console.log(`[conversation] Expired ${count} idle conversation(s)`);
     }

@@ -51,7 +51,7 @@ import { syncAllCalendars } from "./calendar-sync.ts";
 import { initOutlook, getOutlookEmail } from "./outlook.ts";
 import { startExpiryCleanup } from "./approval.ts";
 import { notify } from "./notification-policy.ts";
-import { closeConversation } from "./conversations.ts";
+import { expireIdleConversations } from "./conversations.ts";
 import { expireStaleItems } from "./api/agent-queue.ts";
 import { startPlaneQueueWorker, purgeCompleted as purgePlaneQueue } from "./plane-queue.ts";
 import { onBridgeWrite } from "./api/bridge.ts";
@@ -95,23 +95,12 @@ export const bot = new Bot(BOT_TOKEN);
 startExpiryCleanup();
 
 // Periodic idle conversation expiry (every 5 minutes)
+// ELLIE-232: Now uses expireIdleConversations() which has atomic claim protection
+// to prevent duplicate memory extraction from racing close paths.
 setInterval(async () => {
   if (supabase) {
-    // Properly close stale conversations with memory extraction (replaces blind DB expiry)
     try {
-      const { data: stale } = await supabase
-        .from("conversations")
-        .select("id, channel, message_count, last_message_at")
-        .eq("status", "active")
-        .lt("last_message_at", new Date(Date.now() - 30 * 60_000).toISOString());
-      for (const convo of stale || []) {
-        console.log(`[conversation] Expiring stale ${convo.channel} conversation (${convo.message_count} msgs, last activity: ${convo.last_message_at})`);
-        if (convo.message_count >= 2) {
-          await closeConversation(supabase, convo.id);
-        } else {
-          await supabase.rpc("close_conversation", { p_conversation_id: convo.id });
-        }
-      }
+      await expireIdleConversations(supabase);
     } catch (err: any) {
       logger.error("Stale conversation cleanup error", { error: err?.message });
     }
