@@ -51,18 +51,36 @@ function jsonRes(res: ServerResponse, status: number, data: unknown): void {
   res.end(JSON.stringify(data));
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+const MAX_BODY_BYTES = 1024 * 1024; // 1MB (ELLIE-278)
+
+function readBody(req: IncomingMessage, res: ServerResponse): Promise<string | null> {
   return new Promise((resolve) => {
     let body = "";
-    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
-    req.on("end", () => resolve(body));
+    let bytes = 0;
+    let aborted = false;
+
+    req.on("data", (chunk: Buffer) => {
+      if (aborted) return;
+      bytes += chunk.length;
+      if (bytes > MAX_BODY_BYTES) {
+        aborted = true;
+        jsonRes(res, 413, { error: "Request body too large (max 1MB)" });
+        req.destroy();
+        resolve(null);
+        return;
+      }
+      body += chunk.toString();
+    });
+    req.on("end", () => { if (!aborted) resolve(body); });
+    req.on("error", () => { if (!aborted) { aborted = true; resolve(null); } });
   });
 }
 
 // ── POST /api/gtd/inbox — Capture items ─────────────────────
 
 async function handleInbox(req: IncomingMessage, res: ServerResponse, supabase: SupabaseClient): Promise<void> {
-  const raw = await readBody(req);
+  const raw = await readBody(req, res);
+  if (raw === null) return;
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(raw);
@@ -254,14 +272,34 @@ async function handleReviewState(req: IncomingMessage, res: ServerResponse, supa
 
 // ── PATCH /api/gtd/todos/:id ─────────────────────────────────
 
+const VALID_STATUSES = ["inbox", "open", "done", "cancelled", "waiting_for", "someday"] as const;
+const VALID_PRIORITIES = ["high", "medium", "low", null] as const;
+
 async function handleUpdateTodo(req: IncomingMessage, res: ServerResponse, supabase: SupabaseClient, todoId: string): Promise<void> {
-  const raw = await readBody(req);
+  const raw = await readBody(req, res);
+  if (raw === null) return;
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(raw);
   } catch {
     jsonRes(res, 400, { error: "Invalid JSON" });
     return;
+  }
+
+  // Validate status (ELLIE-279)
+  if (parsed.status !== undefined) {
+    if (!VALID_STATUSES.includes(parsed.status as typeof VALID_STATUSES[number])) {
+      jsonRes(res, 400, { error: `Invalid status: ${parsed.status}. Allowed: ${VALID_STATUSES.join(", ")}` });
+      return;
+    }
+  }
+
+  // Validate priority (ELLIE-279)
+  if (parsed.priority !== undefined) {
+    if (parsed.priority !== null && !VALID_PRIORITIES.includes(parsed.priority as typeof VALID_PRIORITIES[number])) {
+      jsonRes(res, 400, { error: `Invalid priority: ${parsed.priority}. Allowed: high, medium, low, null` });
+      return;
+    }
   }
 
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };

@@ -29,9 +29,12 @@ Content-Type: application/json
   "content": "Follow up on the deployment issue",
   "source_type": "conversation",
   "source_ref": "<conversation_id>",
+  "conversation_id": "<conversation_id>",
   "tags": ["@computer"]
 }
 ```
+
+Fields: `content` (required), `source_type`, `source_ref`, `conversation_id` (stored as `source_conversation_id`), `tags` (array), `priority` (high/medium/low).
 
 Supports batch capture with `{ "items": [...] }`.
 
@@ -63,6 +66,10 @@ Content-Type: application/json
 
 { "status": "done" }
 ```
+
+Allowed `status` values: `inbox`, `open`, `done`, `cancelled`, `waiting_for`, `someday`.
+Allowed `priority` values: `high`, `medium`, `low`, `null`.
+Other fields: `content`, `due_date`, `tags`, `waiting_on`, `project_id`.
 
 Only use this when the user explicitly asks to update a todo.
 
