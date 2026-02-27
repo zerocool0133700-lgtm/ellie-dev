@@ -10,6 +10,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Bot } from "grammy";
 import type { ApiRequest, ApiResponse } from "./types.ts";
+import type { TodoRow, TodoProject } from "./gtd-types.ts";
 import { sendGoogleChatMessage, isGoogleChatEnabled } from "../google-chat.ts";
 import { listOpenIssues, isPlaneConfigured } from "../plane.ts";
 import { log } from "../logger.ts";
@@ -19,37 +20,15 @@ const logger = log.child("weekly-review");
 const TELEGRAM_USER_ID = process.env.TELEGRAM_USER_ID!;
 const GOOGLE_CHAT_SPACE = process.env.GOOGLE_CHAT_SPACE_NAME || "";
 
-interface TodoItem {
-  id: string;
-  content: string;
-  status: string;
-  priority: string | null;
-  due_date: string | null;
-  tags: string[];
-  waiting_on: string | null;
-  project_id: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-interface TodoProject {
-  id: string;
-  name: string;
-  status: string;
-  outcome: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
 interface WeeklyReviewData {
   weekOf: string;
-  inboxItems: TodoItem[];
-  openTodos: TodoItem[];
-  waitingFor: TodoItem[];
-  staleTodos: TodoItem[];
-  overdueTodos: TodoItem[];
-  somedayItems: TodoItem[];
-  completedThisWeek: TodoItem[];
+  inboxItems: TodoRow[];
+  openTodos: TodoRow[];
+  waitingFor: TodoRow[];
+  staleTodos: TodoRow[];
+  overdueTodos: TodoRow[];
+  somedayItems: TodoRow[];
+  completedThisWeek: TodoRow[];
   projects: TodoProject[];
   staleProjects: TodoProject[];
   planeIssues: { sequenceId: number; name: string; priority: string }[];
@@ -71,7 +50,7 @@ async function gatherReviewData(supabase: SupabaseClient): Promise<WeeklyReviewD
     .neq("status", "cancelled")
     .order("created_at", { ascending: true });
 
-  const todos = (allTodos || []) as TodoItem[];
+  const todos = (allTodos || []) as TodoRow[];
 
   const inboxItems = todos.filter((t) => t.status === "inbox");
   const openTodos = todos.filter((t) => t.status === "open");
@@ -95,7 +74,7 @@ async function gatherReviewData(supabase: SupabaseClient): Promise<WeeklyReviewD
     .lte("completed_at", nowISO)
     .order("completed_at", { ascending: false });
 
-  const completedThisWeek = (completedData || []) as TodoItem[];
+  const completedThisWeek = (completedData || []) as TodoRow[];
 
   // GTD Projects
   const { data: projectData } = await supabase
@@ -316,7 +295,9 @@ export async function generateWeeklyReview(
     const data = await gatherReviewData(supabase);
     const text = formatReviewText(data);
 
-    // Store in daily_rollups with a special identifier
+    // Store in daily_rollups with a special "review-" prefix.
+    // ELLIE-285: gtd.ts handleReviewState reads these rows via
+    //   .like("rollup_date", "review-%") — keep the prefix in sync.
     const { error: upsertError } = await supabase
       .from("daily_rollups")
       .upsert(

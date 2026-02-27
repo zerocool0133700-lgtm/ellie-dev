@@ -2,6 +2,7 @@
  * GTD API — Agent-facing endpoints for GTD interaction
  *
  * ELLIE-275: Ellie interaction layer for GTD
+ * ELLIE-281: Refactored to ApiRequest/ApiResponse pattern
  *
  * Layer 1: Raw API endpoints for any agent to read/write GTD data.
  * - POST /api/gtd/inbox      — Capture items from conversations
@@ -13,79 +14,18 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { IncomingMessage, ServerResponse } from "http";
+import type { ApiRequest, ApiResponse } from "./types.ts";
+import type { TodoRow } from "./gtd-types.ts";
 import { log } from "../logger.ts";
 
 const logger = log.child("gtd-api");
 
-// ── Types ────────────────────────────────────────────────────
-
-interface TodoRow {
-  id: string;
-  content: string;
-  status: string;
-  priority: string | null;
-  due_date: string | null;
-  tags: string[];
-  waiting_on: string | null;
-  project_id: string | null;
-  source_type: string | null;
-  source_ref: string | null;
-  completed_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-interface ProjectRow {
-  id: string;
-  name: string;
-  status: string;
-  outcome: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-// ── Helpers ──────────────────────────────────────────────────
-
-function jsonRes(res: ServerResponse, status: number, data: unknown): void {
-  res.writeHead(status, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(data));
-}
-
-const MAX_BODY_BYTES = 1024 * 1024; // 1MB (ELLIE-278)
-
-function readBody(req: IncomingMessage, res: ServerResponse): Promise<string | null> {
-  return new Promise((resolve) => {
-    let body = "";
-    let bytes = 0;
-    let aborted = false;
-
-    req.on("data", (chunk: Buffer) => {
-      if (aborted) return;
-      bytes += chunk.length;
-      if (bytes > MAX_BODY_BYTES) {
-        aborted = true;
-        jsonRes(res, 413, { error: "Request body too large (max 1MB)" });
-        req.destroy();
-        resolve(null);
-        return;
-      }
-      body += chunk.toString();
-    });
-    req.on("end", () => { if (!aborted) resolve(body); });
-    req.on("error", () => { if (!aborted) { aborted = true; resolve(null); } });
-  });
-}
-
 // ── POST /api/gtd/inbox — Capture items ─────────────────────
 
-async function handleInbox(req: IncomingMessage, res: ServerResponse, supabase: SupabaseClient): Promise<void> {
-  const raw = await readBody(req, res);
-  if (raw === null) return;
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    jsonRes(res, 400, { error: "Invalid JSON" });
+async function handleInbox(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
+  const parsed = req.body;
+  if (!parsed) {
+    res.status(400).json({ error: "Missing request body" });
     return;
   }
 
@@ -123,15 +63,20 @@ async function handleInbox(req: IncomingMessage, res: ServerResponse, supabase: 
   }
 
   logger.info("Inbox capture", { captured: results.length, errors: errors.length });
-  jsonRes(res, 200, { captured: results, errors: errors.length > 0 ? errors : undefined });
+  res.json({ captured: results, errors: errors.length > 0 ? errors : undefined });
 }
 
 // ── GET /api/gtd/next-actions ────────────────────────────────
 
-async function handleNextActions(req: IncomingMessage, res: ServerResponse, supabase: SupabaseClient): Promise<void> {
-  const url = new URL(req.url || "/", `http://${req.headers.host}`);
-  const context = url.searchParams.get("context");
-  const limit = Math.min(Number(url.searchParams.get("limit")) || 10, 50);
+/**
+ * Scoring algorithm: also exists in two other locations (ELLIE-282).
+ * Keep in sync with:
+ *   - ellie-home/app/composables/useTodoScoring.ts  (client)
+ *   - ellie-home/server/utils/todoScoring.ts         (dashboard server)
+ */
+async function handleNextActions(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
+  const context = req.query?.context || null;
+  const limit = Math.min(Number(req.query?.limit) || 10, 50);
 
   const { data, error } = await supabase
     .from("todos")
@@ -141,7 +86,7 @@ async function handleNextActions(req: IncomingMessage, res: ServerResponse, supa
     .limit(50);
 
   if (error) {
-    jsonRes(res, 500, { error: error.message });
+    res.status(500).json({ error: error.message });
     return;
   }
 
@@ -187,7 +132,7 @@ async function handleNextActions(req: IncomingMessage, res: ServerResponse, supa
     score: _score,
   }));
 
-  jsonRes(res, 200, {
+  res.json({
     next_actions: topItems,
     context,
     total_open: todos.length,
@@ -196,7 +141,13 @@ async function handleNextActions(req: IncomingMessage, res: ServerResponse, supa
 
 // ── GET /api/gtd/review-state ────────────────────────────────
 
-async function handleReviewState(req: IncomingMessage, res: ServerResponse, supabase: SupabaseClient): Promise<void> {
+/**
+ * Review state detection reads `daily_rollups` rows where
+ * `rollup_date LIKE 'review-%'` — these are written by the weekly
+ * review generator at weekly-review.ts:303 (`rollup_date: review-${data.weekOf}`).
+ * ELLIE-285: Keep the naming convention in sync.
+ */
+async function handleReviewState(_req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
   const now = new Date();
   const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
 
@@ -252,7 +203,7 @@ async function handleReviewState(req: IncomingMessage, res: ServerResponse, supa
   if (staleCount > 3) nudges.push(`${staleCount} items haven't been updated in a week — some might be worth moving to someday`);
   if (staleProjectCount > 0) nudges.push(`${staleProjectCount} project${staleProjectCount > 1 ? "s" : ""} haven't been updated in 2+ weeks`);
 
-  jsonRes(res, 200, {
+  res.json({
     review_overdue: reviewOverdue,
     last_review_date: lastReviewDate,
     last_review_age_days: lastReviewAge,
@@ -275,21 +226,23 @@ async function handleReviewState(req: IncomingMessage, res: ServerResponse, supa
 const VALID_STATUSES = ["inbox", "open", "done", "cancelled", "waiting_for", "someday"] as const;
 const VALID_PRIORITIES = ["high", "medium", "low", null] as const;
 
-async function handleUpdateTodo(req: IncomingMessage, res: ServerResponse, supabase: SupabaseClient, todoId: string): Promise<void> {
-  const raw = await readBody(req, res);
-  if (raw === null) return;
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    jsonRes(res, 400, { error: "Invalid JSON" });
+async function handleUpdateTodo(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
+  const todoId = req.params?.id;
+  if (!todoId) {
+    res.status(400).json({ error: "Missing todo ID" });
+    return;
+  }
+
+  const parsed = req.body;
+  if (!parsed) {
+    res.status(400).json({ error: "Missing request body" });
     return;
   }
 
   // Validate status (ELLIE-279)
   if (parsed.status !== undefined) {
     if (!VALID_STATUSES.includes(parsed.status as typeof VALID_STATUSES[number])) {
-      jsonRes(res, 400, { error: `Invalid status: ${parsed.status}. Allowed: ${VALID_STATUSES.join(", ")}` });
+      res.status(400).json({ error: `Invalid status: ${parsed.status}. Allowed: ${VALID_STATUSES.join(", ")}` });
       return;
     }
   }
@@ -297,7 +250,7 @@ async function handleUpdateTodo(req: IncomingMessage, res: ServerResponse, supab
   // Validate priority (ELLIE-279)
   if (parsed.priority !== undefined) {
     if (parsed.priority !== null && !VALID_PRIORITIES.includes(parsed.priority as typeof VALID_PRIORITIES[number])) {
-      jsonRes(res, 400, { error: `Invalid priority: ${parsed.priority}. Allowed: high, medium, low, null` });
+      res.status(400).json({ error: `Invalid priority: ${parsed.priority}. Allowed: high, medium, low, null` });
       return;
     }
   }
@@ -330,17 +283,17 @@ async function handleUpdateTodo(req: IncomingMessage, res: ServerResponse, supab
     .single();
 
   if (error) {
-    jsonRes(res, error.code === "PGRST116" ? 404 : 500, { error: error.message });
+    res.status(error.code === "PGRST116" ? 404 : 500).json({ error: error.message });
     return;
   }
 
   logger.info("Todo updated via API", { id: todoId, status: parsed.status });
-  jsonRes(res, 200, data);
+  res.json(data);
 }
 
 // ── GET /api/gtd/summary — Quick state for context surfacing ─
 
-async function handleSummary(req: IncomingMessage, res: ServerResponse, supabase: SupabaseClient): Promise<void> {
+async function handleSummary(_req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
   const { data: allTodos } = await supabase
     .from("todos")
     .select("content, status, priority, due_date, tags, project_id, waiting_on")
@@ -374,7 +327,7 @@ async function handleSummary(req: IncomingMessage, res: ServerResponse, supabase
     })
     .slice(0, 5);
 
-  jsonRes(res, 200, {
+  res.json({
     summary_text: lines.join(". ") + ".",
     counts: {
       inbox: inbox.length,
@@ -393,16 +346,37 @@ async function handleSummary(req: IncomingMessage, res: ServerResponse, supabase
 
 // ── Route dispatcher ─────────────────────────────────────────
 
-/** Wrap async handler to catch unhandled rejections (ELLIE-276) */
-function safeAsync(promise: Promise<void>, res: ServerResponse): void {
-  promise.catch((err) => {
-    logger.error("GTD handler failed", err);
-    if (!res.writableEnded) {
-      jsonRes(res, 500, { error: "Internal server error" });
-    }
+const MAX_BODY_BYTES = 1024 * 1024; // 1MB (ELLIE-278)
+
+function jsonRes(res: ServerResponse, status: number, data: unknown): void {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(data));
+}
+
+function readBody(req: IncomingMessage, res: ServerResponse): Promise<string | null> {
+  return new Promise((resolve) => {
+    let body = "";
+    let bytes = 0;
+    let aborted = false;
+
+    req.on("data", (chunk: Buffer) => {
+      if (aborted) return;
+      bytes += chunk.length;
+      if (bytes > MAX_BODY_BYTES) {
+        aborted = true;
+        jsonRes(res, 413, { error: "Request body too large (max 1MB)" });
+        req.destroy();
+        resolve(null);
+        return;
+      }
+      body += chunk.toString();
+    });
+    req.on("end", () => { if (!aborted) resolve(body); });
+    req.on("error", () => { if (!aborted) { aborted = true; resolve(null); } });
   });
 }
 
+/** Build ApiRequest/ApiResponse from raw HTTP objects, then dispatch to handler */
 export function handleGtdRoute(
   req: IncomingMessage,
   res: ServerResponse,
@@ -416,34 +390,66 @@ export function handleGtdRoute(
     return true;
   }
 
-  // POST /api/gtd/inbox
-  if (pathname === "/api/gtd/inbox" && req.method === "POST") {
-    safeAsync(handleInbox(req, res, supabase), res);
+  const url = new URL(req.url || "/", `http://${req.headers.host}`);
+  const queryParams: Record<string, string> = {};
+  url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+
+  const mockRes: ApiResponse = {
+    status: (code: number) => ({
+      json: (data: unknown) => { jsonRes(res, code, data); },
+    }),
+    json: (data: unknown) => { jsonRes(res, 200, data); },
+  };
+
+  /** Wrap async handler to catch unhandled rejections (ELLIE-276) */
+  const safeAsync = (promise: Promise<void>): void => {
+    promise.catch((err) => {
+      logger.error("GTD handler failed", err);
+      if (!res.writableEnded) {
+        jsonRes(res, 500, { error: "Internal server error" });
+      }
+    });
+  };
+
+  // GET endpoints — no body parsing needed
+  if (req.method === "GET") {
+    const mockReq: ApiRequest = { query: queryParams };
+
+    if (pathname === "/api/gtd/next-actions") {
+      safeAsync(handleNextActions(mockReq, mockRes, supabase));
+      return true;
+    }
+    if (pathname === "/api/gtd/review-state") {
+      safeAsync(handleReviewState(mockReq, mockRes, supabase));
+      return true;
+    }
+    if (pathname === "/api/gtd/summary") {
+      safeAsync(handleSummary(mockReq, mockRes, supabase));
+      return true;
+    }
+  }
+
+  // POST/PATCH endpoints — need body parsing
+  if (req.method === "POST" && pathname === "/api/gtd/inbox") {
+    safeAsync((async () => {
+      const raw = await readBody(req, res);
+      if (raw === null) return;
+      let data: Record<string, unknown>;
+      try { data = JSON.parse(raw); } catch { jsonRes(res, 400, { error: "Invalid JSON" }); return; }
+      await handleInbox({ body: data, query: queryParams }, mockRes, supabase);
+    })());
     return true;
   }
 
-  // GET /api/gtd/next-actions
-  if (pathname === "/api/gtd/next-actions" && req.method === "GET") {
-    safeAsync(handleNextActions(req, res, supabase), res);
-    return true;
-  }
-
-  // GET /api/gtd/review-state
-  if (pathname === "/api/gtd/review-state" && req.method === "GET") {
-    safeAsync(handleReviewState(req, res, supabase), res);
-    return true;
-  }
-
-  // GET /api/gtd/summary
-  if (pathname === "/api/gtd/summary" && req.method === "GET") {
-    safeAsync(handleSummary(req, res, supabase), res);
-    return true;
-  }
-
-  // PATCH /api/gtd/todos/:id
   const todoMatch = pathname.match(/^\/api\/gtd\/todos\/([0-9a-f-]{36})$/);
   if (todoMatch && req.method === "PATCH") {
-    safeAsync(handleUpdateTodo(req, res, supabase, todoMatch[1]), res);
+    safeAsync((async () => {
+      const raw = await readBody(req, res);
+      if (raw === null) return;
+      let data: Record<string, unknown>;
+      try { data = JSON.parse(raw); } catch { jsonRes(res, 400, { error: "Invalid JSON" }); return; }
+      await handleUpdateTodo({ body: data, query: queryParams, params: { id: todoMatch[1] } }, mockRes, supabase);
+    })());
     return true;
   }
 
