@@ -38,6 +38,7 @@ interface BridgeKey {
   last_used_at: Date | null
   request_count: number
   expires_at: Date | null
+  entity_id: string | null  // ELLIE-255: linked Forest entity for author attribution
 }
 
 // ── Auth ─────────────────────────────────────────────────────
@@ -95,7 +96,7 @@ export async function bridgeReadEndpoint(req: any, res: any) {
   if (!key) return
 
   try {
-    const { query, scope_path, tree_id, match_count, match_threshold, category, cognitive_type } = req.body
+    const { query, scope_path, tree_id, match_count, match_threshold, category, cognitive_type, author } = req.body
 
     if (!query) {
       return res.status(400).json({ error: 'Missing required field: query' })
@@ -107,7 +108,7 @@ export async function bridgeReadEndpoint(req: any, res: any) {
 
     const effectiveScopePath = scope_path || key.allowed_scopes[0]
 
-    const results = await readMemories({
+    let results = await readMemories({
       query,
       scope_path: effectiveScopePath,
       tree_id,
@@ -118,7 +119,14 @@ export async function bridgeReadEndpoint(req: any, res: any) {
       include_global: false,
     })
 
-    console.log(`[bridge:read] ${key.key_prefix} (${key.collaborator}) queried "${query.slice(0, 60)}" → ${results.length} results`)
+    // ELLIE-255: Filter by author (bridge_collaborator in metadata)
+    if (author) {
+      results = results.filter(m =>
+        (m.metadata as any)?.bridge_collaborator === author
+      )
+    }
+
+    console.log(`[bridge:read] ${key.key_prefix} (${key.collaborator}) queried "${query.slice(0, 60)}"${author ? ` [author:${author}]` : ''} → ${results.length} results`)
 
     return res.json({ success: true, count: results.length, memories: results })
   } catch (error) {
@@ -183,6 +191,8 @@ export async function bridgeWriteEndpoint(req: any, res: any) {
         ...(work_item_id ? { work_item_id } : {}),
       },
       category,
+      // ELLIE-255: Auto-attribute to linked entity
+      ...(key.entity_id ? { source_entity_id: key.entity_id } : {}),
     })
 
     console.log(`[bridge:write] ${key.key_prefix} (${key.collaborator}) wrote memory ${memory.id} at ${scope_path}`)
@@ -261,7 +271,7 @@ export async function bridgeListEndpoint(req: any, res: any) {
   if (!key) return
 
   try {
-    const { scope_path, type, limit, min_confidence, tree_id } = req.query
+    const { scope_path, type, limit, min_confidence, tree_id, author } = req.query
 
     if (scope_path && !isWithinAllowedScopes(scope_path, key.allowed_scopes)) {
       return res.status(403).json({ error: `Scope path '${scope_path}' is outside your allowed scopes` })
@@ -286,6 +296,7 @@ export async function bridgeListEndpoint(req: any, res: any) {
         ${type ? sql`AND type = ${type}` : sql``}
         ${tree_id ? sql`AND source_tree_id = ${tree_id}` : sql``}
         ${min_confidence ? sql`AND confidence >= ${Number(min_confidence)}` : sql``}
+        ${author ? sql`AND metadata->>'bridge_collaborator' = ${author}` : sql``}
       ORDER BY COALESCE(weight, confidence) DESC, created_at DESC
       LIMIT ${Number(limit) || 50}
     `
@@ -381,5 +392,6 @@ export async function bridgeWhoamiEndpoint(req: any, res: any) {
     name: key.name,
     allowed_scopes: key.allowed_scopes,
     permissions: key.permissions,
+    entity_id: key.entity_id,
   })
 }
