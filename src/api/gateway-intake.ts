@@ -18,9 +18,19 @@ import { notify } from "../notification-policy.ts";
 import { getNotifyCtx, getRelayDeps } from "../relay-state.ts";
 import { syncAllCalendars } from "../calendar-sync.ts";
 import { getMessage as outlookGetMessage } from "../outlook.ts";
+import { retrieveSecret } from "../../../ellie-forest/src/hollow.ts";
 
-const HMAC_SECRET = process.env.GATEWAY_HMAC_SECRET || "";
+const KEYCHAIN_ID = "568c0a6a-0c98-4784-87f3-d909139d8c35";
 const MAX_TIMESTAMP_DRIFT_MS = 5 * 60_000; // 5 minutes — reject replayed requests
+
+// Cached HMAC secret — loaded from Hollow on first use
+let _hmacSecret: string | null = null;
+async function getHmacSecret(): Promise<string> {
+  if (_hmacSecret !== null) return _hmacSecret;
+  _hmacSecret = (await retrieveSecret(KEYCHAIN_ID, "gateway_hmac_secret")) || "";
+  if (_hmacSecret) logger.info("HMAC secret loaded from Hollow");
+  return _hmacSecret;
+}
 
 // ── HMAC verification ──────────────────────────────────────
 
@@ -29,10 +39,11 @@ const MAX_TIMESTAMP_DRIFT_MS = 5 * 60_000; // 5 minutes — reject replayed requ
  * Checks: X-Gateway-Source header, timestamp drift, signature.
  * Backwards-compatible: if HMAC secret not configured, falls back to header-only check.
  */
-function isGatewayRequest(req: IncomingMessage, rawBody: string): boolean {
+async function isGatewayRequest(req: IncomingMessage, rawBody: string): Promise<boolean> {
   if (req.headers["x-gateway-source"] !== "ellie-gateway") return false;
 
-  if (!HMAC_SECRET) return true; // no secret configured — header-only (dev mode)
+  const secret = await getHmacSecret();
+  if (!secret) return true; // no secret configured — header-only (dev mode)
 
   const timestamp = req.headers["x-gateway-timestamp"] as string | undefined;
   const signature = req.headers["x-gateway-signature"] as string | undefined;
@@ -49,7 +60,7 @@ function isGatewayRequest(req: IncomingMessage, rawBody: string): boolean {
     return false;
   }
 
-  const expected = createHmac("sha256", HMAC_SECRET)
+  const expected = createHmac("sha256", secret)
     .update(`${timestamp}.${rawBody}`)
     .digest("hex");
 
@@ -115,7 +126,7 @@ export function handleGatewayRoute(
   });
   req.on("end", async () => {
     // ELLIE-236: HMAC verification (needs raw body for signature check)
-    if (!isGatewayRequest(req, body)) {
+    if (!(await isGatewayRequest(req, body))) {
       res.writeHead(403, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Forbidden" }));
       return;
