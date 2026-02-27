@@ -6,10 +6,11 @@
  * POST /api/gateway/email  — email change notification → fetch + process
  * POST /api/gateway/calendar-sync — calendar change → trigger sync
  *
- * ELLIE-151
+ * ELLIE-151, ELLIE-236 (HMAC auth + schema validation + sanitization)
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
+import { createHmac, timingSafeEqual } from "crypto";
 import { log } from "../logger.ts";
 
 const logger = log.child("gateway-intake");
@@ -18,9 +19,81 @@ import { getNotifyCtx, getRelayDeps } from "../relay-state.ts";
 import { syncAllCalendars } from "../calendar-sync.ts";
 import { getMessage as outlookGetMessage } from "../outlook.ts";
 
-/** Verify the request came from our gateway (localhost). */
-function isGatewayRequest(req: IncomingMessage): boolean {
-  return req.headers["x-gateway-source"] === "ellie-gateway";
+const HMAC_SECRET = process.env.GATEWAY_HMAC_SECRET || "";
+const MAX_TIMESTAMP_DRIFT_MS = 5 * 60_000; // 5 minutes — reject replayed requests
+
+// ── HMAC verification ──────────────────────────────────────
+
+/**
+ * Verify the request came from our gateway using HMAC-SHA256.
+ * Checks: X-Gateway-Source header, timestamp drift, signature.
+ * Backwards-compatible: if HMAC secret not configured, falls back to header-only check.
+ */
+function isGatewayRequest(req: IncomingMessage, rawBody: string): boolean {
+  if (req.headers["x-gateway-source"] !== "ellie-gateway") return false;
+
+  if (!HMAC_SECRET) return true; // no secret configured — header-only (dev mode)
+
+  const timestamp = req.headers["x-gateway-timestamp"] as string | undefined;
+  const signature = req.headers["x-gateway-signature"] as string | undefined;
+
+  if (!timestamp || !signature) {
+    logger.warn("Missing HMAC headers");
+    return false;
+  }
+
+  // Reject if timestamp too old or in the future (replay protection)
+  const drift = Math.abs(Date.now() - parseInt(timestamp, 10));
+  if (isNaN(drift) || drift > MAX_TIMESTAMP_DRIFT_MS) {
+    logger.warn("Timestamp drift too large", { drift });
+    return false;
+  }
+
+  const expected = createHmac("sha256", HMAC_SECRET)
+    .update(`${timestamp}.${rawBody}`)
+    .digest("hex");
+
+  // Constant-time comparison to prevent timing attacks
+  try {
+    return timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+  } catch {
+    return false; // length mismatch
+  }
+}
+
+// ── Schema validation ──────────────────────────────────────
+
+function validateEventPayload(data: any): string | null {
+  if (!data || typeof data !== "object") return "Body must be an object";
+  if (typeof data.source !== "string" || data.source.length === 0) return "Missing source";
+  if (typeof data.category !== "string" || data.category.length === 0) return "Missing category";
+  if (typeof data.summary !== "string" || data.summary.length === 0) return "Missing summary";
+  if (data.summary.length > 500) return "summary too long (max 500)";
+  if (data.envelope_id && typeof data.envelope_id !== "string") return "envelope_id must be a string";
+  return null;
+}
+
+function validateAlertPayload(data: any): string | null {
+  if (!data || typeof data !== "object") return "Body must be an object";
+  if (typeof data.source !== "string" || data.source.length === 0) return "Missing source";
+  if (typeof data.summary !== "string" || data.summary.length === 0) return "Missing summary";
+  if (data.summary.length > 500) return "summary too long (max 500)";
+  return null;
+}
+
+function validateEmailPayload(data: any): string | null {
+  if (!data || typeof data !== "object") return "Body must be an object";
+  if (typeof data.message_id !== "string" || data.message_id.length === 0) return "Missing message_id";
+  if (data.message_id.length > 500) return "message_id too long (max 500)";
+  if (data.change_type && typeof data.change_type !== "string") return "change_type must be a string";
+  return null;
+}
+
+// ── Input sanitization ─────────────────────────────────────
+
+/** Strip HTML tags and control characters from a string. */
+function sanitize(s: string): string {
+  return s.replace(/<[^>]*>/g, "").replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "");
 }
 
 /**
@@ -34,12 +107,6 @@ export function handleGatewayRoute(
 ): boolean {
   if (!pathname.startsWith("/api/gateway/")) return false;
 
-  if (!isGatewayRequest(req)) {
-    res.writeHead(403, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Forbidden" }));
-    return true;
-  }
-
   const endpoint = pathname.replace("/api/gateway/", "");
 
   let body = "";
@@ -47,19 +114,37 @@ export function handleGatewayRoute(
     body += chunk.toString();
   });
   req.on("end", async () => {
+    // ELLIE-236: HMAC verification (needs raw body for signature check)
+    if (!isGatewayRequest(req, body)) {
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Forbidden" }));
+      return;
+    }
+
     try {
       const data = JSON.parse(body);
 
       switch (endpoint) {
-        case "event":
+        case "event": {
+          const err = validateEventPayload(data);
+          if (err) { res.writeHead(400); res.end(JSON.stringify({ error: err })); return; }
+          data.summary = sanitize(data.summary);
           await handleGatewayEvent(data, res);
           break;
-        case "alert":
+        }
+        case "alert": {
+          const err = validateAlertPayload(data);
+          if (err) { res.writeHead(400); res.end(JSON.stringify({ error: err })); return; }
+          data.summary = sanitize(data.summary);
           await handleGatewayAlert(data, res);
           break;
-        case "email":
+        }
+        case "email": {
+          const err = validateEmailPayload(data);
+          if (err) { res.writeHead(400); res.end(JSON.stringify({ error: err })); return; }
           await handleGatewayEmail(data, res);
           break;
+        }
         case "calendar-sync":
           await handleGatewayCalendarSync(data, res);
           break;
