@@ -2730,6 +2730,162 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Alert endpoints (ELLIE-317)
+  if (url.pathname.startsWith("/api/alerts/") && !supabase) {
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+
+  if (url.pathname === "/api/alerts/rules" && req.method === "GET") {
+    (async () => {
+      try {
+        const { listRules } = await import("./api/alerts.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await listRules({} as ApiRequest, mockRes, supabase!);
+      } catch (err) { logger.error("Alert rules list error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/alerts/rules" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = body ? JSON.parse(body) : {};
+        const { createRule } = await import("./api/alerts.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await createRule({ body: data }, mockRes, supabase!);
+      } catch (err) { logger.error("Alert rule create error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    });
+    return;
+  }
+
+  // PATCH/DELETE /api/alerts/rules/:id
+  const alertRuleMatch = url.pathname.match(/^\/api\/alerts\/rules\/([0-9a-f-]+)$/);
+  if (alertRuleMatch && (req.method === "PATCH" || req.method === "DELETE")) {
+    const ruleId = alertRuleMatch[1];
+    if (req.method === "DELETE") {
+      (async () => {
+        try {
+          const { deleteRule } = await import("./api/alerts.ts");
+          const mockRes: ApiResponse = {
+            status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+            json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+          };
+          await deleteRule({ params: { id: ruleId } }, mockRes, supabase!);
+        } catch (err) { logger.error("Alert rule delete error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+      })();
+      return;
+    }
+    // PATCH
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = body ? JSON.parse(body) : {};
+        const { updateRule } = await import("./api/alerts.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await updateRule({ body: data, params: { id: ruleId } }, mockRes, supabase!);
+      } catch (err) { logger.error("Alert rule update error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/alerts/recent" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getRecentAlerts } = await import("./api/alerts.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getRecentAlerts({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Alert recent error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  // POST /api/alerts/acknowledge/:id
+  const alertAckMatch = url.pathname.match(/^\/api\/alerts\/acknowledge\/([0-9a-f-]+)$/);
+  if (alertAckMatch && req.method === "POST") {
+    const alertId = alertAckMatch[1];
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = body ? JSON.parse(body) : {};
+        const { acknowledgeAlert } = await import("./api/alerts.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await acknowledgeAlert({ body: data, params: { id: alertId } }, mockRes, supabase!);
+      } catch (err) { logger.error("Alert ack error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/alerts/preferences" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getPreferences } = await import("./api/alerts.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getPreferences({} as ApiRequest, mockRes, supabase!);
+      } catch (err) { logger.error("Alert prefs get error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/alerts/preferences" && req.method === "PUT") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = body ? JSON.parse(body) : {};
+        const { updatePreferences } = await import("./api/alerts.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await updatePreferences({ body: data }, mockRes, supabase!);
+      } catch (err) { logger.error("Alert prefs update error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/alerts/test" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = body ? JSON.parse(body) : {};
+        const { testRule } = await import("./api/alerts.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await testRule({ body: data }, mockRes, supabase!);
+      } catch (err) { logger.error("Alert test error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    });
+    return;
+  }
+
   // Rollup endpoints
   if (url.pathname.startsWith("/api/rollup/") && req.method === "POST") {
     let body = "";

@@ -13,6 +13,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getActiveThreads, getStaleThreads } from "./comms.ts";
 import { getCalendarInsights, getCalendarAlerts } from "./calendar-intel.ts";
+import { getActiveAlertCount, getCachedRules } from "./alert.ts";
 import { log } from "../../logger.ts";
 
 const logger = log.child("ums-consumer-summary");
@@ -43,6 +44,12 @@ export interface SummaryState {
 
 /** Track last-seen counts to detect "new" activity. */
 const lastSeen: Record<string, number> = {};
+
+/** ELLIE-317: Alert state from consumer (avoids circular deps with lazy reads). */
+const alertState = {
+  get activeCount() { try { return getActiveAlertCount(); } catch { return 0; } },
+  get ruleCount() { try { return getCachedRules().length; } catch { return 0; } },
+};
 
 // ── Main aggregator ──────────────────────────────────────────
 
@@ -271,17 +278,30 @@ async function getForestSummary(): Promise<ModuleSummary> {
 }
 
 function getAlertSummary(): ModuleSummary {
-  // Alert consumer is stateless — no persisted alert count
-  // We surface VIP rule count as a passive indicator
-  return {
-    module: "alerts",
-    label: "Alerts",
-    icon: "&#128680;", // 🚨
-    status: "white",
-    text: "Monitoring (5 rules active)",
-    path: "/incidents",
-    has_new: false,
-  };
+  // ELLIE-317: Live alert data from consumer
+  try {
+    const active = alertState.activeCount;
+    const ruleCount = alertState.ruleCount;
+
+    const parts: string[] = [];
+    if (active > 0) parts.push(`${active} unacked`);
+    parts.push(`${ruleCount} rules active`);
+
+    const hasNew = active > (lastSeen["alerts"] ?? 0);
+
+    return {
+      module: "alerts",
+      label: "Alerts",
+      icon: "&#128680;", // 🚨
+      status: active > 0 ? "red" : "white",
+      text: parts.join(", "),
+      path: "/incidents",
+      has_new: hasNew,
+      count: active,
+    };
+  } catch {
+    return fallback("alerts", "Alerts", "/incidents");
+  }
 }
 
 async function getRelationshipSummary(supabase: SupabaseClient): Promise<ModuleSummary> {

@@ -42,7 +42,8 @@ import { setQueueBroadcast } from "./message-queue.ts";
 import { setVoicePipelineDeps } from "./voice-pipeline.ts";
 import { ellieChatPendingActions, setSenderDeps } from "./message-sender.ts";
 import { initForestSync } from "./elasticsearch/context.ts";
-import { initGoogleChat, sendGoogleChatMessage } from "./google-chat.ts";
+import { initGoogleChat, sendGoogleChatMessage, isGoogleChatEnabled } from "./google-chat.ts";
+const GOOGLE_CHAT_SPACE = process.env.GOOGLE_CHAT_SPACE_NAME || "";
 import { startNudgeChecker } from "./delivery.ts";
 import { initClassifier } from "./intent-classifier.ts";
 import { initEntailmentClassifier } from "./entailment-classifier.ts";
@@ -217,6 +218,35 @@ setInterval(async () => {
     logger.debug("Summary push error", { error: err instanceof Error ? err.message : String(err) });
   }
 }, 30_000);
+
+// Alert consumer — DB-backed rules, severity routing, dedup (ELLIE-317)
+if (supabase) {
+  (async () => {
+    try {
+      const { initAlertConsumer } = await import("./ums/consumers/alert.ts");
+      initAlertConsumer(supabase, async (text: string, priority: string) => {
+        const channels: string[] = [];
+        // Critical + High: Telegram + Google Chat; Normal: Google Chat only
+        if (priority === "critical" || priority === "high") {
+          try {
+            await bot.api.sendMessage(ALLOWED_USER_ID, text);
+            channels.push("telegram");
+          } catch (err) { logger.warn("Alert telegram send failed", err); }
+        }
+        if (GOOGLE_CHAT_SPACE && isGoogleChatEnabled()) {
+          try {
+            await sendGoogleChatMessage(GOOGLE_CHAT_SPACE, text);
+            channels.push("google-chat");
+          } catch (err) { logger.warn("Alert gchat send failed", err); }
+        }
+        return channels;
+      });
+      console.log("[alert] Alert consumer initialized with DB-backed rules");
+    } catch (err) {
+      logger.error("Alert consumer init failed", err);
+    }
+  })();
+}
 
 // Morning briefing — check every 15 minutes, deliver once at ~7:00 AM CST (ELLIE-316)
 setInterval(async () => {
