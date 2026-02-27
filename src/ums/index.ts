@@ -108,6 +108,8 @@ export { googleTasksConnector } from "./connectors/google-tasks.ts";
 export { voiceConnector } from "./connectors/voice.ts";
 export { githubConnector } from "./connectors/github.ts";
 export { documentsConnector } from "./connectors/documents.ts";
+export { microsoftGraphConnector } from "./connectors/microsoft-graph.ts";
+export { imapConnector } from "./connectors/imap.ts";
 
 // ── Consumers (push) ──────────────────────────────────────────
 export { initGtdConsumer } from "./consumers/gtd.ts";
