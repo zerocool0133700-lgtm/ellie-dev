@@ -74,6 +74,7 @@ import {
 } from "./delivery.ts";
 import { checkMessageRate, getRateLimitStatus } from "./rate-limiter.ts";
 import { getBreakerStatus } from "./resilience.ts";
+import { getPlaneQueueStatus } from "./plane-queue.ts";
 import {
   routeAndDispatch,
   syncResponse,
@@ -807,25 +808,31 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
     const anyBreakerOpen = Object.values(circuitBreakers).some(b => b.state === "open");
     const status = anyBreakerOpen ? "degraded" : "ok";
 
-    res.writeHead(status === "ok" ? 200 : 503, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({
-      status,
-      service: "ellie-relay",
-      uptime: Math.round(process.uptime()),
-      memory: {
-        rss: Math.round(process.memoryUsage().rss / 1024 / 1024),
-        heap: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
-      },
-      channels: {
-        telegram: true,
-        googleChat: isGoogleChatEnabled(),
-        voice: !!ELEVENLABS_API_KEY,
-        alexa: true,
-      },
-      queue: getQueueStatus(),
-      circuitBreakers,
-      rateLimits: getRateLimitStatus(),
-    }));
+    getPlaneQueueStatus().then(planeQueue => {
+      res.writeHead(status === "ok" ? 200 : 503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        status,
+        service: "ellie-relay",
+        uptime: Math.round(process.uptime()),
+        memory: {
+          rss: Math.round(process.memoryUsage().rss / 1024 / 1024),
+          heap: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+        },
+        channels: {
+          telegram: true,
+          googleChat: isGoogleChatEnabled(),
+          voice: !!ELEVENLABS_API_KEY,
+          alexa: true,
+        },
+        queue: getQueueStatus(),
+        planeQueue,
+        circuitBreakers,
+        rateLimits: getRateLimitStatus(),
+      }));
+    }).catch(() => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status, service: "ellie-relay", uptime: Math.round(process.uptime()) }));
+    });
     return;
   }
 

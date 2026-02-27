@@ -7,6 +7,7 @@
 
 import { log } from "./logger.ts";
 import { breakers, withRetry, isTransientError } from "./resilience.ts";
+import { enqueuePlaneStateChange, enqueuePlaneComment } from "./plane-queue.ts";
 
 const logger = log.child("plane");
 
@@ -96,7 +97,7 @@ async function getIssueBySequenceId(projectId: string, sequenceId: number): Prom
 }
 
 /** Get the state UUID for a given group (e.g. "started" for In Progress) */
-async function getStateIdByGroup(projectId: string, group: string): Promise<string | null> {
+export async function getStateIdByGroup(projectId: string, group: string): Promise<string | null> {
   const data = await planeRequest(`/projects/${projectId}/states/`);
   const state = data.results?.find((s: any) => s.group === group);
   return state?.id ?? null;
@@ -155,7 +156,9 @@ export async function updateWorkItemOnSessionStart(workItemId: string, sessionId
 
   const resolved = await resolveWorkItemId(workItemId);
   if (!resolved) {
-    logger.warn("Could not resolve work item", { workItemId });
+    logger.warn("Could not resolve work item — queueing for retry", { workItemId });
+    await enqueuePlaneStateChange({ workItemId, stateGroup: "started", sessionId });
+    await enqueuePlaneComment({ workItemId, commentHtml: `<p>Work session started — <code>${sessionId}</code></p>`, sessionId });
     return;
   }
 
@@ -164,14 +167,24 @@ export async function updateWorkItemOnSessionStart(workItemId: string, sessionId
   // Move to "In Progress" (group: "started")
   const inProgressStateId = await getStateIdByGroup(projectId, "started");
   if (inProgressStateId) {
-    await updateIssueState(projectId, issueId, inProgressStateId);
-    console.log(`[plane] ${workItemId} → In Progress`);
+    const result = await updateIssueState(projectId, issueId, inProgressStateId);
+    if (result === null) {
+      logger.warn("State update failed — queueing for retry", { workItemId });
+      await enqueuePlaneStateChange({ workItemId, stateGroup: "started", projectId, issueId, sessionId });
+    } else {
+      console.log(`[plane] ${workItemId} → In Progress`);
+    }
   }
 
   // Add comment with session ID
   const comment = `<p>Work session started — <code>${sessionId}</code></p>`;
-  await addIssueComment(projectId, issueId, comment);
-  console.log(`[plane] Added session comment to ${workItemId}`);
+  const commentResult = await addIssueComment(projectId, issueId, comment);
+  if (commentResult === null) {
+    logger.warn("Comment failed — queueing for retry", { workItemId });
+    await enqueuePlaneComment({ workItemId, commentHtml: comment, projectId, issueId, sessionId });
+  } else {
+    console.log(`[plane] Added session comment to ${workItemId}`);
+  }
 }
 
 /**
@@ -196,27 +209,40 @@ export async function updateWorkItemOnSessionComplete(
     return;
   }
 
+  const stateGroup = status === "completed" ? "completed" : "started";
+  const label = status === "completed" ? "completed" : status;
+  const comment = `<p>Work session ${label}</p><p>${summary}</p>`;
+
   const resolved = await resolveWorkItemId(workItemId);
   if (!resolved) {
-    logger.warn("Could not resolve work item", { workItemId });
+    logger.warn("Could not resolve work item — queueing for retry", { workItemId });
+    await enqueuePlaneStateChange({ workItemId, stateGroup });
+    await enqueuePlaneComment({ workItemId, commentHtml: comment });
     return;
   }
 
   const { projectId, issueId } = resolved;
 
   // Map session status to Plane state group
-  const stateGroup = status === "completed" ? "completed" : "started";
   const stateId = await getStateIdByGroup(projectId, stateGroup);
   if (stateId) {
-    await updateIssueState(projectId, issueId, stateId);
-    console.log(`[plane] ${workItemId} → ${status === "completed" ? "Done" : "In Progress (blocked/paused)"}`);
+    const result = await updateIssueState(projectId, issueId, stateId);
+    if (result === null) {
+      logger.warn("State update failed — queueing for retry", { workItemId });
+      await enqueuePlaneStateChange({ workItemId, stateGroup, projectId, issueId });
+    } else {
+      console.log(`[plane] ${workItemId} → ${status === "completed" ? "Done" : "In Progress (blocked/paused)"}`);
+    }
   }
 
   // Add completion comment
-  const label = status === "completed" ? "completed" : status;
-  const comment = `<p>Work session ${label}</p><p>${summary}</p>`;
-  await addIssueComment(projectId, issueId, comment);
-  console.log(`[plane] Added completion comment to ${workItemId}`);
+  const commentResult = await addIssueComment(projectId, issueId, comment);
+  if (commentResult === null) {
+    logger.warn("Comment failed — queueing for retry", { workItemId });
+    await enqueuePlaneComment({ workItemId, commentHtml: comment, projectId, issueId });
+  } else {
+    console.log(`[plane] Added completion comment to ${workItemId}`);
+  }
 }
 
 // ============================================================

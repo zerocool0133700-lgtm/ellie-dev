@@ -53,6 +53,7 @@ import { startExpiryCleanup } from "./approval.ts";
 import { notify } from "./notification-policy.ts";
 import { closeConversation } from "./conversations.ts";
 import { expireStaleItems } from "./api/agent-queue.ts";
+import { startPlaneQueueWorker, purgeCompleted as purgePlaneQueue } from "./plane-queue.ts";
 import { onBridgeWrite } from "./api/bridge.ts";
 import { setBroadcastToEllieChat } from "./tool-approval.ts";
 
@@ -143,6 +144,13 @@ setInterval(() => {
 setTimeout(() => {
   expireStaleItems().catch(err => logger.error("Initial stale expiry error", err));
 }, 10_000);
+
+// Plane sync queue — persistent retry for failed Plane API calls (ELLIE-234)
+startPlaneQueueWorker();
+// Purge completed queue items weekly
+setInterval(() => {
+  purgePlaneQueue().catch(err => logger.error("Plane queue purge error", err));
+}, 24 * 60 * 60_000);
 
 // Bridge write notifications — Telegram + ellie-chat (ELLIE-199)
 onBridgeWrite(({ collaborator, content, memoryId, type, workItemId }) => {
