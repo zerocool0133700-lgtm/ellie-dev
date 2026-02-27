@@ -245,17 +245,21 @@ export async function acknowledgeQueueItems(target: string): Promise<number> {
 // ── v2: Fetch + acknowledge readout items (ELLIE-199) ────────
 
 export async function getAndAcknowledgeReadouts(): Promise<QueueItem[]> {
+  // Only fetch undelivered readouts — 'new' status only.
+  // Previously included 'acknowledged' which caused the same findings
+  // to be re-delivered on every ellie-chat reconnect.
   const items = await sql<QueueItem[]>`
     SELECT * FROM agent_queue
-    WHERE target = 'ellie' AND status IN ('new', 'acknowledged')
+    WHERE target = 'ellie' AND status = 'new'
       AND metadata->>'readout' = 'true'
     ORDER BY created_at ASC
     LIMIT 10
   `
   if (items.length > 0) {
     const ids = items.map(i => i.id)
+    // Mark as completed — these are fire-once notifications, not persistent tasks
     await sql`
-      UPDATE agent_queue SET status = 'acknowledged', acknowledged_at = NOW()
+      UPDATE agent_queue SET status = 'completed', acknowledged_at = NOW()
       WHERE id = ANY(${ids})
     `
   }

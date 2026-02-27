@@ -19,6 +19,7 @@ logs/
 temp/
 uploads/
 session.json
+.cache/
 
 # OS
 .DS_Store

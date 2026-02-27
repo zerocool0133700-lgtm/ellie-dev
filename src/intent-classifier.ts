@@ -27,6 +27,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { getConversationContext } from "./conversations.ts";
 import { matchSkillCommand } from "./skills/commands.ts";
 import { log } from "./logger.ts";
+import { writeToDisk, readFromDisk } from "./config-cache.ts";
 
 const logger = log.child("intent");
 
@@ -472,6 +473,7 @@ async function getAgentDescriptions(): Promise<AgentDescription[]> {
       anti_patterns: a.anti_patterns || [],
     }));
     _agentCacheTime = now;
+    writeToDisk("agents", _agentCache);
     console.log(`[classifier] Agent cache refreshed from forest: ${_agentCache.length} agents`);
     return _agentCache;
   } catch (err) {
@@ -479,23 +481,38 @@ async function getAgentDescriptions(): Promise<AgentDescription[]> {
   }
 
   // Fallback: Supabase agents table (operational)
-  if (!_supabase) return [];
+  if (_supabase) {
+    try {
+      const { data: agents } = await _supabase
+        .from("agents")
+        .select("name, species, capabilities")
+        .eq("status", "active");
 
-  const { data: agents } = await _supabase
-    .from("agents")
-    .select("name, species, capabilities")
-    .eq("status", "active");
+      _agentCache = (agents || []).map((a) => ({
+        name: a.name,
+        species: a.species ?? 'ant',
+        capabilities: a.capabilities || [],
+        anti_patterns: [],
+      }));
+      _agentCacheTime = now;
+      writeToDisk("agents", _agentCache);
+      console.log(`[classifier] Agent cache refreshed from Supabase: ${_agentCache.length} agents`);
+      return _agentCache;
+    } catch (err) {
+      logger.warn("Supabase agent lookup failed", err);
+    }
+  }
 
-  _agentCache = (agents || []).map((a) => ({
-    name: a.name,
-    species: a.species ?? 'ant',
-    capabilities: a.capabilities || [],
-    anti_patterns: [],
-  }));
-  _agentCacheTime = now;
+  // ELLIE-230: Final fallback — disk cache from last successful fetch
+  const diskAgents = await readFromDisk<AgentDescription[]>("agents");
+  if (diskAgents && diskAgents.length > 0) {
+    _agentCache = diskAgents;
+    _agentCacheTime = now;
+    console.log(`[classifier] Agent cache loaded from disk: ${diskAgents.length} agents`);
+    return diskAgents;
+  }
 
-  console.log(`[classifier] Agent cache refreshed from Supabase: ${_agentCache.length} agents`);
-  return _agentCache;
+  return [];
 }
 
 async function getSkillDescriptions(): Promise<SkillDescription[]> {
@@ -504,23 +521,38 @@ async function getSkillDescriptions(): Promise<SkillDescription[]> {
     return _skillCache;
   }
 
-  if (!_supabase) return [];
+  if (_supabase) {
+    try {
+      const { data: skills } = await _supabase
+        .from("skills")
+        .select("name, description, triggers, priority, agents(name)")
+        .eq("enabled", true)
+        .order("priority", { ascending: false });
 
-  const { data: skills } = await _supabase
-    .from("skills")
-    .select("name, description, triggers, priority, agents(name)")
-    .eq("enabled", true)
-    .order("priority", { ascending: false });
+      _skillCache = (skills || []).map((s: any) => ({
+        name: s.name,
+        description: s.description,
+        agent_name: s.agents?.name || "general",
+        triggers: s.triggers || [],
+        priority: s.priority || 0,
+      }));
+      _skillCacheTime = now;
+      writeToDisk("skills", _skillCache);
+      console.log(`[classifier] Skill cache refreshed: ${_skillCache.length} skills`);
+      return _skillCache;
+    } catch (err) {
+      logger.warn("Supabase skill lookup failed", err);
+    }
+  }
 
-  _skillCache = (skills || []).map((s: any) => ({
-    name: s.name,
-    description: s.description,
-    agent_name: s.agents?.name || "general",
-    triggers: s.triggers || [],
-    priority: s.priority || 0,
-  }));
-  _skillCacheTime = now;
+  // ELLIE-230: Disk cache fallback
+  const diskSkills = await readFromDisk<SkillDescription[]>("skills");
+  if (diskSkills && diskSkills.length > 0) {
+    _skillCache = diskSkills;
+    _skillCacheTime = now;
+    console.log(`[classifier] Skill cache loaded from disk: ${diskSkills.length} skills`);
+    return diskSkills;
+  }
 
-  console.log(`[classifier] Skill cache refreshed: ${_skillCache.length} skills`);
-  return _skillCache;
+  return [];
 }

@@ -22,6 +22,7 @@ import { extractApprovalTags } from "./approval.ts";
 import type { ExecutionMode } from "./intent-classifier.ts";
 import { log } from "./logger.ts";
 import { estimateTokens } from "./relay-utils.ts";
+import { writeToDisk, readFromDisk } from "./config-cache.ts";
 
 const logger = log.child("orchestrator");
 
@@ -885,8 +886,18 @@ async function getModelCosts(
       });
     }
     _modelCostCacheTime = Date.now();
+    // ELLIE-230: Persist to disk for offline fallback
+    writeToDisk("model-costs", Object.fromEntries(_modelCostCache));
     return _modelCostCache;
   } catch {
+    // ELLIE-230: Try disk cache before falling back to hardcoded costs
+    const diskCosts = await readFromDisk<Record<string, { input: number; output: number }>>("model-costs");
+    if (diskCosts && Object.keys(diskCosts).length > 0) {
+      _modelCostCache = new Map(Object.entries(diskCosts));
+      _modelCostCacheTime = Date.now();
+      console.log(`[orchestrator] Model costs loaded from disk cache: ${_modelCostCache.size} models`);
+      return _modelCostCache;
+    }
     return FALLBACK_MODEL_COSTS;
   }
 }
