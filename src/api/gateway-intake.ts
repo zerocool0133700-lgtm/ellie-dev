@@ -20,6 +20,40 @@ import { syncAllCalendars } from "../calendar-sync.ts";
 import { getMessage as outlookGetMessage } from "../outlook.ts";
 import { retrieveSecret } from "../../../ellie-forest/src/hollow.ts";
 
+// ── Payload interfaces ───────────────────────────────────
+
+interface GatewayEventPayload {
+  source: string;
+  category: string;
+  summary: string;
+  actor?: string;
+  payload?: Record<string, unknown>;
+  envelope_id?: string;
+}
+
+interface GatewayAlertPayload {
+  source: string;
+  summary: string;
+  payload?: Record<string, unknown>;
+  envelope_id?: string;
+}
+
+interface GatewayEmailPayload {
+  message_id: string;
+  change_type?: string;
+  envelope_id?: string;
+}
+
+interface GatewayCalendarSyncPayload {
+  [key: string]: unknown;
+}
+
+// ── Helpers ──────────────────────────────────────────────
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 const KEYCHAIN_ID = "568c0a6a-0c98-4784-87f3-d909139d8c35";
 const MAX_TIMESTAMP_DRIFT_MS = 5 * 60_000; // 5 minutes — reject replayed requests
 
@@ -74,29 +108,32 @@ async function isGatewayRequest(req: IncomingMessage, rawBody: string): Promise<
 
 // ── Schema validation ──────────────────────────────────────
 
-function validateEventPayload(data: any): string | null {
+function validateEventPayload(data: unknown): string | null {
   if (!data || typeof data !== "object") return "Body must be an object";
-  if (typeof data.source !== "string" || data.source.length === 0) return "Missing source";
-  if (typeof data.category !== "string" || data.category.length === 0) return "Missing category";
-  if (typeof data.summary !== "string" || data.summary.length === 0) return "Missing summary";
-  if (data.summary.length > 500) return "summary too long (max 500)";
-  if (data.envelope_id && typeof data.envelope_id !== "string") return "envelope_id must be a string";
+  const d = data as Record<string, unknown>;
+  if (typeof d.source !== "string" || d.source.length === 0) return "Missing source";
+  if (typeof d.category !== "string" || d.category.length === 0) return "Missing category";
+  if (typeof d.summary !== "string" || d.summary.length === 0) return "Missing summary";
+  if (d.summary.length > 500) return "summary too long (max 500)";
+  if (d.envelope_id && typeof d.envelope_id !== "string") return "envelope_id must be a string";
   return null;
 }
 
-function validateAlertPayload(data: any): string | null {
+function validateAlertPayload(data: unknown): string | null {
   if (!data || typeof data !== "object") return "Body must be an object";
-  if (typeof data.source !== "string" || data.source.length === 0) return "Missing source";
-  if (typeof data.summary !== "string" || data.summary.length === 0) return "Missing summary";
-  if (data.summary.length > 500) return "summary too long (max 500)";
+  const d = data as Record<string, unknown>;
+  if (typeof d.source !== "string" || d.source.length === 0) return "Missing source";
+  if (typeof d.summary !== "string" || d.summary.length === 0) return "Missing summary";
+  if (d.summary.length > 500) return "summary too long (max 500)";
   return null;
 }
 
-function validateEmailPayload(data: any): string | null {
+function validateEmailPayload(data: unknown): string | null {
   if (!data || typeof data !== "object") return "Body must be an object";
-  if (typeof data.message_id !== "string" || data.message_id.length === 0) return "Missing message_id";
-  if (data.message_id.length > 500) return "message_id too long (max 500)";
-  if (data.change_type && typeof data.change_type !== "string") return "change_type must be a string";
+  const d = data as Record<string, unknown>;
+  if (typeof d.message_id !== "string" || d.message_id.length === 0) return "Missing message_id";
+  if (d.message_id.length > 500) return "message_id too long (max 500)";
+  if (d.change_type && typeof d.change_type !== "string") return "change_type must be a string";
   return null;
 }
 
@@ -139,34 +176,37 @@ export function handleGatewayRoute(
         case "event": {
           const err = validateEventPayload(data);
           if (err) { res.writeHead(400); res.end(JSON.stringify({ error: err })); return; }
-          data.summary = sanitize(data.summary);
-          await handleGatewayEvent(data, res);
+          const eventData = data as GatewayEventPayload;
+          eventData.summary = sanitize(eventData.summary);
+          await handleGatewayEvent(eventData, res);
           break;
         }
         case "alert": {
           const err = validateAlertPayload(data);
           if (err) { res.writeHead(400); res.end(JSON.stringify({ error: err })); return; }
-          data.summary = sanitize(data.summary);
-          await handleGatewayAlert(data, res);
+          const alertData = data as GatewayAlertPayload;
+          alertData.summary = sanitize(alertData.summary);
+          await handleGatewayAlert(alertData, res);
           break;
         }
         case "email": {
           const err = validateEmailPayload(data);
           if (err) { res.writeHead(400); res.end(JSON.stringify({ error: err })); return; }
-          await handleGatewayEmail(data, res);
+          await handleGatewayEmail(data as GatewayEmailPayload, res);
           break;
         }
         case "calendar-sync":
-          await handleGatewayCalendarSync(data, res);
+          await handleGatewayCalendarSync(data as GatewayCalendarSyncPayload, res);
           break;
         default:
           res.writeHead(404, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Unknown gateway endpoint" }));
       }
-    } catch (err: any) {
-      logger.error("Error on endpoint", { endpoint, message: err?.message });
+    } catch (err: unknown) {
+      const msg = errorMessage(err);
+      logger.error("Error on endpoint", { endpoint, message: msg });
       res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: err?.message || "Internal error" }));
+      res.end(JSON.stringify({ error: msg || "Internal error" }));
     }
   });
 
@@ -178,7 +218,7 @@ export function handleGatewayRoute(
  * No AI interruption, just knowledge graph updates.
  */
 async function handleGatewayEvent(
-  data: any,
+  data: GatewayEventPayload,
   res: ServerResponse,
 ): Promise<void> {
   const { source, category, summary, actor, payload, envelope_id } = data;
@@ -202,8 +242,8 @@ async function handleGatewayEvent(
         ...(payload?.number && { number: payload.number }),
       },
     });
-  } catch (err: any) {
-    logger.error("Bridge write error", { message: err?.message });
+  } catch (err: unknown) {
+    logger.error("Bridge write error", { message: errorMessage(err) });
   }
 
   res.writeHead(200, { "Content-Type": "application/json" });
@@ -215,7 +255,7 @@ async function handleGatewayEvent(
  * Used for CI failures, critical alerts, etc.
  */
 async function handleGatewayAlert(
-  data: any,
+  data: GatewayAlertPayload,
   res: ServerResponse,
 ): Promise<void> {
   const { source, summary, payload, envelope_id } = data;
@@ -230,8 +270,8 @@ async function handleGatewayAlert(
       telegramMessage: `🚨 *Gateway Alert* (${source}): ${summary}`,
       gchatMessage: `Gateway Alert (${source}): ${summary}`,
     });
-  } catch (err: any) {
-    logger.error("Notification error", { message: err?.message });
+  } catch (err: unknown) {
+    logger.error("Notification error", { message: errorMessage(err) });
   }
 
   // Create agent queue item for the dev agent to review
@@ -244,11 +284,11 @@ async function handleGatewayAlert(
       category: "alert",
       title: summary,
       content: JSON.stringify(payload, null, 2),
-      work_item_id: null,
+      work_item_id: undefined,
       metadata: { envelope_id, gateway_source: source },
     });
-  } catch (err: any) {
-    logger.error("Queue item creation error", { message: err?.message });
+  } catch (err: unknown) {
+    logger.error("Queue item creation error", { message: errorMessage(err) });
   }
 
   res.writeHead(200, { "Content-Type": "application/json" });
@@ -260,7 +300,7 @@ async function handleGatewayAlert(
  * Uses the relay's existing outlook.ts module.
  */
 async function handleGatewayEmail(
-  data: any,
+  data: GatewayEmailPayload,
   res: ServerResponse,
 ): Promise<void> {
   const { message_id, change_type, envelope_id } = data;
@@ -290,8 +330,8 @@ async function handleGatewayEmail(
         },
       });
     }
-  } catch (err: any) {
-    logger.error("Email fetch error", { message: err?.message });
+  } catch (err: unknown) {
+    logger.error("Email fetch error", { message: errorMessage(err) });
   }
 
   res.writeHead(200, { "Content-Type": "application/json" });
@@ -302,7 +342,7 @@ async function handleGatewayEmail(
  * Calendar change notification — trigger the relay's existing calendar sync.
  */
 async function handleGatewayCalendarSync(
-  data: any,
+  _data: GatewayCalendarSyncPayload,
   res: ServerResponse,
 ): Promise<void> {
   console.log(`[gateway-intake] Calendar sync triggered by gateway`);
@@ -310,8 +350,8 @@ async function handleGatewayCalendarSync(
   try {
     await syncAllCalendars();
     console.log("[gateway-intake] Calendar sync complete");
-  } catch (err: any) {
-    logger.error("Calendar sync error", { message: err?.message });
+  } catch (err: unknown) {
+    logger.error("Calendar sync error", { message: errorMessage(err) });
   }
 
   res.writeHead(200, { "Content-Type": "application/json" });

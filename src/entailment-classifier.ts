@@ -58,8 +58,8 @@ Respond with ONLY a JSON object (no markdown fences):
     });
 
     const text = response.content
-      .filter((b: any) => b.type === "text")
-      .map((b: any) => b.text)
+      .filter((b: { type: string }) => b.type === "text")
+      .map((b: { type: string; text: string }) => b.text)
       .join("");
 
     const cleaned = text

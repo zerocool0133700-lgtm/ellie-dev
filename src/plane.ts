@@ -86,20 +86,20 @@ function parseWorkItemId(workItemId: string) {
 /** Find a project UUID by its short identifier (e.g. "ELLIE") */
 async function getProjectByIdentifier(identifier: string): Promise<string | null> {
   const data = await planeRequest("/projects/");
-  const project = data.results?.find((p: any) => p.identifier === identifier);
+  const project = data.results?.find((p: Record<string, unknown>) => p.identifier === identifier);
   return project?.id ?? null;
 }
 
 /** Find an issue by sequence number within a project (returns full issue data) */
-async function getIssueBySequenceId(projectId: string, sequenceId: number): Promise<any | null> {
+async function getIssueBySequenceId(projectId: string, sequenceId: number): Promise<Record<string, unknown> | null> {
   const data = await planeRequest(`/projects/${projectId}/issues/?sequence_id=${sequenceId}`);
-  return data.results?.find((i: any) => i.sequence_id === sequenceId) ?? null;
+  return data.results?.find((i: Record<string, unknown>) => i.sequence_id === sequenceId) ?? null;
 }
 
 /** Get the state UUID for a given group (e.g. "started" for In Progress) */
 export async function getStateIdByGroup(projectId: string, group: string): Promise<string | null> {
   const data = await planeRequest(`/projects/${projectId}/states/`);
-  const state = data.results?.find((s: any) => s.group === group);
+  const state = data.results?.find((s: Record<string, unknown>) => s.group === group);
   return state?.id ?? null;
 }
 
@@ -317,9 +317,9 @@ export async function listOpenIssues(projectIdentifier: string, limit: number = 
 
     const data = await planeRequest(`/projects/${projectId}/issues/`);
     const issues = (data.results || [])
-      .filter((i: any) => !["completed", "cancelled"].includes(i.state_detail?.group || ""))
+      .filter((i: Record<string, unknown>) => !["completed", "cancelled"].includes((i.state_detail as Record<string, string>)?.group || ""))
       .slice(0, limit)
-      .map((i: any) => ({
+      .map((i: Record<string, unknown>) => ({
         sequenceId: i.sequence_id,
         name: i.name,
         priority: i.priority || "none",

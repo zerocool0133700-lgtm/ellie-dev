@@ -246,7 +246,7 @@ export async function updateCredential(
     expires_at?: string | null;
   },
 ): Promise<CredentialRecord> {
-  const updateData: Record<string, any> = {
+  const updateData: Record<string, unknown> = {
     updated_at: new Date().toISOString(),
   };
 

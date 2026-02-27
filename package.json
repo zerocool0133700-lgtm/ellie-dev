@@ -19,7 +19,8 @@
     "work:start": "bun run scripts/work-session-start.ts",
     "security:sweep": "bun run scripts/security-sweep.ts",
     "prove:memory": "bun run scripts/prove-shared-memory.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "lint": "eslint src/"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.74.0",
@@ -44,6 +45,9 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/jsonwebtoken": "^9.0.10"
+    "@types/jsonwebtoken": "^9.0.10",
+    "@typescript-eslint/eslint-plugin": "^8.56.1",
+    "@typescript-eslint/parser": "^8.56.1",
+    "eslint": "^10.0.2"
   }
 }

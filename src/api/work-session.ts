@@ -8,6 +8,7 @@
  */
 
 import type { Bot } from "grammy";
+import type { ApiRequest, ApiResponse } from "./types.ts";
 import { log } from "../logger.ts";
 
 const logger = log.child("work-session");
@@ -45,8 +46,9 @@ async function resolveAgent(
       .limit(1)
       .single();
 
-    const name = (data as any)?.agents?.name;
-    if (name) {
+    const agents = (data as Record<string, unknown>)?.agents;
+    const name = (agents as Record<string, unknown>)?.name;
+    if (typeof name === "string" && name) {
       console.log(`[work-session] Auto-resolved agent from active session: ${name}`);
       return name;
     }
@@ -76,7 +78,7 @@ function getNotifyCtx(bot: Bot): NotifyContext {
  *   "agent": "james" // optional
  * }
  */
-export async function startWorkSession(req: any, res: any, bot: Bot, supabase?: SupabaseClient | null) {
+export async function startWorkSession(req: ApiRequest, res: ApiResponse, bot: Bot, supabase?: SupabaseClient | null) {
   try {
     const { work_item_id, title, project, agent: explicitAgent } = req.body;
 
@@ -104,7 +106,7 @@ export async function startWorkSession(req: any, res: any, bot: Bot, supabase?: 
       entity_names: entityNames,
     });
     const { tree, trunk, creatures, branches } = result;
-    if ((result as any).resumed) {
+    if ((result as Record<string, unknown>).resumed) {
       console.log(`[work-session:start] Resumed existing session ${tree.id} for ${work_item_id}`);
     }
 
@@ -134,7 +136,7 @@ export async function startWorkSession(req: any, res: any, bot: Bot, supabase?: 
     });
 
     // Update Plane work item: set "In Progress" + add session comment (skip on resumed sessions)
-    if (!(result as any).resumed) {
+    if (!(result as Record<string, unknown>).resumed) {
       try {
         await updateWorkItemOnSessionStart(work_item_id, tree.id);
       } catch (planeError) {
@@ -150,12 +152,12 @@ export async function startWorkSession(req: any, res: any, bot: Bot, supabase?: 
       tree_id: tree.id,
       work_item_id,
       started_at: tree.created_at,
-      branches: (branches ?? []).map((b: any) => ({
+      branches: (branches ?? []).map((b: Record<string, unknown>) => ({
         id: b.id,
         name: b.name,
         entity_id: b.entity_id,
       })),
-      creatures: (creatures ?? []).map((c: any) => ({
+      creatures: (creatures ?? []).map((c: Record<string, unknown>) => ({
         id: c.id,
         branch_id: c.branch_id,
         entity_id: c.entity_id,
@@ -179,7 +181,7 @@ export async function startWorkSession(req: any, res: any, bot: Bot, supabase?: 
  *   "message": "Created POST /api/work-session/start endpoint"
  * }
  */
-export async function updateWorkSession(req: any, res: any, bot: Bot) {
+export async function updateWorkSession(req: ApiRequest, res: ApiResponse, bot: Bot) {
   try {
     const { work_item_id, message, agent, git_sha } = req.body;
 
@@ -251,7 +253,7 @@ export async function updateWorkSession(req: any, res: any, bot: Bot) {
  *   "message": "Decision: Using Express router instead of direct app.post for modularity"
  * }
  */
-export async function logDecision(req: any, res: any, bot: Bot) {
+export async function logDecision(req: ApiRequest, res: ApiResponse, bot: Bot) {
   try {
     const { work_item_id, message, agent } = req.body;
 
@@ -323,7 +325,7 @@ export async function logDecision(req: any, res: any, bot: Bot) {
  *   "summary": "Implemented all four communication endpoints. Tested with curl."
  * }
  */
-export async function completeWorkSession(req: any, res: any, bot: Bot) {
+export async function completeWorkSession(req: ApiRequest, res: ApiResponse, bot: Bot) {
   try {
     const { work_item_id, summary, agent } = req.body;
 
@@ -362,8 +364,8 @@ export async function completeWorkSession(req: any, res: any, bot: Bot) {
       } else {
         console.log(`[work-session:complete] Auto-deploy: build is current, skipping`);
       }
-    } catch (deployErr: any) {
-      logger.warn("Auto-deploy failed (non-fatal)", { message: deployErr?.message?.slice(0, 200) });
+    } catch (deployErr: unknown) {
+      logger.warn("Auto-deploy failed (non-fatal)", { message: deployErr instanceof Error ? deployErr.message?.slice(0, 200) : String(deployErr) });
     }
 
     // Only update Plane if the most recent creature session had meaningful duration (>= 2 min)
@@ -440,7 +442,7 @@ export async function completeWorkSession(req: any, res: any, bot: Bot) {
  *   "reason": "Waiting on design review" // optional
  * }
  */
-export async function pauseWorkSession(req: any, res: any, bot: Bot) {
+export async function pauseWorkSession(req: ApiRequest, res: ApiResponse, bot: Bot) {
   try {
     const { work_item_id, reason, agent } = req.body;
 
@@ -507,7 +509,7 @@ export async function pauseWorkSession(req: any, res: any, bot: Bot) {
  *   "work_item_id": "ELLIE-1"
  * }
  */
-export async function resumeWorkSession(req: any, res: any, bot: Bot) {
+export async function resumeWorkSession(req: ApiRequest, res: ApiResponse, bot: Bot) {
   try {
     const { work_item_id, agent } = req.body;
 

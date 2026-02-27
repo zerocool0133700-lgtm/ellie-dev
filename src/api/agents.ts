@@ -9,6 +9,7 @@
 
 import type { Bot } from "grammy";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { ApiRequest, ApiResponse } from "./types.ts";
 import {
   getAgent,
   listAgents,
@@ -21,7 +22,7 @@ const logger = log.child("agents");
 /**
  * GET /api/agents
  */
-export async function listAgentsEndpoint(req: any, res: any, _supabase: SupabaseClient, _bot: Bot) {
+export async function listAgentsEndpoint(req: ApiRequest, res: ApiResponse, _supabase: SupabaseClient, _bot: Bot) {
   try {
     const type = req.query?.type;
     const agents = await listAgents(type ? { type } : undefined);
@@ -49,7 +50,7 @@ export async function listAgentsEndpoint(req: any, res: any, _supabase: Supabase
 /**
  * GET /api/agents/:name
  */
-export async function getAgentEndpoint(req: any, res: any, _supabase: SupabaseClient, _bot: Bot) {
+export async function getAgentEndpoint(req: ApiRequest, res: ApiResponse, _supabase: SupabaseClient, _bot: Bot) {
   try {
     const name = req.params?.name || req.query?.name;
     if (!name) {
@@ -71,7 +72,7 @@ export async function getAgentEndpoint(req: any, res: any, _supabase: SupabaseCl
 /**
  * GET /api/agents/:name/skills
  */
-export async function getAgentSkillsEndpoint(req: any, res: any, supabase: SupabaseClient, _bot: Bot) {
+export async function getAgentSkillsEndpoint(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient, _bot: Bot) {
   try {
     const name = req.params?.name || req.query?.name;
     if (!name) {
@@ -128,7 +129,7 @@ export async function getAgentSkillsEndpoint(req: any, res: any, supabase: Supab
 /**
  * GET /api/capabilities?q=coding
  */
-export async function findCapabilityEndpoint(req: any, res: any, _supabase: SupabaseClient, _bot: Bot) {
+export async function findCapabilityEndpoint(req: ApiRequest, res: ApiResponse, _supabase: SupabaseClient, _bot: Bot) {
   try {
     const capability = req.query?.q;
     if (!capability) {

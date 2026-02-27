@@ -244,7 +244,9 @@ async function checkSessionContinuity(
 
     if (!activeSession) return null;
 
-    const agentName = (activeSession as any).agents?.name || "general";
+    const agentName = (activeSession as Record<string, unknown>).agents
+      ? ((activeSession as Record<string, Record<string, string>>).agents?.name || "general")
+      : "general";
     return {
       agent_name: agentName,
       rule_name: "session_continuity",
@@ -299,8 +301,8 @@ async function classifyWithHaiku(
     });
 
     const text = response.content
-      .filter((b: any) => b.type === "text")
-      .map((b: any) => b.text)
+      .filter((b: { type: string }) => b.type === "text")
+      .map((b: { type: string; text: string }) => b.text)
       .join("");
 
     const cleaned = text
@@ -326,7 +328,7 @@ async function classifyWithHaiku(
         : undefined);
     // Validate and truncate parsed skill fields
     const parsedSkills = rawSkills
-      ? (rawSkills as any[]).map((s) => ({
+      ? (rawSkills as Array<Record<string, unknown>>).map((s) => ({
           agent: String(s.agent || "general").slice(0, 100),
           skill: String(s.skill || "none").slice(0, 100),
           instruction: String(s.instruction || "").slice(0, 2000),
@@ -529,7 +531,7 @@ async function getSkillDescriptions(): Promise<SkillDescription[]> {
         .eq("enabled", true)
         .order("priority", { ascending: false });
 
-      _skillCache = (skills || []).map((s: any) => ({
+      _skillCache = (skills || []).map((s: Record<string, unknown>) => ({
         name: s.name,
         description: s.description,
         agent_name: s.agents?.name || "general",

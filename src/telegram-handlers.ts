@@ -412,7 +412,7 @@ bot.on("message:text", withQueue(async (ctx) => {
       const entityName = AGENT_ENTITY_MAP[agentResult.dispatch.agent.name] ?? agentResult.dispatch.agent.name;
       const entity = await getEntity(entityName);
       if (entity) {
-        const [tree] = await forestSql<any[]>`
+        const [tree] = await forestSql<{ id: string; work_item_id: string | null }[]>`
           SELECT t.id, t.work_item_id FROM trees t
           JOIN creatures c ON c.tree_id = t.id
           WHERE t.type = 'work_session' AND t.state IN ('growing', 'dormant')
@@ -428,7 +428,7 @@ bot.on("message:text", withQueue(async (ctx) => {
           console.log(`[telegram] Late-resolved sessionIds: tree=${tree.id.slice(0, 8)}`);
         }
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       logger.warn("Late-resolve sessionIds failed", err);
     }
   }

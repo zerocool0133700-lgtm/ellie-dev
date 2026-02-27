@@ -11,6 +11,7 @@
  */
 
 import type { Bot } from "grammy";
+import type { ApiRequest, ApiResponse } from "./types.ts";
 import {
   raiseIncident as forestRaiseIncident,
   updateInvestigation as forestUpdateInvestigation,
@@ -18,6 +19,7 @@ import {
   getActiveIncident,
   listOpenBranches,
 } from '../../../ellie-forest/src/index';
+import type { Tree } from '../../../ellie-forest/src/index';
 import { notify, type NotifyContext } from "../notification-policy.ts";
 import { log } from "../logger.ts";
 
@@ -46,7 +48,7 @@ const escapeMarkdown = (text: string) => text.replace(/[_*[\]()~`>#+=|{}.!-]/g, 
  *   "tags": ["production"]         // optional
  * }
  */
-export async function raiseIncident(req: any, res: any, bot: Bot) {
+export async function raiseIncident(req: ApiRequest, res: ApiResponse, bot: Bot) {
   try {
     const { title, severity, source, affected_services, external_ref, entity_names, tags } = req.body;
 
@@ -115,7 +117,7 @@ export async function raiseIncident(req: any, res: any, bot: Bot) {
  *   "agent": "dev_agent"       // optional
  * }
  */
-export async function updateIncident(req: any, res: any, bot: Bot) {
+export async function updateIncident(req: ApiRequest, res: ApiResponse, bot: Bot) {
   try {
     const { tree_id, external_ref, branch_id, findings, agent } = req.body;
 
@@ -178,7 +180,7 @@ export async function updateIncident(req: any, res: any, bot: Bot) {
  *   "fix_summary": "Pinned to Bun 1.1.37, filed upstream issue"
  * }
  */
-export async function resolveIncident(req: any, res: any, bot: Bot) {
+export async function resolveIncident(req: ApiRequest, res: ApiResponse, bot: Bot) {
   try {
     const { tree_id, external_ref, winning_branch_id, root_cause, fix_summary } = req.body;
 
@@ -190,7 +192,7 @@ export async function resolveIncident(req: any, res: any, bot: Bot) {
 
     // Resolve tree
     let treeId = tree_id;
-    let tree: any = null;
+    let tree: Tree | null = null;
     if (!treeId && external_ref) {
       tree = await getActiveIncident(external_ref);
       if (!tree) return res.status(404).json({ error: 'No active incident found for this external_ref' });

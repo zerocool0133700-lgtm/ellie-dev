@@ -101,8 +101,8 @@ setInterval(async () => {
   if (supabase) {
     try {
       await expireIdleConversations(supabase);
-    } catch (err: any) {
-      logger.error("Stale conversation cleanup error", { error: err?.message });
+    } catch (err: unknown) {
+      logger.error("Stale conversation cleanup error", { error: err instanceof Error ? err.message : String(err) });
     }
     expireStaleAgentSessions(supabase).catch(() => {});
   }
@@ -120,8 +120,8 @@ setInterval(async () => {
 setInterval(async () => {
   try {
     await syncAllCalendars();
-  } catch (err: any) {
-    logger.error("Periodic sync error", { error: err?.message });
+  } catch (err: unknown) {
+    logger.error("Periodic sync error", { error: err instanceof Error ? err.message : String(err) });
   }
 }, 5 * 60_000);
 
@@ -172,8 +172,8 @@ setTimeout(async () => {
   try {
     await syncAllCalendars();
     console.log("[calendar-sync] Initial sync complete");
-  } catch (err: any) {
-    logger.error("Initial sync error", { error: err?.message });
+  } catch (err: unknown) {
+    logger.error("Initial sync error", { error: err instanceof Error ? err.message : String(err) });
   }
 }, 10_000);
 
@@ -183,8 +183,8 @@ setInterval(async () => {
     const { expireShortTermMemories } = await import('../../ellie-forest/src/shared-memory');
     const expired = await expireShortTermMemories();
     if (expired > 0) console.log(`[memory-maintenance] Expired ${expired} short-term memories`);
-  } catch (err: any) {
-    logger.error("Short-term expiry error", { error: err?.message });
+  } catch (err: unknown) {
+    logger.error("Short-term expiry error", { error: err instanceof Error ? err.message : String(err) });
   }
 }, 15 * 60_000);
 
@@ -194,8 +194,8 @@ setInterval(async () => {
     const { refreshWeights } = await import('../../ellie-forest/src/shared-memory');
     const refreshed = await refreshWeights({ limit: 500 });
     if (refreshed > 0) console.log(`[memory-maintenance] Refreshed weights for ${refreshed} memories`);
-  } catch (err: any) {
-    logger.error("Weight refresh error", { error: err?.message });
+  } catch (err: unknown) {
+    logger.error("Weight refresh error", { error: err instanceof Error ? err.message : String(err) });
   }
 }, 60 * 60_000);
 

@@ -20,6 +20,7 @@ import {
   sql,
 } from '../../../ellie-forest/src/index'
 import { createQueueItemDirect } from './agent-queue'
+import type { ApiRequest, ApiResponse } from "./types.ts";
 import { log } from "../logger.ts";
 
 const logger = log.child("bridge");
@@ -45,7 +46,7 @@ interface BridgeKey {
 
 async function authenticateBridgeKey(
   rawKey: string | undefined,
-  res: any,
+  res: ApiResponse,
   requiredPermission?: 'read' | 'write',
 ): Promise<BridgeKey | null> {
   if (!rawKey) {
@@ -91,7 +92,7 @@ function isWithinAllowedScopes(targetPath: string, allowedScopes: string[]): boo
 
 // ── POST /api/bridge/read ────────────────────────────────────
 
-export async function bridgeReadEndpoint(req: any, res: any) {
+export async function bridgeReadEndpoint(req: ApiRequest, res: ApiResponse) {
   const key = await authenticateBridgeKey(req.bridgeKey, res, 'read')
   if (!key) return
 
@@ -122,7 +123,7 @@ export async function bridgeReadEndpoint(req: any, res: any) {
     // ELLIE-255: Filter by author (bridge_collaborator in metadata)
     if (author) {
       results = results.filter(m =>
-        (m.metadata as any)?.bridge_collaborator === author
+        (m.metadata as Record<string, unknown>)?.bridge_collaborator === author
       )
     }
 
@@ -154,7 +155,7 @@ export function onBridgeWrite(cb: BridgeWriteCallback): void {
 
 // ── POST /api/bridge/write ───────────────────────────────────
 
-export async function bridgeWriteEndpoint(req: any, res: any) {
+export async function bridgeWriteEndpoint(req: ApiRequest, res: ApiResponse) {
   const key = await authenticateBridgeKey(req.bridgeKey, res, 'write')
   if (!key) return
 
@@ -266,7 +267,7 @@ export async function bridgeWriteEndpoint(req: any, res: any) {
 
 // ── GET /api/bridge/list ─────────────────────────────────────
 
-export async function bridgeListEndpoint(req: any, res: any) {
+export async function bridgeListEndpoint(req: ApiRequest, res: ApiResponse) {
   const key = await authenticateBridgeKey(req.bridgeKey, res, 'read')
   if (!key) return
 
@@ -310,7 +311,7 @@ export async function bridgeListEndpoint(req: any, res: any) {
 
 // ── GET /api/bridge/scopes ───────────────────────────────────
 
-export async function bridgeScopesEndpoint(req: any, res: any) {
+export async function bridgeScopesEndpoint(req: ApiRequest, res: ApiResponse) {
   const key = await authenticateBridgeKey(req.bridgeKey, res, 'read')
   if (!key) return
 
@@ -347,7 +348,7 @@ export async function bridgeScopesEndpoint(req: any, res: any) {
 
 // ── GET /api/bridge/tags ─────────────────────────────────────
 
-export async function bridgeTagsEndpoint(req: any, res: any) {
+export async function bridgeTagsEndpoint(req: ApiRequest, res: ApiResponse) {
   const key = await authenticateBridgeKey(req.bridgeKey, res, 'read')
   if (!key) return
 
@@ -382,7 +383,7 @@ export async function bridgeTagsEndpoint(req: any, res: any) {
 
 // ── GET /api/bridge/whoami ───────────────────────────────────
 
-export async function bridgeWhoamiEndpoint(req: any, res: any) {
+export async function bridgeWhoamiEndpoint(req: ApiRequest, res: ApiResponse) {
   const key = await authenticateBridgeKey(req.bridgeKey, res)
   if (!key) return
 

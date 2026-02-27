@@ -11,6 +11,7 @@
  *   POST /api/app-auth/update-profile — update name, timezone, preferences
  */
 
+import type { ApiRequest, ApiResponse } from "./types.ts"
 import { randomBytes } from 'crypto'
 import { sql } from '../../../ellie-forest/src/index'
 import { createPerson } from '../../../ellie-forest/src/people'
@@ -26,7 +27,7 @@ interface AppUser {
   email: string | null
   name: string | null
   timezone: string | null
-  preferences: Record<string, any>
+  preferences: Record<string, unknown>
   onboarding_state: string
   person_id: string | null
   anonymous_id: string | null
@@ -47,7 +48,7 @@ function generateToken(): string {
   return 'ess_' + randomBytes(32).toString('hex')
 }
 
-function extractToken(req: any): string | null {
+function extractToken(req: ApiRequest & { headers?: Record<string, string> }): string | null {
   const auth = req.headers?.authorization || req.headers?.Authorization || ''
   if (auth.startsWith('Bearer ')) return auth.slice(7)
   return null
@@ -63,7 +64,7 @@ async function getUserByToken(token: string): Promise<AppUser | null> {
 
 // ── POST /api/app-auth/send-code ─────────────────────────────
 
-export async function sendCodeEndpoint(req: any, res: any) {
+export async function sendCodeEndpoint(req: ApiRequest, res: ApiResponse) {
   try {
     const { email } = req.body
     if (!email || typeof email !== 'string' || !email.includes('@')) {
@@ -105,7 +106,7 @@ export async function sendCodeEndpoint(req: any, res: any) {
 
 // ── POST /api/app-auth/verify-code ───────────────────────────
 
-export async function verifyCodeEndpoint(req: any, res: any) {
+export async function verifyCodeEndpoint(req: ApiRequest, res: ApiResponse) {
   try {
     const { email, code, name, anonymous_id } = req.body
     if (!email || !code) {
@@ -210,7 +211,7 @@ export async function verifyCodeEndpoint(req: any, res: any) {
 
 // ── GET /api/app-auth/me ─────────────────────────────────────
 
-export async function meEndpoint(req: any, res: any) {
+export async function meEndpoint(req: ApiRequest, res: ApiResponse) {
   try {
     const token = extractToken(req)
     if (!token) {
@@ -244,7 +245,7 @@ export async function meEndpoint(req: any, res: any) {
 
 // ── POST /api/app-auth/update-profile ────────────────────────
 
-export async function updateProfileEndpoint(req: any, res: any) {
+export async function updateProfileEndpoint(req: ApiRequest, res: ApiResponse) {
   try {
     const token = extractToken(req)
     if (!token) {

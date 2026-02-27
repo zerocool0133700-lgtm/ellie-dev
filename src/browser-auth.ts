@@ -13,7 +13,7 @@ import { getCredentialByDomain } from "../../ellie-forest/src/hollow";
 const logger = log.child("browser-auth");
 
 export interface AuthResult {
-  cookies: any[];
+  cookies: Array<{ name: string; value: string; domain?: string; path?: string }>;
   source: "cache" | "fresh_login";
 }
 
@@ -108,11 +108,11 @@ export async function getAuthHeaders(
 
   switch (cred.entry.credential_type) {
     case "bearer_token":
-      return { Authorization: `Bearer ${(cred.payload as any).token}` };
+      return { Authorization: `Bearer ${(cred.payload as Record<string, string>).token}` };
     case "api_key":
-      return { Authorization: `Bearer ${(cred.payload as any).key}` };
+      return { Authorization: `Bearer ${(cred.payload as Record<string, string>).key}` };
     case "cookie":
-      return { Cookie: (cred.payload as any).cookie };
+      return { Cookie: (cred.payload as Record<string, string>).cookie };
     default:
       return null;
   }

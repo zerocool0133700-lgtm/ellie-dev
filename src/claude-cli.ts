@@ -35,10 +35,10 @@ const CLI_TIMEOUT_MS = parseInt(process.env.CLI_TIMEOUT_MS || (AGENT_MODE ? "300
 // These are registered by relay.ts at startup since the actual
 // implementations depend on state defined later in relay.ts.
 
-let _broadcastExtension: (event: Record<string, any>) => void = () => {};
+let _broadcastExtension: (event: Record<string, unknown>) => void = () => {};
 export function setBroadcastExtension(fn: typeof _broadcastExtension): void { _broadcastExtension = fn; }
 
-let _getNotifyCtx: () => NotifyContext = () => ({ bot: null as any, telegramUserId: "", gchatSpaceName: "" });
+let _getNotifyCtx: () => NotifyContext = () => ({ bot: null as unknown as import("grammy").Bot, telegramUserId: "", gchatSpaceName: "" });
 export function setNotifyCtx(fn: typeof _getNotifyCtx): void { _getNotifyCtx = fn; }
 
 let _anthropic: Anthropic | null = null;
@@ -328,8 +328,8 @@ export async function callClaudeVoice(systemPrompt: string, userMessage: string)
         messages: [{ role: "user", content: userMessage }],
       });
       const text = response.content
-        .filter((b: any) => b.type === "text")
-        .map((b: any) => b.text)
+        .filter((b: { type: string }) => b.type === "text")
+        .map((b: { type: string; text: string }) => b.text)
         .join("");
       console.log(`[voice] API responded in ${Date.now() - start}ms`);
       return text.trim();

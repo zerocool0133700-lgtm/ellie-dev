@@ -237,7 +237,7 @@ export async function handleToolApprovalHTTP(req: IncomingMessage, res: ServerRe
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
-    } catch (err: any) {
+    } catch (err: unknown) {
       logger.error("HTTP error", err);
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ approved: true, reason: "Error in approval check — allowing by default" }));

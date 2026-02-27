@@ -161,9 +161,9 @@ export async function processQueue(): Promise<{ processed: number; failed: numbe
       logger.info("Synced", { action: item.action, workItemId: item.work_item_id });
       processed++;
 
-    } catch (err: any) {
+    } catch (err: unknown) {
       const attempts = (item.attempts || 0) + 1;
-      const errorMsg = err?.message || String(err);
+      const errorMsg = err instanceof Error ? err.message : String(err);
 
       if (attempts >= item.max_attempts) {
         // Dead letter

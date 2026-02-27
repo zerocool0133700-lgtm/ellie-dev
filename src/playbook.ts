@@ -148,13 +148,14 @@ export async function executePlaybookCommands(
           await handleCreate(cmd, ctx);
           break;
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
       logger.error("Command execution failed", { command: cmd.type, ticket: cmd.ticketId }, err);
       await notify(getNotifyCtx(ctx), {
         event: "error",
         workItemId: cmd.ticketId || "playbook",
-        telegramMessage: `Playbook ${cmd.type} failed: ${err?.message?.slice(0, 100) || "unknown error"}`,
-        gchatMessage: `Playbook ${cmd.type} error:\n${err?.message?.slice(0, 300) || "unknown error"}`,
+        telegramMessage: `Playbook ${cmd.type} failed: ${errMsg.slice(0, 100) || "unknown error"}`,
+        gchatMessage: `Playbook ${cmd.type} error:\n${errMsg.slice(0, 300) || "unknown error"}`,
       }).catch(() => {});
     }
   }
@@ -190,7 +191,7 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
   });
 
   // 3. Start work session (creates forest tree)
-  let sessionResult: any;
+  let sessionResult: Record<string, unknown> | undefined;
   try {
     const resp = await fetch("http://localhost:3001/api/work-session/start", {
       method: "POST",
@@ -201,7 +202,7 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
     if (!sessionResult?.success) {
       logger.warn("Work session start returned unexpected result", { result: sessionResult });
     }
-  } catch (err: any) {
+  } catch (err: unknown) {
     logger.warn("Work session start failed (non-fatal)", err);
   }
 

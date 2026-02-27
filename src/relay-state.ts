@@ -67,7 +67,7 @@ export const ellieChatPhoneHistories = new Map<string, Array<{ role: string; con
 // ── Broadcast helpers ──────────────────────────────────────
 
 /** Fire-and-forget broadcast to all connected extension clients. */
-export function broadcastExtension(event: Record<string, any>): void {
+export function broadcastExtension(event: Record<string, unknown>): void {
   if (extensionClients.size === 0) return;
   const payload = JSON.stringify({ ...event, ts: Date.now() });
   console.log(`[extension] Broadcasting ${event.type} to ${extensionClients.size} client(s)`);
@@ -81,7 +81,7 @@ export function broadcastExtension(event: Record<string, any>): void {
 }
 
 /** Broadcast a JSON message to all connected ellie-chat clients (ELLIE-199). */
-export function broadcastToEllieChatClients(event: Record<string, any>): void {
+export function broadcastToEllieChatClients(event: Record<string, unknown>): void {
   if (ellieChatClients.size === 0) return;
   const payload = JSON.stringify(event);
   for (const ws of ellieChatClients) {

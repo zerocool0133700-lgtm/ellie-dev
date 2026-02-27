@@ -17,7 +17,7 @@ const QUEUE_TASK_TIMEOUT_MS = parseInt(process.env.QUEUE_TASK_TIMEOUT_MS || "480
 
 // ── External dependency (registered by relay.ts at startup) ──
 
-let _broadcastExtension: (event: Record<string, any>) => void = () => {};
+let _broadcastExtension: (event: Record<string, unknown>) => void = () => {};
 export function setQueueBroadcast(fn: typeof _broadcastExtension): void { _broadcastExtension = fn; }
 
 // ── Queue types ──────────────────────────────────────────────

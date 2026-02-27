@@ -146,7 +146,7 @@ async function resolveAgentForBlock(
       .limit(1)
       .single();
 
-    const agentName = (data as any)?.agents?.name;
+    const agentName = (data as Record<string, Record<string, string>> | null)?.agents?.name;
     if (agentName) return agentName;
   } catch {
     // Query failed or no match — fall through

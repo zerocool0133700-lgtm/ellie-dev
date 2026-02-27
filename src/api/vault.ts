@@ -9,6 +9,7 @@
  */
 
 import { log } from "../logger.ts";
+import type { ApiRequest, ApiResponse } from "./types.ts";
 import {
   storeCredential, getCredentialByDomain, getCredentialById,
   listCredentials, updateCredential, deleteCredential,
@@ -44,28 +45,28 @@ function toCredentialRecord(entry: HollowEntry) {
  * POST /api/vault/credentials
  * Body: { label, domain, credential_type, payload, notes?, expires_at? }
  */
-export async function createVaultCredential(req: any, res: any, _supabase: any) {
+export async function createVaultCredential(req: ApiRequest, res: ApiResponse, _supabase: unknown) {
   try {
-    const { label, domain, credential_type, payload, notes, expires_at } = req.body;
+    const { label, domain, credential_type, payload, notes, expires_at } = req.body as Record<string, unknown>;
 
     if (!label || !domain || !credential_type || !payload) {
       return res.status(400).json({ error: "Missing required fields: label, domain, credential_type, payload" });
     }
 
     const entry = await storeCredential(KEYCHAIN_ID, {
-      label: normalizeLabel(label),
-      domain,
+      label: normalizeLabel(label as string),
+      domain: domain as string,
       credential_type: credential_type as CredentialType,
       value: JSON.stringify(payload),
-      notes,
-      expires_at: expires_at ? new Date(expires_at) : undefined,
+      notes: notes as string | undefined,
+      expires_at: expires_at ? new Date(expires_at as string) : undefined,
     });
 
     console.log(`[vault] Created credential "${label}" for ${domain}`);
     return res.json(toCredentialRecord(entry));
-  } catch (err: any) {
+  } catch (err: unknown) {
     logger.error("Create failed", err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 }
 
@@ -73,39 +74,39 @@ export async function createVaultCredential(req: any, res: any, _supabase: any) 
  * GET /api/vault/credentials
  * Query: ?domain=x&type=y
  */
-export async function listVaultCredentials(req: any, res: any, _supabase: any) {
+export async function listVaultCredentials(req: ApiRequest, res: ApiResponse, _supabase: unknown) {
   try {
     const entries = await listCredentials({
       domain: req.query?.domain,
       credential_type: req.query?.type as CredentialType | undefined,
     });
     return res.json(entries.map(toCredentialRecord));
-  } catch (err: any) {
+  } catch (err: unknown) {
     logger.error("List failed", err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 }
 
 /**
  * GET /api/vault/credentials/:id
  */
-export async function getVaultCredential(req: any, res: any, _supabase: any) {
+export async function getVaultCredential(req: ApiRequest, res: ApiResponse, _supabase: unknown) {
   try {
     const result = await getCredentialById(req.params.id);
     if (!result) return res.status(404).json({ error: "Credential not found" });
     return res.json(toCredentialRecord(result.entry));
-  } catch (err: any) {
+  } catch (err: unknown) {
     logger.error("Get failed", err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 }
 
 /**
  * PATCH /api/vault/credentials/:id
  */
-export async function updateVaultCredential(req: any, res: any, _supabase: any) {
+export async function updateVaultCredential(req: ApiRequest, res: ApiResponse, _supabase: unknown) {
   try {
-    const updates: any = {};
+    const updates: Record<string, unknown> = {};
     if (req.body.label !== undefined) updates.label = req.body.label;
     if (req.body.domain !== undefined) updates.domain = req.body.domain;
     if (req.body.credential_type !== undefined) updates.credential_type = req.body.credential_type;
@@ -116,23 +117,23 @@ export async function updateVaultCredential(req: any, res: any, _supabase: any) 
     const entry = await updateCredential(req.params.id, updates);
     console.log(`[vault] Updated credential ${req.params.id}`);
     return res.json(toCredentialRecord(entry));
-  } catch (err: any) {
+  } catch (err: unknown) {
     logger.error("Update failed", err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 }
 
 /**
  * DELETE /api/vault/credentials/:id
  */
-export async function deleteVaultCredential(req: any, res: any, _supabase: any) {
+export async function deleteVaultCredential(req: ApiRequest, res: ApiResponse, _supabase: unknown) {
   try {
     await deleteCredential(req.params.id);
     console.log(`[vault] Deleted credential ${req.params.id}`);
     return res.json({ success: true });
-  } catch (err: any) {
+  } catch (err: unknown) {
     logger.error("Delete failed", err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 }
 
@@ -145,7 +146,7 @@ export async function deleteVaultCredential(req: any, res: any, _supabase: any) 
  * Body: { domain: "github.com", type?: "api_key" } or { id: "uuid" }
  * Returns decrypted credential payload. Internal use only.
  */
-export async function resolveVaultCredential(req: any, res: any, _supabase: any) {
+export async function resolveVaultCredential(req: ApiRequest, res: ApiResponse, _supabase: unknown) {
   try {
     const { domain, type, id } = req.body;
 
@@ -168,9 +169,9 @@ export async function resolveVaultCredential(req: any, res: any, _supabase: any)
       record: toCredentialRecord(result.entry),
       payload: result.payload,
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     logger.error("Resolve failed", err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 }
 
@@ -178,7 +179,7 @@ export async function resolveVaultCredential(req: any, res: any, _supabase: any)
  * POST /api/vault/fetch
  * Authenticated fetch with credential injection.
  */
-export async function authenticatedFetch(req: any, res: any, _supabase: any) {
+export async function authenticatedFetch(req: ApiRequest, res: ApiResponse, _supabase: unknown) {
   try {
     const { url, method = "GET", headers = {}, body } = req.body;
 
@@ -203,17 +204,17 @@ export async function authenticatedFetch(req: any, res: any, _supabase: any) {
 
     switch (cred.entry.credential_type) {
       case "bearer_token":
-        fetchHeaders["Authorization"] = `Bearer ${(cred.payload as any).token}`;
+        fetchHeaders["Authorization"] = `Bearer ${(cred.payload as Record<string, string>).token}`;
         break;
       case "api_key":
-        fetchHeaders["Authorization"] = `Bearer ${(cred.payload as any).key}`;
+        fetchHeaders["Authorization"] = `Bearer ${(cred.payload as Record<string, string>).key}`;
         break;
       case "cookie":
-        fetchHeaders["Cookie"] = (cred.payload as any).cookie;
+        fetchHeaders["Cookie"] = (cred.payload as Record<string, string>).cookie;
         break;
       case "oauth":
-        if ((cred.payload as any).access_token) {
-          fetchHeaders["Authorization"] = `Bearer ${(cred.payload as any).access_token}`;
+        if ((cred.payload as Record<string, string>).access_token) {
+          fetchHeaders["Authorization"] = `Bearer ${(cred.payload as Record<string, string>).access_token}`;
         }
         break;
       case "password": {
@@ -221,7 +222,7 @@ export async function authenticatedFetch(req: any, res: any, _supabase: any) {
           const { getAuthenticatedSession } = await import("../browser-auth.ts");
           const session = await getAuthenticatedSession(null, domain);
           if (session) {
-            fetchHeaders["Cookie"] = session.cookies.map((c: any) => `${c.name}=${c.value}`).join("; ");
+            fetchHeaders["Cookie"] = session.cookies.map((c: { name: string; value: string }) => `${c.name}=${c.value}`).join("; ");
           }
         } catch (err) {
           logger.error("Browser auth failed", err);
@@ -252,9 +253,9 @@ export async function authenticatedFetch(req: any, res: any, _supabase: any) {
       contentType,
       body: responseBody,
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     logger.error("Fetch failed", err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 }
 

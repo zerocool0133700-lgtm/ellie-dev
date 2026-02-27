@@ -46,7 +46,7 @@ async function esRequest(
   method: string,
   path: string,
   body?: object
-): Promise<any> {
+): Promise<unknown> {
   const opts: RequestInit = {
     method,
     headers: { "Content-Type": "application/json" },
@@ -360,7 +360,7 @@ export async function bulkIndexForest(
   });
 
   const result = await res.json();
-  const errorCount = result.items?.filter((i: any) => i.index?.error).length || 0;
+  const errorCount = result.items?.filter((i: Record<string, Record<string, unknown>>) => i.index?.error).length || 0;
 
   return { errors: errorCount, indexed: operations.length - errorCount };
 }

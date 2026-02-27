@@ -145,7 +145,10 @@ export async function getArchetypeContext(): Promise<string> {
     const { getChainOwnerArchetype } = await import('../../ellie-forest/src/people');
     const { buildArchetypePrompt } = await import('../../ellie-forest/src/archetypes');
     const prefs = await getChainOwnerArchetype();
-    _archetypeContext = buildArchetypePrompt(prefs.archetype as any, prefs.flavor as any);
+    _archetypeContext = buildArchetypePrompt(
+      prefs.archetype as import('../../ellie-forest/src/archetypes').ArchetypeId,
+      prefs.flavor as import('../../ellie-forest/src/archetypes').FlavorId,
+    );
     _archetypeLastLoaded = now;
   } catch {
     // No archetype set yet — soul alone is enough
@@ -259,14 +262,14 @@ export async function runPostMessageAssessment(
           messages: [{ role: "user", content: prompt }],
         });
         const text = response.content
-          .filter((b: any) => b.type === "text")
-          .map((b: any) => b.text)
+          .filter((b): b is Anthropic.TextBlock => b.type === "text")
+          .map((b) => b.text)
           .join("");
         claudeResult = parseAssessmentResult(text);
         if (!claudeResult) {
           logger.warn("Failed to parse haiku response", { response: text.substring(0, 200) });
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
         logger.error("Haiku call failed", err);
       }
     }
@@ -301,7 +304,7 @@ export async function runPostMessageAssessment(
             category: mapHealthToMemoryCategory(signal.category),
           });
         }
-      } catch (memErr: any) {
+      } catch (memErr: unknown) {
         logger.warn("Health memory write failed", memErr);
       }
     }
@@ -318,14 +321,14 @@ export async function runPostMessageAssessment(
             confidence: mem.importance,
             tags: ['perception', mem.cognitive_type, mem.category],
             metadata: { source: 'perception_layer' },
-            cognitive_type: mem.cognitive_type as any,
-            category: mem.category as any,
+            cognitive_type: mem.cognitive_type as import('../../ellie-forest/src/types').CognitiveType,
+            category: mem.category as import('../../ellie-forest/src/types').MemoryCategory,
             emotional_valence: mem.emotional_valence ?? undefined,
             emotional_intensity: mem.emotional_intensity ?? undefined,
-            duration: mem.duration as any,
+            duration: mem.duration as import('../../ellie-forest/src/types').MemoryDuration,
           });
         }
-      } catch (memErr: any) {
+      } catch (memErr: unknown) {
         logger.warn("Memory perception write failed", memErr);
       }
     }
@@ -336,7 +339,7 @@ export async function runPostMessageAssessment(
 
     console.log(`[assessment] Completed in ${Date.now() - start}ms` +
       (claudeResult ? ` (mbti:${claudeResult.mbti.length} enn:${claudeResult.enneagram.length} health:${claudeResult.health.length} mem:${claudeResult.memories.length})` : " (rules only)"));
-  } catch (err: any) {
+  } catch (err: unknown) {
     logger.error("Assessment failed", err);
   }
 }

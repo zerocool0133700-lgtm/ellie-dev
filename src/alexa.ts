@@ -137,13 +137,13 @@ export async function handleAddTodo(slots: Record<string, string>): Promise<stri
 export async function handleGetTodos(): Promise<string> {
   try {
     const res = await fetch(`${DASHBOARD_URL}/api/todos?status=open&limit=5`);
-    const todos = (await res.json()) as any[];
+    const todos = (await res.json()) as Array<Record<string, unknown>>;
 
     if (!todos?.length) {
       return "Your todo list is clear. Nice work!";
     }
 
-    const items = todos.map((t: any, i: number) => `${i + 1}. ${t.content}`);
+    const items = todos.map((t: Record<string, unknown>, i: number) => `${i + 1}. ${t.content}`);
     const count = todos.length;
     const intro = count === 1 ? "You have one open todo." : `You have ${count} open todos.`;
 
@@ -233,26 +233,27 @@ export function buildAlexaResponse(
   cardTitle?: string,
   cardText?: string,
 ) {
-  const response: Record<string, any> = {
-    version: "1.0",
-    response: {
-      outputSpeech: {
-        type: "SSML",
-        ssml: speechText.startsWith("<speak>") ? speechText : textToSsml(speechText),
-      },
-      shouldEndSession,
+  const alexaResponse: {
+    outputSpeech: { type: string; ssml: string };
+    shouldEndSession: boolean;
+    card?: { type: string; title: string; content: string };
+  } = {
+    outputSpeech: {
+      type: "SSML",
+      ssml: speechText.startsWith("<speak>") ? speechText : textToSsml(speechText),
     },
+    shouldEndSession,
   };
 
   if (cardTitle) {
-    response.response.card = {
+    alexaResponse.card = {
       type: "Simple",
       title: cardTitle,
       content: cardText || speechText.replace(/<[^>]+>/g, ""),
     };
   }
 
-  return response;
+  return { version: "1.0", response: alexaResponse };
 }
 
 export function buildAlexaErrorResponse(message?: string) {

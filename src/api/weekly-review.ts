@@ -9,6 +9,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Bot } from "grammy";
+import type { ApiRequest, ApiResponse } from "./types.ts";
 import { sendGoogleChatMessage, isGoogleChatEnabled } from "../google-chat.ts";
 import { listOpenIssues, isPlaneConfigured } from "../plane.ts";
 import { log } from "../logger.ts";
@@ -225,8 +226,8 @@ function formatReviewText(data: WeeklyReviewData): string {
  * }
  */
 export async function generateWeeklyReview(
-  req: any,
-  res: any,
+  req: ApiRequest,
+  res: ApiResponse,
   supabase: SupabaseClient,
   bot: Bot,
 ) {

@@ -81,8 +81,8 @@ async function getCredentialDomains(): Promise<Set<string>> {
     const domains = await listCredentialDomains();
     domainCache = new Set(domains);
     console.log(`[skills] Credential domains: ${domains.join(", ") || "(none)"}`);
-  } catch (err: any) {
-    logger.warn("Credential domain lookup error", { error: err?.message });
+  } catch (err: unknown) {
+    logger.warn("Credential domain lookup error", { error: err instanceof Error ? err.message : String(err) });
     domainCache = new Set();
   }
 

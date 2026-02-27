@@ -50,7 +50,7 @@ async function esRequest(
   method: string,
   path: string,
   body?: object
-): Promise<any> {
+): Promise<unknown> {
   const opts: RequestInit = {
     method,
     headers: { "Content-Type": "application/json" },
@@ -211,7 +211,7 @@ export async function bulkIndex(
   });
 
   const result = await res.json();
-  const errorCount = result.items?.filter((i: any) => i.index?.error).length || 0;
+  const errorCount = result.items?.filter((i: Record<string, Record<string, unknown>>) => i.index?.error).length || 0;
 
   return { errors: errorCount, indexed: operations.length - errorCount };
 }
@@ -261,7 +261,7 @@ export async function searchElastic(
       filters.push({ bool: { must_not: { term: { conversation_id: excludeConversationId } } } });
     }
 
-    let queryBody: any = {
+    let queryBody: Record<string, unknown> = {
       bool: {
         must: [
           {
@@ -303,12 +303,12 @@ export async function searchElastic(
       "POST",
       "/ellie-messages,ellie-memory,ellie-conversations/_search",
       { query: queryBody, size: limit, min_score: 2.0 }
-    );
+    ) as { hits?: { hits?: Array<{ _source: Record<string, string>; _index: string; _score?: number }> } };
 
     const hits = result.hits?.hits;
     if (!hits || hits.length === 0) return "";
 
-    const lines = hits.map((hit: any) => {
+    const lines = hits.map((hit: { _source: Record<string, string>; _index: string; _score?: number }) => {
       const src = hit._source;
       const index = hit._index;
       const score = hit._score?.toFixed(1) || "?";

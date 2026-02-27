@@ -17,7 +17,7 @@ const ES_URL = process.env.ELASTICSEARCH_URL || "";
 // ES REQUEST HELPER
 // ============================================================
 
-async function esRequest(method: string, path: string, body?: object): Promise<any> {
+async function esRequest(method: string, path: string, body?: object): Promise<unknown> {
   const opts: RequestInit = {
     method,
     headers: { "Content-Type": "application/json" },
@@ -43,7 +43,7 @@ export interface ForestSearchResult {
   score: number;
   type: "event" | "commit" | "creature" | "tree";
   highlight?: Record<string, string[]>;
-  source: Record<string, any>;
+  source: Record<string, unknown>;
 }
 
 export interface ForestSearchOptions {
@@ -126,7 +126,7 @@ export async function searchForest(
   }
 
   // Build query
-  let queryBody: any = {
+  let queryBody: Record<string, unknown> = {
     bool: {
       must: [
         {
@@ -180,10 +180,10 @@ export async function searchForest(
         description: { number_of_fragments: 2 },
       },
     },
-  });
+  }) as { hits?: { hits?: Array<{ _index: string; _id: string; _score: number; _source: Record<string, unknown>; highlight?: Record<string, string[]> }> } };
 
   const hits = result.hits?.hits || [];
-  return hits.map((hit: any) => {
+  return hits.map((hit: { _index: string; _id: string; _score: number; _source: Record<string, unknown> }) => {
     const idx = hit._index as string;
     let type: ForestSearchResult["type"] = "event";
     if (idx.includes("commits")) type = "commit";
@@ -291,7 +291,7 @@ export async function getForestMetrics(
   ]);
 
   // Parse buckets into maps
-  const toBucketMap = (agg: any): Record<string, number> => {
+  const toBucketMap = (agg: { buckets?: Array<{ key: string; doc_count: number }> }): Record<string, number> => {
     const map: Record<string, number> = {};
     for (const bucket of agg?.buckets || []) {
       map[bucket.key] = bucket.doc_count;
@@ -351,10 +351,10 @@ export async function suggestTreeNames(prefix: string): Promise<string[]> {
         },
       },
     },
-  });
+  }) as { suggest?: { tree_suggest?: Array<{ options?: Array<{ text: string }> }> } };
 
   const options = result.suggest?.tree_suggest?.[0]?.options || [];
-  return options.map((o: any) => o.text);
+  return options.map((o: { text: string }) => o.text);
 }
 
 /**

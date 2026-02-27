@@ -531,9 +531,9 @@ export async function initiateCall(toNumber?: string): Promise<string> {
 
     console.log(`[voice] Outbound call initiated: ${call.sid}`);
     return `Calling ${to}... (SID: ${call.sid})`;
-  } catch (error: any) {
+  } catch (error: unknown) {
     logger.error("Call error", error);
-    return `Failed to call: ${error.message}`;
+    return `Failed to call: ${error instanceof Error ? error.message : String(error)}`;
   }
 }
 

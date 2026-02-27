@@ -704,8 +704,8 @@ async function callLightSkill(
   });
 
   const text = response.content
-    .filter((b: any) => b.type === "text")
-    .map((b: any) => b.text)
+    .filter((b: { type: string }) => b.type === "text")
+    .map((b: { type: string; text: string }) => b.text)
     .join("");
 
   // Log estimated vs actual for accuracy tracking (ELLIE-245)

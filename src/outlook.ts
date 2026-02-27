@@ -125,7 +125,7 @@ async function getAccessToken(): Promise<string | null> {
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0/me";
 
-async function graphFetch(path: string, options?: RequestInit): Promise<any> {
+async function graphFetch(path: string, options?: RequestInit): Promise<unknown> {
   const token = await getAccessToken();
   if (!token) throw new Error("Outlook not authenticated");
 
@@ -159,14 +159,14 @@ export async function listUnread(limit: number = 10): Promise<OutlookMessage[]> 
     $orderby: "receivedDateTime desc",
     $select: "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments,conversationId,webLink",
   });
-  const data = await graphFetch(`/mailFolders/inbox/messages?${params}`);
-  return data?.value || [];
+  const data = await graphFetch(`/mailFolders/inbox/messages?${params}`) as Record<string, unknown> | null;
+  return (data?.value as OutlookMessage[]) || [];
 }
 
 /** Get unread count for inbox. */
 export async function getUnreadCount(): Promise<number> {
-  const data = await graphFetch("/mailFolders/inbox?$select=unreadItemCount");
-  return data?.unreadItemCount || 0;
+  const data = await graphFetch("/mailFolders/inbox?$select=unreadItemCount") as Record<string, unknown> | null;
+  return (data?.unreadItemCount as number) || 0;
 }
 
 /** Search messages using Microsoft Graph $search. */
@@ -176,18 +176,18 @@ export async function searchMessages(query: string, limit: number = 10): Promise
     $top: String(limit),
     $select: "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments,conversationId,webLink",
   });
-  const data = await graphFetch(`/messages?${params}`);
-  return data?.value || [];
+  const data = await graphFetch(`/messages?${params}`) as Record<string, unknown> | null;
+  return (data?.value as OutlookMessage[]) || [];
 }
 
 /** Get full message content by ID. */
 export async function getMessage(messageId: string): Promise<OutlookMessage> {
-  return graphFetch(`/messages/${encodeURIComponent(messageId)}`);
+  return graphFetch(`/messages/${encodeURIComponent(messageId)}`) as Promise<OutlookMessage>;
 }
 
 /** Send a new email. */
 export async function sendEmail(payload: OutlookSendPayload): Promise<void> {
-  const message: Record<string, any> = {
+  const message: Record<string, unknown> = {
     subject: payload.subject,
     body: { contentType: "Text", content: payload.body },
     toRecipients: payload.to.map((addr) => ({

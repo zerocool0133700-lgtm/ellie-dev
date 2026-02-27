@@ -140,6 +140,7 @@ import {
 } from "./tool-approval.ts";
 import { handleGatewayRoute } from "./api/gateway-intake.ts";
 import { log } from "./logger.ts";
+import type { ApiRequest, ApiResponse } from "./api/types.ts";
 
 const logger = log.child("http");
 
@@ -208,14 +209,16 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         const event: GoogleChatEvent = JSON.parse(body);
 
         // Handle card button clicks (approval actions)
-        const cardAction = (event as any)?.chat?.cardClickedPayload ||
-          ((event as any)?.type === "CARD_CLICKED" ? event : null);
+        const eventRecord = event as Record<string, unknown>;
+        const cardAction = (eventRecord as { chat?: { cardClickedPayload?: unknown } })?.chat?.cardClickedPayload ||
+          (eventRecord?.type === "CARD_CLICKED" ? event : null);
         if (cardAction) {
-          const actionFn = cardAction?.chat?.cardClickedPayload?.action?.actionMethodName ||
-            (cardAction as any)?.action?.actionMethodName || "";
-          const params = cardAction?.chat?.cardClickedPayload?.action?.parameters ||
-            (cardAction as any)?.action?.parameters || [];
-          const actionId = params.find((p: any) => p.key === "action_id")?.value;
+          const cardRecord = cardAction as Record<string, unknown>;
+          const actionFn = (cardRecord as { chat?: { cardClickedPayload?: { action?: { actionMethodName?: string } } } })?.chat?.cardClickedPayload?.action?.actionMethodName ||
+            (cardRecord as { action?: { actionMethodName?: string } })?.action?.actionMethodName || "";
+          const params = (cardRecord as { chat?: { cardClickedPayload?: { action?: { parameters?: Array<{ key: string; value: string }> } } } })?.chat?.cardClickedPayload?.action?.parameters ||
+            (cardRecord as { action?: { parameters?: Array<{ key: string; value: string }> } })?.action?.parameters || [];
+          const actionId = params.find((p: { key: string; value: string }) => p.key === "action_id")?.value;
 
           if (actionId && (actionFn === "approve_action" || actionFn === "deny_action")) {
             const pending = getPendingAction(actionId);
@@ -863,7 +866,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         const token = await signToken(subject, scopes);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ token }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         logger.error("Token issue error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Token generation failed" }));
@@ -914,7 +917,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
           "Content-Length": audioBuffer.length.toString(),
         });
         res.end(audioBuffer);
-      } catch (err: any) {
+      } catch (err: unknown) {
         logger.error("TTS API error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: String(err) }));
@@ -950,7 +953,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ text }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         logger.error("STT API error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: String(err) }));
@@ -976,11 +979,11 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
             messages: [{ role: "user", content: "ok" }],
           });
           result.anthropic = { status: "ok", latency_ms: Date.now() - start };
-        } catch (err: any) {
-          const msg = err?.message || String(err);
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
           let status = "error";
           if (msg.includes("credit balance")) status = "low_credits";
-          else if (err?.status === 401) status = "invalid_key";
+          else if ((err as { status?: number })?.status === 401) status = "invalid_key";
           result.anthropic = { status, latency_ms: Date.now() - start, error: msg };
         }
       }
@@ -998,9 +1001,9 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         const data = await getGoogleTasksJSON();
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(data));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: err?.message || "Failed to fetch tasks" }));
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Failed to fetch tasks" }));
       }
     })();
     return;
@@ -1013,9 +1016,9 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         await syncAllCalendars();
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: err?.message || "Sync failed" }));
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Sync failed" }));
       }
     })();
     return;
@@ -1082,7 +1085,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
             .select("type, content")
             .in("id", data.memory_ids);
           if (mems?.length) {
-            contextParts.push("MEMORIES:\n" + mems.map((m: any) => `[${m.type}] ${m.content}`).join("\n"));
+            contextParts.push("MEMORIES:\n" + mems.map((m: { type: string; content: string }) => `[${m.type}] ${m.content}`).join("\n"));
           }
         }
 
@@ -1113,10 +1116,10 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         console.log(`[ticket] Created ${result.identifier}: ${ticket.title}`);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ success: true, identifier: result.identifier, title: ticket.title, description: ticket.description }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         logger.error("Ticket creation error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: err?.message || "Failed to create ticket" }));
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Failed to create ticket" }));
       }
     });
     return;
@@ -1277,7 +1280,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
             .order("created_at", { ascending: true });
 
           const transcript = (msgs || [])
-            .map((m: any) => `${m.role === "user" ? "Dave" : "Ellie"}: ${m.content}`)
+            .map((m: { role: string; content: string; created_at: string }) => `${m.role === "user" ? "Dave" : "Ellie"}: ${m.content}`)
             .join("\n");
 
           convoTranscripts.push(
@@ -1363,8 +1366,8 @@ If no actionable ideas are found, return: { "ideas": [] }`;
 
         // Send extracted ideas to ellie-chat for interactive triage
         if (ideas.length > 0) {
-          const newIdeas = ideas.filter((i: any) => !i.existing);
-          const existingIdeas = ideas.filter((i: any) => i.existing);
+          const newIdeas = ideas.filter((i: { title: string; description: string; existing: string | null }) => !i.existing);
+          const existingIdeas = ideas.filter((i: { title: string; description: string; existing: string | null }) => i.existing);
 
           let chatMsg = `**Idea Extraction** — ${ideas.length} potential work items\n\n`;
           for (const idea of ideas) {
@@ -1456,7 +1459,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         }
 
         const transcript = msgs
-          .map((m: any) => `${m.role === "user" ? "Dave" : "Ellie"}: ${m.content}`)
+          .map((m: { role: string; content: string; created_at: string }) => `${m.role === "user" ? "Dave" : "Ellie"}: ${m.content}`)
           .join("\n");
 
         // Build extraction prompt
@@ -1581,7 +1584,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           const isCorrection = candidate.category === "correction";
           const memory = await writeMemory({
             content: candidate.content,
-            type: isCorrection ? "fact" : candidate.type as any,
+            type: isCorrection ? "fact" : candidate.type as "decision" | "finding" | "fact" | "hypothesis",
             scope_path: candidate.scope_path,
             confidence: isCorrection ? 1.0 : candidate.confidence,
             tags: [
@@ -1653,26 +1656,26 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
 
         // Parse query params
         const queryParams: Record<string, string> = {};
-        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        url.searchParams.forEach((v: string, k: string) => { queryParams[k] = v; });
 
         // Extract endpoint and params
         const pathParts = url.pathname.replace("/api/memory/", "").split("/");
         const endpoint = pathParts[0]; // "stats", "timeline", or "by-agent"
         const param = pathParts[1] || null; // agent name for by-agent
 
-        const mockReq = { query: queryParams, params: { agent: param } } as any;
-        const mockRes = {
+        const mockReq: ApiRequest = { query: queryParams, params: { agent: param } };
+        const mockRes: ApiResponse = {
           status: (code: number) => ({
-            json: (data: any) => {
+            json: (data: unknown) => {
               res.writeHead(code, { "Content-Type": "application/json" });
               res.end(JSON.stringify(data));
             }
           }),
-          json: (data: any) => {
+          json: (data: unknown) => {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(data));
           }
-        } as any;
+        };
 
         switch (endpoint) {
           case "stats":
@@ -1780,9 +1783,9 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
             version: snapshot.version,
           },
         }));
-      } catch (err: any) {
+      } catch (err: unknown) {
         res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: err?.message || "Failed to load skills" }));
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Failed to load skills" }));
       }
     })();
     return;
@@ -1918,10 +1921,10 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
             meta,
             auditReport,
           }));
-        } catch (err: any) {
+        } catch (err: unknown) {
           logger.error("Skills import error", err);
           res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: err?.message || "Failed to import skill" }));
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Failed to import skill" }));
         }
       })();
     });
@@ -1934,7 +1937,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
     req.on("end", async () => {
       try {
-        let data: any;
+        let data: Record<string, unknown>;
         try {
           data = JSON.parse(body);
         } catch (parseErr) {
@@ -1950,19 +1953,19 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           await import("./api/work-session.ts");
 
         // Mock req/res objects that match Express signature
-        const mockReq = { body: data } as any;
-        const mockRes = {
+        const mockReq: ApiRequest = { body: data };
+        const mockRes: ApiResponse = {
           status: (code: number) => ({
-            json: (data: any) => {
+            json: (data: unknown) => {
               res.writeHead(code, { "Content-Type": "application/json" });
               res.end(JSON.stringify(data));
             }
           }),
-          json: (data: any) => {
+          json: (data: unknown) => {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(data));
           }
-        } as any;
+        };
 
         switch (endpoint) {
           case "start":
@@ -2046,7 +2049,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
     req.on("end", async () => {
       try {
-        let data: any;
+        let data: Record<string, unknown>;
         try {
           data = JSON.parse(body);
         } catch (parseErr) {
@@ -2060,19 +2063,19 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         const { raiseIncident, updateIncident, resolveIncident } =
           await import("./api/incident.ts");
 
-        const mockReq = { body: data } as any;
-        const mockRes = {
+        const mockReq: ApiRequest = { body: data };
+        const mockRes: ApiResponse = {
           status: (code: number) => ({
-            json: (data: any) => {
+            json: (data: unknown) => {
               res.writeHead(code, { "Content-Type": "application/json" });
               res.end(JSON.stringify(data));
             }
           }),
-          json: (data: any) => {
+          json: (data: unknown) => {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(data));
           }
-        } as any;
+        };
 
         switch (endpoint) {
           case "raise":
@@ -2103,7 +2106,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
     req.on("end", async () => {
       try {
-        let data: any;
+        let data: Record<string, unknown>;
         try {
           data = JSON.parse(body);
         } catch (parseErr) {
@@ -2119,19 +2122,19 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           arcsEndpoint } =
           await import("./api/memory.ts");
 
-        const mockReq = { body: data } as any;
-        const mockRes = {
+        const mockReq: ApiRequest = { body: data };
+        const mockRes: ApiResponse = {
           status: (code: number) => ({
-            json: (data: any) => {
+            json: (data: unknown) => {
               res.writeHead(code, { "Content-Type": "application/json" });
               res.end(JSON.stringify(data));
             }
           }),
-          json: (data: any) => {
+          json: (data: unknown) => {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(data));
           }
-        } as any;
+        };
 
         switch (endpoint) {
           case "write":
@@ -2174,7 +2177,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
 
     const handleBridgeRequest = async (body?: string) => {
       try {
-        let data: any = {};
+        let data: Record<string, unknown> = {};
         if (isPost && body) {
           try {
             data = JSON.parse(body);
@@ -2195,26 +2198,26 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         } = await import("./api/bridge.ts");
 
         const queryParams: Record<string, string> = {};
-        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        url.searchParams.forEach((v: string, k: string) => { queryParams[k] = v; });
 
-        const mockReq = {
+        const mockReq: ApiRequest = {
           body: data,
           query: queryParams,
           bridgeKey: req.headers["x-bridge-key"] as string,
-        } as any;
+        };
 
-        const mockRes = {
+        const mockRes: ApiResponse = {
           status: (code: number) => ({
-            json: (resData: any) => {
+            json: (resData: unknown) => {
               res.writeHead(code, { "Content-Type": "application/json" });
               res.end(JSON.stringify(resData));
             },
           }),
-          json: (resData: any) => {
+          json: (resData: unknown) => {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(resData));
           },
-        } as any;
+        };
 
         switch (endpoint) {
           case "read":
@@ -2268,7 +2271,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
 
     const handleAppAuthRequest = async (body?: string) => {
       try {
-        let data: any = {};
+        let data: Record<string, unknown> = {};
         if (isPost && body) {
           try { data = JSON.parse(body); } catch {
             res.writeHead(400, { "Content-Type": "application/json" });
@@ -2284,23 +2287,23 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           meEndpoint, updateProfileEndpoint,
         } = await import("./api/app-auth.ts");
 
-        const mockReq = {
+        const mockReq: ApiRequest & { headers: { authorization: string } } = {
           body: data,
-          headers: { authorization: req.headers["authorization"] || "" },
-        } as any;
+          headers: { authorization: (req.headers["authorization"] || "") as string },
+        };
 
-        const mockRes = {
+        const mockRes: ApiResponse = {
           status: (code: number) => ({
-            json: (resData: any) => {
+            json: (resData: unknown) => {
               res.writeHead(code, { "Content-Type": "application/json" });
               res.end(JSON.stringify(resData));
             },
           }),
-          json: (resData: any) => {
+          json: (resData: unknown) => {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(resData));
           },
-        } as any;
+        };
 
         switch (endpoint) {
           case "send-code":
@@ -2346,14 +2349,14 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
       try {
         const { createQueueItem, listQueueItems, updateQueueStatus, deleteQueueItem, getQueueStats } = await import("./api/agent-queue.ts");
 
-        let data: any = {};
+        let data: Record<string, unknown> = {};
         if (body) { try { data = JSON.parse(body); } catch { /* empty */ } }
 
-        const mockReq = { body: data, url: `http://localhost${url.pathname}${url.search}`, headers: req.headers } as any;
-        const mockRes = {
-          status: (code: number) => ({ json: (d: any) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); } }),
-          json: (d: any) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); },
-        } as any;
+        const mockReq: ApiRequest = { body: data };
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (d: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); } }),
+          json: (d: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); },
+        };
 
         const path = url.pathname.replace("/api/queue/", "");
 
@@ -2406,7 +2409,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
               res.end(JSON.stringify({ error: "Missing required query parameter: q" }));
               return;
             }
-            const indices = url.searchParams.get("indices")?.split(",").filter(Boolean) as any;
+            const indices = url.searchParams.get("indices")?.split(",").filter(Boolean) as string[] | undefined;
             const limit = parseInt(url.searchParams.get("limit") || "20", 10);
             const results = await withBreaker(
               () => searchForest(q, {
@@ -2483,12 +2486,12 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
       const agentName = pathParts[0] || undefined;
       const subResource = pathParts[1] || undefined;
 
-      const mockReq: any = { query: { ...queryParams, name: agentName }, params: { name: agentName } };
-      const mockRes: any = {
-        statusCode: 200,
-        status(code: number) { this.statusCode = code; return this; },
-        json(data: any) {
-          res.writeHead(this.statusCode, { "Content-Type": "application/json" });
+      const mockReq: ApiRequest = { query: { ...queryParams, ...(agentName ? { name: agentName } : {}) }, params: { name: agentName || null } };
+      let _statusCode = 200;
+      const mockRes: ApiResponse = {
+        status(code: number) { _statusCode = code; return { json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }; },
+        json(data: unknown) {
+          res.writeHead(_statusCode, { "Content-Type": "application/json" });
           res.end(JSON.stringify(data));
         },
       };
@@ -2528,7 +2531,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
     req.on("end", async () => {
       try {
-        let data: any = {};
+        let data: Record<string, unknown> = {};
         if (body) {
           try {
             data = JSON.parse(body);
@@ -2547,26 +2550,26 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
 
         // Parse query params for GET requests
         const queryParams: Record<string, string> = {};
-        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        url.searchParams.forEach((v: string, k: string) => { queryParams[k] = v; });
 
         // Extract ID from path: /api/vault/credentials/:id
         const pathParts = url.pathname.replace("/api/vault/", "").split("/");
         const segment = pathParts[0]; // "credentials", "resolve", or "fetch"
         const id = pathParts[1] || null;
 
-        const mockReq = { body: data, params: { id }, query: queryParams } as any;
-        const mockRes = {
+        const mockReq: ApiRequest = { body: data, params: { id }, query: queryParams };
+        const mockRes: ApiResponse = {
           status: (code: number) => ({
-            json: (data: any) => {
+            json: (data: unknown) => {
               res.writeHead(code, { "Content-Type": "application/json" });
               res.end(JSON.stringify(data));
             }
           }),
-          json: (data: any) => {
+          json: (data: unknown) => {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(data));
           }
-        } as any;
+        };
 
         if (!supabase) {
           res.writeHead(500, { "Content-Type": "application/json" });
@@ -2617,19 +2620,19 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
 
         const { generateRollup } = await import("./api/rollup.ts");
 
-        const mockReq = { body: data } as any;
-        const mockRes = {
+        const mockReq: ApiRequest = { body: data };
+        const mockRes: ApiResponse = {
           status: (code: number) => ({
-            json: (data: any) => {
+            json: (data: unknown) => {
               res.writeHead(code, { "Content-Type": "application/json" });
               res.end(JSON.stringify(data));
             }
           }),
-          json: (data: any) => {
+          json: (data: unknown) => {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(data));
           }
-        } as any;
+        };
 
         if (!supabase) {
           res.writeHead(500, { "Content-Type": "application/json" });
@@ -2650,7 +2653,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
             // Check for /api/rollup/YYYY-MM-DD
             if (/^\d{4}-\d{2}-\d{2}$/.test(endpoint)) {
               const { getRollupByDate } = await import("./api/rollup.ts");
-              const dateReq = { body: data, params: { date: endpoint } } as any;
+              const dateReq: ApiRequest = { body: data, params: { date: endpoint } };
               await getRollupByDate(dateReq, mockRes, supabase);
             } else {
               res.writeHead(404, { "Content-Type": "application/json" });
@@ -2673,18 +2676,18 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
       try {
         const endpoint = url.pathname.replace("/api/rollup/", "");
 
-        const mockRes = {
+        const mockRes: ApiResponse = {
           status: (code: number) => ({
-            json: (data: any) => {
+            json: (data: unknown) => {
               res.writeHead(code, { "Content-Type": "application/json" });
               res.end(JSON.stringify(data));
             }
           }),
-          json: (data: any) => {
+          json: (data: unknown) => {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(data));
           }
-        } as any;
+        };
 
         if (!supabase) {
           res.writeHead(500, { "Content-Type": "application/json" });
@@ -2694,10 +2697,10 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
 
         if (endpoint === "latest") {
           const { getLatestRollup } = await import("./api/rollup.ts");
-          await getLatestRollup({} as any, mockRes, supabase);
+          await getLatestRollup({} as ApiRequest, mockRes, supabase);
         } else if (/^\d{4}-\d{2}-\d{2}$/.test(endpoint)) {
           const { getRollupByDate } = await import("./api/rollup.ts");
-          await getRollupByDate({ params: { date: endpoint } } as any, mockRes, supabase);
+          await getRollupByDate({ params: { date: endpoint } } as ApiRequest, mockRes, supabase);
         } else {
           res.writeHead(404, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Unknown rollup endpoint" }));
@@ -2720,19 +2723,19 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         const data = body ? JSON.parse(body) : {};
         const { generateWeeklyReview } = await import("./api/weekly-review.ts");
 
-        const mockReq = { body: data } as any;
-        const mockRes = {
+        const mockReq: ApiRequest = { body: data };
+        const mockRes: ApiResponse = {
           status: (code: number) => ({
-            json: (data: any) => {
+            json: (data: unknown) => {
               res.writeHead(code, { "Content-Type": "application/json" });
               res.end(JSON.stringify(data));
             }
           }),
-          json: (data: any) => {
+          json: (data: unknown) => {
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(data));
           }
-        } as any;
+        };
 
         if (!supabase) {
           res.writeHead(500, { "Content-Type": "application/json" });
@@ -2784,9 +2787,9 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           const messages = await outlookListUnread(limit);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ messages }));
-        } catch (err: any) {
+        } catch (err: unknown) {
           res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: err.message }));
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
         }
       })();
       return;
@@ -2800,9 +2803,9 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           const messages = await outlookSearchMessages(q, limit);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ messages }));
-        } catch (err: any) {
+        } catch (err: unknown) {
           res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: err.message }));
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
         }
       })();
       return;
@@ -2815,9 +2818,9 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           const message = await outlookGetMessage(messageId);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ message }));
-        } catch (err: any) {
+        } catch (err: unknown) {
           res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: err.message }));
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
         }
       })();
       return;
@@ -2832,9 +2835,9 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           await outlookSendEmail(payload);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ success: true }));
-        } catch (err: any) {
+        } catch (err: unknown) {
           res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: err.message }));
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
         }
       });
       return;
@@ -2849,9 +2852,9 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           await outlookReplyToMessage(messageId, comment);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ success: true }));
-        } catch (err: any) {
+        } catch (err: unknown) {
           res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: err.message }));
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
         }
       });
       return;
@@ -2864,9 +2867,9 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           await outlookMarkAsRead(messageId);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ success: true }));
-        } catch (err: any) {
+        } catch (err: unknown) {
           res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: err.message }));
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
         }
       })();
       return;
@@ -2903,7 +2906,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
               .filter(([, v]) => v !== undefined)
               .map(([k, v]) => [k, Array.isArray(v) ? v.join(', ') : v!])
           ),
-          body: ['GET', 'HEAD'].includes(req.method || 'GET') ? undefined : req as any,
+          body: ['GET', 'HEAD'].includes(req.method || 'GET') ? undefined : req as unknown as BodyInit,
         });
         res.writeHead(proxyRes.status, Object.fromEntries(proxyRes.headers.entries()));
         if (proxyRes.body) {

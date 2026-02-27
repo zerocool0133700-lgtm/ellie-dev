@@ -297,7 +297,7 @@ function scheduleBatchedSend(
         await sendGoogleChatMessage(ctx.gchatSpaceName, message);
       }
       console.log(`[notify] ${channel}/${event}/${workItemId}: batched send`);
-    } catch (err: any) {
+    } catch (err: unknown) {
       logger.error("Batched send failed", { channel, event, work_item_id: workItemId }, err);
     }
   }, delaySec * 1000);

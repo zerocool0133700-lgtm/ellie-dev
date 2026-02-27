@@ -155,7 +155,7 @@ async function deliverPendingReadouts(ws: WebSocket): Promise<void> {
     if (items.length === 0) return;
 
     // Format as a single assistant message summarizing all findings
-    const lines = items.map((item: any) => {
+    const lines = items.map((item: Record<string, unknown>) => {
       const ticket = item.work_item_id ? ` (${item.work_item_id})` : '';
       return `**${item.source}** ${item.category}${ticket}: ${item.content}`;
     });
@@ -166,7 +166,7 @@ async function deliverPendingReadouts(ws: WebSocket): Promise<void> {
 
     if (ws.readyState === WebSocket.OPEN) {
       // Extract memoryId from first item's related_refs for deduplication (ELLIE-199)
-      const firstMemoryRef = items[0]?.related_refs?.find((ref: any) => ref.type === 'bridge')
+      const firstMemoryRef = (items[0]?.related_refs as Array<Record<string, unknown>> | undefined)?.find((ref) => ref.type === 'bridge')
       const memoryId = firstMemoryRef?.id || items[0]?.metadata?.bridge_memory_id
 
       ws.send(JSON.stringify({
@@ -306,7 +306,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
             clearSessionApprovals(); // Reset tool approvals for new chat (ELLIE-213)
             ws.send(JSON.stringify({ type: "new_chat_ok", ts: Date.now() }));
             console.log(`[ellie-chat] New chat started for ${ncUser?.name || ncUserId || 'unknown'}`);
-          } catch (err: any) {
+          } catch (err: unknown) {
             logger.error("New chat error", err);
           }
         })();

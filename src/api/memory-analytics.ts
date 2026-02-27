@@ -7,6 +7,7 @@
  * - GET /api/memory/by-agent/:agent - Filter memories by agent
  */
 
+import type { ApiRequest, ApiResponse } from './types.ts';
 import { createClient } from '@supabase/supabase-js';
 
 const supabaseUrl = process.env.SUPABASE_URL!;
@@ -26,6 +27,14 @@ interface TimelineEntry {
   date: string;
   agent: string;
   count: number;
+}
+
+interface AgentMemory {
+  id: string;
+  created_at: string;
+  type: string;
+  content: string;
+  visibility: string;
 }
 
 /**
@@ -121,7 +130,7 @@ export async function getMemoryTimeline(days: number = 30): Promise<TimelineEntr
 export async function getMemoriesByAgent(
   agent: string,
   limit: number = 50
-): Promise<any[]> {
+): Promise<AgentMemory[]> {
   const query = supabase
     .from('memory')
     .select('id, created_at, type, content, visibility')
@@ -147,32 +156,32 @@ export async function getMemoriesByAgent(
 /**
  * Route handlers
  */
-export async function handleGetStats(req: any, res: any) {
+export async function handleGetStats(req: ApiRequest, res: ApiResponse) {
   try {
     const stats = await getMemoryStats();
     res.json(stats);
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
+  } catch (err: unknown) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 }
 
-export async function handleGetTimeline(req: any, res: any) {
+export async function handleGetTimeline(req: ApiRequest, res: ApiResponse) {
   try {
-    const days = parseInt(req.query.days || '30', 10);
+    const days = parseInt(req.query?.days || '30', 10);
     const timeline = await getMemoryTimeline(days);
     res.json(timeline);
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
+  } catch (err: unknown) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 }
 
-export async function handleGetByAgent(req: any, res: any) {
+export async function handleGetByAgent(req: ApiRequest, res: ApiResponse) {
   try {
-    const { agent } = req.params;
-    const limit = parseInt(req.query.limit || '50', 10);
+    const agent = req.params?.agent ?? '';
+    const limit = parseInt(req.query?.limit || '50', 10);
     const memories = await getMemoriesByAgent(agent, limit);
     res.json(memories);
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
+  } catch (err: unknown) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
 }

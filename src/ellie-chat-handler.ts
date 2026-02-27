@@ -184,7 +184,7 @@ export async function handleEllieChatMessage(
           const { data: recent } = await supabase.from("messages")
             .select("role, content").in("channel", ["ellie-chat", "la-comms"])
             .order("created_at", { ascending: false }).limit(5);
-          contextMessages = (recent || []).reverse().map((m: any) => `[${m.role}]: ${m.content}`);
+          contextMessages = (recent || []).reverse().map((m: { role: string; content: string }) => `[${m.role}]: ${m.content}`);
         } else {
           contextMessages = ["No context available"];
         }
@@ -206,10 +206,11 @@ export async function handleEllieChatMessage(
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "response", text: msg, agent: "system", ts: Date.now() }));
         }
-      } catch (err: any) {
-        logger.error("/ticket error", { detail: err?.message });
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        logger.error("/ticket error", { detail: errMsg });
         if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "response", text: `Failed to create ticket: ${err?.message?.slice(0, 200) || "unknown error"}`, agent: "system", ts: Date.now() }));
+          ws.send(JSON.stringify({ type: "response", text: `Failed to create ticket: ${errMsg.slice(0, 200) || "unknown error"}`, agent: "system", ts: Date.now() }));
         }
       }
     })();
@@ -734,7 +735,7 @@ export async function handleEllieChatMessage(
         const entity = await getEntity(entityName);
         if (entity) {
           // Find most recently active tree (growing or dormant within last 5 min)
-          const [tree] = await forestSql<any[]>`
+          const [tree] = await forestSql<{ id: string; work_item_id: string | null }[]>`
             SELECT t.id, t.work_item_id FROM trees t
             JOIN creatures c ON c.tree_id = t.id
             WHERE t.type = 'work_session'
@@ -761,8 +762,8 @@ export async function handleEllieChatMessage(
             console.log(`[ellie-chat] Late-resolved sessionIds: tree=${tree.id.slice(0, 8)}, creature=${creature?.id?.slice(0, 8) || 'none'}`);
           }
         }
-      } catch (err: any) {
-        logger.warn("Late-resolve sessionIds failed", { detail: err?.message || String(err) });
+      } catch (err: unknown) {
+        logger.warn("Late-resolve sessionIds failed", { detail: err instanceof Error ? err.message : String(err) });
       }
     } else if (!effectiveSessionIds) {
       console.log(`[ellie-chat] No sessionIds and no agent to late-resolve (agent=${agentResult?.dispatch.agent.name})`);

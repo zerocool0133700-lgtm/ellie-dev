@@ -110,7 +110,7 @@ async function fetchCreature(id: string): Promise<ForestCreatureRow | null> {
     LIMIT 1
   `;
   if (!rows[0]) return null;
-  const row = rows[0] as any;
+  const row = rows[0] as Record<string, unknown>;
   // Ensure JSONB fields are objects (postgres may return strings for some drivers)
   if (typeof row.instructions === "string") {
     try { row.instructions = JSON.parse(row.instructions); } catch { /* keep as-is */ }
@@ -138,7 +138,7 @@ async function fetchTree(id: string): Promise<ForestTreeRow | null> {
     LIMIT 1
   `;
   if (!rows[0]) return null;
-  const row = rows[0] as any;
+  const row = rows[0] as Record<string, unknown>;
   // Map tree_config → config for ForestTreeRow, ensuring it's an object
   let config = row.tree_config;
   if (typeof config === "string") {
@@ -220,7 +220,7 @@ export async function startSyncListener(): Promise<void> {
     return;
   }
 
-  sql = postgres(pgConfig as any, {
+  sql = postgres(pgConfig as string, {
     max: 2, // One for LISTEN, one for fetches
     idle_timeout: 0, // Keep alive forever
     connect_timeout: 10,

@@ -56,6 +56,45 @@ export interface ConflictResult {
   reason: string;
 }
 
+/** Shape of a row returned by the search Edge Function for messages. */
+interface SearchMessageResult {
+  role: string;
+  content: string;
+  created_at?: string;
+  channel?: string;
+  conversation_id?: string;
+  similarity?: number;
+}
+
+/** Shape of a row returned by the search Edge Function for memory. */
+interface SearchMemoryResult {
+  id: string;
+  content: string;
+  type: string;
+  source_agent?: string;
+  visibility?: string;
+  metadata?: Record<string, unknown>;
+  similarity: number;
+}
+
+/** Shape of a fact row returned by the get_facts RPC. */
+interface FactRow {
+  content: string;
+}
+
+/** Shape of a goal row returned by the get_active_goals RPC. */
+interface GoalRow {
+  content: string;
+  deadline?: string | null;
+}
+
+/** Shape of a message row returned by the messages query. */
+interface MessageRow {
+  role: string;
+  content: string;
+  created_at: string;
+}
+
 // ────────────────────────────────────────────────────────────────
 // Conflict Detection
 // ────────────────────────────────────────────────────────────────
@@ -86,7 +125,7 @@ export async function checkMemoryConflict(
     if (error || !data?.length) return null;
 
     // Filter to same type and find best match
-    const sameType = data.filter((m: any) => m.type === type);
+    const sameType = data.filter((m: SearchMemoryResult) => m.type === type);
     if (sameType.length === 0) return null;
 
     const best = sameType[0];
@@ -510,12 +549,12 @@ export async function processMemoryIntents(
       try {
         const { writeCreatureMemory } = await import('../../ellie-forest/src/index');
         await writeCreatureMemory({
-          creature_id: forestSessionIds.creature_id ?? undefined as any,
+          creature_id: forestSessionIds.creature_id ?? undefined,
           tree_id: forestSessionIds.tree_id,
           branch_id: forestSessionIds.branch_id,
           entity_id: forestSessionIds.entity_id,
           content,
-          type: memType as any,
+          type: memType as 'fact' | 'decision' | 'preference' | 'finding' | 'hypothesis',
           confidence,
         });
         console.log(`[memory] Forest memory: [${memType}:${confidence}] ${content.slice(0, 60)}...`);
@@ -548,7 +587,7 @@ export async function getMemoryContext(
     if (factsResult.data?.length) {
       parts.push(
         "FACTS:\n" +
-          factsResult.data.map((f: any) => `- ${f.content}`).join("\n")
+          factsResult.data.map((f: FactRow) => `- ${f.content}`).join("\n")
       );
     }
 
@@ -556,7 +595,7 @@ export async function getMemoryContext(
       parts.push(
         "GOALS:\n" +
           goalsResult.data
-            .map((g: any) => {
+            .map((g: GoalRow) => {
               const deadline = g.deadline
                 ? ` (by ${new Date(g.deadline).toLocaleDateString()})`
                 : "";
@@ -613,7 +652,7 @@ export async function getRecentMessages(
     return (
       "RECENT CONVERSATION:\n" +
       messages
-        .map((m: any) => `[${m.role}]: ${m.content}`)
+        .map((m: MessageRow) => `[${m.role}]: ${m.content}`)
         .join("\n")
     );
   } catch (error) {
@@ -649,13 +688,13 @@ export async function getRelevantContext(
 
     // Filter out results older than 14 days and scope to current channel
     const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
-    let recent = data.filter((m: any) => !m.created_at || new Date(m.created_at).getTime() > cutoff);
+    let recent = data.filter((m: SearchMessageResult) => !m.created_at || new Date(m.created_at).getTime() > cutoff);
     if (channel) {
-      recent = recent.filter((m: any) => m.channel === channel);
+      recent = recent.filter((m: SearchMessageResult) => m.channel === channel);
     }
     // ELLIE-202: Exclude messages from current conversation (already loaded in full)
     if (excludeConversationId) {
-      recent = recent.filter((m: any) => m.conversation_id !== excludeConversationId);
+      recent = recent.filter((m: SearchMessageResult) => m.conversation_id !== excludeConversationId);
     }
     recent = recent.slice(0, 3); // Keep top 3
     if (recent.length === 0) return "";
@@ -663,7 +702,7 @@ export async function getRelevantContext(
     return (
       "RELEVANT PAST MESSAGES:\n" +
       recent
-        .map((m: any) => `[${m.role}]: ${m.content}`)
+        .map((m: SearchMessageResult) => `[${m.role}]: ${m.content}`)
         .join("\n")
     );
   } catch {

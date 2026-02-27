@@ -71,8 +71,8 @@ export async function verifyToken(
       audience: requiredScope,
     }) as JwtPayload;
     return decoded;
-  } catch (err: any) {
-    if (err.name !== "TokenExpiredError") {
+  } catch (err: unknown) {
+    if (err instanceof Error && err.name !== "TokenExpiredError") {
       logger.warn("JWT verification failed", { error: err.message });
     }
     return null;

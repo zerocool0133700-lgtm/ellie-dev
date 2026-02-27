@@ -33,22 +33,56 @@ export interface CalendarEvent {
   status: "confirmed" | "tentative" | "cancelled";
   recurring: boolean;
   recurrence_rule?: string;
-  attendees: any[];
+  attendees: Array<{ email?: string; name?: string; status?: string }>;
   organizer?: string;
   meeting_url?: string;
   color?: string;
   reminders: number[];
-  raw_data: any;
+  raw_data: Record<string, unknown>;
   last_synced: string;
 }
 
 const USER_TIMEZONE = "America/Chicago";
 
+/** Shape for a Google Calendar API event response (based on actual usage) */
+interface GoogleCalendarEvent {
+  id: string;
+  status?: string;
+  summary?: string;
+  description?: string;
+  location?: string;
+  hangoutLink?: string;
+  recurringEventId?: string;
+  recurrence?: string[];
+  start?: { dateTime?: string; date?: string; timeZone?: string };
+  end?: { dateTime?: string; date?: string };
+  conferenceData?: { entryPoints?: Array<{ entryPointType?: string; uri?: string }> };
+  attendees?: Array<{ displayName?: string; email?: string; responseStatus?: string }>;
+  organizer?: { email?: string };
+  reminders?: { overrides?: Array<{ minutes: number }> };
+}
+
+/** Shape for an O365/Microsoft Graph calendar event response (based on actual usage) */
+interface O365CalendarEvent {
+  id: string;
+  subject?: string;
+  body?: { content?: string };
+  location?: { displayName?: string };
+  start?: { dateTime?: string; timeZone?: string };
+  end?: { dateTime?: string };
+  isAllDay?: boolean;
+  recurrence?: Record<string, unknown>;
+  attendees?: Array<{ emailAddress?: { name?: string; address?: string }; status?: { response?: string } }>;
+  organizer?: { emailAddress?: { address?: string } };
+  onlineMeetingUrl?: string;
+  onlineMeeting?: { joinUrl?: string };
+}
+
 // ============================================================
 // GOOGLE CALENDAR
 // ============================================================
 
-async function fetchGoogleEvents(token: string, calendarId = "primary"): Promise<any[]> {
+async function fetchGoogleEvents(token: string, calendarId = "primary"): Promise<GoogleCalendarEvent[]> {
   const now = new Date();
   const windowEnd = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
@@ -73,13 +107,13 @@ async function fetchGoogleEvents(token: string, calendarId = "primary"): Promise
 
     const data = await res.json();
     return data.items || [];
-  } catch (err: any) {
-    logger.error("Google fetch error", err);
+  } catch (err: unknown) {
+    logger.error("Google fetch error", err instanceof Error ? err.message : String(err));
     return [];
   }
 }
 
-function normalizeGoogleEvent(event: any, accountLabel: string, calendarId: string): CalendarEvent {
+function normalizeGoogleEvent(event: GoogleCalendarEvent, accountLabel: string, calendarId: string): CalendarEvent {
   const isAllDay = !event.start?.dateTime;
   const startRaw = event.start?.dateTime || event.start?.date || "";
   const endRaw = event.end?.dateTime || event.end?.date || "";
@@ -91,7 +125,7 @@ function normalizeGoogleEvent(event: any, accountLabel: string, calendarId: stri
 
   // Extract meeting URL
   const meetingUrl =
-    event.conferenceData?.entryPoints?.find((e: any) => e.entryPointType === "video")?.uri ||
+    event.conferenceData?.entryPoints?.find((e: { entryPointType?: string; uri?: string }) => e.entryPointType === "video")?.uri ||
     event.hangoutLink ||
     undefined;
 
@@ -117,7 +151,7 @@ function normalizeGoogleEvent(event: any, accountLabel: string, calendarId: stri
     status: statusMap[event.status] || "confirmed",
     recurring: !!event.recurringEventId,
     recurrence_rule: event.recurrence?.[0] || undefined,
-    attendees: (event.attendees || []).map((a: any) => ({
+    attendees: (event.attendees || []).map((a: { displayName?: string; email?: string; responseStatus?: string }) => ({
       name: a.displayName,
       email: a.email,
       status: a.responseStatus,
@@ -125,8 +159,8 @@ function normalizeGoogleEvent(event: any, accountLabel: string, calendarId: stri
     organizer: event.organizer?.email || undefined,
     meeting_url: meetingUrl,
     color: undefined,
-    reminders: event.reminders?.overrides?.map((r: any) => r.minutes) || [],
-    raw_data: event,
+    reminders: event.reminders?.overrides?.map((r: { minutes: number }) => r.minutes) || [],
+    raw_data: event as unknown as Record<string, unknown>,
     last_synced: new Date().toISOString(),
   };
 }
@@ -166,8 +200,8 @@ async function upsertEvents(events: CalendarEvent[]): Promise<number> {
           updated_at = NOW()
       `;
       count++;
-    } catch (err: any) {
-      logger.error("Upsert error", { external_id: e.external_id }, err);
+    } catch (err: unknown) {
+      logger.error("Upsert error", { external_id: e.external_id }, err instanceof Error ? err.message : String(err));
     }
   }
   return count;
@@ -184,8 +218,8 @@ async function syncGoogleAccount(account: GoogleAccount): Promise<number> {
   if (!rawEvents.length) return 0;
 
   const normalized = rawEvents
-    .filter((e: any) => e.status !== "cancelled")
-    .map((e: any) => normalizeGoogleEvent(e, account.label, "primary"));
+    .filter((e: GoogleCalendarEvent) => e.status !== "cancelled")
+    .map((e: GoogleCalendarEvent) => normalizeGoogleEvent(e, account.label, "primary"));
 
   if (!normalized.length) return 0;
   return upsertEvents(normalized);
@@ -238,13 +272,13 @@ async function getMsCalendarToken(): Promise<string | null> {
       expiresAt: Date.now() + (data.expires_in || 3600) * 1000,
     };
     return msCalendarToken.accessToken;
-  } catch (err: any) {
-    logger.error("O365 token error", err);
+  } catch (err: unknown) {
+    logger.error("O365 token error", err instanceof Error ? err.message : String(err));
     return null;
   }
 }
 
-async function fetchO365Events(token: string): Promise<any[]> {
+async function fetchO365Events(token: string): Promise<O365CalendarEvent[]> {
   const now = new Date();
   const windowEnd = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
@@ -274,13 +308,13 @@ async function fetchO365Events(token: string): Promise<any[]> {
 
     const data = await res.json();
     return data.value || [];
-  } catch (err: any) {
-    logger.error("O365 fetch error", err);
+  } catch (err: unknown) {
+    logger.error("O365 fetch error", err instanceof Error ? err.message : String(err));
     return [];
   }
 }
 
-function normalizeO365Event(event: any): CalendarEvent {
+function normalizeO365Event(event: O365CalendarEvent): CalendarEvent {
   return {
     external_id: event.id,
     provider: "outlook",
@@ -301,7 +335,7 @@ function normalizeO365Event(event: any): CalendarEvent {
     status: "confirmed",
     recurring: !!event.recurrence,
     recurrence_rule: event.recurrence ? JSON.stringify(event.recurrence) : undefined,
-    attendees: (event.attendees || []).map((a: any) => ({
+    attendees: (event.attendees || []).map((a: { emailAddress?: { name?: string; address?: string }; status?: { response?: string } }) => ({
       name: a.emailAddress?.name,
       email: a.emailAddress?.address,
       status: a.status?.response || "none",
@@ -310,7 +344,7 @@ function normalizeO365Event(event: any): CalendarEvent {
     meeting_url: event.onlineMeetingUrl || event.onlineMeeting?.joinUrl || undefined,
     color: undefined,
     reminders: [],
-    raw_data: event,
+    raw_data: event as unknown as Record<string, unknown>,
     last_synced: new Date().toISOString(),
   };
 }
@@ -379,12 +413,12 @@ async function fetchAppleEvents(): Promise<CalendarEvent[]> {
         try {
           const events = parseICalEvents(obj.data, cal.displayName || "Apple");
           allEvents.push(...events);
-        } catch (err: any) {
-          logger.error("Apple iCal parse error", err);
+        } catch (err: unknown) {
+          logger.error("Apple iCal parse error", err instanceof Error ? err.message : String(err));
         }
       }
-    } catch (err: any) {
-      logger.error("Apple fetch error", { calendar: cal.displayName }, err);
+    } catch (err: unknown) {
+      logger.error("Apple fetch error", { calendar: cal.displayName }, err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -432,12 +466,12 @@ function parseICalEvents(icalData: string, calendarName: string): CalendarEvent[
     const isRecurring = !!rrule;
 
     // Attendees
-    const attendees = vevent.getAllProperties("attendee").map((prop: any) => {
+    const attendees = vevent.getAllProperties("attendee").map((prop: ICAL.Property) => {
       const cn = prop.getParameter("cn") || "";
       const partstat = prop.getParameter("partstat") || "NEEDS-ACTION";
       const val = prop.getFirstValue() || "";
-      const email = val.replace(/^mailto:/i, "");
-      return { name: cn, email, status: partstat.toLowerCase() };
+      const email = (val as string).replace(/^mailto:/i, "");
+      return { name: cn as string, email, status: (partstat as string).toLowerCase() };
     });
 
     const organizer = vevent.getFirstProperty("organizer");
@@ -466,7 +500,7 @@ function parseICalEvents(icalData: string, calendarName: string): CalendarEvent[
       meeting_url: meetingUrl,
       color: undefined,
       reminders: [],
-      raw_data: { ical: icalData.substring(0, 2000) },
+      raw_data: { ical: icalData.substring(0, 2000) } as Record<string, unknown>,
       last_synced: new Date().toISOString(),
     });
   }
@@ -481,8 +515,8 @@ async function syncAppleCalendar(): Promise<number> {
     const events = await fetchAppleEvents();
     if (!events.length) return 0;
     return upsertEvents(events);
-  } catch (err: any) {
-    logger.error("Apple CalDAV error", err);
+  } catch (err: unknown) {
+    logger.error("Apple CalDAV error", err instanceof Error ? err.message : String(err));
     return 0;
   }
 }
@@ -500,8 +534,8 @@ export async function syncAllCalendars(): Promise<void> {
     try {
       const count = await syncGoogleAccount(account);
       totalEvents += count;
-    } catch (err: any) {
-      logger.error("Google sync error", { account: account.label }, err);
+    } catch (err: unknown) {
+      logger.error("Google sync error", { account: account.label }, err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -509,16 +543,16 @@ export async function syncAllCalendars(): Promise<void> {
   try {
     const count = await syncO365Calendar();
     totalEvents += count;
-  } catch (err: any) {
-    logger.error("O365 error", err);
+  } catch (err: unknown) {
+    logger.error("O365 error", err instanceof Error ? err.message : String(err));
   }
 
   // Apple (iCloud CalDAV)
   try {
     const count = await syncAppleCalendar();
     totalEvents += count;
-  } catch (err: any) {
-    logger.error("Apple error", err);
+  } catch (err: unknown) {
+    logger.error("Apple error", err instanceof Error ? err.message : String(err));
   }
 
   // Clean up old events (ended > 7 days ago)

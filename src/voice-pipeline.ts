@@ -31,7 +31,7 @@ const MIN_AUDIO_MS = 400;
 export interface VoicePipelineDeps {
   supabase: SupabaseClient | null;
   getActiveAgent: (channel?: string) => string;
-  broadcastExtension: (event: Record<string, any>) => void;
+  broadcastExtension: (event: Record<string, unknown>) => void;
   getContextDocket: () => Promise<string>;
   triggerConsolidation: (channel?: string) => Promise<void>;
 }

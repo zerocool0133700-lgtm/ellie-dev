@@ -9,6 +9,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Bot } from "grammy";
+import type { ApiRequest, ApiResponse } from "./types.ts";
 import { sendGoogleChatMessage, isGoogleChatEnabled } from "../google-chat.ts";
 import { log } from "../logger.ts";
 
@@ -16,6 +17,22 @@ const logger = log.child("rollup");
 
 const TELEGRAM_USER_ID = process.env.TELEGRAM_USER_ID!;
 const GOOGLE_CHAT_SPACE = process.env.GOOGLE_CHAT_SPACE_NAME || "";
+
+interface SessionRow {
+  id: string;
+  work_item_id: string;
+  work_item_title: string;
+  agent: string | null;
+  created_at: string;
+  completed_at: string;
+}
+
+interface UpdateRow {
+  session_id: string;
+  type: string;
+  message: string;
+  created_at: string;
+}
 
 interface SessionEntry {
   workItemId: string;
@@ -75,13 +92,13 @@ async function buildDigestForDate(
 
   // Separate clean sessions from noise, but keep noise if it has updates/decisions
   // (we'll merge its updates into the real session for that work item)
-  const cleanSessions = sessions.filter((s: any) => !isNoiseTitle(s.work_item_title || ""));
-  const noiseSessions = sessions.filter((s: any) => isNoiseTitle(s.work_item_title || ""));
+  const cleanSessions = sessions.filter((s: SessionRow) => !isNoiseTitle(s.work_item_title || ""));
+  const noiseSessions = sessions.filter((s: SessionRow) => isNoiseTitle(s.work_item_title || ""));
 
   if (!cleanSessions.length && !noiseSessions.length) return null;
 
   // Fetch all updates for ALL sessions (clean + noise) in one query
-  const allSessionIds = sessions.map((s: any) => s.id);
+  const allSessionIds = sessions.map((s: SessionRow) => s.id);
   const { data: updates } = await supabase
     .from("work_session_updates")
     .select("session_id, type, message, created_at")
@@ -89,8 +106,8 @@ async function buildDigestForDate(
     .order("created_at", { ascending: true });
 
   // Helper: build an entry from a session row
-  const buildEntry = (s: any): SessionEntry => {
-    const sessionUpdates = (updates || []).filter((u: any) => u.session_id === s.id);
+  const buildEntry = (s: SessionRow): SessionEntry => {
+    const sessionUpdates = ((updates || []) as UpdateRow[]).filter((u: UpdateRow) => u.session_id === s.id);
     const durationMs = new Date(s.completed_at).getTime() - new Date(s.created_at).getTime();
     return {
       workItemId: s.work_item_id,
@@ -99,8 +116,8 @@ async function buildDigestForDate(
       startedAt: s.created_at,
       completedAt: s.completed_at,
       durationMin: Math.round(durationMs / 1000 / 60),
-      decisions: sessionUpdates.filter((u: any) => u.type === "decision").map((u: any) => u.message),
-      progressUpdates: sessionUpdates.filter((u: any) => u.type === "progress").map((u: any) => u.message),
+      decisions: sessionUpdates.filter((u: UpdateRow) => u.type === "decision").map((u: UpdateRow) => u.message),
+      progressUpdates: sessionUpdates.filter((u: UpdateRow) => u.type === "progress").map((u: UpdateRow) => u.message),
     };
   };
 
@@ -203,12 +220,12 @@ function formatDigestText(digest: DailyDigest): string {
  *   "notify": true           // optional, send Telegram summary (default: true)
  * }
  */
-export async function generateRollup(req: any, res: any, supabase: SupabaseClient, bot: Bot) {
+export async function generateRollup(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient, bot: Bot) {
   try {
     const { date, notify = true } = req.body || {};
 
     // Default to today in UTC
-    const rollupDate = date || new Date().toISOString().split("T")[0];
+    const rollupDate = (typeof date === "string" ? date : "") || new Date().toISOString().split("T")[0];
 
     // Validate date format
     if (!/^\d{4}-\d{2}-\d{2}$/.test(rollupDate)) {
@@ -289,7 +306,7 @@ export async function generateRollup(req: any, res: any, supabase: SupabaseClien
  *
  * Fetch the most recent daily rollup from Supabase.
  */
-export async function getLatestRollup(req: any, res: any, supabase: SupabaseClient) {
+export async function getLatestRollup(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient) {
   try {
     const { data, error } = await supabase
       .from("daily_rollups")
@@ -314,9 +331,9 @@ export async function getLatestRollup(req: any, res: any, supabase: SupabaseClie
  *
  * Fetch rollup for a specific date.
  */
-export async function getRollupByDate(req: any, res: any, supabase: SupabaseClient) {
+export async function getRollupByDate(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient) {
   try {
-    const { date } = req.params;
+    const date = req.params?.date ?? "";
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       return res.status(400).json({ error: "Invalid date format. Use YYYY-MM-DD." });

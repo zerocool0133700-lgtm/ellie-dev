@@ -13,6 +13,7 @@
  */
 
 import type { Bot } from "grammy";
+import type { ApiRequest, ApiResponse } from "./types.ts";
 import {
   writeMemory,
   readMemories,
@@ -59,7 +60,7 @@ const escapeMarkdown = (text: string) => text.replace(/[_*[\]()~`>#+=|{}.!-]/g, 
  *   "check_contradictions": true  // optional: run entailment-verified contradiction check
  * }
  */
-export async function writeMemoryEndpoint(req: any, res: any, bot: Bot) {
+export async function writeMemoryEndpoint(req: ApiRequest, res: ApiResponse, bot: Bot) {
   try {
     const { content, check_contradictions, contradiction_threshold, ...opts } = req.body;
 
@@ -187,7 +188,7 @@ export async function writeMemoryEndpoint(req: any, res: any, bot: Bot) {
 /**
  * POST /api/forest-memory/read
  */
-export async function readMemoryEndpoint(req: any, res: any, _bot: Bot) {
+export async function readMemoryEndpoint(req: ApiRequest, res: ApiResponse, _bot: Bot) {
   try {
     const { query, ...opts } = req.body;
 
@@ -207,7 +208,7 @@ export async function readMemoryEndpoint(req: any, res: any, _bot: Bot) {
 /**
  * POST /api/forest-memory/context
  */
-export async function agentContextEndpoint(req: any, res: any, _bot: Bot) {
+export async function agentContextEndpoint(req: ApiRequest, res: ApiResponse, _bot: Bot) {
   try {
     const { tree_id, ...opts } = req.body;
 
@@ -235,7 +236,7 @@ export async function agentContextEndpoint(req: any, res: any, _bot: Bot) {
  *   "merged_content": "combined..."  // required when resolution === "merge"
  * }
  */
-export async function resolveContradictionEndpoint(req: any, res: any, _bot: Bot) {
+export async function resolveContradictionEndpoint(req: ApiRequest, res: ApiResponse, _bot: Bot) {
   try {
     const { memory_id, resolution, resolved_by, merged_content } = req.body;
 
@@ -271,7 +272,7 @@ export async function resolveContradictionEndpoint(req: any, res: any, _bot: Bot
  *   "tree_id": "uuid"
  * }
  */
-export async function askCriticEndpoint(req: any, res: any, _bot: Bot) {
+export async function askCriticEndpoint(req: ApiRequest, res: ApiResponse, _bot: Bot) {
   try {
     const { memory_id, tree_id } = req.body;
 
@@ -326,7 +327,7 @@ export async function askCriticEndpoint(req: any, res: any, _bot: Bot) {
 /**
  * POST /api/forest-memory/creature-write
  */
-export async function creatureWriteMemoryEndpoint(req: any, res: any, _bot: Bot) {
+export async function creatureWriteMemoryEndpoint(req: ApiRequest, res: ApiResponse, _bot: Bot) {
   try {
     const { creature_id, tree_id, content, ...opts } = req.body;
 
@@ -348,7 +349,7 @@ export async function creatureWriteMemoryEndpoint(req: any, res: any, _bot: Bot)
  *
  * Body: { "action": "create"|"get"|"update"|"add_memory"|"list"|"for_memory", ...params }
  */
-export async function arcsEndpoint(req: any, res: any, _bot: Bot) {
+export async function arcsEndpoint(req: ApiRequest, res: ApiResponse, _bot: Bot) {
   try {
     const { action, ...params } = req.body;
 

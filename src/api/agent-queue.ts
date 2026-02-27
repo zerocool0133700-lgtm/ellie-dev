@@ -19,6 +19,7 @@
 
 import { sql, writeMemory } from '../../../ellie-forest/src/index'
 import { log } from "../logger.ts";
+import type { ApiRequest, ApiResponse } from "./types.ts";
 
 const logger = log.child("agent-queue");
 
@@ -40,13 +41,13 @@ interface QueueItem {
   status: QueueStatus
   acknowledged_at: Date | null
   completed_at: Date | null
-  related_refs: any[]
-  metadata: Record<string, any>
+  related_refs: Record<string, unknown>[]
+  metadata: Record<string, unknown>
 }
 
 // ── POST /api/queue/create ──────────────────────────────────
 
-export async function createQueueItem(req: any, res: any) {
+export async function createQueueItem(req: ApiRequest, res: ApiResponse) {
   try {
     const { source, target, priority, category, title, content, work_item_id, related_refs, metadata } = req.body
 
@@ -73,9 +74,9 @@ export async function createQueueItem(req: any, res: any) {
 
 // ── GET /api/queue/list ─────────────────────────────────────
 
-export async function listQueueItems(req: any, res: any) {
+export async function listQueueItems(req: ApiRequest, res: ApiResponse) {
   try {
-    const url = new URL(req.url, 'http://localhost')
+    const url = new URL(req.url || '/', 'http://localhost')
     const target = url.searchParams.get('target')
     const status = url.searchParams.get('status')
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 200)
@@ -121,7 +122,7 @@ export async function listQueueItems(req: any, res: any) {
 
 // ── POST /api/queue/:id/status ──────────────────────────────
 
-export async function updateQueueStatus(req: any, res: any, id: string) {
+export async function updateQueueStatus(req: ApiRequest, res: ApiResponse, id: string) {
   try {
     const { status } = req.body
 
@@ -161,7 +162,7 @@ export async function updateQueueStatus(req: any, res: any, id: string) {
 
 // ── DELETE /api/queue/:id ───────────────────────────────────
 
-export async function deleteQueueItem(req: any, res: any, id: string) {
+export async function deleteQueueItem(req: ApiRequest, res: ApiResponse, id: string) {
   try {
     const [item] = await sql<{ id: string }[]>`
       DELETE FROM agent_queue WHERE id = ${id} RETURNING id
@@ -282,7 +283,7 @@ export async function expireStaleItems(): Promise<number> {
 
 // ── v2: Queue stats for dashboard (ELLIE-201) ────────────────
 
-export async function getQueueStats(req: any, res: any) {
+export async function getQueueStats(req: ApiRequest, res: ApiResponse) {
   try {
     const [byTarget, byPriority, byStatus, recent] = await Promise.all([
       sql`
@@ -331,8 +332,8 @@ export async function createQueueItemDirect(params: {
   title: string
   content: string
   work_item_id?: string
-  related_refs?: any[]
-  metadata?: Record<string, any>
+  related_refs?: Record<string, unknown>[]
+  metadata?: Record<string, unknown>
 }): Promise<QueueItem> {
   const prio = params.priority || 'medium'
   const [item] = await sql<QueueItem[]>`

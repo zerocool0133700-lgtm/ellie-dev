@@ -87,11 +87,11 @@ export async function getRecentWorkSessions(
       if (title.length > 120) return true;
       return false;
     };
-    const cleanSessions = sessions.filter((s: any) => !isNoise(s.work_item_title));
+    const cleanSessions = sessions.filter((s: Record<string, unknown>) => !isNoise(s.work_item_title as string));
     if (!cleanSessions.length) return "";
 
     // Fetch updates for these sessions
-    const sessionIds = cleanSessions.map((s: any) => s.id);
+    const sessionIds = cleanSessions.map((s: Record<string, unknown>) => s.id);
     const { data: updates } = await supabase
       .from("work_session_updates")
       .select("session_id, type, message")
@@ -99,21 +99,21 @@ export async function getRecentWorkSessions(
       .order("created_at", { ascending: true });
 
     // Build digests
-    const digests: SessionDigest[] = cleanSessions.map((s: any) => {
-      const sessionUpdates = (updates || []).filter((u: any) => u.session_id === s.id);
-      const durationMs = new Date(s.completed_at).getTime() - new Date(s.created_at).getTime();
+    const digests: SessionDigest[] = cleanSessions.map((s: Record<string, unknown>) => {
+      const sessionUpdates = (updates || []).filter((u: Record<string, unknown>) => u.session_id === s.id);
+      const durationMs = new Date(s.completed_at as string).getTime() - new Date(s.created_at as string).getTime();
 
       return {
-        workItemId: s.work_item_id,
-        title: s.work_item_title,
-        completedAt: s.completed_at,
+        workItemId: s.work_item_id as string,
+        title: s.work_item_title as string,
+        completedAt: s.completed_at as string,
         durationMin: Math.round(durationMs / 1000 / 60),
         decisions: sessionUpdates
-          .filter((u: any) => u.type === "decision")
-          .map((u: any) => u.message),
+          .filter((u: Record<string, unknown>) => u.type === "decision")
+          .map((u: Record<string, unknown>) => u.message as string),
         updates: sessionUpdates
-          .filter((u: any) => u.type === "progress")
-          .map((u: any) => u.message),
+          .filter((u: Record<string, unknown>) => u.type === "progress")
+          .map((u: Record<string, unknown>) => u.message as string),
       };
     });
 
@@ -175,9 +175,9 @@ export async function getGoalsAndFacts(
     const parts: string[] = [];
 
     if (goalsResult.data?.length) {
-      const goalLines = goalsResult.data.map((g: any) => {
+      const goalLines = goalsResult.data.map((g: Record<string, unknown>) => {
         const deadline = g.deadline
-          ? ` (by ${new Date(g.deadline).toLocaleDateString("en-US", { month: "short", day: "numeric" })})`
+          ? ` (by ${new Date(g.deadline as string).toLocaleDateString("en-US", { month: "short", day: "numeric" })})`
           : "";
         return `- ${g.content}${deadline}`;
       });
@@ -185,7 +185,7 @@ export async function getGoalsAndFacts(
     }
 
     if (factsResult.data?.length) {
-      const factLines = factsResult.data.map((f: any) => `- ${f.content}`);
+      const factLines = factsResult.data.map((f: Record<string, unknown>) => `- ${f.content}`);
       parts.push("KEY FACTS:\n" + factLines.join("\n"));
     }
 
@@ -222,22 +222,24 @@ export async function getRecentConversations(
 
     if (error || !convos?.length) return "";
 
-    const lines = convos.map((c: any) => {
-      const time = new Date(c.started_at).toLocaleString("en-US", {
+    const lines = convos.map((c: Record<string, unknown>) => {
+      const time = new Date(c.started_at as string).toLocaleString("en-US", {
         month: "short",
         day: "numeric",
         hour: "numeric",
         minute: "2-digit",
         timeZone: USER_TIMEZONE,
       });
-      const channel = c.channel || "telegram";
-      const status = c.status || "closed";
-      const agentLabel = c.agent && c.agent !== "general" ? `, ${c.agent}` : "";
+      const channel = (c.channel as string) || "telegram";
+      const status = (c.status as string) || "closed";
+      const agent = c.agent as string | undefined;
+      const agentLabel = agent && agent !== "general" ? `, ${agent}` : "";
       const msgs = c.message_count ? `, ${c.message_count} msgs` : "";
-      const summary = c.summary
-        ? c.summary.length > 150
-          ? c.summary.substring(0, 150) + "..."
-          : c.summary
+      const summaryRaw = c.summary as string | undefined;
+      const summary = summaryRaw
+        ? summaryRaw.length > 150
+          ? summaryRaw.substring(0, 150) + "..."
+          : summaryRaw
         : "No summary";
       return `- [${channel}, ${status}${agentLabel}, ${time}${msgs}] ${summary}`;
     });
@@ -338,10 +340,10 @@ export async function getAccessTokenForAccount(account: GoogleAccount): Promise<
 
   if (!res.ok) return null;
 
-  const data = await res.json();
+  const data = (await res.json()) as Record<string, unknown>;
   account.tokenCache = {
-    accessToken: data.access_token,
-    expiresAt: Date.now() + (data.expires_in || 3600) * 1000,
+    accessToken: data.access_token as string,
+    expiresAt: Date.now() + ((data.expires_in as number) || 3600) * 1000,
   };
   return account.tokenCache.accessToken;
 }
@@ -381,12 +383,13 @@ async function getCalendarForAccount(account: GoogleAccount): Promise<{ label: s
 
   if (!res.ok) return { label: account.label, lines: [] };
 
-  const data = await res.json();
-  const events = data.items || [];
+  const data = (await res.json()) as Record<string, unknown>;
+  const events = (data.items || []) as Record<string, unknown>[];
 
-  const lines = events.map((e: any) => {
-    const start = e.start?.dateTime || e.start?.date || "";
-    const isAllDay = !e.start?.dateTime;
+  const lines = events.map((e: Record<string, unknown>) => {
+    const startObj = e.start as Record<string, unknown> | undefined;
+    const start = (startObj?.dateTime as string) || (startObj?.date as string) || "";
+    const isAllDay = !startObj?.dateTime;
     const time = isAllDay
       ? new Date(start).toLocaleDateString("en-US", {
           weekday: "short", month: "short", day: "numeric",
@@ -398,7 +401,7 @@ async function getCalendarForAccount(account: GoogleAccount): Promise<{ label: s
           timeZone: USER_TIMEZONE,
         });
     const location = e.location ? ` @ ${e.location}` : "";
-    return `- ${time}: ${e.summary || "(no title)"}${location}`;
+    return `- ${time}: ${(e.summary as string) || "(no title)"}${location}`;
   });
 
   return { label: account.label, lines };
@@ -443,8 +446,8 @@ async function getGmailSignalForAccount(account: GoogleAccount): Promise<string>
     { headers: { Authorization: `Bearer ${token}` } },
   );
   if (!labelRes.ok) return "";
-  const labelData = await labelRes.json();
-  const unreadCount = labelData.messagesUnread || 0;
+  const labelData = (await labelRes.json()) as Record<string, unknown>;
+  const unreadCount = (labelData.messagesUnread as number) || 0;
 
   if (unreadCount === 0) return "";
 
@@ -458,8 +461,8 @@ async function getGmailSignalForAccount(account: GoogleAccount): Promise<string>
     { headers: { Authorization: `Bearer ${token}` } },
   );
   if (!listRes.ok) return `${account.label}: ${unreadCount} unread`;
-  const listData = await listRes.json();
-  const messageIds = (listData.messages || []).map((m: any) => m.id);
+  const listData = (await listRes.json()) as Record<string, unknown>;
+  const messageIds = ((listData.messages || []) as Record<string, unknown>[]).map((m) => m.id as string);
 
   // Fetch metadata for each (in parallel)
   const headerPromises = messageIds.map(async (id: string) => {
@@ -468,15 +471,16 @@ async function getGmailSignalForAccount(account: GoogleAccount): Promise<string>
       { headers: { Authorization: `Bearer ${token}` } },
     );
     if (!msgRes.ok) return null;
-    return msgRes.json();
+    return (await msgRes.json()) as Record<string, unknown>;
   });
 
   const messages = (await Promise.all(headerPromises)).filter(Boolean);
 
-  const lines = messages.map((msg: any) => {
-    const headers = msg.payload?.headers || [];
-    const from = headers.find((h: any) => h.name === "From")?.value || "Unknown";
-    const subject = headers.find((h: any) => h.name === "Subject")?.value || "(no subject)";
+  const lines = messages.map((msg: Record<string, unknown>) => {
+    const payload = msg.payload as Record<string, unknown> | undefined;
+    const headers = (payload?.headers || []) as Record<string, unknown>[];
+    const from = (headers.find((h) => h.name === "From")?.value as string) || "Unknown";
+    const subject = (headers.find((h) => h.name === "Subject")?.value as string) || "(no subject)";
     const fromName = from.replace(/<.*>/, "").trim() || from;
     const shortSubject = subject.length > 60 ? subject.substring(0, 57) + "..." : subject;
     return `- ${fromName}: ${shortSubject}`;
@@ -567,19 +571,19 @@ async function getGoogleTasksForAccount(account: GoogleAccount): Promise<string>
 
   if (!res.ok) return "";
 
-  const data = await res.json();
-  const tasks = data.items || [];
+  const data = (await res.json()) as Record<string, unknown>;
+  const tasks = (data.items || []) as Record<string, unknown>[];
   if (!tasks.length) return "";
 
-  const lines = tasks.map((t: any) => {
+  const lines = tasks.map((t: Record<string, unknown>) => {
     const due = t.due
-      ? ` (due ${new Date(t.due).toLocaleDateString("en-US", {
+      ? ` (due ${new Date(t.due as string).toLocaleDateString("en-US", {
           month: "short",
           day: "numeric",
           timeZone: USER_TIMEZONE,
         })})`
       : "";
-    const notes = t.notes ? ` — ${t.notes.substring(0, 50)}` : "";
+    const notes = t.notes ? ` — ${(t.notes as string).substring(0, 50)}` : "";
     return `- ${t.title}${due}${notes}`;
   });
 
@@ -630,18 +634,18 @@ async function getGoogleTasksJSONForAccount(account: GoogleAccount): Promise<{ l
 
   if (!res.ok) return { label: account.label, tasks: [] };
 
-  const data = await res.json();
-  const items = data.items || [];
+  const data = (await res.json()) as Record<string, unknown>;
+  const items = (data.items || []) as Record<string, unknown>[];
 
   return {
     label: account.label,
-    tasks: items.map((t: any) => ({
-      id: t.id,
-      title: t.title,
-      notes: t.notes || undefined,
-      due: t.due || undefined,
-      status: t.status,
-      updated: t.updated,
+    tasks: items.map((t: Record<string, unknown>) => ({
+      id: t.id as string,
+      title: t.title as string,
+      notes: (t.notes as string) || undefined,
+      due: (t.due as string) || undefined,
+      status: t.status as string,
+      updated: t.updated as string,
     })),
   };
 }
@@ -695,8 +699,8 @@ export async function getPendingActionItems(
     const parts: string[] = [];
 
     if (actionItems?.length) {
-      const lines = actionItems.map((a: any) => {
-        const date = new Date(a.created_at).toLocaleDateString("en-US", {
+      const lines = actionItems.map((a: Record<string, unknown>) => {
+        const date = new Date(a.created_at as string).toLocaleDateString("en-US", {
           month: "short", day: "numeric",
         });
         return `- ${a.content} (${date})`;
@@ -705,11 +709,12 @@ export async function getPendingActionItems(
     }
 
     if (blockers?.length) {
-      const lines = blockers.map((b: any) => {
-        const date = new Date(b.created_at).toLocaleDateString("en-US", {
+      const lines = blockers.map((b: Record<string, unknown>) => {
+        const date = new Date(b.created_at as string).toLocaleDateString("en-US", {
           month: "short", day: "numeric",
         });
-        const short = b.message.length > 100 ? b.message.substring(0, 100) + "..." : b.message;
+        const msg = b.message as string;
+        const short = msg.length > 100 ? msg.substring(0, 100) + "..." : msg;
         return `- [BLOCKER] ${short} (${date})`;
       });
       parts.push(...lines);
@@ -749,7 +754,7 @@ const ALL_SOURCE_NAMES = Object.keys(SOURCE_REGISTRY);
 // Each strategy defines default sources, priority, and excluded sections.
 // Explicit profile settings (sources/exclude/priority) override the strategy.
 
-import type { ContextStrategy } from '../../ellie-forest/src/types';
+import type { ContextStrategy, Tree, MemorySearchResult, AgentDigest } from '../../ellie-forest/src/types';
 
 interface StrategyPreset {
   sources: string[] | 'all';
@@ -971,14 +976,14 @@ export async function getAgentMemoryContext(
     if (!entity) return empty;
 
     // Find active tree — prefer explicit work item ID, fall back to growing tree for this entity
-    let tree: any = null;
+    let tree: Tree | null = null;
     if (workItemId) {
       tree = await getWorkSessionByPlaneId(workItemId);
     }
     if (!tree) {
       // No explicit work item — check for a growing tree this agent is actively working on
       const { default: forestSql } = await import('../../ellie-forest/src/db');
-      const [activeTree] = await forestSql`
+      const [activeTree] = await forestSql<Tree[]>`
         SELECT DISTINCT t.* FROM trees t
         JOIN creatures c ON c.tree_id = t.id
         WHERE t.type = 'work_session' AND t.state = 'growing'
@@ -1013,7 +1018,7 @@ export async function getAgentMemoryContext(
     // Format memories for prompt
     let memoryContext = '';
     if (memories.length > 0) {
-      const lines = memories.map((m: any) => {
+      const lines = memories.map((m: MemorySearchResult) => {
         const scope = m.scope === 'global' ? '[global]' : m.scope === 'tree' ? '[session]' : `[${m.scope}]`;
         const conf = m.confidence ? ` (confidence: ${m.confidence.toFixed(1)})` : '';
         return `  ${scope} ${m.content}${conf}`;
@@ -1034,7 +1039,7 @@ export async function getAgentMemoryContext(
       });
 
       if (crossMemories.length > 0) {
-        const crossLines = crossMemories.map((m: any) => {
+        const crossLines = crossMemories.map((m: MemorySearchResult & { source_agent_species?: string }) => {
           const species = m.source_agent_species ? `[${m.source_agent_species}]` : '[agent]';
           const conf = m.confidence ? ` (confidence: ${m.confidence.toFixed(1)})` : '';
           return `  ${species} ${m.content}${conf}`;
@@ -1045,7 +1050,7 @@ export async function getAgentMemoryContext(
       // Session digest (ELLIE-178 Layer 2)
       const digest = await getOrGenerateDigest({ tree_id: tree.id });
       if (digest) {
-        const dc = digest.digest_content as any;
+        const dc = digest.digest_content as AgentDigest['digest_content'];
         const parts: string[] = [];
         if (dc.decisions?.length) parts.push(`  Decisions: ${dc.decisions.join('; ')}`);
         if (dc.facts_learned?.length) parts.push(`  Facts learned: ${dc.facts_learned.join('; ')}`);
@@ -1092,9 +1097,9 @@ export async function getActiveIncidentContext(): Promise<string> {
 
     const parts: string[] = [];
     for (const inc of incidents.slice(0, 3)) {
-      const severity = (inc.metadata as any)?.severity || "unknown";
+      const severity = inc.metadata?.severity || "unknown";
       const summary = await getIncidentSummary(inc.id);
-      const desc = summary?.status || (inc.metadata as any)?.description || "Active incident";
+      const desc = (summary as Record<string, unknown> | null)?.status || inc.metadata?.description || "Active incident";
       parts.push(`[${String(severity).toUpperCase()}] ${inc.name}: ${desc}`);
     }
     return `ACTIVE INCIDENTS (${incidents.length}):\n${parts.join("\n")}`;
@@ -1136,7 +1141,7 @@ export async function getCreatureStatusContext(): Promise<string> {
 
     const items = creatures.slice(0, 8).map((c) => {
       const state = c.state || "unknown";
-      const entity = (c as any).entity_name || c.entity_id?.substring(0, 8) || "unassigned";
+      const entity = (c as Record<string, unknown>).entity_name || c.entity_id?.substring(0, 8) || "unassigned";
       return `- [${state}] ${c.intent || c.species} (${entity})`;
     });
     return `ACTIVE WORK (${creatures.length} creatures):\n${items.join("\n")}`;
@@ -1166,8 +1171,8 @@ export async function getPersonMentionContext(text: string): Promise<string> {
     const parts: string[] = [];
     for (const person of mentioned.slice(0, 3)) {
       const groups = await getPersonGroups(person.id);
-      const groupNames = groups.map((g: any) => g.name).filter(Boolean).join(", ");
-      const note = (person as any).notes || "";
+      const groupNames = groups.map((g: Record<string, unknown>) => g.name).filter(Boolean).join(", ");
+      const note = person.notes || "";
       parts.push(`${person.name}${groupNames ? ` (${groupNames})` : ""}${note ? `: ${note}` : ""}`);
     }
     return `MENTIONED PEOPLE:\n${parts.join("\n")}`;
