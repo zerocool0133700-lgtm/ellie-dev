@@ -117,16 +117,36 @@ function isAutoApproved(toolName: string): boolean {
   return false;
 }
 
-// ── Session approvals (per-tool, remembered during session) ──
+// ── Session approvals (per-tool, remembered with TTL) ────────
 
-const sessionApprovals = new Set<string>();
+const SESSION_APPROVAL_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+/** tool_name → timestamp when approval was granted */
+const sessionApprovals = new Map<string, number>();
 
 export function clearSessionApprovals(): void {
   sessionApprovals.clear();
 }
 
 export function getSessionApprovals(): string[] {
-  return [...sessionApprovals];
+  pruneExpiredSessionApprovals();
+  return [...sessionApprovals.keys()];
+}
+
+/** Remove expired session approvals and notify about them. */
+function pruneExpiredSessionApprovals(): string[] {
+  const now = Date.now();
+  const expired: string[] = [];
+  for (const [tool, grantedAt] of sessionApprovals) {
+    if (now - grantedAt > SESSION_APPROVAL_TTL_MS) {
+      sessionApprovals.delete(tool);
+      expired.push(tool);
+    }
+  }
+  if (expired.length > 0) {
+    logger.info("Session approvals expired", { tools: expired, ttl_ms: SESSION_APPROVAL_TTL_MS });
+  }
+  return expired;
 }
 
 // ── Pending approvals ────────────────────────────────────────
@@ -151,10 +171,19 @@ export async function checkToolApproval(req: ToolApprovalRequest): Promise<{ app
     return { approved: true };
   }
 
-  // Fast-path: session-remembered approvals
-  if (sessionApprovals.has(tool_name)) {
-    return { approved: true };
+  // Fast-path: session-remembered approvals (with TTL check)
+  const grantedAt = sessionApprovals.get(tool_name);
+  if (grantedAt !== undefined) {
+    if (Date.now() - grantedAt <= SESSION_APPROVAL_TTL_MS) {
+      return { approved: true };
+    }
+    // Expired — remove and fall through to re-request
+    sessionApprovals.delete(tool_name);
+    logger.info("Session approval expired, re-requesting", { tool: tool_name, expired_after_ms: Date.now() - grantedAt });
   }
+
+  // Check if this is a re-request (previously approved but expired)
+  const isReRequest = grantedAt !== undefined;
 
   // Need user approval — create pending request
   const id = randomUUID();
@@ -172,24 +201,38 @@ export async function checkToolApproval(req: ToolApprovalRequest): Promise<{ app
     };
     pendingApprovals.set(id, pending);
 
-    // Send to frontend
+    // Send to frontend (include expired flag for re-requests)
     _broadcastToEllieChat({
       type: "tool_approval",
       id,
       tool_name,
       tool_input,
       description,
+      expired: isReRequest,
       ts: Date.now(),
     });
 
-    console.log(`[tool-approval] Requesting approval for ${tool_name} (${id.slice(0, 8)})`);
+    logger.info(isReRequest ? "Re-requesting expired approval" : "Requesting approval", {
+      tool: tool_name,
+      approval_id: id.slice(0, 8),
+    });
 
-    // Timeout — deny after 60s
+    // Timeout — deny after 60s and notify user
     setTimeout(() => {
       if (pendingApprovals.has(id)) {
         pendingApprovals.delete(id);
-        console.log(`[tool-approval] Timed out: ${tool_name} (${id.slice(0, 8)})`);
-        resolve({ approved: false, reason: "Approval timed out (60s)" });
+        logger.info("Approval timed out", { tool: tool_name, approval_id: id.slice(0, 8) });
+
+        // Notify frontend that this approval expired
+        _broadcastToEllieChat({
+          type: "tool_approval_expired",
+          id,
+          tool_name,
+          description,
+          ts: Date.now(),
+        });
+
+        resolve({ approved: false, reason: "Approval timed out (60s). The tool can be re-requested — ask Ellie to try again." });
       }
     }, APPROVAL_TIMEOUT_MS);
   });
@@ -204,10 +247,13 @@ export function resolveToolApproval(id: string, approved: boolean, remember?: bo
   pendingApprovals.delete(id);
 
   if (approved && remember) {
-    sessionApprovals.add(pending.tool_name);
-    console.log(`[tool-approval] Approved + remembered: ${pending.tool_name}`);
+    sessionApprovals.set(pending.tool_name, Date.now());
+    logger.info("Approved + remembered", { tool: pending.tool_name, ttl_ms: SESSION_APPROVAL_TTL_MS });
   } else {
-    console.log(`[tool-approval] ${approved ? "Approved" : "Denied"}: ${pending.tool_name} (${id.slice(0, 8)})`);
+    logger.info(approved ? "Approved (one-time)" : "Denied", {
+      tool: pending.tool_name,
+      approval_id: id.slice(0, 8),
+    });
   }
 
   pending.resolve({

@@ -368,7 +368,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
         const resolved = resolveToolApproval(msg.id, msg.approved, msg.remember === true);
         if (!resolved) {
           if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "response", text: "That tool approval has expired.", agent: "system", ts: Date.now() }));
+            ws.send(JSON.stringify({ type: "response", text: "That tool approval has already expired or been resolved. Ask Ellie to try again if needed.", agent: "system", ts: Date.now() }));
           }
         }
         return;
