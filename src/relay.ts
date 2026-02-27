@@ -336,9 +336,11 @@ async function gracefulShutdown(signal: string): Promise<void> {
   try { await bot.stop(); } catch {}
   console.log("[relay] Telegram bot stopped");
 
-  // 2. Close HTTP server (stop accepting new connections)
+  // 2. Close HTTP server + file watchers
   httpServer.close();
-  console.log("[relay] HTTP server closed");
+  const { stopPersonalityWatchers } = await import("./prompt-builder.ts");
+  stopPersonalityWatchers();
+  console.log("[relay] HTTP server closed, personality watchers stopped");
 
   // 3. Release lock file
   const { releaseLock } = await import("./claude-cli.ts");

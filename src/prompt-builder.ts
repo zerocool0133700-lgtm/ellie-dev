@@ -7,6 +7,7 @@
  */
 
 import { readFile } from "fs/promises";
+import { watch, type FSWatcher } from "fs";
 import { log } from "./logger.ts";
 
 const logger = log.child("prompt-builder");
@@ -38,23 +39,97 @@ const AGENT_MODE = process.env.AGENT_MODE !== "false";
 export const USER_NAME = process.env.USER_NAME || "";
 export const USER_TIMEZONE = process.env.USER_TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-// ── Soul context (loaded once at startup) ───────────────────
+// ── Soul context (hot-reloaded on file change — ELLIE-244) ──
+
+const SOUL_PATH = join(PROJECT_ROOT, "soul.md");
+const PROFILE_PATH = join(PROJECT_ROOT, "config", "profile.md");
 
 let soulContext = "";
 try {
-  soulContext = await readFile(join(PROJECT_ROOT, "soul.md"), "utf-8");
+  soulContext = await readFile(SOUL_PATH, "utf-8");
 } catch {
   // No soul file yet — that's fine
 }
 
-// ── Profile context (loaded once at startup) ────────────────
+// ── Profile context (hot-reloaded on file change — ELLIE-244) ──
 
 let profileContext = "";
 try {
-  profileContext = await readFile(join(PROJECT_ROOT, "config", "profile.md"), "utf-8");
+  profileContext = await readFile(PROFILE_PATH, "utf-8");
 } catch {
   // No profile yet — that's fine
 }
+
+// ── File watchers for personality files (ELLIE-244) ─────────
+
+const RELOAD_DEBOUNCE_MS = 500;
+let soulReloadTimer: ReturnType<typeof setTimeout> | null = null;
+let profileReloadTimer: ReturnType<typeof setTimeout> | null = null;
+const personalityWatchers: FSWatcher[] = [];
+
+function watchPersonalityFiles(): void {
+  // Watch soul.md
+  try {
+    const w = watch(SOUL_PATH, (_event) => {
+      if (soulReloadTimer) clearTimeout(soulReloadTimer);
+      soulReloadTimer = setTimeout(async () => {
+        try {
+          soulContext = await readFile(SOUL_PATH, "utf-8");
+          logger.info("Reloaded soul.md");
+        } catch {
+          soulContext = "";
+          logger.info("soul.md removed or unreadable — cleared");
+        }
+        soulReloadTimer = null;
+      }, RELOAD_DEBOUNCE_MS);
+    });
+    personalityWatchers.push(w);
+  } catch {
+    // File doesn't exist yet — that's fine
+  }
+
+  // Watch profile.md
+  try {
+    const w = watch(PROFILE_PATH, (_event) => {
+      if (profileReloadTimer) clearTimeout(profileReloadTimer);
+      profileReloadTimer = setTimeout(async () => {
+        try {
+          profileContext = await readFile(PROFILE_PATH, "utf-8");
+          logger.info("Reloaded config/profile.md");
+        } catch {
+          profileContext = "";
+          logger.info("config/profile.md removed or unreadable — cleared");
+        }
+        profileReloadTimer = null;
+      }, RELOAD_DEBOUNCE_MS);
+    });
+    personalityWatchers.push(w);
+  } catch {
+    // File doesn't exist yet — that's fine
+  }
+
+  if (personalityWatchers.length > 0) {
+    console.log(`[prompt-builder] Watching ${personalityWatchers.length} personality files for changes`);
+  }
+}
+
+/** Stop personality file watchers. Call on shutdown. */
+export function stopPersonalityWatchers(): void {
+  for (const w of personalityWatchers) w.close();
+  personalityWatchers.length = 0;
+}
+
+/** Force-clear all personality caches (soul, profile, archetype, psy, phase, health). */
+export function clearPersonalityCache(): void {
+  _archetypeLastLoaded = 0;
+  _psyLastLoaded = 0;
+  _phaseLastLoaded = 0;
+  _healthLastLoaded = 0;
+  logger.info("All personality caches invalidated");
+}
+
+// Start watchers immediately
+watchPersonalityFiles();
 
 // ── Personality context loaders (60s TTL each) ──────────────
 
