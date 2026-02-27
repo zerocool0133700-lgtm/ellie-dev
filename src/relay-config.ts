@@ -8,6 +8,7 @@ import { createHmac } from "crypto";
 import { join, dirname } from "path";
 import type { IncomingMessage } from "http";
 import { log } from "./logger.ts";
+import { writeToDisk, readFromDisk } from "./config-cache.ts";
 
 const logger = log.child("relay-config");
 
@@ -81,10 +82,11 @@ export const TEMP_DIR = join(RELAY_DIR, "temp");
 export const UPLOADS_DIR = join(RELAY_DIR, "uploads");
 
 // ============================================================
-// CONTEXT DOCKET
+// CONTEXT DOCKET — ELLIE-231
 // ============================================================
 
-const CONTEXT_ENDPOINT = "http://localhost:3000/api/context";
+const DASHBOARD_URL = process.env.DASHBOARD_URL || "http://localhost:3000";
+const CONTEXT_ENDPOINT = `${DASHBOARD_URL}/api/context`;
 let cachedContext: { document: string; fetchedAt: number } | null = null;
 const CONTEXT_CACHE_MS = 5 * 60_000; // cache for 5 minutes
 
@@ -98,11 +100,24 @@ export async function getContextDocket(): Promise<string> {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     cachedContext = { document: data.document, fetchedAt: now };
+    writeToDisk("context-docket", data.document);
     console.log("[context] Loaded context docket");
     return data.document;
   } catch (err) {
-    logger.error("Failed to fetch context docket", err);
-    return cachedContext?.document || "";
+    // Return in-memory cache if available
+    if (cachedContext?.document) {
+      logger.warn("Dashboard unreachable, using in-memory cached docket");
+      return cachedContext.document;
+    }
+    // ELLIE-231: Fall back to disk cache
+    const diskDocket = await readFromDisk<string>("context-docket");
+    if (diskDocket) {
+      cachedContext = { document: diskDocket, fetchedAt: now };
+      logger.warn("Dashboard unreachable, using disk-cached docket");
+      return diskDocket;
+    }
+    logger.warn("Dashboard unreachable, no cached docket available");
+    return "";
   }
 }
 
