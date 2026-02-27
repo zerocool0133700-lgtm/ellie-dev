@@ -2630,6 +2630,106 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Briefing endpoints (ELLIE-316)
+  if (url.pathname === "/api/briefing/generate" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = body ? JSON.parse(body) : {};
+        const { generateBriefingHandler } = await import("./api/briefing.ts");
+        const mockReq: ApiRequest = { body: data };
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({
+            json: (data: unknown) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(data));
+            }
+          }),
+          json: (data: unknown) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(data));
+          }
+        };
+        if (!supabase) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Supabase not configured" }));
+          return;
+        }
+        await generateBriefingHandler(mockReq, mockRes, supabase, bot);
+      } catch (err) {
+        logger.error("Briefing generate error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/briefing/latest" && req.method === "GET") {
+    (async () => {
+      try {
+        if (!supabase) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Supabase not configured" }));
+          return;
+        }
+        const { getLatestBriefing } = await import("./api/briefing.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({
+            json: (data: unknown) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(data));
+            }
+          }),
+          json: (data: unknown) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(data));
+          }
+        };
+        await getLatestBriefing({} as ApiRequest, mockRes, supabase);
+      } catch (err) {
+        logger.error("Briefing latest error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/briefing/history" && req.method === "GET") {
+    (async () => {
+      try {
+        if (!supabase) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Supabase not configured" }));
+          return;
+        }
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getBriefingHistory } = await import("./api/briefing.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({
+            json: (data: unknown) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(data));
+            }
+          }),
+          json: (data: unknown) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(data));
+          }
+        };
+        await getBriefingHistory({ query: queryParams } as ApiRequest, mockRes, supabase);
+      } catch (err) {
+        logger.error("Briefing history error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
   // Rollup endpoints
   if (url.pathname.startsWith("/api/rollup/") && req.method === "POST") {
     let body = "";

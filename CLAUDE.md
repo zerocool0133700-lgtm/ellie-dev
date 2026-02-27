@@ -400,6 +400,22 @@ When the work item is done (or the session ends):
 - Ensure no `.env` or secrets are staged
 - Reference the work item ID in the commit
 
+## UI Development Workflow
+
+When working on UI code in the `ellie-home` project:
+
+1. **After editing any UI files** (`.vue`, `.ts`, `.js`, `.css` in `ellie-home/`):
+   - Always rebuild: `cd /home/ellie/ellie-home && bun run build`
+   - Or restart the dev server if running in dev mode: `bun run dev`
+
+2. **Remind the user to hard refresh** their browser:
+   - Chrome/Firefox: `Ctrl+Shift+R` (Linux/Windows) or `Cmd+Shift+R` (macOS)
+   - This clears the browser cache and loads the latest version
+
+3. **Common mistake:** Editing UI files but forgetting to rebuild means changes won't appear to the user, even though the code was modified.
+
+**ALWAYS** mention the rebuild step when completing UI changes, not just when the user reports "it's not working."
+
 ## Plane Reference
 
 - **Workspace:** evelife

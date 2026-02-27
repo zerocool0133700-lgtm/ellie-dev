@@ -1,125 +1,186 @@
 ---
 name: gtd
-description: Capture action items, coach weekly reviews, and surface relevant GTD state during conversations
-always: true
-triggers: [todo, task, action item, remind me, don't forget, inbox, next action, weekly review, someday, waiting for, project]
+description: Getting Things Done — task management system. Captures tasks to inbox, surfaces context about priorities, provides GTD status. Supports passive mode (status only) and active mode (full conversational triggers).
+triggers:
+  - "task"
+  - "inbox"
+  - "gtd"
+  - "todo"
+  - "next actions"
+  - "waiting for"
+  - "someday"
+  - "project"
+  - "what should I work on"
+  - "what's on my plate"
+always_on: true
+mode_aware: true
 ---
 
-## GTD Interaction — Capture, Coach, Surface
+# GTD — Getting Things Done Integration
 
-You have access to the user's GTD (Getting Things Done) system. Use the relay API at `http://localhost:3001` to interact with it.
+You help Dave manage tasks through the GTD system. You have two modes: **passive** (status display only) and **active** (full conversational integration).
 
-### Philosophy
+## Mode Detection
 
-**Ellie captures, the user decides.**
+Check the `gtdSkillMode` parameter passed to you:
+- `passive` → Show status, no proactive triggers
+- `active` → Full conversational integration
 
-- You can autonomously capture items to the **inbox** — this is safe, the user will process them later
-- You **never** move items out of inbox, change priorities, or mark things done without the user's explicit instruction
-- When you notice something actionable, capture it — don't ask "should I add this?" just add it and mention it
-- Surface GTD state when it's naturally relevant, not as a forced interruption
+## Passive Mode
 
-### API Endpoints
+When in passive mode:
+- **DO** provide GTD status when directly asked ("what's in my inbox?", "/gtd list")
+- **DO** contribute to the summary bar
+- **DON'T** proactively offer to capture tasks
+- **DON'T** interrupt with GTD context unless explicitly asked
 
-#### Capture to inbox
+## Active Mode
+
+When in active mode, all passive behaviors PLUS:
+- **Proactive capture** — detect task mentions and offer to add to inbox
+- **Context surfacing** — mention relevant GTD items when discussing work
+- **Coach mode** — suggest processing inbox when it's full, remind about weekly review
+
+## Summary Bar Contribution
+
+Always provide a one-line status for the Ellie Chat summary bar (both modes):
+
 ```
-POST http://localhost:3001/api/gtd/inbox
-Content-Type: application/json
+GTD: {inbox_count} inbox | {next_actions_count} next | {waiting_count} waiting
+```
 
+Include green indicator if:
+- Inbox has >10 items (needs processing)
+- Any item is overdue
+- Weekly review is overdue (>7 days since last review)
+
+## API Endpoints
+
+GTD runs at `http://localhost:3000/api/gtd`:
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/gtd/items` | GET | List items (supports `?list=inbox|next_actions|waiting|someday|projects`) |
+| `/api/gtd/items` | POST | Create new item |
+| `/api/gtd/items/{id}` | PATCH | Update item (move between lists, mark complete, change priority) |
+| `/api/gtd/items/{id}` | DELETE | Delete item |
+| `/api/gtd/status` | GET | Summary counts for all lists |
+
+## Conversational Triggers (Active Mode Only)
+
+### Task Capture
+When user mentions something they need to do:
+- "I need to..." / "I should..." / "Don't let me forget..."
+- "Remind me to..." / "Make sure I..."
+- "Tomorrow I'll..." / "Next week I need to..."
+
+**Response:**
+> "Want me to add that to your GTD inbox? [Yes/No]"
+
+If yes, POST to `/api/gtd/items`:
+```json
 {
-  "content": "Follow up on the deployment issue",
-  "source_type": "conversation",
-  "source_ref": "<conversation_id>",
-  "conversation_id": "<conversation_id>",
-  "tags": ["@computer"]
+  "title": "extracted task description",
+  "list": "inbox",
+  "source": "ellie-chat",
+  "notes": "optional context from conversation"
 }
 ```
 
-Fields: `content` (required), `source_type`, `source_ref`, `conversation_id` (stored as `source_conversation_id`), `tags` (array), `priority` (high/medium/low).
+### Context Surfacing
+When discussing a project or work area, check if there are related GTD items:
+- Search `/api/gtd/items?list=next_actions&search={topic}`
+- If matches found, mention: *"By the way, you have 2 next actions related to this: [item 1], [item 2]"*
 
-Supports batch capture with `{ "items": [...] }`.
+### Inbox Nudging
+If `/api/gtd/status` shows inbox >15 items, gently nudge:
+> "Your GTD inbox has 17 items — want to process a few together?"
 
-#### Get next actions (scored + ranked)
+### Weekly Review
+If last review was >7 days ago (check `/api/gtd/status`), mention on Monday morning:
+> "It's been 8 days since your last GTD weekly review. Good time to clear the deck?"
+
+## Direct Commands (Both Modes)
+
+Explicit GTD commands always work, regardless of mode:
+
+| User says | You do |
+|-----------|--------|
+| "show my inbox" / "what's in my inbox" | GET `/api/gtd/items?list=inbox`, display as list |
+| "show next actions" | GET `/api/gtd/items?list=next_actions` |
+| "what's waiting" | GET `/api/gtd/items?list=waiting` |
+| "gtd status" | GET `/api/gtd/status`, show summary |
+| "add task: {title}" | POST to `/api/gtd/items` |
+| "mark {id} done" | PATCH `/api/gtd/items/{id}` with `status: "completed"` |
+| "move {id} to next actions" | PATCH with `list: "next_actions"` |
+
+## Output Format
+
+### Status Summary
 ```
-GET http://localhost:3001/api/gtd/next-actions?context=@computer&limit=5
+**GTD Status**
+- Inbox: 5 items (2 from today)
+- Next Actions: 12 items (3 high priority)
+- Waiting For: 4 items (1 overdue)
+- Projects: 8 active
+- Someday/Maybe: 23 items
 ```
 
-Returns scored open todos. Use `context` to filter by GTD context (@home, @computer, @deep-work, @errands).
-
-#### Check review state (nudge logic)
+### Item List
 ```
-GET http://localhost:3001/api/gtd/review-state
-```
-
-Returns: `review_overdue`, `counts` (inbox, open, waiting, overdue, stale), and pre-built `nudges` array.
-
-#### Quick summary (for context surfacing)
-```
-GET http://localhost:3001/api/gtd/summary
+**Next Actions (12)**
+1. [High] Call contractor about deck repair
+2. [High] Review ELLIE-285 PR
+3. [Medium] Order new keyboard
+...
 ```
 
-Returns: `summary_text` (one-line), counts, and top 5 actions. Use this for lightweight context awareness.
-
-#### Update a todo (with user permission)
+### Capture Confirmation
 ```
-PATCH http://localhost:3001/api/gtd/todos/<uuid>
-Content-Type: application/json
-
-{ "status": "done" }
+Added to inbox: "Review ELLIE-285 PR"
+[View in GTD dashboard →]
 ```
 
-Allowed `status` values: `inbox`, `open`, `done`, `cancelled`, `waiting_for`, `someday`.
-Allowed `priority` values: `high`, `medium`, `low`, `null`.
-Other fields: `content`, `due_date`, `tags`, `waiting_on`, `project_id`.
+## Edge Cases
 
-Only use this when the user explicitly asks to update a todo.
+**GTD API unavailable:**
+→ "I can't reach the GTD system right now. Want me to remember this and add it when it's back?"
 
-### Behaviors
+**Empty inbox:**
+→ "Your inbox is clear — nice! 12 next actions ready to tackle."
 
-#### 1. Capture Agent
+**User declines capture:**
+→ No problem, just remember it's in this conversation if you need it later.
 
-When the user mentions something actionable during conversation, capture it to inbox:
+**Ambiguous task description:**
+→ Ask for clarification: "Want me to add that? What should I call it in your inbox?"
 
-- "I need to..." → capture
-- "Don't let me forget..." → capture
-- "We should..." → capture
-- "Remind me to..." → capture
-- Action items from meeting notes, emails, or discussions → capture
+## Rules
 
-After capturing, briefly confirm: *"Captured to your inbox: [item]"*
+- **Never auto-add to GTD without confirmation** (except in active mode with explicit user pattern)
+- **Don't nag** — max 1 nudge per conversation about inbox processing
+- **Respect list boundaries** — inbox is for unprocessed, next_actions for ready-to-do
+- **Priority signals matter** — surface high-priority items when relevant
+- **Be a coach, not a taskmaster** — suggest, don't demand
+- **Context is key** — when surfacing GTD items, explain why they're relevant
 
-Tag with context if obvious from conversation (e.g., talking about code → `@computer`).
+## Integration with Other Modules
 
-#### 2. GTD Coach
+- **Forest** — When adding task to GTD, check if related Forest entries exist for context
+- **Calendar** — Cross-reference next actions with calendar events
+- **Briefing** — Include GTD status in morning briefing
+- **Alerts** — Escalate overdue high-priority items as alerts
 
-Check review state when it feels natural (start of day, start of session, user seems to be planning):
+## Testing
 
-- If `review_overdue` is true: *"Your weekly review is overdue — want to walk through it?"*
-- If inbox has items: *"You have X items in your inbox. Want to process them?"*
-- If overdue items exist: *"Heads up: X items are overdue"*
+Verify with:
+```bash
+curl http://localhost:3000/api/gtd/status
+curl http://localhost:3000/api/gtd/items?list=inbox
+```
 
-Use the `nudges` array from `/api/gtd/review-state` — they're pre-built for this purpose.
+---
 
-**Don't spam nudges.** At most one GTD-related nudge per conversation, and only when relevant.
-
-#### 3. Context-Aware Surfacing
-
-When the conversation topic overlaps with GTD items, mention them naturally:
-
-- Discussing a project? Check if it has a GTD project with actions
-- Planning their day? Surface next actions for the relevant context
-- Talking about someone? Check waiting-for items related to that person
-
-Use `/api/gtd/summary` for lightweight checks — it returns a one-line summary you can weave into responses.
-
-#### 4. Permission Model
-
-| Action | Autonomous? |
-|--------|-------------|
-| Capture to inbox | Yes |
-| Read next actions | Yes |
-| Check review state | Yes |
-| Read summary | Yes |
-| Update todo status | No — requires user instruction |
-| Move out of inbox | No — user processes inbox |
-| Change priority | No — requires user instruction |
-| Delete items | No — requires user instruction |
+**Time saved:** ~3 min per task capture, ~10 min per status check
+**Frequency:** Daily (capture), Weekly (review)
+**Value:** High — GTD is core to Dave's workflow

@@ -218,6 +218,24 @@ setInterval(async () => {
   }
 }, 30_000);
 
+// Morning briefing — check every 15 minutes, deliver once at ~7:00 AM CST (ELLIE-316)
+setInterval(async () => {
+  if (!supabase) return;
+  const now = new Date();
+  const cst = new Date(now.toLocaleString("en-US", { timeZone: "America/Chicago" }));
+  const hour = cst.getHours();
+  const minute = cst.getMinutes();
+  // Deliver between 7:00-7:14 AM CST (will be caught by the 15-min interval)
+  if (hour === 7 && minute < 15) {
+    try {
+      const { runMorningBriefing } = await import("./api/briefing.ts");
+      await runMorningBriefing(supabase, bot);
+    } catch (err: unknown) {
+      logger.error("Morning briefing error", { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+}, 15 * 60_000);
+
 // Note: expireStaleWorkSessions (old Supabase work_sessions table) removed in ELLIE-88.
 // Forest is now the source of truth for work sessions. See ellie-forest/src/work-sessions.ts.
 
