@@ -10,6 +10,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { bumpSnapshotVersion } from "./snapshot.ts";
 import { clearBinCache } from "./eligibility.ts";
+import { clearSkillFileCache } from "./loader.ts";
 
 const DEBOUNCE_MS = 500;
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -59,6 +60,7 @@ function scheduleReload(filename: string): void {
   debounceTimer = setTimeout(() => {
     console.log(`[skills] Reloading after change: ${filename}`);
     clearBinCache();
+    clearSkillFileCache();
     bumpSnapshotVersion();
     debounceTimer = null;
   }, DEBOUNCE_MS);

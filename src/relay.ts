@@ -243,6 +243,10 @@ setBroadcastToEllieChat(broadcastToEllieChatClients);
 if (anthropic && supabase) initClassifier(anthropic, supabase);
 if (anthropic) initEntailmentClassifier(anthropic);
 
+// ELLIE-235: Preload model costs at startup (avoids first-request latency)
+import { preloadModelCosts } from "./orchestrator.ts";
+preloadModelCosts(supabase).catch(err => logger.warn("Model cost preload failed", err));
+
 // Initialize SKILL.md watcher for hot-reload (ELLIE-217)
 startSkillWatcher();
 getSkillSnapshot().then(s => {

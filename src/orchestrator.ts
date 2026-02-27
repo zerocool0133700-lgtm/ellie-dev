@@ -153,9 +153,10 @@ let _skillComplexityCache: Map<string, "light" | "heavy"> | null = null;
 let _skillComplexityCacheTime = 0;
 const SKILL_CACHE_TTL_MS = 5 * 60_000;
 
-// Model cost cache
+// Model cost cache — ELLIE-235: extended to 30min, preloaded at startup
 let _modelCostCache: Map<string, { input: number; output: number }> | null = null;
 let _modelCostCacheTime = 0;
+const MODEL_COST_CACHE_TTL_MS = 30 * 60_000;
 
 /** Reset internal caches — test-only. */
 export function _resetCachesForTesting(): void {
@@ -863,7 +864,8 @@ async function getSkillComplexity(
 async function getModelCosts(
   supabase: SupabaseClient | null,
 ): Promise<Map<string, { input: number; output: number }>> {
-  if (_modelCostCache && Date.now() - _modelCostCacheTime < SKILL_CACHE_TTL_MS) {
+  // ELLIE-235: Use dedicated TTL (30min) instead of skill cache TTL (5min)
+  if (_modelCostCache && Date.now() - _modelCostCacheTime < MODEL_COST_CACHE_TTL_MS) {
     return _modelCostCache;
   }
 
@@ -887,6 +889,53 @@ async function getModelCosts(
   } catch {
     return FALLBACK_MODEL_COSTS;
   }
+}
+
+/**
+ * ELLIE-235: Preload model costs into cache at startup.
+ * Avoids first-request latency and ensures costs are available immediately.
+ */
+export async function preloadModelCosts(
+  supabase: SupabaseClient | null,
+): Promise<void> {
+  const costs = await getModelCosts(supabase);
+  console.log(`[orchestrator] Model costs preloaded: ${costs.size} models`);
+}
+
+/**
+ * ELLIE-235: Estimate cost of an execution before running it.
+ * Uses cached model costs and token estimation to predict total cost.
+ * Returns { estimatedCost, wouldExceedLimit, modelId }.
+ */
+export async function estimateExecutionCost(
+  supabase: SupabaseClient | null,
+  opts: {
+    promptText: string;
+    mode: ExecutionMode;
+    modelId: string;
+    steps?: number;
+  },
+): Promise<{ estimatedCost: number; wouldExceedLimit: boolean; modelId: string }> {
+  const inputTokens = estimateTokens(opts.promptText);
+  // Estimate output as ~40% of input (conservative average across modes)
+  const outputRatio = opts.mode === "critic-loop" ? 0.6 : 0.4;
+  const estimatedOutputTokens = Math.ceil(inputTokens * outputRatio);
+  const stepCount = opts.steps || (opts.mode === "critic-loop" ? 3 : opts.mode === "fan-out" ? 2 : 1);
+
+  const costs = await getModelCosts(supabase);
+  const model = costs.get(opts.modelId);
+  if (!model) {
+    return { estimatedCost: 0, wouldExceedLimit: false, modelId: opts.modelId };
+  }
+
+  const perStep = (inputTokens * model.input + estimatedOutputTokens * model.output) / 1_000_000;
+  const estimatedCost = perStep * stepCount;
+
+  return {
+    estimatedCost,
+    wouldExceedLimit: estimatedCost > MAX_COST_PER_EXECUTION,
+    modelId: opts.modelId,
+  };
 }
 
 async function calculateStepCost(

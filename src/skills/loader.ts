@@ -1,8 +1,11 @@
 /**
- * Skill Loader — ELLIE-217
+ * Skill Loader — ELLIE-217, ELLIE-235
  *
  * Discovers and loads SKILL.md files from multiple directories
  * with precedence-based deduplication.
+ *
+ * ELLIE-235: Mtime-based caching — only re-reads files whose mtime changed.
+ * Avoids full filesystem I/O on every snapshot rebuild.
  */
 
 import { readdir, readFile, stat } from "fs/promises";
@@ -21,9 +24,18 @@ const SEARCH_DIRS = [
   { path: () => join(import.meta.dir, "../../skills"), priority: 3, label: "bundled" },
 ];
 
+// ELLIE-235: Per-file cache keyed by path, stores entry + mtime
+interface CachedSkill {
+  entry: SkillEntry;
+  mtimeMs: number;
+}
+const fileCache = new Map<string, CachedSkill>();
+
 /**
  * Load all skill entries from configured directories.
  * First-found wins (highest priority directory takes precedence).
+ *
+ * ELLIE-235: Uses mtime-based caching — only re-reads changed files.
  */
 export async function loadSkillEntries(): Promise<SkillEntry[]> {
   const seen = new Map<string, SkillEntry>();
@@ -44,8 +56,14 @@ export async function loadSkillEntries(): Promise<SkillEntry[]> {
   return skills;
 }
 
+/** Clear the file cache (called by watcher on hot-reload). */
+export function clearSkillFileCache(): void {
+  fileCache.clear();
+}
+
 /**
  * Scan a single directory for skill subdirectories containing SKILL.md.
+ * ELLIE-235: Checks mtime before re-reading — skips unchanged files.
  */
 async function scanSkillDir(dirPath: string, priority: number): Promise<SkillEntry[]> {
   const entries: SkillEntry[] = [];
@@ -66,21 +84,32 @@ async function scanSkillDir(dirPath: string, priority: number): Promise<SkillEnt
           continue;
         }
 
+        // ELLIE-235: Check mtime cache — skip re-reading unchanged files
+        const cached = fileCache.get(skillMdPath);
+        if (cached && cached.mtimeMs === fileStat.mtimeMs) {
+          entries.push(cached.entry);
+          continue;
+        }
+
         const raw = await readFile(skillMdPath, "utf-8");
         const parsed = parseFrontmatter(raw);
         if (!parsed) {
           logger.warn("Skipping skill: invalid frontmatter", { skill: item.name });
+          fileCache.delete(skillMdPath);
           continue;
         }
 
-        entries.push({
+        const entry: SkillEntry = {
           name: parsed.frontmatter.name,
           description: parsed.frontmatter.description,
           instructions: parsed.body,
           frontmatter: parsed.frontmatter,
           sourceDir: join(dirPath, item.name),
           sourcePriority: priority,
-        });
+        };
+
+        fileCache.set(skillMdPath, { entry, mtimeMs: fileStat.mtimeMs });
+        entries.push(entry);
       } catch {
         // No SKILL.md in this subdirectory — skip silently
       }

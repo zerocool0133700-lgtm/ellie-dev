@@ -67,7 +67,8 @@ export function isSkillEligible(entry: SkillEntry, credentialDomains?: Set<strin
  */
 let domainCache: Set<string> | null = null;
 let domainCacheTime = 0;
-const CACHE_TTL = 60_000;
+// ELLIE-235: Extended from 60s to 10min — credential domains rarely change
+const CACHE_TTL = 10 * 60_000;
 
 async function getCredentialDomains(): Promise<Set<string>> {
   const now = Date.now();
