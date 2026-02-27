@@ -21,6 +21,7 @@ import {
   mapHealthToMemoryCategory,
   type PromptSection,
 } from "./relay-utils.ts";
+import { getLastResolvedStrategy, getStrategyExcludedSections, getStrategyTokenBudget } from "./context-sources.ts";
 
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
 
@@ -590,6 +591,13 @@ export function buildPrompt(
     priority: 3 });
   }
 
-  // ── Apply token budget (ELLIE-185) ──
-  return applyTokenBudget(sections);
+  // ── ELLIE-261: Apply strategy mode section filtering + budget ──
+  const activeStrategy = getLastResolvedStrategy();
+  const excludedSections = getStrategyExcludedSections(activeStrategy);
+  const filteredSections = excludedSections.size > 0
+    ? sections.filter(s => !excludedSections.has(s.label))
+    : sections;
+
+  // ── Apply token budget (ELLIE-185 + ELLIE-261 budget control) ──
+  return applyTokenBudget(filteredSections, getStrategyTokenBudget(activeStrategy));
 }

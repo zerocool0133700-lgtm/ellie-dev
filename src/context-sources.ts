@@ -745,16 +745,108 @@ const SOURCE_REGISTRY: Record<string, SourceFetcher> = {
 
 const ALL_SOURCE_NAMES = Object.keys(SOURCE_REGISTRY);
 
+// ── ELLIE-261: Context strategy presets ─────────────────────
+// Each strategy defines default sources, priority, and excluded sections.
+// Explicit profile settings (sources/exclude/priority) override the strategy.
+
+import type { ContextStrategy } from '../../ellie-forest/src/types';
+
+interface StrategyPreset {
+  sources: string[] | 'all';
+  priority: string[];
+  exclude: string[];
+  /** Prompt section labels to exclude (applied in buildPrompt) */
+  excludeSections: string[];
+  /** Token budget override */
+  budget: 'minimal' | 'default' | 'extended';
+}
+
+const STRATEGY_PRESETS: Record<ContextStrategy, StrategyPreset> = {
+  full: {
+    sources: 'all',
+    priority: [],
+    exclude: [],
+    excludeSections: [],
+    budget: 'default',
+  },
+  focused: {
+    sources: ['work_items', 'work_sessions', 'action_items', 'goals'],
+    priority: ['work_items', 'work_sessions'],
+    exclude: [],
+    excludeSections: ['context-docket'],
+    budget: 'default',
+  },
+  minimal: {
+    sources: [],  // No structured context at all
+    priority: [],
+    exclude: [],
+    excludeSections: ['structured-context', 'context-docket', 'search', 'forest-awareness', 'skills', 'queue'],
+    budget: 'minimal',
+  },
+  voice: {
+    sources: ['calendar', 'action_items', 'google_tasks'],
+    priority: ['calendar'],
+    exclude: [],
+    excludeSections: ['memory-protocol', 'confirm-protocol', 'forest-memory-writes', 'dev-protocol',
+                      'playbook-commands', 'work-commands', 'context-docket', 'search'],
+    budget: 'minimal',
+  },
+  briefing: {
+    sources: 'all',
+    priority: ['calendar', 'gmail', 'outlook', 'action_items', 'google_tasks', 'activity'],
+    exclude: [],
+    excludeSections: [],
+    budget: 'extended',
+  },
+};
+
+/** Get the strategy preset for a given strategy name. */
+export function getStrategyPreset(strategy: ContextStrategy | undefined): StrategyPreset {
+  return STRATEGY_PRESETS[strategy || 'full'];
+}
+
+/** Get excluded section labels for the active strategy (used by buildPrompt). */
+export function getStrategyExcludedSections(strategy: ContextStrategy | undefined): Set<string> {
+  const preset = getStrategyPreset(strategy);
+  return new Set(preset.excludeSections);
+}
+
+const BUDGET_TOKEN_MAP: Record<string, number> = {
+  minimal: 60_000,
+  default: 150_000,
+  extended: 190_000,
+};
+
+/** Get the token budget for a strategy (used by applyTokenBudget in buildPrompt). */
+export function getStrategyTokenBudget(strategy: ContextStrategy | undefined): number {
+  const preset = getStrategyPreset(strategy);
+  return BUDGET_TOKEN_MAP[preset.budget] || BUDGET_TOKEN_MAP.default;
+}
+
+// Last resolved strategy — cached so buildPrompt can read it without extra DB call
+let _lastResolvedStrategy: ContextStrategy = 'full';
+
+/** Get the strategy that was resolved on the last getAgentStructuredContext call. */
+export function getLastResolvedStrategy(): ContextStrategy {
+  return _lastResolvedStrategy;
+}
+
 /**
  * Fetch structured context filtered by an agent's context profile.
  * Profile controls which sources to fetch, priority ordering, and exclusions.
+ * Strategy mode (ELLIE-261) provides high-level presets; explicit settings override.
  */
 export async function getAgentStructuredContext(
   supabase: SupabaseClient | null,
   agentName: string,
 ): Promise<string> {
   // Load agent profile from forest DB
-  let profile: { sources?: string[] | 'all'; priority?: string[]; exclude?: string[] } = {};
+  let profile: {
+    sources?: string[] | 'all';
+    priority?: string[];
+    exclude?: string[];
+    strategy?: ContextStrategy;
+  } = {};
   try {
     const { getAgent } = await import('../../ellie-forest/src/index');
     const agent = await getAgent(agentName);
@@ -765,17 +857,27 @@ export async function getAgentStructuredContext(
     // If forest DB unavailable, use all sources (graceful degradation)
   }
 
-  // Determine which sources to fetch
+  const strategy = profile.strategy || 'full';
+  const preset = getStrategyPreset(strategy);
+
+  // Determine which sources to fetch:
+  // Explicit sources > strategy sources > all
   let sourceNames: string[];
   if (Array.isArray(profile.sources)) {
     sourceNames = profile.sources.filter(s => s in SOURCE_REGISTRY);
+  } else if (Array.isArray(preset.sources)) {
+    sourceNames = preset.sources.filter(s => s in SOURCE_REGISTRY);
   } else {
     sourceNames = [...ALL_SOURCE_NAMES];
   }
 
-  // Apply exclusions
-  if (profile.exclude?.length) {
-    sourceNames = sourceNames.filter(s => !profile.exclude!.includes(s));
+  // Apply exclusions: merge strategy + explicit
+  const allExclusions = new Set([
+    ...(preset.exclude || []),
+    ...(profile.exclude || []),
+  ]);
+  if (allExclusions.size > 0) {
+    sourceNames = sourceNames.filter(s => !allExclusions.has(s));
   }
 
   // Fetch all selected sources in parallel
@@ -786,18 +888,19 @@ export async function getAgentStructuredContext(
     }))
   );
 
-  // Apply priority ordering: priority sources first, then the rest
-  if (profile.priority?.length) {
-    const prioritySet = new Set(profile.priority);
+  // Apply priority ordering: explicit > strategy > default order
+  const priorityList = profile.priority?.length ? profile.priority : preset.priority;
+  if (priorityList?.length) {
+    const prioritySet = new Set(priorityList);
     entries.sort((a, b) => {
       const aP = prioritySet.has(a.name) ? 0 : 1;
       const bP = prioritySet.has(b.name) ? 0 : 1;
       if (aP !== bP) return aP - bP;
-      // Within same priority tier, maintain original order
       return sourceNames.indexOf(a.name) - sourceNames.indexOf(b.name);
     });
   }
 
+  _lastResolvedStrategy = strategy;
   return entries.map(e => e.content).filter(Boolean).join("\n\n");
 }
 
