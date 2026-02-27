@@ -355,6 +355,16 @@ async function handleSummary(req: IncomingMessage, res: ServerResponse, supabase
 
 // ── Route dispatcher ─────────────────────────────────────────
 
+/** Wrap async handler to catch unhandled rejections (ELLIE-276) */
+function safeAsync(promise: Promise<void>, res: ServerResponse): void {
+  promise.catch((err) => {
+    logger.error("GTD handler failed", err);
+    if (!res.writableEnded) {
+      jsonRes(res, 500, { error: "Internal server error" });
+    }
+  });
+}
+
 export function handleGtdRoute(
   req: IncomingMessage,
   res: ServerResponse,
@@ -370,32 +380,32 @@ export function handleGtdRoute(
 
   // POST /api/gtd/inbox
   if (pathname === "/api/gtd/inbox" && req.method === "POST") {
-    handleInbox(req, res, supabase);
+    safeAsync(handleInbox(req, res, supabase), res);
     return true;
   }
 
   // GET /api/gtd/next-actions
   if (pathname === "/api/gtd/next-actions" && req.method === "GET") {
-    handleNextActions(req, res, supabase);
+    safeAsync(handleNextActions(req, res, supabase), res);
     return true;
   }
 
   // GET /api/gtd/review-state
   if (pathname === "/api/gtd/review-state" && req.method === "GET") {
-    handleReviewState(req, res, supabase);
+    safeAsync(handleReviewState(req, res, supabase), res);
     return true;
   }
 
   // GET /api/gtd/summary
   if (pathname === "/api/gtd/summary" && req.method === "GET") {
-    handleSummary(req, res, supabase);
+    safeAsync(handleSummary(req, res, supabase), res);
     return true;
   }
 
   // PATCH /api/gtd/todos/:id
   const todoMatch = pathname.match(/^\/api\/gtd\/todos\/([0-9a-f-]{36})$/);
   if (todoMatch && req.method === "PATCH") {
-    handleUpdateTodo(req, res, supabase, todoMatch[1]);
+    safeAsync(handleUpdateTodo(req, res, supabase, todoMatch[1]), res);
     return true;
   }
 

@@ -998,8 +998,8 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
     return;
   }
 
-  // GTD — return pending Google Tasks as JSON
-  if (url.pathname === "/api/gtd" && req.method === "GET") {
+  // Google Tasks — return pending tasks as JSON (ELLIE-277: moved from /api/gtd)
+  if (url.pathname === "/api/google-tasks" && req.method === "GET") {
     (async () => {
       try {
         const data = await getGoogleTasksJSON();
