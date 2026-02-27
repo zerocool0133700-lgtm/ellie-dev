@@ -19,8 +19,8 @@ Comprehensive security audit for any OpenClaw skill before installation.
 
 ## Audit Modes
 
-- **Standard audit** (default): Full 8-step procedure below
-- **Quick audit**: Steps 1-3 + Step 8 only (use when user says "quick audit" or "quick check")
+- **Standard audit** (default): Full 9-step procedure below, including sandboxing recommendations
+- **Quick audit**: Steps 1-3 + Step 8 only (use when user says "quick audit" or "quick check") — skips detailed analysis and sandboxing guidance
 
 ## Audit Procedure
 
@@ -199,6 +199,37 @@ Honesty: [Accurate | Understated | Misleading | Deceptive]
 [If CAUTION or RISKY]: Quarantine option: Install in an isolated agent
 first and test with non-sensitive data before using in your main workspace.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+### Step 9: Sandboxing Recommendation (Optional)
+
+Based on the risk rating and findings, recommend how this skill should be deployed:
+
+**For SAFE skills:**
+- Can be used normally in any agent
+- No sandboxing required
+- Recommend: **Unrestricted**
+
+**For CAUTION skills:**
+- Evaluate which warnings are critical vs. context-dependent
+- Recommend one of:
+  - **Restricted agent**: Only load in a non-production agent with limited scope (e.g., testing agent, personal research agent)
+  - **Rate limiting**: Cap execution frequency or max concurrent runs
+  - **Manual approval gate**: Require explicit user confirmation before execution
+  - **Data isolation**: Run with access only to specific folders/files, not system-wide
+
+**For RISKY skills:**
+- Recommend: **Do NOT install**
+- If user insists on testing:
+  - **Isolated sandbox**: Run in a fresh container/VM with network disabled
+  - **Audit before production**: Require security team review before any production use
+  - **Monitor execution**: Log all file access, network calls, environment variable reads
+
+**Include in the report:**
+```
+━━ SANDBOXING RECOMMENDATION ━━
+[Risk Level]: [Unrestricted | Restricted | Manual Approval | Rate Limited | Isolated | Do Not Install]
+Reasoning: [1-2 sentences on why this level is appropriate]
 ```
 
 ## Important Rules

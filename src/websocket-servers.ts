@@ -165,10 +165,15 @@ async function deliverPendingReadouts(ws: WebSocket): Promise<void> {
       : `${items[0].source} has ${items.length} new findings:\n\n${lines.join('\n\n')}`;
 
     if (ws.readyState === WebSocket.OPEN) {
+      // Extract memoryId from first item's related_refs for deduplication (ELLIE-199)
+      const firstMemoryRef = items[0]?.related_refs?.find((ref: any) => ref.type === 'bridge')
+      const memoryId = firstMemoryRef?.id || items[0]?.metadata?.bridge_memory_id
+
       ws.send(JSON.stringify({
         type: "response",
         text: summary,
         agent: "general",
+        memoryId,
         ts: Date.now(),
       }));
     }

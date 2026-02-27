@@ -1759,6 +1759,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           const data = body ? JSON.parse(body) : {};
           const { bumpSnapshotVersion } = await import("./skills/snapshot.ts");
           const { parseFrontmatter } = await import("./skills/frontmatter.ts");
+          const { auditSkill } = await import("./skills/auditor.ts");
           const { join } = await import("path");
           const { mkdir, writeFile } = await import("fs/promises");
 
@@ -1766,6 +1767,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           let skillName: string;
           let files: Array<{ path: string; content: string }> = [];
           let meta: Record<string, unknown> | null = null;
+          let skillMdContent = "";
 
           if (data.zip) {
             // Base64-encoded zip — extract in memory
@@ -1802,6 +1804,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
             }
 
             skillName = parsed.frontmatter.name;
+            skillMdContent = skillMd;
             files.push({ path: "SKILL.md", content: skillMd });
             if (meta) files.push({ path: "_meta.json", content: JSON.stringify(meta, null, 2) });
             files.push(...extraFiles);
@@ -1815,6 +1818,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
               return;
             }
             skillName = parsed.frontmatter.name;
+            skillMdContent = data.markdown;
             files.push({ path: "SKILL.md", content: data.markdown });
 
           } else {
@@ -1826,6 +1830,31 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           // Sanitize skill name for directory
           const safeName = skillName.replace(/[^a-zA-Z0-9_-]/g, "-").toLowerCase();
           const installDir = join(skillsDir, safeName);
+
+          // **SECURITY: Audit skill before installation**
+          const extraFiles = files.filter((f) => f.path !== "SKILL.md" && f.path !== "_meta.json");
+          const auditReport = await auditSkill(installDir, skillMdContent, extraFiles);
+
+          // Enforce sandbox policy
+          if (auditReport.riskRating === "RISKY") {
+            res.writeHead(403, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              error: "Skill audit failed — security risks detected",
+              auditReport,
+            }));
+            return;
+          }
+
+          // CAUTION: require explicit acknowledgment from user (could be set via data.bypassCaution flag for automated installs)
+          if (auditReport.riskRating === "CAUTION" && !data.acknowledgeCaution) {
+            res.writeHead(202, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              message: "Skill audit requires acknowledgment",
+              auditReport,
+              instruction: "Re-submit with acknowledgeCaution: true to proceed",
+            }));
+            return;
+          }
 
           // Write all files
           for (const f of files) {
@@ -1841,13 +1870,14 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           // Bump snapshot so new skill is picked up
           bumpSnapshotVersion();
 
-          console.log(`[skills] Imported "${skillName}" (${files.length} files) → ${installDir}`);
+          console.log(`[skills] Imported "${skillName}" (${files.length} files, ${auditReport.riskRating}) → ${installDir}`);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({
             name: skillName,
             dir: installDir,
             files: files.map(f => f.path),
             meta,
+            auditReport,
           }));
         } catch (err: any) {
           logger.error("Skills import error", err);
