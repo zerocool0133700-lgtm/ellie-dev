@@ -139,6 +139,7 @@ import {
   clearSessionApprovals,
 } from "./tool-approval.ts";
 import { handleGatewayRoute } from "./api/gateway-intake.ts";
+import { handleGtdRoute } from "./api/gtd.ts";
 import { log } from "./logger.ts";
 import type { ApiRequest, ApiResponse } from "./api/types.ts";
 
@@ -151,6 +152,9 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
 
   // Gateway intake endpoints (ELLIE-151) — forwarded from ellie-gateway
   if (req.method === "POST" && handleGatewayRoute(req, res, url.pathname)) return;
+
+  // GTD API endpoints (ELLIE-275) — agent-facing GTD interaction
+  if (handleGtdRoute(req, res, url.pathname, supabase)) return;
 
   // Twilio TwiML webhook — tells Twilio to open a media stream
   if (url.pathname === "/voice" && req.method === "POST") {
