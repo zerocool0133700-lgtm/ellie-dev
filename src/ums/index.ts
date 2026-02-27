@@ -92,9 +92,38 @@ export async function ingestNormalized(
   return message;
 }
 
-// Re-export everything
+// ── Re-export core ─────────────────────────────────────────────
 export { registerConnector, getConnector, listProviders } from "./connector.ts";
 export { subscribe, unsubscribe, listSubscribers, queryMessages } from "./events.ts";
 export type { UMSConnector } from "./connector.ts";
 export type { SubscriptionFilter, MessageHandler } from "./events.ts";
 export type { UnifiedMessage, UnifiedMessageInsert, MessageQueryFilters, Provider, ContentType, Sender } from "./types.ts";
+
+// ── Connectors ─────────────────────────────────────────────────
+export { telegramConnector } from "./connectors/telegram.ts";
+export { googleChatConnector } from "./connectors/google-chat.ts";
+export { gmailConnector } from "./connectors/gmail.ts";
+export { calendarConnector } from "./connectors/calendar.ts";
+export { googleTasksConnector } from "./connectors/google-tasks.ts";
+export { voiceConnector } from "./connectors/voice.ts";
+export { githubConnector } from "./connectors/github.ts";
+export { documentsConnector } from "./connectors/documents.ts";
+
+// ── Consumers (push) ──────────────────────────────────────────
+export { initGtdConsumer } from "./consumers/gtd.ts";
+export { initMemoryConsumer } from "./consumers/memory.ts";
+export { initForestConsumer } from "./consumers/forest.ts";
+export { initAlertConsumer } from "./consumers/alert.ts";
+export { initCommsConsumer } from "./consumers/comms.ts";
+export { initCalendarIntelConsumer } from "./consumers/calendar-intel.ts";
+
+// ── Consumers (pull) ──────────────────────────────────────────
+export { generateBriefing } from "./consumers/briefing.ts";
+export type { DailyBriefing, BriefingSection, BriefingItem } from "./consumers/briefing.ts";
+export { generateRelationshipReport } from "./consumers/relationship.ts";
+export type { RelationshipReport, ContactStats } from "./consumers/relationship.ts";
+export { generateAnalyticsReport } from "./consumers/analytics.ts";
+export type { ActivityReport, ChannelVolume, HourlyDistribution } from "./consumers/analytics.ts";
+export { getStaleThreads, getActiveThreads } from "./consumers/comms.ts";
+export { getCalendarInsights, getCalendarAlerts, clearInsights } from "./consumers/calendar-intel.ts";
+export type { CalendarInsight } from "./consumers/calendar-intel.ts";
