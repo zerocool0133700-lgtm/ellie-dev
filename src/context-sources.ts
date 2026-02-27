@@ -764,6 +764,8 @@ interface StrategyPreset {
   excludeSections: string[];
   /** Token budget override */
   budget: 'minimal' | 'default' | 'extended';
+  /** Per-section priority overrides (label → priority number) */
+  sectionPriorities?: Record<string, number>;
 }
 
 const STRATEGY_PRESETS: Record<ContextStrategy, StrategyPreset> = {
@@ -773,6 +775,8 @@ const STRATEGY_PRESETS: Record<ContextStrategy, StrategyPreset> = {
     exclude: [],
     excludeSections: [],
     budget: 'default',
+    // Soul at priority 2 — full personality in conversational modes
+    sectionPriorities: { soul: 2 },
   },
   focused: {
     sources: ['work_items', 'work_sessions', 'action_items', 'goals'],
@@ -780,6 +784,8 @@ const STRATEGY_PRESETS: Record<ContextStrategy, StrategyPreset> = {
     exclude: [],
     excludeSections: ['context-docket'],
     budget: 'default',
+    // Soul at priority 7 — condensed identity in deep-work modes
+    sectionPriorities: { soul: 7, archetype: 8 },
   },
   minimal: {
     sources: [],  // No structured context at all
@@ -787,6 +793,8 @@ const STRATEGY_PRESETS: Record<ContextStrategy, StrategyPreset> = {
     exclude: [],
     excludeSections: ['structured-context', 'context-docket', 'search', 'forest-awareness', 'skills', 'queue'],
     budget: 'minimal',
+    // Soul at priority 7 — minimal but still present
+    sectionPriorities: { soul: 7, archetype: 8 },
   },
   voice: {
     sources: ['calendar', 'action_items', 'google_tasks'],
@@ -795,6 +803,8 @@ const STRATEGY_PRESETS: Record<ContextStrategy, StrategyPreset> = {
     excludeSections: ['memory-protocol', 'confirm-protocol', 'forest-memory-writes', 'dev-protocol',
                       'playbook-commands', 'work-commands', 'context-docket', 'search'],
     budget: 'minimal',
+    // Soul at priority 7 — voice is tight on tokens
+    sectionPriorities: { soul: 7, archetype: 8 },
   },
   briefing: {
     sources: 'all',
@@ -802,6 +812,8 @@ const STRATEGY_PRESETS: Record<ContextStrategy, StrategyPreset> = {
     exclude: [],
     excludeSections: [],
     budget: 'extended',
+    // Soul at priority 5 — present but situational context takes priority
+    sectionPriorities: { soul: 5 },
   },
 };
 
@@ -826,6 +838,12 @@ const BUDGET_TOKEN_MAP: Record<string, number> = {
 export function getStrategyTokenBudget(strategy: ContextStrategy | undefined): number {
   const preset = getStrategyPreset(strategy);
   return BUDGET_TOKEN_MAP[preset.budget] || BUDGET_TOKEN_MAP.default;
+}
+
+/** Get per-section priority overrides for the active strategy (used by buildPrompt). */
+export function getStrategySectionPriorities(strategy: ContextStrategy | undefined): Record<string, number> {
+  const preset = getStrategyPreset(strategy);
+  return preset.sectionPriorities || {};
 }
 
 // Last resolved strategy — cached so buildPrompt can read it without extra DB call

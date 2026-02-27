@@ -21,7 +21,7 @@ import {
   mapHealthToMemoryCategory,
   type PromptSection,
 } from "./relay-utils.ts";
-import { getLastResolvedStrategy, getStrategyExcludedSections, getStrategyTokenBudget } from "./context-sources.ts";
+import { getLastResolvedStrategy, getStrategyExcludedSections, getStrategyTokenBudget, getStrategySectionPriorities } from "./context-sources.ts";
 
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
 
@@ -42,7 +42,7 @@ export const USER_TIMEZONE = process.env.USER_TIMEZONE || Intl.DateTimeFormat().
 
 // ── Soul context (hot-reloaded on file change — ELLIE-244) ──
 
-const SOUL_PATH = join(PROJECT_ROOT, "soul.md");
+const SOUL_PATH = join(PROJECT_ROOT, "config", "soul.md");
 const PROFILE_PATH = join(PROJECT_ROOT, "config", "profile.md");
 
 let soulContext = "";
@@ -595,7 +595,14 @@ export function buildPrompt(
   }
 
   // ── ELLIE-261: Apply strategy mode section filtering + budget ──
+  // ── ELLIE-262: Apply per-mode soul/personality priority overrides ──
   const activeStrategy = getLastResolvedStrategy();
+  const sectionPriorityOverrides = getStrategySectionPriorities(activeStrategy);
+  for (const s of sections) {
+    if (sectionPriorityOverrides[s.label] !== undefined) {
+      s.priority = sectionPriorityOverrides[s.label];
+    }
+  }
   const excludedSections = getStrategyExcludedSections(activeStrategy);
   const filteredSections = excludedSections.size > 0
     ? sections.filter(s => !excludedSections.has(s.label))
