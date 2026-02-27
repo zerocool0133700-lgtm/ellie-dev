@@ -25,13 +25,26 @@ const TTS_PROVIDER = (process.env.TTS_PROVIDER || "elevenlabs") as "elevenlabs" 
 const TMP_DIR = process.env.TMPDIR || "/tmp";
 
 /** Returns which provider to use, falling back if primary is unconfigured. */
-function getProvider(): "elevenlabs" | "openai" | null {
-  if (TTS_PROVIDER === "openai" && OPENAI_API_KEY) return "openai";
-  if (TTS_PROVIDER === "elevenlabs" && ELEVENLABS_API_KEY) return "elevenlabs";
+function getProvider(override?: "elevenlabs" | "openai"): "elevenlabs" | "openai" | null {
+  const preferred = override || TTS_PROVIDER;
+  if (preferred === "openai" && OPENAI_API_KEY) return "openai";
+  if (preferred === "elevenlabs" && ELEVENLABS_API_KEY) return "elevenlabs";
   // Fallback: try the other one
   if (OPENAI_API_KEY) return "openai";
   if (ELEVENLABS_API_KEY) return "elevenlabs";
   return null;
+}
+
+/** Returns the current default provider and which providers are available. */
+export function getTTSProviderInfo() {
+  return {
+    default: TTS_PROVIDER,
+    current: getProvider(),
+    available: {
+      elevenlabs: !!ELEVENLABS_API_KEY,
+      openai: !!OPENAI_API_KEY,
+    },
+  };
 }
 
 // ── OpenAI TTS helper ───────────────────────────────────────
@@ -314,8 +327,8 @@ export async function textToSpeechMulaw(text: string): Promise<string> {
 // ── TTS: OGG/Opus (for Telegram voice messages) ─────────────
 
 /** Convert text to OGG/Opus audio (for Telegram voice messages). */
-export async function textToSpeechOgg(text: string): Promise<Buffer | null> {
-  const provider = getProvider();
+export async function textToSpeechOgg(text: string, providerOverride?: "elevenlabs" | "openai"): Promise<Buffer | null> {
+  const provider = getProvider(providerOverride);
   if (!provider) return null;
 
   if (provider === "openai") {
@@ -347,8 +360,8 @@ export async function textToSpeechOgg(text: string): Promise<Buffer | null> {
 // ── TTS: MP3 (for dashboard / ellie-chat playback) ──────────
 
 /** Low-bandwidth TTS for dashboard playback (MP3). */
-export async function textToSpeechFast(text: string): Promise<Buffer | null> {
-  const provider = getProvider();
+export async function textToSpeechFast(text: string, providerOverride?: "elevenlabs" | "openai"): Promise<Buffer | null> {
+  const provider = getProvider(providerOverride);
   if (!provider) return null;
 
   if (provider === "openai") {

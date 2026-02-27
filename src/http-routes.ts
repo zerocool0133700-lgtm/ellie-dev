@@ -28,7 +28,9 @@ import { triggerConsolidation, resetTelegramIdleTimer, resetGchatIdleTimer } fro
 import {
   textToSpeechOgg,
   textToSpeechFast,
+  getTTSProviderInfo,
 } from "./tts.ts";
+import { signToken, authenticateRequest } from "./api/jwt-auth.ts";
 import {
   buildPrompt,
   getArchetypeContext,
@@ -843,14 +845,49 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
     return;
   }
 
+  // JWT token endpoint — exchange API key for a short-lived JWT (ELLIE-233)
+  if (url.pathname === "/api/auth/token" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const apiKey = req.headers["x-api-key"] as string;
+        if (!apiKey || apiKey !== EXTENSION_API_KEY || !EXTENSION_API_KEY) {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid API key" }));
+          return;
+        }
+        const data = body ? JSON.parse(body) : {};
+        const subject = data.subject || "dashboard";
+        const scopes = Array.isArray(data.scopes) ? data.scopes : ["tts", "stt"];
+        const token = await signToken(subject, scopes);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ token }));
+      } catch (err: any) {
+        logger.error("Token issue error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Token generation failed" }));
+      }
+    });
+    return;
+  }
+
+  // TTS provider info — returns available providers
+  if (url.pathname === "/api/tts/provider" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(getTTSProviderInfo()));
+    return;
+  }
+
   // TTS endpoint — returns OGG audio for dashboard playback
   if (url.pathname === "/api/tts" && req.method === "POST") {
     let body = "";
     req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
     req.on("end", async () => {
       try {
-        const authKey = req.headers["x-api-key"] as string;
-        if (!authKey || authKey !== EXTENSION_API_KEY || !EXTENSION_API_KEY) {
+        // ELLIE-233: JWT auth (preferred) or legacy x-api-key (backwards compat)
+        const auth = await authenticateRequest(req, "tts", EXTENSION_API_KEY);
+        if (!auth) {
           res.writeHead(401, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Unauthorized" }));
           return;
@@ -862,9 +899,10 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
           return;
         }
         const fast = data.fast === true || url.searchParams.get("fast") === "1";
+        const providerOverride = (data.provider === "elevenlabs" || data.provider === "openai") ? data.provider : undefined;
         const audioBuffer = fast
-          ? await textToSpeechFast(data.text)
-          : await textToSpeechOgg(data.text);
+          ? await textToSpeechFast(data.text, providerOverride)
+          : await textToSpeechOgg(data.text, providerOverride);
         if (!audioBuffer) {
           res.writeHead(503, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "TTS unavailable" }));
@@ -891,8 +929,9 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
     req.on("data", (chunk: Buffer) => { chunks.push(chunk); });
     req.on("end", async () => {
       try {
-        const authKey = req.headers["x-api-key"] as string;
-        if (!authKey || authKey !== EXTENSION_API_KEY || !EXTENSION_API_KEY) {
+        // ELLIE-233: JWT auth (preferred) or legacy x-api-key (backwards compat)
+        const auth = await authenticateRequest(req, "stt", EXTENSION_API_KEY);
+        if (!auth) {
           res.writeHead(401, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Unauthorized" }));
           return;
