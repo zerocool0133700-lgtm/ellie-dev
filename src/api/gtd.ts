@@ -20,6 +20,19 @@ import { log } from "../logger.ts";
 
 const logger = log.child("gtd-api");
 
+// ELLIE-290: Context tag validation — tags starting with @ must match this pattern
+const CONTEXT_TAG_PATTERN = /^@[a-z][a-z0-9-]*$/;
+
+function validateTags(tags: unknown[]): string | null {
+  for (const tag of tags) {
+    if (typeof tag !== "string") continue;
+    if (tag.startsWith("@") && !CONTEXT_TAG_PATTERN.test(tag)) {
+      return `Invalid context tag "${tag}" — must match @lowercase-with-dashes`;
+    }
+  }
+  return null;
+}
+
 // ── POST /api/gtd/inbox — Capture items ─────────────────────
 
 async function handleInbox(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
@@ -38,6 +51,14 @@ async function handleInbox(req: ApiRequest, res: ApiResponse, supabase: Supabase
     const content = (item as Record<string, unknown>).content as string | undefined;
     if (!content || typeof content !== "string" || !content.trim()) {
       errors.push("Missing or empty content field");
+      continue;
+    }
+
+    // ELLIE-290: Validate context tags
+    const tags = Array.isArray((item as Record<string, unknown>).tags) ? (item as Record<string, unknown>).tags as unknown[] : [];
+    const tagError = validateTags(tags);
+    if (tagError) {
+      errors.push(tagError);
       continue;
     }
 
@@ -188,12 +209,46 @@ async function handleReviewState(_req: ApiRequest, res: ApiResponse, supabase: S
   // Active projects
   const { data: projectData } = await supabase
     .from("todo_projects")
-    .select("id, updated_at")
+    .select("id, name, updated_at")
     .eq("status", "active");
 
-  const projects = (projectData || []) as { id: string; updated_at: string }[];
+  const projects = (projectData || []) as { id: string; name: string; updated_at: string }[];
   const twoWeeksAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
   const staleProjectCount = projects.filter((p) => new Date(p.updated_at) < twoWeeksAgo).length;
+
+  // ELLIE-289: Find active projects with no open next-actions
+  const projectIds = projects.map((p) => p.id);
+  const projectsWithoutActions: string[] = [];
+  if (projectIds.length > 0) {
+    const { data: projectTodos } = await supabase
+      .from("todos")
+      .select("project_id")
+      .in("project_id", projectIds)
+      .eq("status", "open");
+
+    const projectsWithActions = new Set((projectTodos || []).map((t: { project_id: string }) => t.project_id));
+    for (const p of projects) {
+      if (!projectsWithActions.has(p.id)) {
+        projectsWithoutActions.push(p.name);
+      }
+    }
+  }
+
+  // ELLIE-291: Waiting-for age tracking
+  const waitingAges: { content: string; days: number; waiting_on: string | null }[] = [];
+  if (waitingCount > 0) {
+    const { data: waitingDetails } = await supabase
+      .from("todos")
+      .select("content, waiting_on, updated_at")
+      .eq("status", "waiting_for");
+
+    for (const w of (waitingDetails || []) as { content: string; waiting_on: string | null; updated_at: string }[]) {
+      const days = Math.floor((now.getTime() - new Date(w.updated_at).getTime()) / (1000 * 60 * 60 * 24));
+      if (days >= 7) {
+        waitingAges.push({ content: w.content, days, waiting_on: w.waiting_on });
+      }
+    }
+  }
 
   // Build nudges (things Ellie should mention if relevant)
   const nudges: string[] = [];
@@ -202,6 +257,17 @@ async function handleReviewState(_req: ApiRequest, res: ApiResponse, supabase: S
   if (overdueCount > 0) nudges.push(`${overdueCount} item${overdueCount > 1 ? "s" : ""} are overdue`);
   if (staleCount > 3) nudges.push(`${staleCount} items haven't been updated in a week — some might be worth moving to someday`);
   if (staleProjectCount > 0) nudges.push(`${staleProjectCount} project${staleProjectCount > 1 ? "s" : ""} haven't been updated in 2+ weeks`);
+  // ELLIE-289: Nudge for projects without next actions
+  if (projectsWithoutActions.length > 0) {
+    const names = projectsWithoutActions.slice(0, 3).join(", ");
+    const suffix = projectsWithoutActions.length > 3 ? ` (+${projectsWithoutActions.length - 3} more)` : "";
+    nudges.push(`${projectsWithoutActions.length} active project${projectsWithoutActions.length > 1 ? "s have" : " has"} no next actions: ${names}${suffix}`);
+  }
+  // ELLIE-291: Nudge for stale waiting-for items
+  if (waitingAges.length > 0) {
+    const oldest = waitingAges.sort((a, b) => b.days - a.days)[0];
+    nudges.push(`${waitingAges.length} waiting-for item${waitingAges.length > 1 ? "s" : ""} older than a week — oldest: "${oldest.content}" (${oldest.days}d${oldest.waiting_on ? `, on ${oldest.waiting_on}` : ""})`);
+  }
 
   res.json({
     review_overdue: reviewOverdue,
@@ -216,8 +282,10 @@ async function handleReviewState(_req: ApiRequest, res: ApiResponse, supabase: S
       stale: staleCount,
       active_projects: projects.length,
       stale_projects: staleProjectCount,
+      projects_without_actions: projectsWithoutActions.length,
     },
     nudges,
+    waiting_ages: waitingAges.length > 0 ? waitingAges : undefined,
   });
 }
 
@@ -255,6 +323,15 @@ async function handleUpdateTodo(req: ApiRequest, res: ApiResponse, supabase: Sup
     }
   }
 
+  // ELLIE-290: Validate context tags
+  if (parsed.tags !== undefined && Array.isArray(parsed.tags)) {
+    const tagError = validateTags(parsed.tags);
+    if (tagError) {
+      res.status(400).json({ error: tagError });
+      return;
+    }
+  }
+
   const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
 
   if (parsed.status !== undefined) {
@@ -264,8 +341,12 @@ async function handleUpdateTodo(req: ApiRequest, res: ApiResponse, supabase: Sup
     } else {
       updates.completed_at = null;
     }
-    if (parsed.status !== "waiting_for") {
+    // ELLIE-291: Track when item entered waiting_for
+    if (parsed.status === "waiting_for") {
+      updates.waiting_since = new Date().toISOString();
+    } else {
       updates.waiting_on = null;
+      updates.waiting_since = null;
     }
   }
   if (parsed.priority !== undefined) updates.priority = parsed.priority;

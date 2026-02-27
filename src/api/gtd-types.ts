@@ -13,6 +13,7 @@ export interface TodoRow {
   due_date: string | null;
   tags: string[];
   waiting_on: string | null;
+  waiting_since: string | null;  // ELLIE-291
   project_id: string | null;
   source_type: string | null;
   source_ref: string | null;
