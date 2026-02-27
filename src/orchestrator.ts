@@ -21,6 +21,7 @@ import { processMemoryIntents } from "./memory.ts";
 import { extractApprovalTags } from "./approval.ts";
 import type { ExecutionMode } from "./intent-classifier.ts";
 import { log } from "./logger.ts";
+import { estimateTokens } from "./relay-utils.ts";
 
 const logger = log.child("orchestrator");
 
@@ -631,10 +632,9 @@ async function executeStep(
         : undefined,
       model: dispatch.agent.model || undefined,
     });
-    // Approximate tokens for CLI calls: ~4 chars per token is a rough heuristic
-    // with ~20-30% variance. Suitable for cost guardrails, not for billing.
-    inputTokens = Math.ceil(stepPrompt.length / 4);
-    outputTokens = Math.ceil(rawOutput.length / 4);
+    // Token estimation via proper tokenizer (ELLIE-245)
+    inputTokens = estimateTokens(stepPrompt);
+    outputTokens = estimateTokens(rawOutput);
   }
 
   const duration = Date.now() - startTime;
@@ -681,13 +681,12 @@ async function callLightSkill(
   config?: { systemPrompt?: string },
 ): Promise<{ text: string; input_tokens: number; output_tokens: number }> {
   if (!options.anthropicClient) {
-    // Fallback to heavy — approximate tokens: ~4 chars per token is a rough
-    // heuristic with ~20-30% variance. Suitable for cost guardrails, not billing.
+    // Fallback to heavy — estimate tokens via proper tokenizer (ELLIE-245)
     const text = await options.callClaudeFn(prompt, { resume: false });
     return {
       text,
-      input_tokens: Math.ceil(prompt.length / 4),
-      output_tokens: Math.ceil(text.length / 4),
+      input_tokens: estimateTokens(prompt),
+      output_tokens: estimateTokens(text),
     };
   }
 
@@ -707,10 +706,22 @@ async function callLightSkill(
     .map((b: any) => b.text)
     .join("");
 
+  // Log estimated vs actual for accuracy tracking (ELLIE-245)
+  const estInput = estimateTokens(prompt);
+  const estOutput = estimateTokens(text);
+  const actualInput = response.usage.input_tokens;
+  const actualOutput = response.usage.output_tokens;
+  if (Math.abs(estInput - actualInput) > actualInput * 0.15) {
+    logger.info("Token estimation variance", {
+      estInput, actualInput, inputDrift: `${((estInput - actualInput) / actualInput * 100).toFixed(1)}%`,
+      estOutput, actualOutput, outputDrift: `${((estOutput - actualOutput) / actualOutput * 100).toFixed(1)}%`,
+    });
+  }
+
   return {
     text,
-    input_tokens: response.usage.input_tokens,
-    output_tokens: response.usage.output_tokens,
+    input_tokens: actualInput,
+    output_tokens: actualOutput,
   };
 }
 

@@ -7,8 +7,16 @@
  */
 
 import { log } from "./logger.ts";
+import { encodingForModel } from "js-tiktoken";
 
 const logger = log.child("relay-utils");
+
+// Initialize tokenizer once — cl100k_base is close to Claude's tokenizer (~5% variance)
+let _encoder: ReturnType<typeof encodingForModel> | null = null;
+function getEncoder() {
+  if (!_encoder) _encoder = encodingForModel("gpt-4o");
+  return _encoder;
+}
 
 /**
  * Enforce a combined character budget across search sources.
@@ -89,9 +97,19 @@ export function formatForestMetrics(m: {
 
 // ── Token Budget Guard (ELLIE-185) ──────────────────────────
 
-/** Estimate token count from character length (~4 chars/token for English). */
+/**
+ * Count tokens using a proper tokenizer (ELLIE-245).
+ * Uses cl100k_base encoding via js-tiktoken (~5% variance from Claude's tokenizer).
+ * Falls back to character heuristic if tokenizer fails.
+ */
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  try {
+    const enc = getEncoder();
+    return enc.encode(text).length;
+  } catch {
+    // Fallback: ~4 chars/token for English
+    return Math.ceil(text.length / 4);
+  }
 }
 
 /**
@@ -116,50 +134,56 @@ export function applyTokenBudget(
   sections: PromptSection[],
   maxTokens: number = 150_000,
 ): string {
-  // Fast path: if under budget, just join
-  let totalChars = sections.reduce((sum, s) => sum + s.content.length, 0);
-  const totalTokens = estimateTokens(totalChars.toString().length > 0 ? sections.map(s => s.content).join('\n') : '');
+  // Apply 10% buffer margin to account for system prompt overhead (ELLIE-245)
+  const effectiveMax = Math.floor(maxTokens * 0.9);
 
-  if (totalTokens <= maxTokens) {
-    return sections.map(s => s.content).join('\n');
+  // Fast path: if under budget, just join
+  const joined = sections.map(s => s.content).join('\n');
+  const totalTokens = estimateTokens(joined);
+
+  if (totalTokens <= effectiveMax) {
+    return joined;
   }
 
-  // Over budget — need to trim
-  const overBy = totalTokens - maxTokens;
-  const overChars = overBy * 4; // convert back to chars for trimming
+  // Over budget — need to trim by removing/truncating sections
   logger.warn(
     `Prompt exceeds budget — trimming lower-priority sections`,
-    { totalTokens, maxTokens, overBy }
+    { totalTokens, effectiveMax, overBy: totalTokens - effectiveMax }
   );
+
+  // Pre-compute token counts per section
+  const sectionTokens = sections.map(s => estimateTokens(s.content));
+  let tokensToTrim = totalTokens - effectiveMax;
 
   // Sort trimmable sections: highest priority number first, then largest first
   const trimmable = sections
-    .map((s, i) => ({ ...s, index: i }))
+    .map((s, i) => ({ ...s, index: i, tokens: sectionTokens[i] }))
     .filter(s => s.priority > 1)
-    .sort((a, b) => b.priority - a.priority || b.content.length - a.content.length);
+    .sort((a, b) => b.priority - a.priority || b.tokens - a.tokens);
 
-  let charsToTrim = overChars;
   const trimmed = new Set<number>();
   const truncatedContent = new Map<number, string>();
 
   for (const section of trimmable) {
-    if (charsToTrim <= 0) break;
+    if (tokensToTrim <= 0) break;
 
-    if (section.content.length <= charsToTrim) {
+    if (section.tokens <= tokensToTrim) {
       // Remove this section entirely
       trimmed.add(section.index);
-      charsToTrim -= section.content.length;
-      logger.warn("Dropped section", { label: section.label, tokens: estimateTokens(section.content) });
+      tokensToTrim -= section.tokens;
+      logger.warn("Dropped section", { label: section.label, tokens: section.tokens });
     } else {
-      // Truncate this section to fit
-      const keepChars = section.content.length - charsToTrim;
+      // Truncate this section — estimate how much text to keep
+      // Use ratio of tokens to trim vs section tokens to determine cut point
+      const keepRatio = 1 - (tokensToTrim / section.tokens);
+      const keepChars = Math.floor(section.content.length * keepRatio);
       const truncatedText = section.content.slice(0, keepChars);
       // Cut at last newline to avoid mid-sentence breaks
       const lastNewline = truncatedText.lastIndexOf('\n');
       const cleanCut = lastNewline > keepChars * 0.5 ? truncatedText.slice(0, lastNewline) : truncatedText;
       truncatedContent.set(section.index, cleanCut + `\n[...truncated — ${section.label}]`);
-      logger.warn("Truncated section", { label: section.label, originalChars: section.content.length, truncatedChars: cleanCut.length });
-      charsToTrim = 0;
+      logger.warn("Truncated section", { label: section.label, originalTokens: section.tokens, keptChars: cleanCut.length });
+      tokensToTrim = 0;
     }
   }
 
@@ -175,7 +199,7 @@ export function applyTokenBudget(
   }
 
   const finalTokens = estimateTokens(result.join('\n'));
-  logger.warn("Final prompt after trimming", { tokens: finalTokens });
+  logger.warn("Final prompt after trimming", { tokens: finalTokens, targetMax: effectiveMax });
 
   return result.join('\n');
 }
