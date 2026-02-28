@@ -2,10 +2,10 @@
  * UMS Consumer: Comms Assistant
  *
  * ELLIE-308: Push subscriber — tracks conversation thread state
- * and identifies unanswered threads that need follow-up.
+ * ELLIE-318: DB persistence, priority scoring, snooze/resolve, configurable thresholds
  *
  * Listens to: text messages from conversational channels
- * Action: maintains thread tracking table, flags stale unanswered threads
+ * Action: maintains DB-backed thread tracking, flags stale unanswered threads
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -18,78 +18,272 @@ const logger = log.child("ums-consumer-comms");
 /** Channels where thread tracking makes sense. */
 const THREADED_PROVIDERS = new Set(["telegram", "gchat", "gmail"]);
 
-/** How long before a thread is considered stale (ms). */
-const STALE_THRESHOLD_MS = 4 * 60 * 60 * 1000; // 4 hours
+// ── Types ────────────────────────────────────────────────────
 
-interface ThreadState {
+export interface ThreadState {
+  id: string;
   thread_id: string;
   provider: string;
   channel: string | null;
+  subject: string | null;
+  participants: Array<{ name?: string; email?: string; username?: string }>;
   last_message_at: string;
   last_sender: string | null;
   message_count: number;
   awaiting_reply: boolean;
+  priority: "critical" | "high" | "normal" | "low";
+  snoozed_until: string | null;
+  resolved: boolean;
+  resolved_at: string | null;
+  resolution_note: string | null;
   first_seen: string;
+  updated_at: string;
 }
 
-/** In-memory thread tracker. Persisted to DB periodically. */
-const threads = new Map<string, ThreadState>();
+// ── State ────────────────────────────────────────────────────
 
-/**
- * Initialize the Comms Assistant consumer.
- */
+let supabaseRef: SupabaseClient | null = null;
+
+/** In-memory cache for fast reads — synced from DB. */
+const threadCache = new Map<string, ThreadState>();
+
+/** Stale thresholds per provider (hours). */
+let staleThresholds: Record<string, number> = {
+  telegram: 4,
+  gchat: 4,
+  gmail: 48,
+};
+
+// ── Initialization ───────────────────────────────────────────
+
 export function initCommsConsumer(supabase: SupabaseClient): void {
+  supabaseRef = supabase;
+
+  // Load from DB on startup
+  refreshCache().catch(err => logger.error("Initial cache load failed", err));
+  loadPreferences().catch(err => logger.error("Preferences load failed", err));
+
   subscribe("consumer:comms", {}, async (message) => {
     try {
-      await handleMessage(supabase, message);
+      await handleMessage(message);
     } catch (err) {
       logger.error("Comms consumer failed", { messageId: message.id, err });
     }
   });
-  logger.info("Comms consumer initialized");
+
+  // Periodic cache refresh
+  setInterval(() => {
+    refreshCache().catch(err => logger.error("Cache refresh failed", err));
+  }, 60_000);
+
+  // Unsnooze expired threads (every 5 min)
+  setInterval(() => {
+    unsnoozeExpired().catch(err => logger.error("Unsnooze failed", err));
+  }, 5 * 60_000);
+
+  logger.info("Comms consumer initialized (ELLIE-318, DB-backed)");
 }
 
-async function handleMessage(_supabase: SupabaseClient, message: UnifiedMessage): Promise<void> {
+// ── Cache Management ─────────────────────────────────────────
+
+async function refreshCache(): Promise<void> {
+  if (!supabaseRef) return;
+  const { data, error } = await supabaseRef
+    .from("comms_threads")
+    .select("*")
+    .eq("resolved", false)
+    .order("last_message_at", { ascending: false })
+    .limit(200);
+
+  if (error) {
+    logger.error("Failed to load threads from DB", error);
+    return;
+  }
+
+  threadCache.clear();
+  for (const row of (data || []) as ThreadState[]) {
+    threadCache.set(row.thread_id, row);
+  }
+}
+
+async function loadPreferences(): Promise<void> {
+  if (!supabaseRef) return;
+  try {
+    const { data } = await supabaseRef
+      .from("comms_preferences")
+      .select("key, value")
+      .eq("key", "stale_thresholds")
+      .single();
+
+    if (data?.value) {
+      const val = typeof data.value === "string" ? JSON.parse(data.value) : data.value;
+      staleThresholds = { ...staleThresholds, ...val };
+    }
+  } catch {
+    // Use defaults
+  }
+}
+
+async function unsnoozeExpired(): Promise<void> {
+  if (!supabaseRef) return;
+  const now = new Date().toISOString();
+  const { data } = await supabaseRef
+    .from("comms_threads")
+    .update({ snoozed_until: null, updated_at: now })
+    .lt("snoozed_until", now)
+    .not("snoozed_until", "is", null)
+    .select("thread_id");
+
+  if (data && data.length > 0) {
+    logger.info("Unsnoozed expired threads", { count: data.length });
+    await refreshCache();
+  }
+}
+
+/** Force cache invalidation (after API writes). */
+export async function invalidateCommsCache(): Promise<void> {
+  await refreshCache();
+}
+
+// ── Message Handler ──────────────────────────────────────────
+
+async function handleMessage(message: UnifiedMessage): Promise<void> {
   if (!THREADED_PROVIDERS.has(message.provider)) return;
   if (message.content_type !== "text" && message.content_type !== "voice") return;
+  if (!supabaseRef) return;
 
   const threadId = resolveThreadId(message);
   const senderName = message.sender?.name || message.sender?.username || message.sender?.email || null;
   const now = new Date().toISOString();
+  const isUser = isDave(message);
 
-  const existing = threads.get(threadId);
+  const existing = threadCache.get(threadId);
+
   if (existing) {
-    existing.last_message_at = now;
-    existing.last_sender = senderName;
-    existing.message_count++;
-    // If Dave replied, no longer awaiting reply
-    existing.awaiting_reply = !isDave(message);
+    const updates: Record<string, unknown> = {
+      last_message_at: now,
+      last_sender: senderName,
+      message_count: existing.message_count + 1,
+      awaiting_reply: !isUser,
+      updated_at: now,
+    };
+
+    // Add participant if new
+    if (message.sender && !isUser) {
+      const participants = [...(existing.participants || [])];
+      const alreadyKnown = participants.some(p =>
+        (p.email && p.email === message.sender?.email) ||
+        (p.username && p.username === message.sender?.username)
+      );
+      if (!alreadyKnown && (message.sender.email || message.sender.username || message.sender.name)) {
+        participants.push({
+          name: message.sender.name || undefined,
+          email: message.sender.email || undefined,
+          username: message.sender.username || undefined,
+        });
+        updates.participants = participants;
+      }
+    }
+
+    // Un-snooze if someone replied
+    if (!isUser && existing.snoozed_until) {
+      updates.snoozed_until = null;
+    }
+
+    await supabaseRef
+      .from("comms_threads")
+      .update(updates)
+      .eq("thread_id", threadId);
+
+    // Update cache
+    Object.assign(existing, updates);
   } else {
-    threads.set(threadId, {
+    // Create new thread
+    const subject = message.content?.slice(0, 100) || null;
+    const participants: Array<{ name?: string; email?: string; username?: string }> = [];
+    if (message.sender && !isUser) {
+      participants.push({
+        name: message.sender.name || undefined,
+        email: message.sender.email || undefined,
+        username: message.sender.username || undefined,
+      });
+    }
+
+    const newThread = {
       thread_id: threadId,
       provider: message.provider,
       channel: message.channel,
+      subject,
+      participants,
       last_message_at: now,
       last_sender: senderName,
       message_count: 1,
-      awaiting_reply: !isDave(message),
+      awaiting_reply: !isUser,
+      priority: "normal",
       first_seen: now,
-    });
+      updated_at: now,
+    };
+
+    const { data: inserted } = await supabaseRef
+      .from("comms_threads")
+      .upsert(newThread, { onConflict: "thread_id" })
+      .select()
+      .single();
+
+    if (inserted) {
+      threadCache.set(threadId, inserted as ThreadState);
+    }
+  }
+
+  // Link message to thread for drill-down
+  const thread = threadCache.get(threadId);
+  if (thread?.id && message.id) {
+    supabaseRef
+      .from("comms_thread_messages")
+      .upsert({ thread_id: thread.id, message_id: message.id }, { onConflict: "thread_id,message_id" })
+      .then(() => {})
+      .catch(() => {}); // non-critical, fire-and-forget
   }
 }
 
+// ── Helpers ──────────────────────────────────────────────────
+
+function resolveThreadId(message: UnifiedMessage): string {
+  const meta = message.metadata || {};
+  if (meta.thread_name) return `${message.provider}:${meta.thread_name}`;
+  if (meta.thread_id) return `${message.provider}:${meta.thread_id}`;
+  if (meta.conversation_id) return `${message.provider}:${meta.conversation_id}`;
+  return message.channel || `${message.provider}:${message.provider_id}`;
+}
+
+function isDave(message: UnifiedMessage): boolean {
+  const s = message.sender;
+  if (!s) return false;
+  const name = (s.name || "").toLowerCase();
+  const email = (s.email || "").toLowerCase();
+  return name.includes("dave") || email.includes("dave");
+}
+
+// ── Exports for Summary Bar & API ────────────────────────────
+
 /**
- * Get threads that are awaiting a reply and have been stale.
- * Called on schedule (e.g., by briefing consumer).
+ * Get threads that are awaiting a reply and stale per provider threshold.
+ * Excludes snoozed and resolved threads.
  */
 export function getStaleThreads(): ThreadState[] {
   const now = Date.now();
   const stale: ThreadState[] = [];
 
-  for (const thread of threads.values()) {
+  for (const thread of threadCache.values()) {
     if (!thread.awaiting_reply) continue;
+    if (thread.resolved) continue;
+    if (thread.snoozed_until && new Date(thread.snoozed_until).getTime() > now) continue;
+
+    const thresholdHours = staleThresholds[thread.provider] ?? 4;
+    const thresholdMs = thresholdHours * 60 * 60 * 1000;
     const lastAt = new Date(thread.last_message_at).getTime();
-    if (now - lastAt > STALE_THRESHOLD_MS) {
+
+    if (now - lastAt > thresholdMs) {
       stale.push(thread);
     }
   }
@@ -99,27 +293,12 @@ export function getStaleThreads(): ThreadState[] {
   );
 }
 
-/** Get all active thread states. */
+/** Get all active (non-resolved) thread states. */
 export function getActiveThreads(): ThreadState[] {
-  return Array.from(threads.values());
+  return Array.from(threadCache.values()).filter(t => !t.resolved);
 }
 
-function resolveThreadId(message: UnifiedMessage): string {
-  // Use thread-specific metadata if available
-  const meta = message.metadata || {};
-  if (meta.thread_name) return `${message.provider}:${meta.thread_name}`;
-  if (meta.thread_id) return `${message.provider}:${meta.thread_id}`;
-  if (meta.conversation_id) return `${message.provider}:${meta.conversation_id}`;
-
-  // Fall back to channel as thread ID
-  return message.channel || `${message.provider}:${message.provider_id}`;
-}
-
-/** Check if the message sender is Dave (the user). */
-function isDave(message: UnifiedMessage): boolean {
-  const s = message.sender;
-  if (!s) return false;
-  const name = (s.name || "").toLowerCase();
-  const email = (s.email || "").toLowerCase();
-  return name.includes("dave") || email.includes("dave");
+/** Get stale thresholds (for API). */
+export function getStaleThresholds(): Record<string, number> {
+  return { ...staleThresholds };
 }

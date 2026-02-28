@@ -219,6 +219,19 @@ setInterval(async () => {
   }
 }, 30_000);
 
+// Comms consumer — DB-backed thread tracking (ELLIE-318)
+if (supabase) {
+  (async () => {
+    try {
+      const { initCommsConsumer } = await import("./ums/consumers/comms.ts");
+      initCommsConsumer(supabase);
+      console.log("[comms] Comms consumer initialized with DB-backed threads");
+    } catch (err) {
+      logger.error("Comms consumer init failed", err);
+    }
+  })();
+}
+
 // Alert consumer — DB-backed rules, severity routing, dedup (ELLIE-317)
 if (supabase) {
   (async () => {

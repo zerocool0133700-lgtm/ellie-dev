@@ -2630,6 +2630,114 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Comms endpoints (ELLIE-318)
+  if (url.pathname.startsWith("/api/comms/") && !supabase) {
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+
+  if (url.pathname === "/api/comms/threads" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { listThreads } = await import("./api/comms.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await listThreads({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Comms threads list error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/comms/stale" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getStale } = await import("./api/comms.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getStale({} as ApiRequest, mockRes, supabase!);
+      } catch (err) { logger.error("Comms stale error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/comms/preferences" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getPreferences } = await import("./api/comms.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getPreferences({} as ApiRequest, mockRes, supabase!);
+      } catch (err) { logger.error("Comms prefs get error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/comms/preferences" && req.method === "PUT") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = body ? JSON.parse(body) : {};
+        const { updatePreferences } = await import("./api/comms.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await updatePreferences({ body: data }, mockRes, supabase!);
+      } catch (err) { logger.error("Comms prefs update error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    });
+    return;
+  }
+
+  // /api/comms/threads/:id, /api/comms/threads/:id/snooze, /api/comms/threads/:id/resolve
+  const commsThreadMatch = url.pathname.match(/^\/api\/comms\/threads\/([0-9a-f-]+)(\/(\w+))?$/);
+  if (commsThreadMatch) {
+    const threadId = commsThreadMatch[1];
+    const action = commsThreadMatch[3]; // snooze, resolve, or undefined
+
+    if (!action && req.method === "GET") {
+      (async () => {
+        try {
+          const { getThread } = await import("./api/comms.ts");
+          const mockRes: ApiResponse = {
+            status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+            json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+          };
+          await getThread({ params: { id: threadId } }, mockRes, supabase!);
+        } catch (err) { logger.error("Comms thread detail error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+      })();
+      return;
+    }
+
+    if ((action === "snooze" || action === "resolve") && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+      req.on("end", async () => {
+        try {
+          const data = body ? JSON.parse(body) : {};
+          const handler = action === "snooze"
+            ? (await import("./api/comms.ts")).snoozeThread
+            : (await import("./api/comms.ts")).resolveThread;
+          const mockRes: ApiResponse = {
+            status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+            json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+          };
+          await handler({ body: data, params: { id: threadId } }, mockRes, supabase!);
+        } catch (err) { logger.error(`Comms thread ${action} error`, err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+      });
+      return;
+    }
+  }
+
   // Briefing endpoints (ELLIE-316)
   if (url.pathname === "/api/briefing/generate" && req.method === "POST") {
     let body = "";
