@@ -142,6 +142,10 @@ import { handleGatewayRoute } from "./api/gateway-intake.ts";
 import { handleGtdRoute } from "./api/gtd.ts";
 import { getSummaryState } from "./ums/consumers/summary.ts";
 import { log } from "./logger.ts";
+import { detectAndCaptureCorrection } from "./correction-detector.ts";
+import { detectAndLinkCalendarEvents } from "./calendar-linker.ts";
+import { freshnessTracker, autoRefreshStaleSources, detectConflicts } from "./context-freshness.ts";
+import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hierarchy.ts";
 import type { ApiRequest, ApiResponse } from "./api/types.ts";
 
 const logger = log.child("http");
@@ -330,6 +334,32 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         }, "google-chat", parsed.senderEmail);
         broadcastExtension({ type: "message_in", channel: "google-chat", preview: parsed.text.substring(0, 200) });
 
+        // Correction detection + calendar linking (ELLIE-250)
+        if (supabase) {
+          const gchatConvIdForHooks = await getOrCreateConversation(supabase, "google-chat");
+          if (gchatConvIdForHooks) {
+            // Correction detection — check if user is correcting last assistant response
+            supabase.from("messages")
+              .select("content")
+              .eq("conversation_id", gchatConvIdForHooks)
+              .eq("role", "assistant")
+              .order("created_at", { ascending: false })
+              .limit(1)
+              .single()
+              .then(({ data }) => {
+                if (data?.content) {
+                  detectAndCaptureCorrection(parsed.text, data.content, anthropic, "google-chat", gchatConvIdForHooks)
+                    .catch(err => logger.warn("gchat correction detection failed", err));
+                }
+              })
+              .catch(() => {});
+
+            // Calendar-conversation linking — detect event mentions
+            detectAndLinkCalendarEvents(parsed.text, supabase, gchatConvIdForHooks)
+              .catch(err => logger.warn("gchat calendar linking failed", err));
+          }
+        }
+
         // /plan on|off — planning mode toggle
         const gchatPlanMatch = parsed.text.match(/^\/plan\s+(on|off)$/i);
         if (gchatPlanMatch) {
@@ -419,6 +449,15 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
 
             const gchatActiveAgent = getActiveAgent("google-chat");
             const gchatConvoId = await getOrCreateConversation(supabase!, "google-chat") || undefined;
+
+            // ── ELLIE-325: Message-level mode detection ──
+            const { processMessageMode } = await import("./context-mode.ts");
+            const gchatConvoKey = gchatConvoId || "gchat-default";
+            const { mode: gchatContextMode, changed: gchatModeChanged } = processMessageMode(gchatConvoKey, effectiveGchatText);
+            if (gchatModeChanged) {
+              console.log(`[context:mode] mode=${gchatContextMode} channel=gchat`);
+            }
+
             const [gchatConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, gchatQueueContext, liveForest] = await Promise.all([
               gchatConvoId && supabase ? getConversationMessages(supabase, gchatConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
               getContextDocket(),
@@ -435,6 +474,39 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               acknowledgeQueueItems(gchatActiveAgent).catch(() => {});
             }
 
+            // ELLIE-327: Track section-level freshness for non-registry sources
+            if (recentMessages) freshnessTracker.recordFetch("recent-messages", 0);
+            if (gchatQueueContext) freshnessTracker.recordFetch("queue", 0);
+            if (contextDocket) freshnessTracker.recordFetch("context-docket", 0);
+            if (relevantContext || elasticContext || forestContext) freshnessTracker.recordFetch("search", 0);
+
+            // ELLIE-327: Log mode config + freshness status
+            freshnessTracker.logModeConfig(gchatContextMode);
+            freshnessTracker.logAllFreshness(gchatContextMode);
+
+            // ELLIE-327: Auto-refresh stale critical sources
+            const { refreshed: gchatRefreshed, results: gchatRefreshResults } = await autoRefreshStaleSources(
+              gchatContextMode,
+              {
+                "structured-context": () => getAgentStructuredContext(supabase, gchatActiveAgent),
+                "context-docket": () => { clearContextCache(); return getContextDocket(); },
+                "agent-memory": async () => {
+                  const mem = await getAgentMemoryContext(gchatActiveAgent, gchatWorkItem, getMaxMemoriesForModel(gchatAgentResult?.dispatch.agent.model));
+                  return mem.memoryContext;
+                },
+                "forest-awareness": async () => {
+                  const lf = await getLiveForestContext(effectiveGchatText);
+                  return lf.awareness;
+                },
+              },
+            );
+
+            // ELLIE-327: Apply auto-refresh results
+            const gchatStructured = gchatRefreshResults["structured-context"] || structuredContext;
+            const gchatDocket = gchatRefreshResults["context-docket"] || contextDocket;
+            const gchatForestAwareness = gchatRefreshResults["forest-awareness"] || liveForest.awareness;
+            const gchatAgentMem = gchatRefreshResults["agent-memory"] || agentMemory.memoryContext;
+
             // Detect work item mentions (ELLIE-5, EVE-3, etc.) — matches Telegram text handler
             let workItemContext = "";
             const workItemMatch = effectiveGchatText.match(/\b([A-Z]+-\d+)\b/);
@@ -449,6 +521,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
                   `Title: ${details.name}\n` +
                   `Priority: ${details.priority}\n` +
                   `Description: ${details.description}\n`;
+                freshnessTracker.recordFetch("work-item", 0);
               }
             }
 
@@ -468,8 +541,8 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
                   channel: "google-chat",
                   userId: parsed.senderEmail,
                   anthropicClient: anthropic,
-                  contextDocket, relevantContext, elasticContext,
-                  structuredContext, recentMessages, workItemContext, forestContext,
+                  contextDocket: gchatDocket, relevantContext, elasticContext,
+                  structuredContext: gchatStructured, recentMessages, workItemContext, forestContext,
                   buildPromptFn: buildPrompt,
                   callClaudeFn: callClaude,
                 }),
@@ -509,17 +582,32 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
                 const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "google-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
                 executePlaybookCommands(gchatOrcPlaybookCmds, pbCtx).catch(err => logger.error("Playbook execution failed", err));
               }
+
+              // Psy assessment (ELLIE-333: was missing for Google Chat)
+              runPostMessageAssessment(effectiveGchatText, gchatClean, anthropic).catch(err => logger.error("Post-message assessment failed (gchat multi-step)", err));
               return;
             }
 
             // ── Google Chat single-agent path (default) ──
+            // ELLIE-250 Phase 3: Proactive conflict detection + cross-channel sync
+            const gchatContextSections = [
+              { label: "structured-context", content: gchatStructured || "" },
+              { label: "context-docket", content: gchatDocket || "" },
+              { label: "work-item", content: workItemContext || "" },
+              { label: "forest-awareness", content: gchatForestAwareness || "" },
+            ];
+            const [gchatGroundTruthConflicts, gchatCrossChannel] = await Promise.all([
+              checkGroundTruthConflicts(effectiveGchatText, gchatContextSections),
+              buildCrossChannelSection(supabase, "google-chat"),
+            ]);
+
             const enrichedPrompt = buildPrompt(
-              effectiveGchatText, contextDocket, relevantContext, elasticContext, "google-chat",
+              effectiveGchatText, gchatDocket, relevantContext, elasticContext, "google-chat",
               gchatAgentResult?.dispatch.agent ? { system_prompt: gchatAgentResult.dispatch.agent.system_prompt, name: gchatAgentResult.dispatch.agent.name, tools_enabled: gchatAgentResult.dispatch.agent.tools_enabled } : undefined,
-              workItemContext || undefined, structuredContext, recentMessages,
+              workItemContext || undefined, gchatStructured, recentMessages,
               gchatAgentResult?.dispatch.skill_context,
               forestContext,
-              agentMemory.memoryContext || undefined,
+              gchatAgentMem || undefined,
               agentMemory.sessionIds,
               await getArchetypeContext(),
               await getPsyContext(),
@@ -527,8 +615,13 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               await getHealthContext(),
               gchatQueueContext || undefined,
               liveForest.incidents || undefined,
-              liveForest.awareness || undefined,
+              gchatForestAwareness || undefined,
               (await getSkillSnapshot()).prompt || undefined,
+              gchatContextMode,
+              gchatRefreshed,
+              undefined, // channelProfile (Google Chat doesn't use channels)
+              gchatGroundTruthConflicts || undefined,
+              gchatCrossChannel || undefined,
             );
 
             const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
@@ -579,6 +672,9 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "google-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
               executePlaybookCommands(gchatPlaybookCmds, pbCtx).catch(err => logger.error("Playbook execution failed", err));
             }
+
+            // Psy assessment (ELLIE-333: was missing for Google Chat)
+            runPostMessageAssessment(effectiveGchatText, gchatClean, anthropic).catch(err => logger.error("Post-message assessment failed (gchat single-agent)", err));
           } catch (err) {
             logger.error("Async processing error", err);
             const errMsg = err instanceof PipelineStepError && err.partialOutput
@@ -850,6 +946,150 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
   if (url.pathname === "/queue-status") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(getQueueStatus()));
+    return;
+  }
+
+  // Context Freshness Dashboard — source freshness snapshot (ELLIE-329)
+  if (url.pathname === "/api/freshness" && req.method === "GET") {
+    const modeParam = url.searchParams.get("mode") || "conversation";
+    const validModes = ["conversation", "strategy", "workflow", "deep-work"];
+    const mode = validModes.includes(modeParam) ? modeParam as import("./context-mode.ts").ContextMode : "conversation";
+
+    const snapshot = freshnessTracker.getSnapshot(mode);
+    const conflicts = detectConflicts();
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      ...snapshot,
+      conflicts,
+      timestamp: new Date().toISOString(),
+    }));
+    return;
+  }
+
+  // Ground Truth Index — ELLIE-250
+  if (url.pathname === "/api/ground-truth" && req.method === "GET") {
+    (async () => {
+      try {
+        const { listGroundTruth } = await import("./data-quality.ts");
+        const limit = parseInt(url.searchParams.get("limit") || "20", 10);
+        const offset = parseInt(url.searchParams.get("offset") || "0", 10);
+        const corrections = await listGroundTruth(supabase, { limit, offset });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(corrections));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Failed to fetch ground truth" }));
+      }
+    })();
+    return;
+  }
+
+  // Accuracy Stats — ELLIE-250
+  if (url.pathname === "/api/accuracy" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getAccuracyStats } = await import("./data-quality.ts");
+        const stats = await getAccuracyStats(supabase);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(stats));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Failed to fetch accuracy stats" }));
+      }
+    })();
+    return;
+  }
+
+  // Chat Channels — ELLIE-334
+  if (url.pathname === "/api/chat-channels" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getChannelTree } = await import("./chat-channels.ts");
+        const tree = await getChannelTree(supabase);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(tree));
+      } catch (err) {
+        logger.error("Chat channels list error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Failed to fetch channels" }));
+      }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/chat-channels" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { createChannel } = await import("./chat-channels.ts");
+        const payload = JSON.parse(body);
+        if (!payload.name || !payload.slug) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "name and slug are required" }));
+          return;
+        }
+        const channel = await createChannel(supabase, payload);
+        if (!channel) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Failed to create channel" }));
+          return;
+        }
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(channel));
+      } catch (err) {
+        logger.error("Chat channel create error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Failed to create channel" }));
+      }
+    });
+    return;
+  }
+
+  // PATCH /api/chat-channels/:id
+  const channelPatchMatch = url.pathname.match(/^\/api\/chat-channels\/([a-f0-9-]+)$/);
+  if (channelPatchMatch && req.method === "PATCH") {
+    const channelId = channelPatchMatch[1];
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { updateChannel } = await import("./chat-channels.ts");
+        const updates = JSON.parse(body);
+        const channel = await updateChannel(supabase, channelId, updates);
+        if (!channel) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Channel not found" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(channel));
+      } catch (err) {
+        logger.error("Chat channel update error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Failed to update channel" }));
+      }
+    });
+    return;
+  }
+
+  // POST /api/chat-channels/:id/archive
+  const channelArchiveMatch = url.pathname.match(/^\/api\/chat-channels\/([a-f0-9-]+)\/archive$/);
+  if (channelArchiveMatch && req.method === "POST") {
+    const channelId = channelArchiveMatch[1];
+    (async () => {
+      try {
+        const { archiveChannel } = await import("./chat-channels.ts");
+        const ok = await archiveChannel(supabase, channelId);
+        res.writeHead(ok ? 200 : 404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: ok }));
+      } catch (err) {
+        logger.error("Chat channel archive error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Failed to archive channel" }));
+      }
+    })();
     return;
   }
 
@@ -1668,6 +1908,435 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // ── Analytics Module endpoints (ELLIE-321) ────────────────
+
+  if (url.pathname.startsWith("/api/analytics/") && !supabase) {
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+
+  if (url.pathname === "/api/analytics/summary" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getSummary } = await import("./api/analytics-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getSummary({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Analytics summary error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/analytics/time-distribution" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getTimeDistributionEndpoint } = await import("./api/analytics-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getTimeDistributionEndpoint({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Analytics time-distribution error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/analytics/timeline" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getTimeline } = await import("./api/analytics-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getTimeline({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Analytics timeline error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/analytics/patterns" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getPatternsEndpoint } = await import("./api/analytics-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getPatternsEndpoint({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Analytics patterns error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/analytics/insights" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getInsights } = await import("./api/analytics-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getInsights({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Analytics insights error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/analytics/focus-blocks" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getFocusBlocksEndpoint } = await import("./api/analytics-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getFocusBlocksEndpoint({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Analytics focus-blocks error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/analytics/activity" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getActivity } = await import("./api/analytics-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getActivity({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Analytics activity error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/analytics/module-stats" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getModuleStats } = await import("./api/analytics-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getModuleStats({}, mockRes);
+      } catch (err) { logger.error("Analytics module-stats error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  // /api/analytics/metrics/:date
+  const metricsDateMatch = url.pathname.match(/^\/api\/analytics\/metrics\/(\d{4}-\d{2}-\d{2})$/);
+  if (metricsDateMatch && req.method === "GET") {
+    (async () => {
+      try {
+        const { getMetrics } = await import("./api/analytics-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getMetrics({ params: { date: metricsDateMatch[1] } }, mockRes, supabase!);
+      } catch (err) { logger.error("Analytics metrics error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/analytics/compare" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getCompare } = await import("./api/analytics-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getCompare({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Analytics compare error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/analytics/trends" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getTrendsEndpoint } = await import("./api/analytics-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getTrendsEndpoint({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Analytics trends error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/analytics/anomalies" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getAnomaliesEndpoint } = await import("./api/analytics-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getAnomaliesEndpoint({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Analytics anomalies error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/analytics/energy-curve" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getEnergyCurveEndpoint } = await import("./api/analytics-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getEnergyCurveEndpoint({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Analytics energy-curve error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/analytics/burnout-risk" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getBurnoutRiskEndpoint } = await import("./api/analytics-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getBurnoutRiskEndpoint({}, mockRes, supabase!);
+      } catch (err) { logger.error("Analytics burnout-risk error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  // Memory Module endpoints (ELLIE-323) — must come before memory-analytics catch-all
+  if (url.pathname.startsWith("/api/memory/") && !supabase &&
+      !["stats", "timeline", "by-agent"].includes(url.pathname.replace("/api/memory/", "").split("/")[0])) {
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+
+  if (url.pathname === "/api/memory/facts" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { listFacts } = await import("./api/memory-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await listFacts({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Memory list facts error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/memory/facts" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk; });
+    req.on("end", async () => {
+      try {
+        const parsed = JSON.parse(body);
+        const { createFact } = await import("./api/memory-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await createFact({ body: parsed }, mockRes, supabase!);
+      } catch (err) { logger.error("Memory create fact error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/memory/goals" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { listGoals } = await import("./api/memory-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await listGoals({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Memory list goals error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/memory/conflicts" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { listConflicts } = await import("./api/memory-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await listConflicts({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Memory list conflicts error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/memory/search" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { searchFacts } = await import("./api/memory-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await searchFacts({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Memory search error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/memory/tags" && req.method === "GET") {
+    (async () => {
+      try {
+        const { listTags } = await import("./api/memory-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await listTags({}, mockRes, supabase!);
+      } catch (err) { logger.error("Memory tags error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/memory/module-stats" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getModuleStats } = await import("./api/memory-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getModuleStats({}, mockRes);
+      } catch (err) { logger.error("Memory module stats error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/memory/health" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getHealth } = await import("./api/memory-module.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getHealth({}, mockRes);
+      } catch (err) { logger.error("Memory health error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  // /api/memory/facts/:id (PUT, DELETE) and /api/memory/goals/:id/complete and /api/memory/conflicts/:id/resolve
+  {
+    const factsMatch = url.pathname.match(/^\/api\/memory\/facts\/([a-f0-9-]+)$/);
+    if (factsMatch) {
+      const factId = factsMatch[1];
+      if (req.method === "PUT") {
+        let body = "";
+        req.on("data", (chunk: Buffer) => { body += chunk; });
+        req.on("end", async () => {
+          try {
+            const parsed = JSON.parse(body);
+            const { updateFact } = await import("./api/memory-module.ts");
+            const mockRes: ApiResponse = {
+              status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+              json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+            };
+            await updateFact({ body: parsed, params: { id: factId } }, mockRes, supabase!);
+          } catch (err) { logger.error("Memory update fact error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+        });
+        return;
+      }
+      if (req.method === "DELETE") {
+        (async () => {
+          try {
+            const { deleteFact } = await import("./api/memory-module.ts");
+            const mockRes: ApiResponse = {
+              status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+              json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+            };
+            await deleteFact({ params: { id: factId } }, mockRes, supabase!);
+          } catch (err) { logger.error("Memory delete fact error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+        })();
+        return;
+      }
+    }
+
+    const goalCompleteMatch = url.pathname.match(/^\/api\/memory\/goals\/([a-f0-9-]+)\/complete$/);
+    if (goalCompleteMatch && req.method === "POST") {
+      (async () => {
+        try {
+          const { completeGoal } = await import("./api/memory-module.ts");
+          const mockRes: ApiResponse = {
+            status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+            json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+          };
+          await completeGoal({ params: { id: goalCompleteMatch[1] } }, mockRes, supabase!);
+        } catch (err) { logger.error("Memory complete goal error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+      })();
+      return;
+    }
+
+    const conflictResolveMatch = url.pathname.match(/^\/api\/memory\/conflicts\/([a-f0-9-]+)\/resolve$/);
+    if (conflictResolveMatch && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk; });
+      req.on("end", async () => {
+        try {
+          const parsed = JSON.parse(body);
+          const { resolveConflict } = await import("./api/memory-module.ts");
+          const mockRes: ApiResponse = {
+            status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+            json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+          };
+          await resolveConflict({ body: parsed, params: { id: conflictResolveMatch[1] } }, mockRes, supabase!);
+        } catch (err) { logger.error("Memory resolve conflict error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+      });
+      return;
+    }
+  }
+
   // Memory analytics endpoints (GET requests)
   if (url.pathname.startsWith("/api/memory/") && req.method === "GET") {
     (async () => {
@@ -1812,6 +2481,78 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Skill help endpoint (ELLIE-324 — Module Help Icons)
+  if (url.pathname.startsWith("/api/skills/") && url.pathname.endsWith("/help") && req.method === "GET") {
+    const parts = url.pathname.split("/");
+    // /api/skills/<name>/help → parts = ["", "api", "skills", "<name>", "help"]
+    const skillName = parts[3];
+    if (!skillName) {
+      res.writeHead(400, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      res.end(JSON.stringify({ error: "Missing skill name" }));
+      return;
+    }
+    (async () => {
+      try {
+        const { loadSkillEntries } = await import("./skills/loader.ts");
+        const { filterEligibleSkills } = await import("./skills/eligibility.ts");
+
+        const allSkills = await loadSkillEntries();
+        const skill = allSkills.find(s => s.name === skillName);
+
+        if (!skill) {
+          res.writeHead(404, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+          res.end(JSON.stringify({ error: `Skill '${skillName}' not found` }));
+          return;
+        }
+
+        const eligible = await filterEligibleSkills(allSkills);
+        const isEligible = eligible.some(s => s.name === skillName);
+
+        // Build requirement status
+        let credentialDomains: Set<string> = new Set();
+        try {
+          const { listCredentialDomains } = await import("../../ellie-forest/src/hollow");
+          const domains = await listCredentialDomains();
+          credentialDomains = new Set(domains);
+        } catch {}
+
+        const reqs: Array<{ type: string; key: string; met: boolean }> = [];
+        if (skill.frontmatter.requires?.env) {
+          for (const envKey of skill.frontmatter.requires.env) {
+            reqs.push({ type: "env", key: envKey, met: !!process.env[envKey] });
+          }
+        }
+        if (skill.frontmatter.requires?.bins) {
+          for (const bin of skill.frontmatter.requires.bins) {
+            reqs.push({ type: "binary", key: bin, met: true });
+          }
+        }
+        if (skill.frontmatter.requires?.credentials) {
+          for (const domain of skill.frontmatter.requires.credentials) {
+            reqs.push({ type: "credential", key: domain, met: credentialDomains.has(domain) });
+          }
+        }
+
+        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+        res.end(JSON.stringify({
+          name: skill.name,
+          description: skill.description,
+          eligible: isEligible,
+          triggers: skill.frontmatter.triggers || [],
+          userInvocable: skill.frontmatter.userInvocable || false,
+          help: skill.frontmatter.help || null,
+          requires: reqs.length > 0 ? reqs : null,
+          always: skill.frontmatter.always || false,
+          mcp: skill.frontmatter.mcp || null,
+        }));
+      } catch (err: unknown) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Failed to load skill" }));
+      }
+    })();
+    return;
+  }
+
   // Skill import endpoint (ELLIE-220)
   if (url.pathname === "/api/skills/import" && req.method === "POST") {
     let body = "";
@@ -1949,6 +2690,236 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         }
       })();
     });
+    return;
+  }
+
+  // ── Skill Sandbox endpoints (ELLIE-326) ────────────────────
+
+  // List sandboxed skills
+  if (url.pathname === "/api/skills/sandbox" && req.method === "GET") {
+    (async () => {
+      try {
+        const { join } = await import("path");
+        const { readdir, readFile, stat } = await import("fs/promises");
+        const { parseFrontmatter } = await import("./skills/frontmatter.ts");
+
+        const sandboxDir = join(process.cwd(), "skills-sandbox");
+        let entries: string[] = [];
+        try { entries = await readdir(sandboxDir); } catch { /* dir may not exist */ }
+
+        const skills: Array<Record<string, unknown>> = [];
+        for (const name of entries) {
+          const skillDir = join(sandboxDir, name);
+          const st = await stat(skillDir).catch(() => null);
+          if (!st?.isDirectory()) continue;
+
+          const skillMdPath = join(skillDir, "SKILL.md");
+          const skillMd = await readFile(skillMdPath, "utf-8").catch(() => null);
+          if (!skillMd) continue;
+
+          const parsed = parseFrontmatter(skillMd);
+          // Check for stored audit report
+          const reportPath = join(skillDir, "_audit-report.json");
+          const report = await readFile(reportPath, "utf-8").then(r => JSON.parse(r)).catch(() => null);
+
+          skills.push({
+            dirName: name,
+            name: parsed?.frontmatter?.name || name,
+            description: parsed?.frontmatter?.description || "",
+            triggers: parsed?.frontmatter?.triggers || [],
+            auditReport: report,
+            uploadedAt: st.mtime.toISOString(),
+          });
+        }
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ skills }));
+      } catch (err: unknown) {
+        logger.error("Sandbox list error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Failed to list sandbox" }));
+      }
+    })();
+    return;
+  }
+
+  // Upload to sandbox
+  if (url.pathname === "/api/skills/sandbox/upload" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", () => {
+      (async () => {
+        try {
+          const data = body ? JSON.parse(body) : {};
+          const { parseFrontmatter } = await import("./skills/frontmatter.ts");
+          const { auditSkill } = await import("./skills/auditor.ts");
+          const { join } = await import("path");
+          const { mkdir, writeFile } = await import("fs/promises");
+
+          const sandboxDir = join(process.cwd(), "skills-sandbox");
+          let skillName: string;
+          let files: Array<{ path: string; content: string }> = [];
+          let skillMdContent = "";
+
+          if (data.zip) {
+            const zipBuf = Buffer.from(data.zip, "base64");
+            const JSZip = (await import("jszip")).default;
+            const zip = await JSZip.loadAsync(zipBuf);
+
+            let skillMd = "";
+            const extraFiles: Array<{ path: string; content: string }> = [];
+
+            for (const [name, entry] of Object.entries(zip.files)) {
+              if (entry.dir) continue;
+              const content = await entry.async("string");
+              if (name === "SKILL.md" || name.endsWith("/SKILL.md")) {
+                skillMd = content;
+              } else {
+                extraFiles.push({ path: name, content });
+              }
+            }
+
+            if (!skillMd) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "No SKILL.md found in zip" }));
+              return;
+            }
+
+            const parsed = parseFrontmatter(skillMd);
+            if (!parsed) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "Invalid SKILL.md frontmatter" }));
+              return;
+            }
+
+            skillName = parsed.frontmatter.name;
+            skillMdContent = skillMd;
+            files.push({ path: "SKILL.md", content: skillMd });
+            files.push(...extraFiles);
+
+          } else if (data.markdown) {
+            const parsed = parseFrontmatter(data.markdown);
+            if (!parsed) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "Invalid SKILL.md frontmatter — needs --- name --- block" }));
+              return;
+            }
+            skillName = parsed.frontmatter.name;
+            skillMdContent = data.markdown;
+            files.push({ path: "SKILL.md", content: data.markdown });
+
+          } else {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Provide 'zip' (base64) or 'markdown' (string)" }));
+            return;
+          }
+
+          // Save to sandbox directory
+          const safeName = skillName.replace(/[^a-zA-Z0-9_-]/g, "-").toLowerCase();
+          const installDir = join(sandboxDir, safeName);
+          await mkdir(installDir, { recursive: true });
+
+          for (const f of files) {
+            const filePath = join(installDir, f.path);
+            const dir = filePath.substring(0, filePath.lastIndexOf("/"));
+            await mkdir(dir, { recursive: true });
+            await writeFile(filePath, f.content, "utf-8");
+          }
+
+          // Run audit
+          const extraFiles = files.filter(f => f.path !== "SKILL.md");
+          const auditReport = await auditSkill(installDir, skillMdContent, extraFiles);
+
+          // Store audit report alongside the skill
+          await writeFile(join(installDir, "_audit-report.json"), JSON.stringify(auditReport, null, 2), "utf-8");
+
+          console.log(`[skills] Sandbox upload "${skillName}" (${files.length} files, ${auditReport.riskRating}) → ${installDir}`);
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            name: skillName,
+            dirName: safeName,
+            files: files.map(f => f.path),
+            auditReport,
+          }));
+        } catch (err: unknown) {
+          logger.error("Sandbox upload error", err);
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Failed to upload to sandbox" }));
+        }
+      })();
+    });
+    return;
+  }
+
+  // Promote sandbox skill to live
+  if (url.pathname.match(/^\/api\/skills\/sandbox\/([^/]+)\/promote$/) && req.method === "POST") {
+    const dirName = url.pathname.match(/^\/api\/skills\/sandbox\/([^/]+)\/promote$/)?.[1];
+    (async () => {
+      try {
+        const { join } = await import("path");
+        const { readdir, readFile, mkdir, writeFile, rm } = await import("fs/promises");
+        const { bumpSnapshotVersion } = await import("./skills/snapshot.ts");
+
+        const sandboxDir = join(process.cwd(), "skills-sandbox", dirName!);
+        const targetDir = join(process.cwd(), "skills", dirName!);
+
+        // Read audit report to check rating
+        const reportPath = join(sandboxDir, "_audit-report.json");
+        const report = await readFile(reportPath, "utf-8").then(r => JSON.parse(r)).catch(() => null);
+        if (report?.riskRating === "RISKY") {
+          res.writeHead(403, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Cannot promote RISKY skill — resolve security issues first" }));
+          return;
+        }
+
+        // Copy all files except _audit-report.json to skills/
+        const entries = await readdir(sandboxDir);
+        await mkdir(targetDir, { recursive: true });
+        for (const entry of entries) {
+          if (entry === "_audit-report.json") continue;
+          const content = await readFile(join(sandboxDir, entry), "utf-8");
+          await writeFile(join(targetDir, entry), content, "utf-8");
+        }
+
+        // Remove from sandbox
+        await rm(sandboxDir, { recursive: true, force: true });
+
+        // Bump snapshot so skill loads
+        bumpSnapshotVersion();
+
+        console.log(`[skills] Promoted "${dirName}" from sandbox to live`);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: true, name: dirName, dir: targetDir }));
+      } catch (err: unknown) {
+        logger.error("Sandbox promote error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Failed to promote skill" }));
+      }
+    })();
+    return;
+  }
+
+  // Delete sandbox skill
+  if (url.pathname.match(/^\/api\/skills\/sandbox\/([^/]+)$/) && req.method === "DELETE") {
+    const dirName = url.pathname.match(/^\/api\/skills\/sandbox\/([^/]+)$/)?.[1];
+    (async () => {
+      try {
+        const { join } = await import("path");
+        const { rm } = await import("fs/promises");
+
+        const sandboxDir = join(process.cwd(), "skills-sandbox", dirName!);
+        await rm(sandboxDir, { recursive: true, force: true });
+
+        console.log(`[skills] Deleted sandbox skill "${dirName}"`);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: true }));
+      } catch (err: unknown) {
+        logger.error("Sandbox delete error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Failed to delete sandbox skill" }));
+      }
+    })();
     return;
   }
 
@@ -2734,6 +3705,529 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           await handler({ body: data, params: { id: threadId } }, mockRes, supabase!);
         } catch (err) { logger.error(`Comms thread ${action} error`, err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
       });
+      return;
+    }
+  }
+
+  // Calendar Intel endpoints (ELLIE-319)
+  if (url.pathname.startsWith("/api/calendar-intel/") && !supabase) {
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+
+  if (url.pathname === "/api/calendar-intel/upcoming" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getUpcoming } = await import("./api/calendar-intel.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getUpcoming({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Calendar intel upcoming error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/calendar-intel/conflicts" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getConflicts } = await import("./api/calendar-intel.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getConflicts({} as ApiRequest, mockRes, supabase!);
+      } catch (err) { logger.error("Calendar intel conflicts error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/calendar-intel/patterns" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getPatterns } = await import("./api/calendar-intel.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getPatterns({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Calendar intel patterns error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/calendar-intel/suggest-focus-blocks" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getFocusBlocks } = await import("./api/calendar-intel.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        getFocusBlocks({} as ApiRequest, mockRes);
+      } catch (err) { logger.error("Calendar intel focus blocks error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/calendar-intel/insights" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getInsights } = await import("./api/calendar-intel.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        getInsights({} as ApiRequest, mockRes);
+      } catch (err) { logger.error("Calendar intel insights error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/calendar-intel/sync" && req.method === "POST") {
+    (async () => {
+      try {
+        const { syncCalendarIntel } = await import("./api/calendar-intel.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await syncCalendarIntel({} as ApiRequest, mockRes);
+      } catch (err) { logger.error("Calendar intel sync error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/calendar-intel/preferences" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getPreferences } = await import("./api/calendar-intel.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getPreferences({} as ApiRequest, mockRes, supabase!);
+      } catch (err) { logger.error("Calendar intel prefs get error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/calendar-intel/preferences" && req.method === "PUT") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = body ? JSON.parse(body) : {};
+        const { updatePreferences } = await import("./api/calendar-intel.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await updatePreferences({ body: data }, mockRes, supabase!);
+      } catch (err) { logger.error("Calendar intel prefs update error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    });
+    return;
+  }
+
+  // /api/calendar-intel/event/:id, /api/calendar-intel/event/:id/prep, /api/calendar-intel/event/:id/mark-reviewed, /api/calendar-intel/event/:id/generate-prep
+  const calIntelEventMatch = url.pathname.match(/^\/api\/calendar-intel\/event\/([0-9a-f-]+)(\/(\S+))?$/);
+  if (calIntelEventMatch) {
+    const eventId = calIntelEventMatch[1];
+    const action = calIntelEventMatch[3]; // prep, mark-reviewed, generate-prep, or undefined
+
+    if (!action && req.method === "GET") {
+      (async () => {
+        try {
+          const { getEvent } = await import("./api/calendar-intel.ts");
+          const mockRes: ApiResponse = {
+            status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+            json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+          };
+          await getEvent({ params: { id: eventId } }, mockRes, supabase!);
+        } catch (err) { logger.error("Calendar intel event detail error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+      })();
+      return;
+    }
+
+    if (action === "prep" && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+      req.on("end", async () => {
+        try {
+          const data = body ? JSON.parse(body) : {};
+          const { updatePrep } = await import("./api/calendar-intel.ts");
+          const mockRes: ApiResponse = {
+            status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+            json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+          };
+          await updatePrep({ body: data, params: { id: eventId } }, mockRes, supabase!);
+        } catch (err) { logger.error("Calendar intel prep update error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+      });
+      return;
+    }
+
+    if (action === "mark-reviewed" && req.method === "POST") {
+      (async () => {
+        try {
+          const { markReviewed } = await import("./api/calendar-intel.ts");
+          const mockRes: ApiResponse = {
+            status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+            json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+          };
+          await markReviewed({ params: { id: eventId } }, mockRes, supabase!);
+        } catch (err) { logger.error("Calendar intel mark-reviewed error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+      })();
+      return;
+    }
+
+    if (action === "generate-prep" && req.method === "POST") {
+      (async () => {
+        try {
+          const { generatePrep } = await import("./api/calendar-intel.ts");
+          const mockRes: ApiResponse = {
+            status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+            json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+          };
+          await generatePrep({ params: { id: eventId } }, mockRes, supabase!);
+        } catch (err) { logger.error("Calendar intel generate-prep error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+      })();
+      return;
+    }
+  }
+
+  // Forest Module endpoints (ELLIE-322)
+  if (url.pathname === "/api/forest/browse" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { browse } = await import("./api/forest.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await browse({ query: queryParams }, mockRes);
+      } catch (err) { logger.error("Forest browse error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/forest/search" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = body ? JSON.parse(body) : {};
+        const { search } = await import("./api/forest.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await search({ body: data }, mockRes);
+      } catch (err) { logger.error("Forest search error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/forest/scopes" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getScopeTree } = await import("./api/forest.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getScopeTree({}, mockRes);
+      } catch (err) { logger.error("Forest scopes error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/forest/timeline" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getTimeline } = await import("./api/forest.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getTimeline({ query: queryParams }, mockRes);
+      } catch (err) { logger.error("Forest timeline error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/forest/tags" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { getTags } = await import("./api/forest.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getTags({ query: queryParams }, mockRes);
+      } catch (err) { logger.error("Forest tags error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/forest/contradictions" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getContradictions } = await import("./api/forest.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getContradictions({}, mockRes);
+      } catch (err) { logger.error("Forest contradictions error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/forest/batch" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = body ? JSON.parse(body) : {};
+        const { batchRetrieve } = await import("./api/forest.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await batchRetrieve({ body: data }, mockRes);
+      } catch (err) { logger.error("Forest batch error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    });
+    return;
+  }
+
+  // /api/forest/memory/:id and /api/forest/memory/:id/related
+  const forestMemoryMatch = url.pathname.match(/^\/api\/forest\/memory\/([0-9a-f-]+)(\/(\S+))?$/);
+  if (forestMemoryMatch) {
+    const memoryId = forestMemoryMatch[1];
+    const action = forestMemoryMatch[3];
+
+    if (!action && req.method === "GET") {
+      (async () => {
+        try {
+          const { getMemoryDetail } = await import("./api/forest.ts");
+          const mockRes: ApiResponse = {
+            status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+            json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+          };
+          await getMemoryDetail({ params: { id: memoryId } }, mockRes);
+        } catch (err) { logger.error("Forest memory detail error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+      })();
+      return;
+    }
+
+    if (action === "related" && req.method === "GET") {
+      (async () => {
+        try {
+          const queryParams: Record<string, string> = {};
+          url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+          const { getRelatedMemories } = await import("./api/forest.ts");
+          const mockRes: ApiResponse = {
+            status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+            json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+          };
+          await getRelatedMemories({ params: { id: memoryId }, query: queryParams }, mockRes);
+        } catch (err) { logger.error("Forest related memories error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+      })();
+      return;
+    }
+  }
+
+  // /api/forest/scope/:path/stats (path can contain slashes)
+  const forestScopeMatch = url.pathname.match(/^\/api\/forest\/scope\/(.+)\/stats$/);
+  if (forestScopeMatch && req.method === "GET") {
+    const scopePath = forestScopeMatch[1];
+    (async () => {
+      try {
+        const { getScopeStats } = await import("./api/forest.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getScopeStats({ params: { path: scopePath } }, mockRes);
+      } catch (err) { logger.error("Forest scope stats error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  // Relationship Tracker endpoints (ELLIE-320)
+  if (url.pathname.startsWith("/api/relationships/") && !supabase) {
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+
+  if (url.pathname === "/api/relationships/profiles" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { listProfiles } = await import("./api/relationship.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await listProfiles({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Relationship list profiles error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/relationships/follow-ups" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getFollowUps } = await import("./api/relationship.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getFollowUps({}, mockRes, supabase!);
+      } catch (err) { logger.error("Relationship follow-ups error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/relationships/health" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getHealthBreakdown } = await import("./api/relationship.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getHealthBreakdown({}, mockRes, supabase!);
+      } catch (err) { logger.error("Relationship health error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/relationships/search" && req.method === "GET") {
+    (async () => {
+      try {
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+        const { searchProfiles } = await import("./api/relationship.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await searchProfiles({ query: queryParams }, mockRes, supabase!);
+      } catch (err) { logger.error("Relationship search error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/relationships/preferences" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getPreferences } = await import("./api/relationship.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await getPreferences({}, mockRes, supabase!);
+      } catch (err) { logger.error("Relationship preferences error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/relationships/preferences" && req.method === "PUT") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = body ? JSON.parse(body) : {};
+        const { updatePreferences } = await import("./api/relationship.ts");
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+          json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+        };
+        await updatePreferences({ body: data }, mockRes, supabase!);
+      } catch (err) { logger.error("Relationship preferences update error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    });
+    return;
+  }
+
+  // /api/relationships/profile/:id, /api/relationships/profile/:id/timeline, /api/relationships/profile/:id/dismiss-follow-up
+  const relProfileMatch = url.pathname.match(/^\/api\/relationships\/profile\/([0-9a-f-]+)(\/(\S+))?$/);
+  if (relProfileMatch) {
+    const profileId = relProfileMatch[1];
+    const action = relProfileMatch[3]; // timeline, dismiss-follow-up, or undefined
+
+    if (!action && req.method === "GET") {
+      (async () => {
+        try {
+          const { getProfile } = await import("./api/relationship.ts");
+          const mockRes: ApiResponse = {
+            status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+            json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+          };
+          await getProfile({ params: { id: profileId } }, mockRes, supabase!);
+        } catch (err) { logger.error("Relationship get profile error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+      })();
+      return;
+    }
+
+    if (!action && req.method === "PUT") {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+      req.on("end", async () => {
+        try {
+          const data = body ? JSON.parse(body) : {};
+          const { updateProfile } = await import("./api/relationship.ts");
+          const mockRes: ApiResponse = {
+            status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+            json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+          };
+          await updateProfile({ params: { id: profileId }, body: data }, mockRes, supabase!);
+        } catch (err) { logger.error("Relationship update profile error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+      });
+      return;
+    }
+
+    if (action === "timeline" && req.method === "GET") {
+      (async () => {
+        try {
+          const queryParams: Record<string, string> = {};
+          url.searchParams.forEach((v, k) => { queryParams[k] = v; });
+          const { getTimeline } = await import("./api/relationship.ts");
+          const mockRes: ApiResponse = {
+            status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+            json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+          };
+          await getTimeline({ params: { id: profileId }, query: queryParams }, mockRes, supabase!);
+        } catch (err) { logger.error("Relationship timeline error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+      })();
+      return;
+    }
+
+    if (action === "dismiss-follow-up" && req.method === "POST") {
+      (async () => {
+        try {
+          const { dismissFollowUp } = await import("./api/relationship.ts");
+          const mockRes: ApiResponse = {
+            status: (code: number) => ({ json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }),
+            json: (data: unknown) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+          };
+          await dismissFollowUp({ params: { id: profileId } }, mockRes, supabase!);
+        } catch (err) { logger.error("Relationship dismiss follow-up error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+      })();
       return;
     }
   }

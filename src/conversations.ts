@@ -47,6 +47,7 @@ export async function getOrCreateConversation(
   supabase: SupabaseClient,
   channel: string,
   agent: string = "general",
+  channelId?: string,
 ): Promise<string | null> {
   try {
     const { data, error } = await supabase.rpc("get_or_create_conversation", {

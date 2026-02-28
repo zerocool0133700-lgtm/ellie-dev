@@ -93,6 +93,7 @@ import { detectAndLinkCalendarEvents } from "./calendar-linker.ts";
 import { processMessageMode, isContextRefresh } from "./context-mode.ts";
 import { freshnessTracker, autoRefreshStaleSources } from "./context-freshness.ts";
 import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hierarchy.ts";
+import { logVerificationTrail } from "./data-quality.ts";
 
 const logger = log.child("telegram");
 
@@ -308,14 +309,31 @@ bot.on("message:text", withQueue(async (ctx) => {
     agentResult?.route.skill_name === "code_review" ||
     agentResult?.route.skill_name === "debugging";
   if (workItemMatch && isPlaneConfigured()) {
+    const wiStart = Date.now();
     const details = await fetchWorkItemDetails(workItemMatch[1]);
+    const wiLatency = Date.now() - wiStart;
     if (details) {
       const label = isWorkIntent ? "ACTIVE WORK ITEM" : "REFERENCED WORK ITEM";
       workItemContext = `\n${label}: ${workItemMatch[1]}\n` +
         `Title: ${details.name}\n` +
         `Priority: ${details.priority}\n` +
         `Description: ${details.description}\n`;
-      freshnessTracker.recordFetch("work-item", 0);
+      freshnessTracker.recordFetch("work-item", wiLatency);
+
+      // ELLIE-328: Log verification trail for work item health check
+      logVerificationTrail({
+        channel: "telegram",
+        agent: activeAgent || "general",
+        conversation_id: activeConvoId,
+        entries: [{
+          claim: `ticket-state:${workItemMatch[1]}`,
+          source: "plane",
+          result: "confirmed",
+          checked_value: details.state || details.priority,
+          latency_ms: wiLatency,
+        }],
+        timestamp: new Date().toISOString(),
+      }).catch(() => {}); // fire-and-forget
     }
   }
 
