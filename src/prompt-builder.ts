@@ -663,6 +663,17 @@ export function buildPrompt(
         s.priority = modePriorities[s.label];
       }
     }
+
+    // Actively suppress sections with priority >= 7 — these are "suppressed" per
+    // the context-strategy skill, not just deprioritized for budget trimming.
+    const SUPPRESS_THRESHOLD = 7;
+    const suppCount = sections.filter(s => s.priority >= SUPPRESS_THRESHOLD).length;
+    if (suppCount > 0) {
+      for (let i = sections.length - 1; i >= 0; i--) {
+        if (sections[i].priority >= SUPPRESS_THRESHOLD) sections.splice(i, 1);
+      }
+      logger.debug(`Mode ${contextMode}: suppressed ${suppCount} sections (priority >= ${SUPPRESS_THRESHOLD})`);
+    }
   }
 
   const excludedSections = getStrategyExcludedSections(activeStrategy);

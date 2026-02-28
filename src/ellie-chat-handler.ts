@@ -89,7 +89,7 @@ import {
 } from "./api/agent-queue.ts";
 import { detectAndCaptureCorrection } from "./correction-detector.ts";
 import { detectAndLinkCalendarEvents } from "./calendar-linker.ts";
-import { processMessageMode, isContextRefresh } from "./context-mode.ts";
+import { processMessageMode, isContextRefresh, getModeSectionPriorities } from "./context-mode.ts";
 import { freshnessTracker, autoRefreshStaleSources } from "./context-freshness.ts";
 import { refreshSource } from "./context-sources.ts";
 import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hierarchy.ts";
@@ -608,15 +608,19 @@ export async function handleEllieChatMessage(
       }
     }
 
+    // Mode-aware fetch gating — skip sources that would be suppressed (priority >= 7)
+    const modePriorities = getModeSectionPriorities(contextMode);
+    const shouldFetch = (label: string) => (modePriorities[label] ?? 0) < 7;
+
     const [ecConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, ecQueueContext, liveForest] = await Promise.all([
       ecConvoId && supabase ? getConversationMessages(supabase, ecConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
-      getContextDocket(),
+      shouldFetch("context-docket") ? getContextDocket() : Promise.resolve(""),
       getRelevantContext(supabase, effectiveText, "ellie-chat", ellieChatActiveAgent, ecConvoId),
       searchElastic(effectiveText, { limit: 5, recencyBoost: true, channel: "ellie-chat", sourceAgent: ellieChatActiveAgent, excludeConversationId: ecConvoId }),
-      getAgentStructuredContext(supabase, ellieChatActiveAgent),
+      shouldFetch("structured-context") ? getAgentStructuredContext(supabase, ellieChatActiveAgent) : Promise.resolve(""),
       getForestContext(effectiveText),
       getAgentMemoryContext(ellieChatActiveAgent, ellieChatWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model)),
-      agentResult?.dispatch.is_new ? getQueueContext(ellieChatActiveAgent) : Promise.resolve(""),
+      shouldFetch("queue") && agentResult?.dispatch.is_new ? getQueueContext(ellieChatActiveAgent) : Promise.resolve(""),
       getLiveForestContext(effectiveText),
     ]);
     const recentMessages = ecConvoContext.text;
@@ -634,21 +638,22 @@ export async function handleEllieChatMessage(
     freshnessTracker.logModeConfig(contextMode);
     freshnessTracker.logAllFreshness(contextMode);
 
-    // ELLIE-327: Auto-refresh stale critical sources
+    // ELLIE-327: Auto-refresh stale critical sources (only for non-suppressed sections)
+    const refreshSources: Record<string, () => Promise<string>> = {
+      ...(shouldFetch("structured-context") && { "structured-context": () => getAgentStructuredContext(supabase, ellieChatActiveAgent) }),
+      ...(shouldFetch("context-docket") && { "context-docket": () => { clearContextCache(); return getContextDocket(); } }),
+      "agent-memory": async () => {
+        const mem = await getAgentMemoryContext(ellieChatActiveAgent, ellieChatWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model));
+        return mem.memoryContext;
+      },
+      "forest-awareness": async () => {
+        const lf = await getLiveForestContext(effectiveText);
+        return lf.awareness;
+      },
+    };
     const { refreshed: ecRefreshed, results: ecRefreshResults } = await autoRefreshStaleSources(
       contextMode,
-      {
-        "structured-context": () => getAgentStructuredContext(supabase, ellieChatActiveAgent),
-        "context-docket": () => { clearContextCache(); return getContextDocket(); },
-        "agent-memory": async () => {
-          const mem = await getAgentMemoryContext(ellieChatActiveAgent, ellieChatWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model));
-          return mem.memoryContext;
-        },
-        "forest-awareness": async () => {
-          const lf = await getLiveForestContext(effectiveText);
-          return lf.awareness;
-        },
-      },
+      refreshSources,
     );
 
     // Detect work item mentions (ELLIE-5, EVE-3, etc.) — matches Telegram text handler
@@ -683,6 +688,20 @@ export async function handleEllieChatMessage(
           }],
           timestamp: new Date().toISOString(),
         }).catch(() => {}); // fire-and-forget
+      }
+    }
+
+    // Auto-load work item from channel's work_item_id (deep-work ephemeral channels)
+    if (!workItemContext && channelProfile?.workItemId && isPlaneConfigured()) {
+      const wiStart = Date.now();
+      const details = await fetchWorkItemDetails(channelProfile.workItemId);
+      const wiLatency = Date.now() - wiStart;
+      if (details) {
+        workItemContext = `\nACTIVE WORK ITEM: ${channelProfile.workItemId}\n` +
+          `Title: ${details.name}\n` +
+          `Priority: ${details.priority}\n` +
+          `Description: ${details.description}\n`;
+        freshnessTracker.recordFetch("work-item", wiLatency);
       }
     }
 
@@ -816,9 +835,9 @@ export async function handleEllieChatMessage(
       forestContext,
       ecAgentMem || undefined,
       agentMemory.sessionIds,
-      await getArchetypeContext(),
-      await getPsyContext(),
-      await getPhaseContext(),
+      shouldFetch("archetype") ? await getArchetypeContext() : undefined,
+      shouldFetch("psy") ? await getPsyContext() : undefined,
+      shouldFetch("phase") ? await getPhaseContext() : undefined,
       await getHealthContext(),
       ecQueueContext || undefined,
       liveForest.incidents || undefined,
@@ -1040,9 +1059,9 @@ export async function runSpecialistAsync(
       forestContext,
       agentMemory.memoryContext || undefined,
       agentMemory.sessionIds,
-      await getArchetypeContext(),
-      await getPsyContext(),
-      await getPhaseContext(),
+      shouldFetch("archetype") ? await getArchetypeContext() : undefined,
+      shouldFetch("psy") ? await getPsyContext() : undefined,
+      shouldFetch("phase") ? await getPhaseContext() : undefined,
       await getHealthContext(),
       specQueueContext || undefined,
       liveForest.incidents || undefined,

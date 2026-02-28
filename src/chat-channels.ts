@@ -49,6 +49,7 @@ export interface ChannelContextProfile {
   tokenBudget: number;
   criticalSources: string[];
   suppressedSections: string[];
+  workItemId: string | null;
 }
 
 // ── In-memory cache ──────────────────────────────────────────
@@ -228,6 +229,7 @@ export async function resolveContextProfile(
     tokenBudget: findInChain(chain, c => c.token_budget) || getModeTokenBudget(contextMode),
     criticalSources: findInChain(chain, c => c.critical_sources) || modeDefaults.critical,
     suppressedSections: findInChain(chain, c => c.suppressed_sections) || [],
+    workItemId: channel?.work_item_id || null,
   };
 }
 
