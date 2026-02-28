@@ -81,6 +81,11 @@ export function initCommsConsumer(supabase: SupabaseClient): void {
     unsnoozeExpired().catch(err => logger.error("Unsnooze failed", err));
   }, 5 * 60_000);
 
+  // GTD auto-create for very stale threads (every 30 min)
+  setInterval(() => {
+    createGtdItemsForStaleThreads().catch(err => logger.error("GTD auto-create failed", err));
+  }, 30 * 60_000);
+
   logger.info("Comms consumer initialized (ELLIE-318, DB-backed)");
 }
 
@@ -137,6 +142,78 @@ async function unsnoozeExpired(): Promise<void> {
   if (data && data.length > 0) {
     logger.info("Unsnoozed expired threads", { count: data.length });
     await refreshCache();
+  }
+}
+
+/**
+ * ELLIE-318 Phase 2: Auto-create GTD inbox items for threads past the GTD threshold.
+ * Only creates if auto_gtd_create preference is enabled.
+ */
+async function createGtdItemsForStaleThreads(): Promise<void> {
+  if (!supabaseRef) return;
+
+  // Check if feature is enabled
+  try {
+    const { data: pref } = await supabaseRef
+      .from("comms_preferences")
+      .select("value")
+      .eq("key", "auto_gtd_create")
+      .single();
+
+    const enabled = pref?.value === true || pref?.value === "true";
+    if (!enabled) return;
+  } catch {
+    return;
+  }
+
+  // Get GTD threshold
+  let thresholdHours = 72;
+  try {
+    const { data: pref } = await supabaseRef
+      .from("comms_preferences")
+      .select("value")
+      .eq("key", "gtd_threshold_hours")
+      .single();
+    if (pref?.value) thresholdHours = Number(pref.value) || 72;
+  } catch { /* use default */ }
+
+  const cutoff = new Date(Date.now() - thresholdHours * 60 * 60 * 1000).toISOString();
+
+  // Find stale threads past GTD threshold that haven't been resolved or snoozed
+  const { data: threads } = await supabaseRef
+    .from("comms_threads")
+    .select("thread_id, provider, last_sender, subject")
+    .eq("awaiting_reply", true)
+    .eq("resolved", false)
+    .is("snoozed_until", null)
+    .lt("last_message_at", cutoff)
+    .limit(10);
+
+  if (!threads || threads.length === 0) return;
+
+  for (const t of threads) {
+    const who = t.last_sender || t.provider;
+    const content = `Reply to ${who}${t.subject ? ` re: ${t.subject.slice(0, 50)}` : ""} (${t.provider})`;
+
+    // Check if we already created a todo for this thread
+    const { count } = await supabaseRef
+      .from("todos")
+      .select("*", { count: "exact", head: true })
+      .eq("source_type", "comms")
+      .eq("source_ref", t.thread_id)
+      .in("status", ["inbox", "open"]);
+
+    if ((count ?? 0) > 0) continue; // Already exists
+
+    await supabaseRef.from("todos").insert({
+      content,
+      status: "inbox",
+      tags: ["@comms"],
+      source_type: "comms",
+      source_ref: t.thread_id,
+    });
+
+    logger.info("Created GTD item for stale thread", { thread: t.thread_id, who });
   }
 }
 

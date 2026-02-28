@@ -267,9 +267,9 @@ async function fetchMessages(supabase: SupabaseClient): Promise<BriefingSection>
 
   return {
     key: "messages",
-    title: "Communications",
-    icon: "\u{1F4AC}",
-    priority: 4,
+    title: "Message Volume",
+    icon: "\u{1F4E8}",
+    priority: 5,
     items,
   };
 }
@@ -306,7 +306,52 @@ async function fetchForestFindings(): Promise<BriefingSection> {
     key: "forest",
     title: "Recent Decisions",
     icon: "\u{1F332}",
-    priority: 5,
+    priority: 6,
+    items,
+  };
+}
+
+// ELLIE-318 Phase 2: Comms section for briefing
+async function fetchCommsState(supabase: SupabaseClient): Promise<BriefingSection> {
+  const items: BriefingItem[] = [];
+  try {
+    const { getStaleThreads, getActiveThreads } = await import("../ums/consumers/comms.ts");
+    const stale = getStaleThreads();
+    const active = getActiveThreads();
+    const awaiting = active.filter(t => t.awaiting_reply);
+
+    if (stale.length > 0) {
+      for (const t of stale.slice(0, 5)) {
+        const hours = Math.round((Date.now() - new Date(t.last_message_at).getTime()) / (1000 * 60 * 60));
+        const who = t.last_sender || t.provider;
+        const subject = t.subject ? `: ${t.subject.slice(0, 60)}` : "";
+        items.push({
+          text: `Stale (${hours}h): ${who} on ${t.provider}${subject}`,
+          urgency: hours >= 48 ? "high" : "normal",
+          metadata: { thread_id: t.thread_id, provider: t.provider },
+        });
+      }
+      if (stale.length > 5) {
+        items.push({ text: `...and ${stale.length - 5} more stale threads`, urgency: "low" });
+      }
+    }
+
+    if (awaiting.length > 0 && stale.length === 0) {
+      items.push({ text: `${awaiting.length} threads awaiting reply (not yet stale)`, urgency: "low" });
+    }
+
+    if (active.length > 0 && items.length === 0) {
+      items.push({ text: `${active.length} active threads, all caught up`, urgency: "low" });
+    }
+  } catch (err) {
+    logger.warn("Comms fetch failed", err);
+  }
+
+  return {
+    key: "comms",
+    title: "Conversations",
+    icon: "\u{1F4AC}",
+    priority: 3, // between work sessions and messages
     items,
   };
 }
@@ -353,10 +398,11 @@ function formatBriefingMarkdown(sections: BriefingSection[], date: string): stri
 
 async function buildBriefing(supabase: SupabaseClient, date: string): Promise<Briefing> {
   // Fetch all sources in parallel with graceful degradation
-  const [calendar, gtd, work, messages, forest] = await Promise.allSettled([
+  const [calendar, gtd, work, comms, messages, forest] = await Promise.allSettled([
     fetchCalendarEvents(date),
     fetchGtdState(supabase),
     fetchWorkSessions(supabase),
+    fetchCommsState(supabase),
     fetchMessages(supabase),
     fetchForestFindings(),
   ]);
@@ -365,7 +411,7 @@ async function buildBriefing(supabase: SupabaseClient, date: string): Promise<Br
   const extract = (result: PromiseSettledResult<BriefingSection>): BriefingSection | null =>
     result.status === "fulfilled" ? result.value : null;
 
-  for (const result of [calendar, gtd, work, messages, forest]) {
+  for (const result of [calendar, gtd, work, comms, messages, forest]) {
     const section = extract(result);
     if (section && section.items.length > 0) sections.push(section);
   }
