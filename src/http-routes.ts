@@ -4335,6 +4335,48 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Channel Gardener endpoints (ELLIE-335)
+  if (url.pathname === "/api/gardener/suggestions" && req.method === "GET") {
+    if (!supabase) { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Supabase not configured" })); return; }
+    (async () => {
+      try {
+        const { getPendingSuggestions } = await import("./api/channel-gardener.ts");
+        const suggestions = await getPendingSuggestions(supabase);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ suggestions }));
+      } catch (err) { logger.error("Gardener suggestions error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname.match(/^\/api\/gardener\/suggestions\/[^/]+\/approve$/) && req.method === "POST") {
+    if (!supabase) { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Supabase not configured" })); return; }
+    (async () => {
+      try {
+        const id = url.pathname.split("/")[4];
+        const { approveSuggestion } = await import("./api/channel-gardener.ts");
+        const ok = await approveSuggestion(supabase, id);
+        res.writeHead(ok ? 200 : 404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: ok }));
+      } catch (err) { logger.error("Gardener approve error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname.match(/^\/api\/gardener\/suggestions\/[^/]+\/dismiss$/) && req.method === "POST") {
+    if (!supabase) { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Supabase not configured" })); return; }
+    (async () => {
+      try {
+        const id = url.pathname.split("/")[4];
+        const { dismissSuggestion } = await import("./api/channel-gardener.ts");
+        const ok = await dismissSuggestion(supabase, id);
+        res.writeHead(ok ? 200 : 404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: ok }));
+      } catch (err) { logger.error("Gardener dismiss error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
   // Alert endpoints (ELLIE-317)
   if (url.pathname.startsWith("/api/alerts/") && !supabase) {
     res.writeHead(500, { "Content-Type": "application/json" });

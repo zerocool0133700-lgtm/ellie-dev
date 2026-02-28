@@ -396,22 +396,47 @@ function formatBriefingMarkdown(sections: BriefingSection[], date: string): stri
   return lines.join("\n").trimEnd();
 }
 
+async function fetchGardenerSuggestions(supabase: SupabaseClient): Promise<BriefingSection> {
+  const items: BriefingItem[] = [];
+  try {
+    const { data } = await supabase
+      .from("channel_gardener_suggestions")
+      .select("id, title, description, suggestion_type, confidence")
+      .eq("status", "pending")
+      .order("confidence", { ascending: false })
+      .limit(5);
+
+    for (const s of data || []) {
+      items.push({
+        text: s.title,
+        detail: s.description,
+        urgency: s.confidence >= 0.8 ? "high" : "normal",
+        metadata: { suggestion_id: s.id, suggestion_type: s.suggestion_type },
+      });
+    }
+  } catch (err) {
+    logger.warn("Gardener suggestions fetch failed", err);
+  }
+  return { key: "gardener", title: "Channel Garden", icon: "~", priority: 6, items };
+}
+
 async function buildBriefing(supabase: SupabaseClient, date: string): Promise<Briefing> {
   // Fetch all sources in parallel with graceful degradation
-  const [calendar, gtd, work, comms, messages, forest] = await Promise.allSettled([
+  const [calendar, gtd, work, comms, messages, forest, gardener] = await Promise.allSettled([
     fetchCalendarEvents(date),
     fetchGtdState(supabase),
     fetchWorkSessions(supabase),
     fetchCommsState(supabase),
     fetchMessages(supabase),
     fetchForestFindings(),
+    fetchGardenerSuggestions(supabase),
   ]);
 
   const sections: BriefingSection[] = [];
   const extract = (result: PromiseSettledResult<BriefingSection>): BriefingSection | null =>
     result.status === "fulfilled" ? result.value : null;
 
-  for (const result of [calendar, gtd, work, comms, messages, forest]) {
+  for (const result of [calendar, gtd, work, comms, messages, forest, gardener]) {
     const section = extract(result);
     if (section && section.items.length > 0) sections.push(section);
   }

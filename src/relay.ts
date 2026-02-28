@@ -54,6 +54,8 @@ import { startExpiryCleanup } from "./approval.ts";
 import { notify } from "./notification-policy.ts";
 import { expireIdleConversations } from "./conversations.ts";
 import { expireStaleItems } from "./api/agent-queue.ts";
+import { archiveCompletedEphemeralChannels } from "./chat-channels.ts";
+import { isWorkItemDone } from "./plane.ts";
 import { startPlaneQueueWorker, purgeCompleted as purgePlaneQueue } from "./plane-queue.ts";
 import { onBridgeWrite } from "./api/bridge.ts";
 import { setBroadcastToEllieChat } from "./tool-approval.ts";
@@ -107,6 +109,8 @@ setInterval(async () => {
       logger.error("Stale conversation cleanup error", { error: err instanceof Error ? err.message : String(err) });
     }
     expireStaleAgentSessions(supabase).catch(() => {});
+    // ELLIE-334: Auto-archive ephemeral channels whose tickets are Done
+    archiveCompletedEphemeralChannels(supabase, isWorkItemDone).catch(() => {});
   }
   // Expire Ellie Chat pending confirm actions (15-min TTL)
   const now = Date.now();
@@ -232,6 +236,32 @@ if (supabase) {
   })();
 }
 
+// Calendar Intel consumer — DB-backed event intel, conflict detection, prep tracking (ELLIE-319)
+if (supabase) {
+  (async () => {
+    try {
+      const { initCalendarIntelConsumer } = await import("./ums/consumers/calendar-intel.ts");
+      initCalendarIntelConsumer(supabase);
+      console.log("[calendar-intel] Calendar Intel consumer initialized with DB-backed intel");
+    } catch (err) {
+      logger.error("Calendar Intel consumer init failed", err);
+    }
+  })();
+}
+
+// Relationship consumer — DB-backed contact profiles, health scoring, follow-up detection (ELLIE-320)
+if (supabase) {
+  (async () => {
+    try {
+      const { initRelationshipConsumer } = await import("./ums/consumers/relationship.ts");
+      initRelationshipConsumer(supabase);
+      console.log("[relationship] Relationship consumer initialized with DB-backed profiles");
+    } catch (err) {
+      logger.error("Relationship consumer init failed", err);
+    }
+  })();
+}
+
 // Alert consumer — DB-backed rules, severity routing, dedup (ELLIE-317)
 if (supabase) {
   (async () => {
@@ -275,6 +305,21 @@ setInterval(async () => {
       await runMorningBriefing(supabase, bot);
     } catch (err: unknown) {
       logger.error("Morning briefing error", { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+}, 15 * 60_000);
+
+// Channel gardener — runs at 11 PM CST nightly (ELLIE-335)
+setInterval(async () => {
+  if (!supabase) return;
+  const now = new Date();
+  const cst = new Date(now.toLocaleString("en-US", { timeZone: "America/Chicago" }));
+  if (cst.getHours() === 23 && cst.getMinutes() < 15) {
+    try {
+      const { runNightlyGardener } = await import("./api/channel-gardener.ts");
+      await runNightlyGardener(supabase);
+    } catch (err: unknown) {
+      logger.error("[gardener] Nightly run failed", { error: err instanceof Error ? err.message : String(err) });
     }
   }
 }, 15 * 60_000);
