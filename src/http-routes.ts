@@ -28,6 +28,8 @@ import { triggerConsolidation, resetTelegramIdleTimer, resetGchatIdleTimer } fro
 import {
   textToSpeechOgg,
   textToSpeechFast,
+  textToSpeechFastStream,
+  textToSpeechOggStream,
   getTTSProviderInfo,
 } from "./tts.ts";
 import { signToken, authenticateRequest } from "./api/jwt-auth.ts";
@@ -1164,20 +1166,21 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         }
         const fast = data.fast === true || url.searchParams.get("fast") === "1";
         const providerOverride = (data.provider === "elevenlabs" || data.provider === "openai") ? data.provider : undefined;
-        const audioBuffer = fast
-          ? await textToSpeechFast(data.text, providerOverride)
-          : await textToSpeechOgg(data.text, providerOverride);
-        if (!audioBuffer) {
+
+        // ELLIE-258: Stream audio directly from provider to client
+        const stream = fast
+          ? await textToSpeechFastStream(data.text, providerOverride)
+          : await textToSpeechOggStream(data.text, providerOverride);
+        if (!stream) {
           res.writeHead(503, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "TTS unavailable" }));
           return;
         }
-        const contentType = fast ? "audio/mpeg" : "audio/ogg";
-        res.writeHead(200, {
-          "Content-Type": contentType,
-          "Content-Length": audioBuffer.length.toString(),
-        });
-        res.end(audioBuffer);
+        res.writeHead(200, { "Content-Type": stream.contentType });
+        for await (const chunk of stream.body) {
+          res.write(chunk);
+        }
+        res.end();
       } catch (err: unknown) {
         logger.error("TTS API error", err);
         res.writeHead(500, { "Content-Type": "application/json" });

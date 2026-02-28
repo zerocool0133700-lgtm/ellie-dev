@@ -389,3 +389,97 @@ export async function textToSpeechFast(text: string, providerOverride?: "elevenl
 
   return Buffer.from(await response.arrayBuffer());
 }
+
+// ── Streaming TTS (ELLIE-258) ────────────────────────────────
+// Returns the raw response body as a ReadableStream for piping
+// directly to the HTTP client — no buffering in relay memory.
+
+interface TTSStream {
+  body: ReadableStream<Uint8Array>;
+  contentType: string;
+}
+
+async function openaiTTSStream(text: string, format: OpenAIFormat, contentType: string): Promise<TTSStream | null> {
+  const response = await fetch("https://api.openai.com/v1/audio/speech", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: OPENAI_TTS_MODEL,
+      input: text,
+      voice: OPENAI_TTS_VOICE,
+      response_format: format,
+    }),
+  });
+
+  if (!response.ok || !response.body) {
+    logger.error("OpenAI TTS stream error", { status: response.status, body: await response.text() });
+    return null;
+  }
+
+  return { body: response.body, contentType };
+}
+
+/** Streaming MP3 TTS for dashboard playback — pipes directly to client. */
+export async function textToSpeechFastStream(text: string, providerOverride?: "elevenlabs" | "openai"): Promise<TTSStream | null> {
+  const provider = getProvider(providerOverride);
+  if (!provider) return null;
+
+  if (provider === "openai") {
+    return await openaiTTSStream(text, "mp3", "audio/mpeg");
+  }
+
+  // ElevenLabs — use /stream endpoint for lower TTFB
+  const response = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream?output_format=mp3_22050_32`,
+    {
+      method: "POST",
+      headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        model_id: "eleven_turbo_v2_5",
+        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+      }),
+    }
+  );
+
+  if (!response.ok || !response.body) {
+    logger.error("ElevenLabs fast stream error", { status: response.status, body: await response.text() });
+    return null;
+  }
+
+  return { body: response.body, contentType: "audio/mpeg" };
+}
+
+/** Streaming OGG/Opus TTS — pipes directly to client. */
+export async function textToSpeechOggStream(text: string, providerOverride?: "elevenlabs" | "openai"): Promise<TTSStream | null> {
+  const provider = getProvider(providerOverride);
+  if (!provider) return null;
+
+  if (provider === "openai") {
+    return await openaiTTSStream(text, "opus", "audio/ogg");
+  }
+
+  // ElevenLabs — use /stream endpoint for lower TTFB
+  const response = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream?output_format=opus_48000_64`,
+    {
+      method: "POST",
+      headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        model_id: "eleven_turbo_v2_5",
+        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+      }),
+    }
+  );
+
+  if (!response.ok || !response.body) {
+    logger.error("ElevenLabs ogg stream error", { status: response.status, body: await response.text() });
+    return null;
+  }
+
+  return { body: response.body, contentType: "audio/ogg" };
+}
