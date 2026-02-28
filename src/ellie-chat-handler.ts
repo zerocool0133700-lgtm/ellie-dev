@@ -11,7 +11,7 @@ import { join } from "path";
 import { WebSocket } from "ws";
 import {
   BOT_TOKEN, ALLOWED_USER_ID, GCHAT_SPACE_NOTIFY, UPLOADS_DIR,
-  getContextDocket,
+  getContextDocket, clearContextCache,
 } from "./relay-config.ts";
 import {
   getActiveAgent, setActiveAgent,
@@ -89,15 +89,20 @@ import {
 } from "./api/agent-queue.ts";
 import { detectAndCaptureCorrection } from "./correction-detector.ts";
 import { detectAndLinkCalendarEvents } from "./calendar-linker.ts";
+import { processMessageMode, isContextRefresh } from "./context-mode.ts";
+import { freshnessTracker, autoRefreshStaleSources } from "./context-freshness.ts";
+import { refreshSource } from "./context-sources.ts";
+import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hierarchy.ts";
 
 export async function handleEllieChatMessage(
   ws: WebSocket,
   text: string,
   phoneMode: boolean = false,
   image?: { data: string; mime_type: string; name: string },
+  channelId?: string,
 ): Promise<void> {
   const { bot, anthropic, supabase } = getRelayDeps();
-  console.log(`[ellie-chat] User${phoneMode ? " (phone)" : ""}${image ? " [+image]" : ""}: ${text.substring(0, 80)}...`);
+  console.log(`[ellie-chat] User${phoneMode ? " (phone)" : ""}${image ? " [+image]" : ""}${channelId ? ` [ch:${channelId.substring(0, 8)}]` : ""}: ${text.substring(0, 80)}...`);
   acknowledgeChannel("ellie-chat");
 
   const ecUser = wsAppUserMap.get(ws);
@@ -106,9 +111,21 @@ export async function handleEllieChatMessage(
   await saveMessage("user", text, image ? { image_name: image.name, image_mime: image.mime_type } : {}, "ellie-chat", ecUserId);
   broadcastExtension({ type: "message_in", channel: "ellie-chat", preview: text.substring(0, 200) });
 
+  // ELLIE-334: Resolve channel context profile if channelId provided
+  let channelProfile: import("./chat-channels.ts").ChannelContextProfile | null = null;
+  if (channelId && supabase) {
+    try {
+      const { resolveContextProfile } = await import("./chat-channels.ts");
+      channelProfile = await resolveContextProfile(supabase, channelId);
+      console.log(`[ellie-chat] Channel profile: mode=${channelProfile.contextMode} budget=${channelProfile.tokenBudget}`);
+    } catch (err) {
+      logger.warn("Channel profile resolution failed, falling back to mode detection", err);
+    }
+  }
+
   // Correction detection + calendar linking (ELLIE-250)
   if (supabase) {
-    const convId = await getOrCreateConversation(supabase, "ellie-chat");
+    const convId = await getOrCreateConversation(supabase, "ellie-chat", "general", channelId);
     if (convId) {
       // Correction detection — check if user is correcting last assistant response
       supabase.from("messages")
@@ -377,6 +394,18 @@ export async function handleEllieChatMessage(
         if (USER_NAME) systemParts.push(`You are speaking with ${USER_NAME}.`);
       }
 
+      // Playbook commands — available to primary user and onboarded app users
+      const phoneUserOnboarded = !wsUser || wsUser.onboarding_state === 'onboarded' || wsUser.onboarding_state === 'verified';
+      if (phoneUserOnboarded) {
+        systemParts.push(
+          "\nYou can take actions by adding commands at the END of your response (invisible to user):",
+          '- Create a ticket: ELLIE:: create ticket "Title" "Description"',
+          "- Dispatch work: ELLIE:: send ELLIE-XXX to dev",
+          '- Close a ticket: ELLIE:: close ELLIE-XXX "Summary"',
+          "Use these when the user asks you to create tickets, dispatch work, or close items.",
+        );
+      }
+
       if (contextDocket) systemParts.push(`\n${contextDocket}`);
       const ellieChatSearchBlock = trimSearchContext([relevantContext || '', elasticContext || '']);
       if (ellieChatSearchBlock) systemParts.push(`\n${ellieChatSearchBlock}`);
@@ -391,8 +420,17 @@ export async function handleEllieChatMessage(
       const rawResponse = await callClaudeVoice(systemPrompt, userPrompt);
       const durationMs = Date.now() - startTime;
 
-      // Process ELLIE:: onboarding commands (ELLIE-176)
+      // Process playbook commands (create ticket, send, close) — before onboarding commands
       let responseText = rawResponse.trim();
+      const { cleanedText: phonePbClean, commands: phonePbCmds } = extractPlaybookCommands(responseText);
+      if (phonePbCmds.length > 0) {
+        responseText = phonePbClean;
+        const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "ellie-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
+        executePlaybookCommands(phonePbCmds, pbCtx).catch(err => logger.error("Phone playbook execution failed", err));
+        console.log(`[ellie-chat] Phone mode playbook: ${phonePbCmds.map(c => c.type).join(", ")}`);
+      }
+
+      // Process ELLIE:: onboarding commands (ELLIE-176)
       if (wsUser) {
         const ellieCommands = responseText.match(/ELLIE::\S+.*$/gm) || [];
         for (const cmd of ellieCommands) {
@@ -473,6 +511,9 @@ export async function handleEllieChatMessage(
       // Cap per-user history at 20 entries to prevent memory growth
       if (phoneHistory.length > 20) phoneHistory.splice(0, phoneHistory.length - 20);
 
+      // Post-message psy assessment (ELLIE-330)
+      runPostMessageAssessment(text, cleanedText, anthropic).catch(err => logger.error("Post-message assessment failed", err));
+
       await saveMessage("assistant", cleanedText, {}, "ellie-chat", ecUserId);
       broadcastExtension({
         type: "message_out", channel: "ellie-chat",
@@ -537,7 +578,7 @@ export async function handleEllieChatMessage(
       broadcastExtension({ type: "message_out", channel: "ellie-chat", agent: "general", preview: ack });
 
       // Fire-and-forget: specialist runs outside the queue
-      runSpecialistAsync(ws, supabase, effectiveText, text, agentResult, imagePath, ellieChatWorkItem).catch(err => {
+      runSpecialistAsync(ws, supabase, effectiveText, text, agentResult, imagePath, ellieChatWorkItem, channelId, channelProfile).catch(err => {
         logger.error("Specialist async error", err);
       });
 
@@ -546,7 +587,26 @@ export async function handleEllieChatMessage(
     }
 
     const ellieChatActiveAgent = getActiveAgent("ellie-chat");
-    const ecConvoId = await getOrCreateConversation(supabase!, "ellie-chat") || undefined;
+    const ecConvoId = await getOrCreateConversation(supabase!, "ellie-chat", "general", channelId) || undefined;
+
+    // ── ELLIE-325/334: Mode detection — channel profile overrides regex detection ──
+    const ecConvoKey = ecConvoId || "ellie-chat-default";
+    let contextMode: import("./context-mode.ts").ContextMode;
+    let modeChanged = false;
+    if (channelProfile) {
+      // Channel IS the mode — skip regex detection
+      contextMode = channelProfile.contextMode;
+      console.log(`[context:mode] mode=${contextMode} channel=ellie-chat source=channel-profile`);
+    } else {
+      // Fallback: regex-based mode detection
+      const detection = processMessageMode(ecConvoKey, effectiveText);
+      contextMode = detection.mode;
+      modeChanged = detection.changed;
+      if (modeChanged) {
+        console.log(`[context:mode] mode=${contextMode} channel=ellie-chat source=detection`);
+      }
+    }
+
     const [ecConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, ecQueueContext, liveForest] = await Promise.all([
       ecConvoId && supabase ? getConversationMessages(supabase, ecConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
       getContextDocket(),
@@ -563,6 +623,33 @@ export async function handleEllieChatMessage(
       acknowledgeQueueItems(ellieChatActiveAgent).catch(() => {});
     }
 
+    // ELLIE-327: Track section-level freshness for non-registry sources
+    if (recentMessages) freshnessTracker.recordFetch("recent-messages", 0);
+    if (ecQueueContext) freshnessTracker.recordFetch("queue", 0);
+    if (contextDocket) freshnessTracker.recordFetch("context-docket", 0);
+    if (relevantContext || elasticContext || forestContext) freshnessTracker.recordFetch("search", 0);
+
+    // ELLIE-327: Log mode config + freshness status
+    freshnessTracker.logModeConfig(contextMode);
+    freshnessTracker.logAllFreshness(contextMode);
+
+    // ELLIE-327: Auto-refresh stale critical sources
+    const { refreshed: ecRefreshed, results: ecRefreshResults } = await autoRefreshStaleSources(
+      contextMode,
+      {
+        "structured-context": () => getAgentStructuredContext(supabase, ellieChatActiveAgent),
+        "context-docket": () => { clearContextCache(); return getContextDocket(); },
+        "agent-memory": async () => {
+          const mem = await getAgentMemoryContext(ellieChatActiveAgent, ellieChatWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model));
+          return mem.memoryContext;
+        },
+        "forest-awareness": async () => {
+          const lf = await getLiveForestContext(effectiveText);
+          return lf.awareness;
+        },
+      },
+    );
+
     // Detect work item mentions (ELLIE-5, EVE-3, etc.) — matches Telegram text handler
     let workItemContext = "";
     const workItemMatch = effectiveText.match(/\b([A-Z]+-\d+)\b/);
@@ -577,6 +664,7 @@ export async function handleEllieChatMessage(
           `Title: ${details.name}\n` +
           `Priority: ${details.priority}\n` +
           `Description: ${details.description}\n`;
+        freshnessTracker.recordFetch("work-item", 0);
       }
     }
 
@@ -653,6 +741,9 @@ export async function handleEllieChatMessage(
           const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "ellie-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
           executePlaybookCommands(ellieChatOrcPlaybookCmds, pbCtx).catch(err => logger.error("Playbook execution failed", err));
         }
+
+        // Post-message psy assessment (ELLIE-330)
+        runPostMessageAssessment(effectiveText, cleanedText, anthropic).catch(err => logger.error("Post-message assessment failed", err));
       } catch (err) {
         logger.error("Multi-step failed", err);
         const errMsg = err instanceof PipelineStepError && err.partialOutput
@@ -677,17 +768,35 @@ export async function handleEllieChatMessage(
     }
 
     // ── Single-agent path ──
+    // ELLIE-327: Apply auto-refresh results to context variables
+    const ecStructured = ecRefreshResults["structured-context"] || structuredContext;
+    const ecDocket = ecRefreshResults["context-docket"] || contextDocket;
+    const ecForestAwareness = ecRefreshResults["forest-awareness"] || liveForest.awareness;
+    const ecAgentMem = ecRefreshResults["agent-memory"] || agentMemory.memoryContext;
+
+    // ELLIE-250 Phase 3: Proactive conflict detection + cross-channel sync
+    const contextSectionsForCheck = [
+      { label: "structured-context", content: ecStructured || "" },
+      { label: "context-docket", content: ecDocket || "" },
+      { label: "work-item", content: workItemContext || "" },
+      { label: "forest-awareness", content: ecForestAwareness || "" },
+    ];
+    const [ecGroundTruthConflicts, ecCrossChannel] = await Promise.all([
+      checkGroundTruthConflicts(effectiveText, contextSectionsForCheck),
+      buildCrossChannelSection(supabase, "ellie-chat"),
+    ]);
+
     const enrichedPrompt = buildPrompt(
-      effectiveText, contextDocket, relevantContext, elasticContext, "ellie-chat",
+      effectiveText, ecDocket, relevantContext, elasticContext, "ellie-chat",
       agentResult?.dispatch.agent ? {
         system_prompt: agentResult.dispatch.agent.system_prompt,
         name: agentResult.dispatch.agent.name,
         tools_enabled: agentResult.dispatch.agent.tools_enabled,
       } : undefined,
-      workItemContext || undefined, structuredContext, recentMessages,
+      workItemContext || undefined, ecStructured, recentMessages,
       agentResult?.dispatch.skill_context,
       forestContext,
-      agentMemory.memoryContext || undefined,
+      ecAgentMem || undefined,
       agentMemory.sessionIds,
       await getArchetypeContext(),
       await getPsyContext(),
@@ -695,8 +804,13 @@ export async function handleEllieChatMessage(
       await getHealthContext(),
       ecQueueContext || undefined,
       liveForest.incidents || undefined,
-      liveForest.awareness || undefined,
+      ecForestAwareness || undefined,
       (await getSkillSnapshot()).prompt || undefined,
+      contextMode,
+      ecRefreshed,
+      channelProfile,
+      ecGroundTruthConflicts || undefined,
+      ecCrossChannel || undefined,
     );
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -803,6 +917,9 @@ export async function handleEllieChatMessage(
       executePlaybookCommands(ecPlaybookCmds, pbCtx).catch(err => logger.error("Playbook execution failed", err));
     }
 
+    // Post-message psy assessment (ELLIE-330)
+    runPostMessageAssessment(effectiveText, cleanedText, anthropic).catch(err => logger.error("Post-message assessment failed", err));
+
     // Cleanup temp image file
     if (imagePath) unlink(imagePath).catch(() => {});
 
@@ -821,8 +938,10 @@ export async function runSpecialistAsync(
   agentResult: { route: RouteResult; dispatch: DispatchResult },
   imagePath: string | undefined,
   workItemId: string | undefined,
+  channelId?: string,
+  channelProfile?: import("./chat-channels.ts").ChannelContextProfile | null,
 ): Promise<void> {
-  const { bot } = getRelayDeps();
+  const { bot, anthropic } = getRelayDeps();
   const agentName = agentResult.dispatch.agent.name;
   const specUser = wsAppUserMap.get(ws);
   const ecUserId = specUser?.id || specUser?.anonymous_id || undefined;
@@ -841,7 +960,11 @@ export async function runSpecialistAsync(
 
     // Gather context (same sources as sync path)
     const ellieChatActiveAgent = getActiveAgent("ellie-chat");
-    const specConvoId = await getOrCreateConversation(supabase!, "ellie-chat") || undefined;
+    const specConvoId = await getOrCreateConversation(supabase!, "ellie-chat", "general", channelId) || undefined;
+
+    // ── ELLIE-325/334: Use channel profile or conversation mode ──
+    const specConvoKey = specConvoId || "ellie-chat-default";
+    const specContextMode = channelProfile?.contextMode || processMessageMode(specConvoKey, effectiveText).mode;
     const [specConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, specQueueContext, liveForest] = await Promise.all([
       specConvoId && supabase ? getConversationMessages(supabase, specConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
       getContextDocket(),
@@ -875,6 +998,18 @@ export async function runSpecialistAsync(
       }
     }
 
+    // ELLIE-250 Phase 3: Proactive conflict detection + cross-channel sync
+    const specContextSections = [
+      { label: "structured-context", content: structuredContext || "" },
+      { label: "context-docket", content: contextDocket || "" },
+      { label: "work-item", content: workItemContext || "" },
+      { label: "forest-awareness", content: liveForest.awareness || "" },
+    ];
+    const [ecGroundTruthConflicts, ecCrossChannel] = await Promise.all([
+      checkGroundTruthConflicts(effectiveText, specContextSections),
+      buildCrossChannelSection(supabase, "ellie-chat"),
+    ]);
+
     const enrichedPrompt = buildPrompt(
       effectiveText, contextDocket, relevantContext, elasticContext, "ellie-chat",
       {
@@ -895,6 +1030,11 @@ export async function runSpecialistAsync(
       liveForest.incidents || undefined,
       liveForest.awareness || undefined,
       (await getSkillSnapshot()).prompt || undefined,
+      specContextMode,
+      undefined, // refreshedSources
+      channelProfile,
+      ecGroundTruthConflicts || undefined,
+      ecCrossChannel || undefined,
     );
 
     const agentTools = agentResult.dispatch.agent.tools_enabled;
@@ -960,6 +1100,9 @@ export async function runSpecialistAsync(
       const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "ellie-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
       executePlaybookCommands(playCmds, pbCtx).catch(err => logger.error("Playbook execution failed", err));
     }
+
+    // Post-message psy assessment (ELLIE-330)
+    runPostMessageAssessment(effectiveText, cleanedText, anthropic).catch(err => logger.error("Post-message assessment failed", err));
 
     // Cleanup temp image file
     if (imagePath) unlink(imagePath).catch(() => {});

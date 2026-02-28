@@ -10,7 +10,7 @@ import { join } from "path";
 import { log } from "./logger.ts";
 import {
   BOT_TOKEN, ALLOWED_USER_ID, GCHAT_SPACE_NOTIFY, UPLOADS_DIR,
-  getContextDocket,
+  getContextDocket, clearContextCache,
 } from "./relay-config.ts";
 import {
   getActiveAgent, setActiveAgent,
@@ -90,6 +90,9 @@ import {
 } from "./api/agent-queue.ts";
 import { detectAndCaptureCorrection } from "./correction-detector.ts";
 import { detectAndLinkCalendarEvents } from "./calendar-linker.ts";
+import { processMessageMode, isContextRefresh } from "./context-mode.ts";
+import { freshnessTracker, autoRefreshStaleSources } from "./context-freshness.ts";
+import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hierarchy.ts";
 
 const logger = log.child("telegram");
 
@@ -241,6 +244,13 @@ bot.on("message:text", withQueue(async (ctx) => {
   // Gather context: full conversation (primary) + docket + search (excluding current conversation) + structured + forest + agent memory + queue
   const activeAgent = getActiveAgent("telegram");
   const activeConvoId = await getOrCreateConversation(supabase!, "telegram") || undefined;
+
+  // ── ELLIE-325: Message-level mode detection ──
+  const convoKey = activeConvoId || "telegram-default";
+  const { mode: contextMode, changed: modeChanged } = processMessageMode(convoKey, effectiveText);
+  if (modeChanged) {
+    console.log(`[context:mode] mode=${contextMode}`);
+  }
   const [conversationContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext, liveForest] = await Promise.all([
     activeConvoId && supabase ? getConversationMessages(supabase, activeConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
     getContextDocket(),
@@ -258,6 +268,39 @@ bot.on("message:text", withQueue(async (ctx) => {
     acknowledgeQueueItems(activeAgent).catch(() => {});
   }
 
+  // ELLIE-327: Track section-level freshness for non-registry sources
+  if (recentMessages) freshnessTracker.recordFetch("recent-messages", 0);
+  if (queueContext) freshnessTracker.recordFetch("queue", 0);
+  if (contextDocket) freshnessTracker.recordFetch("context-docket", 0);
+  if (relevantContext || elasticContext || forestContext) freshnessTracker.recordFetch("search", 0);
+
+  // ELLIE-327: Log mode config + freshness status
+  freshnessTracker.logModeConfig(contextMode);
+  freshnessTracker.logAllFreshness(contextMode);
+
+  // ELLIE-327: Auto-refresh stale critical sources
+  const { refreshed: tgRefreshed, results: tgRefreshResults } = await autoRefreshStaleSources(
+    contextMode,
+    {
+      "structured-context": () => getAgentStructuredContext(supabase, activeAgent),
+      "context-docket": () => { clearContextCache(); return getContextDocket(); },
+      "agent-memory": async () => {
+        const mem = await getAgentMemoryContext(activeAgent, detectedWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model));
+        return mem.memoryContext;
+      },
+      "forest-awareness": async () => {
+        const lf = await getLiveForestContext(effectiveText);
+        return lf.awareness;
+      },
+    },
+  );
+
+  // ELLIE-327: Apply auto-refresh results
+  const tgStructured = tgRefreshResults["structured-context"] || structuredContext;
+  const tgDocket = tgRefreshResults["context-docket"] || contextDocket;
+  const tgForestAwareness = tgRefreshResults["forest-awareness"] || liveForest.awareness;
+  const tgAgentMem = tgRefreshResults["agent-memory"] || agentMemory.memoryContext;
+
   // Detect work item mentions (ELLIE-5, EVE-3, etc.)
   let workItemContext = "";
   const workItemMatch = effectiveText.match(/\b([A-Z]+-\d+)\b/);
@@ -272,6 +315,7 @@ bot.on("message:text", withQueue(async (ctx) => {
         `Title: ${details.name}\n` +
         `Priority: ${details.priority}\n` +
         `Description: ${details.description}\n`;
+      freshnessTracker.recordFetch("work-item", 0);
     }
   }
 
@@ -358,6 +402,7 @@ bot.on("message:text", withQueue(async (ctx) => {
           liveForest.incidents || undefined,
           liveForest.awareness || undefined,
           (await getSkillSnapshot()).prompt || undefined,
+          contextMode,
         );
         const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
         const fallbackAgentName = agentResult?.dispatch.agent.name || "general";
@@ -373,13 +418,25 @@ bot.on("message:text", withQueue(async (ctx) => {
   }
 
   // ── Single-agent path (default) ──
+  // ELLIE-250 Phase 3: Proactive conflict detection + cross-channel sync
+  const tgContextSections = [
+    { label: "structured-context", content: tgStructured || "" },
+    { label: "context-docket", content: tgDocket || "" },
+    { label: "work-item", content: workItemContext || "" },
+    { label: "forest-awareness", content: tgForestAwareness || "" },
+  ];
+  const [tgGroundTruthConflicts, tgCrossChannel] = await Promise.all([
+    checkGroundTruthConflicts(effectiveText, tgContextSections),
+    buildCrossChannelSection(supabase, "telegram"),
+  ]);
+
   const enrichedPrompt = buildPrompt(
-    effectiveText, contextDocket, relevantContext, elasticContext, "telegram",
+    effectiveText, tgDocket, relevantContext, elasticContext, "telegram",
     agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
-    workItemContext, structuredContext, recentMessages,
+    workItemContext, tgStructured, recentMessages,
     agentResult?.dispatch.skill_context,
     forestContext,
-    agentMemory.memoryContext || undefined,
+    tgAgentMem || undefined,
     agentMemory.sessionIds,
     await getArchetypeContext(),
     await getPsyContext(),
@@ -387,8 +444,13 @@ bot.on("message:text", withQueue(async (ctx) => {
     await getHealthContext(),
     queueContext || undefined,
     liveForest.incidents || undefined,
-    liveForest.awareness || undefined,
+    tgForestAwareness || undefined,
     (await getSkillSnapshot()).prompt || undefined,
+    contextMode,
+    tgRefreshed,
+    undefined, // channelProfile (Telegram doesn't use channels yet)
+    tgGroundTruthConflicts || undefined,
+    tgCrossChannel || undefined,
   );
 
   const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -520,6 +582,14 @@ bot.on("message:voice", withQueue(async (ctx) => {
 
     const voiceActiveAgent = getActiveAgent("telegram");
     const voiceConvoId = await getOrCreateConversation(supabase!, "telegram") || undefined;
+
+    // ── ELLIE-325: Mode detection for voice messages ──
+    const voiceConvoKey = voiceConvoId || "telegram-voice-default";
+    const { mode: voiceContextMode, changed: voiceModeChanged } = processMessageMode(voiceConvoKey, effectiveTranscription);
+    if (voiceModeChanged) {
+      console.log(`[context:mode] mode=${voiceContextMode} channel=voice`);
+    }
+
     const [voiceConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, voiceQueueContext, liveForest] = await Promise.all([
       voiceConvoId && supabase ? getConversationMessages(supabase, voiceConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
       getContextDocket(),
@@ -535,6 +605,31 @@ bot.on("message:voice", withQueue(async (ctx) => {
     if (agentResult?.dispatch.is_new && voiceQueueContext) {
       acknowledgeQueueItems(voiceActiveAgent).catch(() => {});
     }
+
+    // ELLIE-327: Track section-level freshness for non-registry sources
+    if (recentMessages) freshnessTracker.recordFetch("recent-messages", 0);
+    if (voiceQueueContext) freshnessTracker.recordFetch("queue", 0);
+
+    // ELLIE-327: Log mode config + freshness status
+    freshnessTracker.logModeConfig(voiceContextMode);
+    freshnessTracker.logAllFreshness(voiceContextMode);
+
+    // ELLIE-327: Auto-refresh stale critical sources
+    const { refreshed: voiceRefreshed, results: voiceRefreshResults } = await autoRefreshStaleSources(
+      voiceContextMode,
+      {
+        "structured-context": () => getAgentStructuredContext(supabase, voiceActiveAgent),
+        "context-docket": () => { clearContextCache(); return getContextDocket(); },
+        "agent-memory": async () => {
+          const mem = await getAgentMemoryContext(voiceActiveAgent, voiceWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model));
+          return mem.memoryContext;
+        },
+        "forest-awareness": async () => {
+          const lf = await getLiveForestContext(effectiveTranscription);
+          return lf.awareness;
+        },
+      },
+    );
 
     // ── Voice multi-step branch (ELLIE-58) ──
     if (agentResult?.route.execution_mode !== "single" && agentResult?.route.skills?.length) {
@@ -609,6 +704,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
             liveForest.incidents || undefined,
             liveForest.awareness || undefined,
             (await getSkillSnapshot()).prompt || undefined,
+            voiceContextMode,
           );
           const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
           const voiceFallbackAgent = agentResult?.dispatch.agent.name || "general";
@@ -624,17 +720,23 @@ bot.on("message:voice", withQueue(async (ctx) => {
     }
 
     // ── Voice single-agent path (default) ──
+    // ELLIE-327: Apply auto-refresh results
+    const voiceStructured = voiceRefreshResults["structured-context"] || structuredContext;
+    const voiceDocket = voiceRefreshResults["context-docket"] || contextDocket;
+    const voiceForestAwareness = voiceRefreshResults["forest-awareness"] || liveForest.awareness;
+    const voiceAgentMem = voiceRefreshResults["agent-memory"] || agentMemory.memoryContext;
+
     const enrichedPrompt = buildPrompt(
       `[Voice message transcribed]: ${effectiveTranscription}`,
-      contextDocket,
+      voiceDocket,
       relevantContext,
       elasticContext,
       "telegram",
       agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
-      undefined, structuredContext, recentMessages,
+      undefined, voiceStructured, recentMessages,
       agentResult?.dispatch.skill_context,
       forestContext,
-      agentMemory.memoryContext || undefined,
+      voiceAgentMem || undefined,
       agentMemory.sessionIds,
       await getArchetypeContext(),
       await getPsyContext(),
@@ -642,8 +744,10 @@ bot.on("message:voice", withQueue(async (ctx) => {
       await getHealthContext(),
       voiceQueueContext || undefined,
       liveForest.incidents || undefined,
-      liveForest.awareness || undefined,
+      voiceForestAwareness || undefined,
       (await getSkillSnapshot()).prompt || undefined,
+      voiceContextMode,
+      voiceRefreshed,
     );
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;

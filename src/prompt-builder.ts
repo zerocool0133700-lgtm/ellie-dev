@@ -22,6 +22,11 @@ import {
   type PromptSection,
 } from "./relay-utils.ts";
 import { getLastResolvedStrategy, getStrategyExcludedSections, getStrategyTokenBudget, getStrategySectionPriorities } from "./context-sources.ts";
+import type { ContextMode } from "./context-mode.ts";
+import { getModeSectionPriorities, getModeTokenBudget } from "./context-mode.ts";
+import { freshnessTracker, buildStalenessWarning } from "./context-freshness.ts";
+import type { ChannelContextProfile } from "./chat-channels.ts";
+import { buildSourceHierarchyInstruction } from "./source-hierarchy.ts";
 
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
 
@@ -164,10 +169,13 @@ export async function getPsyContext(): Promise<string> {
   const now = Date.now();
   if (_psyContext && now - _psyLastLoaded < PSY_CACHE_MS) return _psyContext;
   try {
-    const { getChainOwnerPsy } = await import('../../ellie-forest/src/people');
+    const { getChainOwnerPsy, getChainOwnerCalibration } = await import('../../ellie-forest/src/people');
     const { buildPsyPrompt } = await import('../../ellie-forest/src/psy');
-    const psy = await getChainOwnerPsy();
-    _psyContext = buildPsyPrompt(psy);
+    const [psy, calibrationLevel] = await Promise.all([
+      getChainOwnerPsy(),
+      getChainOwnerCalibration(),
+    ]);
+    _psyContext = buildPsyPrompt(psy, { calibrationLevel });
     _psyLastLoaded = now;
   } catch {
     // No psy profile yet — archetype alone is enough
@@ -368,6 +376,11 @@ export function buildPrompt(
   incidentContext?: string,
   awarenessContext?: string,
   skillsPrompt?: string,
+  contextMode?: ContextMode,
+  refreshedSources?: string[],
+  channelProfile?: ChannelContextProfile | null,
+  groundTruthConflicts?: string,
+  crossChannelCorrections?: string,
 ): string {
   const channelLabel = channel === "google-chat" ? "Google Chat" : channel === "ellie-chat" ? "Ellie Chat (dashboard)" : "Telegram";
 
@@ -530,6 +543,34 @@ export function buildPrompt(
   const searchBlock = trimSearchContext([relevantContext || '', elasticContext || '', forestContext || '']);
   if (searchBlock) sections.push({ label: "search", content: `\n${searchBlock}`, priority: 7 });
 
+  // Priority 8: Context freshness timestamps (ELLIE-327)
+  const freshnessBlock = freshnessTracker.getAllTimestamps();
+  if (freshnessBlock) {
+    sections.push({ label: "freshness", content: `\nCONTEXT FRESHNESS:\n${freshnessBlock}`, priority: 8 });
+  }
+
+  // Priority 3: Staleness warning (ELLIE-328) — visible when critical sources are aging/stale
+  if (contextMode) {
+    const stalenessWarning = buildStalenessWarning(contextMode, refreshedSources);
+    if (stalenessWarning) {
+      sections.push({ label: "staleness-warning", content: `\n${stalenessWarning}`, priority: 3 });
+    }
+  }
+
+  // Priority 3: Source hierarchy instruction (ELLIE-250 Phase 3)
+  sections.push({ label: "source-hierarchy", content: `\n${buildSourceHierarchyInstruction()}`, priority: 3 });
+
+  // Priority 3: Ground truth conflicts (ELLIE-250 Phase 3)
+  // Injected by chat handler when conflicts are detected — passed via groundTruthConflicts param
+  if (groundTruthConflicts) {
+    sections.push({ label: "ground-truth-conflicts", content: `\n${groundTruthConflicts}`, priority: 3 });
+  }
+
+  // Priority 5: Cross-channel corrections (ELLIE-250 Phase 3)
+  if (crossChannelCorrections) {
+    sections.push({ label: "cross-channel-corrections", content: `\n${crossChannelCorrections}`, priority: 5 });
+  }
+
   // Priority 3: Work item + dispatch protocols
   if (workItemContext) sections.push({ label: "work-item", content: workItemContext, priority: 3 });
 
@@ -603,11 +644,34 @@ export function buildPrompt(
       s.priority = sectionPriorityOverrides[s.label];
     }
   }
+
+  // ── ELLIE-325: Apply message-level mode priorities (override strategy) ──
+  if (contextMode) {
+    const modePriorities = getModeSectionPriorities(contextMode);
+    for (const s of sections) {
+      if (modePriorities[s.label] !== undefined) {
+        s.priority = modePriorities[s.label];
+      }
+    }
+  }
+
   const excludedSections = getStrategyExcludedSections(activeStrategy);
-  const filteredSections = excludedSections.size > 0
+  let filteredSections = excludedSections.size > 0
     ? sections.filter(s => !excludedSections.has(s.label))
     : sections;
 
-  // ── Apply token budget (ELLIE-185 + ELLIE-261 budget control) ──
-  return applyTokenBudget(filteredSections, getStrategyTokenBudget(activeStrategy));
+  // ── ELLIE-334: Apply channel suppressed sections ──
+  if (channelProfile?.suppressedSections?.length) {
+    const suppressed = new Set(channelProfile.suppressedSections);
+    filteredSections = filteredSections.filter(s => !suppressed.has(s.label));
+  }
+
+  // ── Apply token budget (ELLIE-185 + ELLIE-261 + ELLIE-334 budget control) ──
+  // Channel profile budget > mode budget > strategy budget
+  const budget = channelProfile?.tokenBudget
+    ? channelProfile.tokenBudget
+    : contextMode
+      ? getModeTokenBudget(contextMode)
+      : getStrategyTokenBudget(activeStrategy);
+  return applyTokenBudget(filteredSections, budget);
 }
