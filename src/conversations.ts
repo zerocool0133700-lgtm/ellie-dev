@@ -54,6 +54,7 @@ export async function getOrCreateConversation(
       p_channel: channel,
       p_agent: agent,
       p_idle_minutes: IDLE_TIMEOUT_MINUTES,
+      p_channel_id: channelId || null,
     });
 
     if (error) {
