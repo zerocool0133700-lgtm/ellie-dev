@@ -10,8 +10,6 @@
 
 import type Anthropic from "@anthropic-ai/sdk";
 import { log } from "./logger.ts";
-import { trackDecisionAccuracy, logAgentPostmortem } from "./data-quality.ts";
-import { freshnessTracker } from "./context-freshness.ts";
 
 const logger = log.child("correction-detector");
 
@@ -149,60 +147,6 @@ async function writeCorrectionToForest(
   }
 }
 
-// ── Correction-triggered freshness invalidation (ELLIE-329) ──
-
-/**
- * When a correction is detected, invalidate related context sources
- * so they get auto-refreshed on the next message cycle.
- *
- * Maps correction tags/content to context sources that may contain
- * the wrong information that was just corrected.
- */
-function invalidateRelatedSources(result: CorrectionResult): void {
-  const invalidated: string[] = [];
-
-  // Ticket-related corrections → invalidate work-item and structured-context
-  if (
-    result.tags.some(t => /ticket|issue|ellie-\d+/i.test(t)) ||
-    /ELLIE-\d+/i.test(result.ground_truth) ||
-    /ticket|issue|state|status/i.test(result.what_was_wrong)
-  ) {
-    freshnessTracker.invalidate("work-item");
-    freshnessTracker.invalidate("structured-context");
-    invalidated.push("work-item", "structured-context");
-  }
-
-  // Queue/workflow corrections
-  if (result.tags.some(t => /queue|workflow|agent/i.test(t))) {
-    freshnessTracker.invalidate("queue");
-    invalidated.push("queue");
-  }
-
-  // Calendar/schedule corrections
-  if (
-    result.tags.some(t => /calendar|meeting|schedule|event/i.test(t)) ||
-    /meeting|calendar|schedule/i.test(result.what_was_wrong)
-  ) {
-    freshnessTracker.invalidate("calendar");
-    invalidated.push("calendar");
-  }
-
-  // Forest/memory corrections → invalidate forest-awareness and agent-memory
-  if (result.tags.some(t => /memory|forest|fact|context/i.test(t))) {
-    freshnessTracker.invalidate("forest-awareness");
-    freshnessTracker.invalidate("agent-memory");
-    invalidated.push("forest-awareness", "agent-memory");
-  }
-
-  // If nothing specific matched, invalidate structured-context as a general catch-all
-  if (!invalidated.length) {
-    freshnessTracker.invalidate("structured-context");
-    invalidated.push("structured-context");
-  }
-
-  logger.info(`Correction-triggered invalidation: [${invalidated.join(", ")}]`);
-}
-
 // ── Public API ───────────────────────────────────────────────
 
 /**
@@ -230,32 +174,5 @@ export async function detectAndCaptureCorrection(
   if (!result?.is_correction || !result.ground_truth) return;
 
   console.log(`[correction] Detected: "${result.what_was_wrong}" → "${result.ground_truth}"`);
-  const correctionMemoryId = await writeCorrectionToForest(result, conversationId, channel);
-
-  // ELLIE-329: Invalidate related context sources so stale data gets refreshed
-  invalidateRelatedSources(result);
-
-  // ELLIE-250 Phase 2: Decision accuracy tracking + agent failure postmortem
-  if (correctionMemoryId) {
-    // Link correction to the original wrong memory (fire-and-forget)
-    trackDecisionAccuracy(
-      result.ground_truth,
-      result.what_was_wrong,
-      correctionMemoryId,
-      channel,
-    ).then(({ linkedMemoryId, rootCause }) => {
-      // Log a structured postmortem for the factual error
-      logAgentPostmortem({
-        what_was_claimed: result.what_was_wrong,
-        what_was_correct: result.ground_truth,
-        sources_consulted: [],  // populated by verify skill trail when available
-        sources_available: result.tags.filter(t => !t.startsWith("correction:")),
-        root_cause: rootCause,
-        channel,
-        conversation_id: conversationId || undefined,
-        correction_memory_id: correctionMemoryId,
-        original_memory_id: linkedMemoryId || undefined,
-      }).catch(err => logger.warn("Postmortem logging failed", err));
-    }).catch(err => logger.warn("Decision accuracy tracking failed", err));
-  }
+  await writeCorrectionToForest(result, conversationId, channel);
 }
