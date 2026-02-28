@@ -462,6 +462,16 @@ export function buildPrompt(
   const now = new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE, dateStyle: "full", timeStyle: "short" });
   sections.push({ label: "time", content: `Current date/time: ${now} (${USER_TIMEZONE}).`, priority: 2 });
 
+  // ELLIE-334: Inject current channel context so the model knows which sub-channel it's in
+  if (channelProfile?.channelName) {
+    sections.push({ label: "channel-context", content:
+      `\nCURRENT CHANNEL: ${channelProfile.channelName}` +
+      `\nChannel mode: ${channelProfile.contextMode}` +
+      `\nThis conversation is scoped to the "${channelProfile.channelName}" sub-channel. ` +
+      `Stay focused on topics relevant to this channel's purpose.`,
+      priority: 2 });
+  }
+
   // Priority 3: Protocols (static text, important but can be trimmed in extreme cases)
   sections.push({ label: "memory-protocol", content:
     "\nMEMORY MANAGEMENT:" +

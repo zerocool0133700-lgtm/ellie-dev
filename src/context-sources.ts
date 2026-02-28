@@ -9,6 +9,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { listOpenIssues, isPlaneConfigured } from "./plane.ts";
 import { log } from "./logger.ts";
+import { freshnessTracker } from "./context-freshness.ts";
 
 const logger = log.child("context");
 
@@ -903,12 +904,15 @@ export async function getAgentStructuredContext(
     sourceNames = sourceNames.filter(s => !allExclusions.has(s));
   }
 
-  // Fetch all selected sources in parallel
+  // Fetch all selected sources in parallel (ELLIE-327: with freshness tracking)
   const entries = await Promise.all(
-    sourceNames.map(async (name) => ({
-      name,
-      content: await SOURCE_REGISTRY[name](supabase),
-    }))
+    sourceNames.map(async (name) => {
+      const start = Date.now();
+      const content = await SOURCE_REGISTRY[name](supabase);
+      const latencyMs = Date.now() - start;
+      freshnessTracker.recordFetch(name, latencyMs);
+      return { name, content };
+    })
   );
 
   // Apply priority ordering: explicit > strategy > default order
@@ -924,6 +928,10 @@ export async function getAgentStructuredContext(
   }
 
   _lastResolvedStrategy = strategy;
+
+  // ELLIE-327: Track the aggregate structured-context section freshness
+  freshnessTracker.recordFetch("structured-context", 0);
+
   return entries.map(e => e.content).filter(Boolean).join("\n\n");
 }
 
@@ -936,6 +944,25 @@ export async function getStructuredContext(
   supabase: SupabaseClient | null,
 ): Promise<string> {
   return getAgentStructuredContext(supabase, 'general');
+}
+
+/**
+ * ELLIE-327: Refresh a single source by name and return its content.
+ * Used by auto-refresh when a critical source is stale.
+ */
+export async function refreshSource(
+  name: string,
+  supabase: SupabaseClient | null,
+): Promise<string> {
+  const fetcher = SOURCE_REGISTRY[name];
+  if (!fetcher) return "";
+
+  const start = Date.now();
+  const content = await fetcher(supabase);
+  const latencyMs = Date.now() - start;
+  freshnessTracker.recordFetch(name, latencyMs);
+  freshnessTracker.logRefreshComplete(name, latencyMs);
+  return content;
 }
 
 // ============================================================
@@ -981,6 +1008,7 @@ export async function getAgentMemoryContext(
   maxMemories?: number,
 ): Promise<AgentSessionContext> {
   const empty: AgentSessionContext = { memoryContext: '' };
+  const fetchStart = Date.now();
 
   try {
     const {
@@ -1082,6 +1110,9 @@ export async function getAgentMemoryContext(
       logger.warn("Cross-agent context failed", { agent: agentName }, err);
     }
 
+    // ELLIE-327: Track agent memory freshness
+    freshnessTracker.recordFetch("agent-memory", Date.now() - fetchStart);
+
     return {
       memoryContext,
       sessionIds: {
@@ -1110,7 +1141,7 @@ export async function getAgentMemoryContext(
 export async function getActiveIncidentContext(): Promise<string> {
   try {
     const { listIncidents, getIncidentSummary } = await import("../../ellie-forest/src/incidents");
-    const incidents = await listIncidents({ state: ["active", "investigating"] });
+    const incidents = await listIncidents({ state: ["seedling", "growing"] });
     if (!incidents.length) return "";
 
     const parts: string[] = [];
@@ -1118,7 +1149,7 @@ export async function getActiveIncidentContext(): Promise<string> {
       const severity = inc.metadata?.severity || "unknown";
       const summary = await getIncidentSummary(inc.id);
       const desc = (summary as Record<string, unknown> | null)?.status || inc.metadata?.description || "Active incident";
-      parts.push(`[${String(severity).toUpperCase()}] ${inc.name}: ${desc}`);
+      parts.push(`[${String(severity).toUpperCase()}] ${inc.title || "Untitled"}: ${desc}`);
     }
     return `ACTIVE INCIDENTS (${incidents.length}):\n${parts.join("\n")}`;
   } catch (err) {
@@ -1209,12 +1240,18 @@ export async function getPersonMentionContext(text: string): Promise<string> {
 export async function getLiveForestContext(
   userMessage?: string,
 ): Promise<{ incidents: string; awareness: string }> {
+  const start = Date.now();
   const [incidents, contradictions, creatures, personMentions] = await Promise.all([
     getActiveIncidentContext(),
     getContradictionContext(),
     getCreatureStatusContext(),
     userMessage ? getPersonMentionContext(userMessage) : Promise.resolve(""),
   ]);
+
+  // ELLIE-327: Track forest awareness freshness
+  const latencyMs = Date.now() - start;
+  if (incidents) freshnessTracker.recordFetch("incidents", latencyMs);
+  freshnessTracker.recordFetch("forest-awareness", latencyMs);
 
   const awarenessParts = [contradictions, creatures, personMentions].filter(Boolean);
   return {
