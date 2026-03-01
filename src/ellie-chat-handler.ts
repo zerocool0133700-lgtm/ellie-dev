@@ -545,6 +545,13 @@ export async function handleEllieChatMessage(
 
   // ── Normal text mode: full agent routing + context gathering (mirrors Google Chat) ──
   await enqueueEllieChat(async () => {
+    // ELLIE-391: Context refresh — bust all caches so this message gets fully fresh data
+    if (isContextRefresh(text)) {
+      freshnessTracker.clear();
+      clearContextCache();
+      console.log(`[context] refresh triggered — reloading all sources`);
+    }
+
     const ellieChatWorkItem = text.match(/\b([A-Z]+-\d+)\b/)?.[1];
 
     // ELLIE-381: Pre-routing mode check — skill-only → road-runner override

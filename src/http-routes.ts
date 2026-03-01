@@ -151,7 +151,7 @@ import { detectAndCaptureCorrection } from "./correction-detector.ts";
 import { detectAndLinkCalendarEvents } from "./calendar-linker.ts";
 import { freshnessTracker, autoRefreshStaleSources, detectConflicts } from "./context-freshness.ts";
 import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hierarchy.ts";
-import { getModeConfig, updateModeConfig, resetModeConfig, detectMode, type ContextMode } from "./context-mode.ts";
+import { getModeConfig, updateModeConfig, resetModeConfig, detectMode, isContextRefresh, type ContextMode } from "./context-mode.ts";
 import { getSectionContents, updateSectionContent } from "./api/context-sections.ts";
 import type { ApiRequest, ApiResponse } from "./api/types.ts";
 import { getActiveRunStates, getRunState, killRun } from "./orchestration-tracker.ts";
@@ -438,6 +438,13 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         // All remaining work is async — response delivered via Chat API
         (async () => {
           try {
+            // ELLIE-391: Context refresh — bust all caches so this message gets fully fresh data
+            if (isContextRefresh(parsed.text)) {
+              freshnessTracker.clear();
+              clearContextCache();
+              console.log(`[context] refresh triggered — reloading all sources`);
+            }
+
             const gchatWorkItem = parsed.text.match(/\b([A-Z]+-\d+)\b/)?.[1];
             const gchatPreRoute = detectMode(parsed.text);
             const gchatSkillOverride = gchatPreRoute?.mode === "skill-only" ? "road-runner" : undefined;

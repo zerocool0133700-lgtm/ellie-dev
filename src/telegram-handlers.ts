@@ -225,6 +225,13 @@ bot.on("message:text", withQueue(async (ctx) => {
     return;
   }
 
+  // ELLIE-391: Context refresh — bust all caches so this message gets fully fresh data
+  if (isContextRefresh(text)) {
+    freshnessTracker.clear();
+    clearContextCache();
+    console.log(`[context] refresh triggered — reloading all sources`);
+  }
+
   // Route message to appropriate agent via LLM classifier (falls back gracefully)
   const detectedWorkItem = text.match(/\b([A-Z]+-\d+)\b/)?.[1];
 
