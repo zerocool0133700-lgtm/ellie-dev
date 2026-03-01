@@ -17,6 +17,7 @@ import { processMemoryIntents } from "./memory.ts";
 import { notify, type NotifyContext } from "./notification-policy.ts";
 import { getAgentArchetype, getPsyContext, getPhaseContext, getHealthContext } from "./prompt-builder.ts";
 import type { PlaybookContext } from "./playbook.ts";
+import { withRetry, classifyError } from "./dispatch-retry.ts";
 
 const logger = log.child("orchestration-dispatch");
 
@@ -85,15 +86,21 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
   };
 
   try {
-    // 1. Fetch ticket details
-    const details = await fetchWorkItemDetails(workItemId);
+    // 1. Fetch ticket details (with retry for transient Plane API failures)
+    const retryOpts = { runId, agentType, workItemId };
+    const detailsResult = await withRetry(
+      () => fetchWorkItemDetails(workItemId),
+      retryOpts,
+    );
+    const details = detailsResult.success ? detailsResult.result : null;
     if (!details) {
-      emitEvent(runId, "failed", agentType, workItemId, { error: "Ticket not found in Plane" });
+      const retryNote = detailsResult.attempts > 1 ? ` (after ${detailsResult.attempts} attempts)` : "";
+      emitEvent(runId, "failed", agentType, workItemId, { error: `Ticket not found in Plane${retryNote}` });
       endRun(runId, "failed");
       await notify(notifyCtx, {
         event: "error",
         workItemId,
-        telegramMessage: `Could not find ${workItemId} in Plane`,
+        telegramMessage: `Could not find ${workItemId} in Plane${retryNote}`,
       });
       return;
     }
@@ -128,18 +135,27 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       entity_id: (sessionResult.creatures as any)?.[0]?.entity_id,
     } : undefined;
 
-    // 4. Dispatch agent
-    const dispatch = await dispatchAgent(ctx.supabase, agentType, ctx.telegramUserId, channel, `Work on ${workItemId}: ${details.name}`, workItemId);
-    if (!dispatch) {
-      emitEvent(runId, "failed", agentType, workItemId, { error: "Agent dispatch failed" });
+    // 4. Dispatch agent (with retry for transient Supabase/edge-function failures)
+    const dispatchResult = await withRetry(
+      async () => {
+        const d = await dispatchAgent(ctx.supabase, agentType, ctx.telegramUserId, channel, `Work on ${workItemId}: ${details.name}`, workItemId);
+        if (!d) throw new Error("Agent dispatch returned null");
+        return d;
+      },
+      retryOpts,
+    );
+    if (!dispatchResult.success || !dispatchResult.result) {
+      const retryNote = dispatchResult.attempts > 1 ? ` (after ${dispatchResult.attempts} attempts)` : "";
+      emitEvent(runId, "failed", agentType, workItemId, { error: `Agent dispatch failed${retryNote}` });
       endRun(runId, "failed");
       await notify(notifyCtx, {
         event: "error",
         workItemId,
-        telegramMessage: `Failed to dispatch ${agentType} agent for ${workItemId}`,
+        telegramMessage: `Failed to dispatch ${agentType} agent for ${workItemId}${retryNote}`,
       });
       return;
     }
+    const dispatch = dispatchResult.result;
 
     // 5. Build prompt with personality context
     const workItemContext = `\nACTIVE WORK ITEM: ${workItemId}\n` +
@@ -161,14 +177,32 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       archetype, psy, phase, health,
     );
 
-    // 6. Call Claude with runId for heartbeat tracking
+    // 6. Call Claude with runId for heartbeat tracking (with retry for transient failures)
     emitEvent(runId, "progress", agentType, workItemId, { step: "calling_claude" });
     const startTime = Date.now();
-    const rawResponse = await ctx.callClaudeFn(prompt, {
-      resume: false,
-      model: dispatch.agent.model,
-      allowedTools: dispatch.agent.tools_enabled,
-    });
+    const claudeResult = await withRetry(
+      () => ctx.callClaudeFn(prompt, {
+        resume: false,
+        model: dispatch.agent.model,
+        allowedTools: dispatch.agent.tools_enabled,
+      }),
+      retryOpts,
+    );
+    if (!claudeResult.success || !claudeResult.result) {
+      const retryNote = claudeResult.attempts > 1 ? ` (after ${claudeResult.attempts} attempts)` : "";
+      emitEvent(runId, "failed", agentType, workItemId, {
+        error: `Claude call failed${retryNote}`,
+        claude_error: claudeResult.error?.message?.slice(0, 500),
+      });
+      endRun(runId, "failed");
+      await notify(notifyCtx, {
+        event: "error",
+        workItemId,
+        telegramMessage: `${agentType} Claude call failed for ${workItemId}${retryNote}: ${claudeResult.error?.message?.slice(0, 100) || "unknown"}`,
+      });
+      return;
+    }
+    const rawResponse = claudeResult.result;
     const durationMs = Date.now() - startTime;
     const durationMin = Math.round(durationMs / 1000 / 60);
 
@@ -202,7 +236,12 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
 
   } catch (err: unknown) {
     const errMsg = err instanceof Error ? err.message : String(err);
-    emitEvent(runId, "failed", agentType, workItemId, { error: errMsg.slice(0, 500) });
+    const { errorClass, reason } = classifyError(err);
+    emitEvent(runId, "failed", agentType, workItemId, {
+      error: errMsg.slice(0, 500),
+      error_class: errorClass,
+      error_reason: reason,
+    });
     endRun(runId, "failed");
 
     await notify(notifyCtx, {

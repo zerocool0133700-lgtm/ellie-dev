@@ -58,6 +58,7 @@ import { archiveCompletedEphemeralChannels } from "./chat-channels.ts";
 import { isWorkItemDone } from "./plane.ts";
 import { startPlaneQueueWorker, purgeCompleted as purgePlaneQueue } from "./plane-queue.ts";
 import { startWatchdog, recoverActiveRuns, setWatchdogNotify } from "./orchestration-tracker.ts";
+import { reconcileOnStartup, startReconciler } from "./orchestration-reconciler.ts";
 import { onBridgeWrite } from "./api/bridge.ts";
 import { setBroadcastToEllieChat } from "./tool-approval.ts";
 import { getSummaryState } from "./ums/consumers/summary.ts";
@@ -150,7 +151,13 @@ setInterval(() => {
 
 // Orchestration tracker — ELLIE-349: heartbeat watchdog + orphan recovery
 // ELLIE-387: Wire proactive notifications to watchdog (deferred — needs setRelayDeps first)
-recoverActiveRuns().then(() => startWatchdog()).catch(err => logger.error("Orchestration startup error", err));
+recoverActiveRuns()
+  .then(() => reconcileOnStartup(supabase))
+  .then(() => {
+    startWatchdog();
+    startReconciler(supabase);
+  })
+  .catch(err => logger.error("Orchestration startup error", err));
 
 // ELLIE-374: Validate all archetype files on startup
 import("./prompt-builder.ts").then(({ validateArchetypes }) => validateArchetypes()).catch(() => {});

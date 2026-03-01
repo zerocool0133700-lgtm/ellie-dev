@@ -285,7 +285,7 @@ export function startWatchdog(): void {
     }
   }, WATCHDOG_INTERVAL_MS);
 
-  logger.info("Watchdog started", { interval_ms: WATCHDOG_INTERVAL_MS, threshold_ms: STALE_THRESHOLD_MS });
+  logger.info("Watchdog started", { interval_ms: WATCHDOG_INTERVAL_MS, default_threshold_ms: DEFAULT_STALE_THRESHOLD_MS });
 }
 
 /** Stop the watchdog timer (for relay shutdown). */
