@@ -26,6 +26,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type Anthropic from "@anthropic-ai/sdk";
 import { getConversationContext } from "./conversations.ts";
 import { matchSkillCommand } from "./skills/commands.ts";
+import { matchWorkflow } from "./workflow-templates.ts";
 import { log } from "./logger.ts";
 import { writeToDisk, readFromDisk } from "./config-cache.ts";
 
@@ -150,6 +151,32 @@ export async function classifyIntent(
     logger.warn("Skill command match failed", err);
   }
 
+  // Tier 1.6: ELLIE-388 — Workflow template matching (0ms)
+  const workflowMatch = matchWorkflow(message);
+  if (workflowMatch) {
+    const wf = workflowMatch.workflow;
+    console.log(`[classifier] Workflow template "${wf.name}" (${wf.steps.length} steps, ${wf.mode})`);
+    return {
+      agent_name: wf.steps[0].agent,
+      rule_name: `workflow:${wf.name}`,
+      confidence: workflowMatch.confidence,
+      execution_mode: wf.mode,
+      skills: wf.steps.map(s => ({
+        agent: s.agent,
+        skill: s.skill,
+        instruction: s.instruction,
+      })),
+    };
+  }
+
+  // Tier 1.8: ELLIE-386 — Regex fast-path for obvious specialist patterns (0ms)
+  // Skips ~300ms Haiku call when the intent is unambiguous
+  const smartRoute = matchSmartPattern(message);
+  if (smartRoute) {
+    console.log(`[classifier] Smart pattern → "${smartRoute.agent_name}" (${smartRoute.rule_name})`);
+    return smartRoute;
+  }
+
   // Tier 2+3: Run session continuity and LLM classification in parallel
   if (!_anthropic) {
     // No LLM available — fall back to session continuity or general
@@ -216,6 +243,70 @@ export function parseSlashCommand(
     if (trimmed === cmd || trimmed.startsWith(cmd + " ")) {
       const stripped = trimmed.slice(cmd.length).trim();
       return { agent, strippedMessage: stripped || trimmed };
+    }
+  }
+  return null;
+}
+
+// ────────────────────────────────────────────────────────────────
+// Tier 1.8: ELLIE-386 — Smart pattern matching (regex fast-path)
+// ────────────────────────────────────────────────────────────────
+
+interface SmartPattern {
+  pattern: RegExp;
+  agent: string;
+  rule: string;
+}
+
+const SMART_PATTERNS: SmartPattern[] = [
+  // Strategy patterns
+  { pattern: /\bhow\s+should\s+we\s+(architect|design|structure|approach|plan)\b/i, agent: "strategy", rule: "strategy_how_should" },
+  { pattern: /\blet'?s?\s+(think\s+through|brainstorm|plan\s+out|strategize)\b/i, agent: "strategy", rule: "strategy_think_through" },
+  { pattern: /\bwhat'?s?\s+(the|our)\s+(strategy|approach|roadmap|plan)\s+for\b/i, agent: "strategy", rule: "strategy_whats" },
+  { pattern: /\bbrain\s*dump\b/i, agent: "strategy", rule: "strategy_braindump" },
+
+  // Dev patterns
+  { pattern: /\b(fix|debug|patch)\s+(the\s+)?(bug|error|issue|crash)\s+(in|with|where)\b/i, agent: "dev", rule: "dev_fix_bug" },
+  { pattern: /\bimplement\s+(the\s+)?(\w+\s+){0,3}(feature|endpoint|api|function|method|class)\b/i, agent: "dev", rule: "dev_implement" },
+  { pattern: /\brefactor\s/i, agent: "dev", rule: "dev_refactor" },
+  { pattern: /\bwrite\s+(a\s+)?(unit\s+)?test/i, agent: "dev", rule: "dev_test" },
+  { pattern: /\badd\s+(a\s+)?(new\s+)?(endpoint|route|migration|column|table|index)\b/i, agent: "dev", rule: "dev_add" },
+
+  // Research patterns
+  { pattern: /\bresearch\s+(competitors?|alternatives?|options?|tools?)\s+for\b/i, agent: "research", rule: "research_for" },
+  { pattern: /\bwhat\s+are\s+(the\s+)?(options|alternatives|competitors|approaches)\s+for\b/i, agent: "research", rule: "research_options" },
+  { pattern: /\bcompare\s+\w+\s+(vs?\.?|versus|and|or)\s+\w+/i, agent: "research", rule: "research_compare" },
+  { pattern: /\bfind\s+out\s+(about|how|what|why)\b/i, agent: "research", rule: "research_find" },
+
+  // Critic patterns
+  { pattern: /\breview\s+(this|my|the)\s+(code|pr|pull\s+request|implementation|design)\b/i, agent: "critic", rule: "critic_review" },
+  { pattern: /\bwhat'?s?\s+wrong\s+with\s+(this|my)\b/i, agent: "critic", rule: "critic_whats_wrong" },
+  { pattern: /\baudit\s+(this|my|the)\b/i, agent: "critic", rule: "critic_audit" },
+
+  // Content patterns
+  { pattern: /\b(write|draft|compose)\s+(an?\s+)?(email|post|blog|article|message|announcement)\b/i, agent: "content", rule: "content_draft" },
+  { pattern: /\bcreate\s+(content|copy|messaging)\s+for\b/i, agent: "content", rule: "content_create" },
+
+  // Finance patterns
+  { pattern: /\bhow\s+much\s+(did|do|are|have)\s+we\s+(spend|spent|pay|paid)\b/i, agent: "finance", rule: "finance_spend" },
+  { pattern: /\b(budget|cost)\s+(analysis|breakdown|report|summary)\b/i, agent: "finance", rule: "finance_budget" },
+  { pattern: /\banalyze\s+(our\s+)?(spend|costs?|expenses?|budget)\b/i, agent: "finance", rule: "finance_analyze" },
+
+  // Ops patterns
+  { pattern: /\b(deploy|restart|rollback)\s+(the\s+)?(server|service|relay|app)\b/i, agent: "ops", rule: "ops_deploy" },
+  { pattern: /\b(server|service|relay)\s+(status|health|logs?)\b/i, agent: "ops", rule: "ops_status" },
+  { pattern: /\bhealth\s+check\b/i, agent: "ops", rule: "ops_health" },
+];
+
+export function matchSmartPattern(message: string): ClassificationResult | null {
+  for (const { pattern, agent, rule } of SMART_PATTERNS) {
+    if (pattern.test(message)) {
+      return {
+        agent_name: agent,
+        rule_name: `smart_pattern:${rule}`,
+        confidence: 0.9,
+        execution_mode: "single",
+      };
     }
   }
   return null;

@@ -636,7 +636,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               gchatCrossChannel || undefined,
             );
 
-            // ELLIE-383: Context snapshot logging + extension broadcast
+            // ELLIE-383: Context snapshot logging (journal only)
             const gchatBuildMetrics = getLastBuildMetrics();
             if (gchatBuildMetrics) {
               const top5 = [...gchatBuildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
@@ -645,16 +645,6 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
                 `tokens=${gchatBuildMetrics.totalTokens} sections=${gchatBuildMetrics.sectionCount} budget=${gchatBuildMetrics.budget} ` +
                 `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
               );
-              broadcastExtension({
-                type: "context_snapshot",
-                channel: "google-chat",
-                creature: gchatBuildMetrics.creature || "general",
-                contextMode: gchatBuildMetrics.mode || "conversation",
-                totalTokens: gchatBuildMetrics.totalTokens,
-                sectionCount: gchatBuildMetrics.sectionCount,
-                budget: gchatBuildMetrics.budget,
-                top5: top5.map(s => ({ label: s.label, tokens: s.tokens })),
-              });
             }
 
             const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
@@ -874,7 +864,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               undefined, // channelProfile
             );
 
-            // ELLIE-383: Context snapshot logging + extension broadcast
+            // ELLIE-383: Context snapshot logging (journal only)
             const alexaBuildMetrics = getLastBuildMetrics();
             if (alexaBuildMetrics) {
               const top5 = [...alexaBuildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
@@ -883,16 +873,6 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
                 `tokens=${alexaBuildMetrics.totalTokens} sections=${alexaBuildMetrics.sectionCount} budget=${alexaBuildMetrics.budget} ` +
                 `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
               );
-              broadcastExtension({
-                type: "context_snapshot",
-                channel: "alexa",
-                creature: alexaBuildMetrics.creature || "general",
-                contextMode: alexaBuildMetrics.mode || "conversation",
-                totalTokens: alexaBuildMetrics.totalTokens,
-                sectionCount: alexaBuildMetrics.sectionCount,
-                budget: alexaBuildMetrics.budget,
-                top5: top5.map(s => ({ label: s.label, tokens: s.tokens })),
-              });
             }
 
             const ALEXA_TIMEOUT_MS = 6_000;

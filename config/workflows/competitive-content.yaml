@@ -1,0 +1,20 @@
+name: competitive-content
+description: Research competitors then create content based on findings
+triggers:
+  - competitive content
+  - competitor analysis and content
+  - content about competitors
+mode: pipeline
+steps:
+  - agent: research
+    skill: none
+    instruction: "Research the competitors mentioned. Gather key differentiators, pricing, strengths, and weaknesses. Produce a structured comparison table."
+  - agent: strategy
+    skill: none
+    instruction: "Using the research findings, identify the strongest positioning angles and messaging strategy. Recommend 2-3 content angles."
+  - agent: content
+    skill: none
+    instruction: "Using the strategy recommendations and research data, draft polished content. Match the requested format (blog post, email, social, etc.)."
+  - agent: critic
+    skill: none
+    instruction: "Review the content for accuracy against the research, messaging alignment with strategy, and overall quality. Flag any issues."

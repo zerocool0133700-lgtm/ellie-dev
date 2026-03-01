@@ -1,0 +1,18 @@
+name: weekly-report
+description: Generate a weekly summary combining tickets, spending, and key updates
+triggers:
+  - weekly report
+  - weekly summary
+  - week in review
+  - generate weekly report
+mode: pipeline
+steps:
+  - agent: research
+    skill: none
+    instruction: "Summarize all tickets completed this week from Plane. Include ticket IDs, titles, and outcomes. Also note any tickets that are blocked or overdue."
+  - agent: finance
+    skill: none
+    instruction: "Pull spending data for this week. Summarize costs by category (API usage, infrastructure, subscriptions). Compare to last week if data is available."
+  - agent: content
+    skill: none
+    instruction: "Combine the ticket summary and spending data into a clean weekly report. Use headers, bullet points, and a brief executive summary at the top. Keep it scannable."

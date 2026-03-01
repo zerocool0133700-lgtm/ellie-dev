@@ -1,0 +1,18 @@
+name: feature-implementation
+description: Design, implement, review, and deploy a feature end-to-end
+triggers:
+  - implement feature end to end
+  - full feature implementation
+  - design and implement
+  - build feature with review
+mode: pipeline
+steps:
+  - agent: strategy
+    skill: none
+    instruction: "Design the architecture for this feature. Define the approach, key components, data flow, and any trade-offs. Produce a clear implementation plan."
+  - agent: dev
+    skill: code_changes
+    instruction: "Implement the feature based on the architecture plan. Write clean code, add tests where appropriate, and verify the build passes."
+  - agent: critic
+    skill: code_review
+    instruction: "Review the implementation against the architecture plan. Check for bugs, edge cases, security issues, and code quality. Provide specific feedback."

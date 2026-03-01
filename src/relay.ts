@@ -57,7 +57,7 @@ import { expireStaleItems } from "./api/agent-queue.ts";
 import { archiveCompletedEphemeralChannels } from "./chat-channels.ts";
 import { isWorkItemDone } from "./plane.ts";
 import { startPlaneQueueWorker, purgeCompleted as purgePlaneQueue } from "./plane-queue.ts";
-import { startWatchdog, recoverActiveRuns } from "./orchestration-tracker.ts";
+import { startWatchdog, recoverActiveRuns, setWatchdogNotify } from "./orchestration-tracker.ts";
 import { onBridgeWrite } from "./api/bridge.ts";
 import { setBroadcastToEllieChat } from "./tool-approval.ts";
 import { getSummaryState } from "./ums/consumers/summary.ts";
@@ -149,6 +149,8 @@ setInterval(() => {
 }, 24 * 60 * 60_000);
 
 // Orchestration tracker — ELLIE-349: heartbeat watchdog + orphan recovery
+// ELLIE-387: Wire proactive notifications to watchdog
+setWatchdogNotify(notify, getNotifyCtx());
 recoverActiveRuns().then(() => startWatchdog()).catch(err => logger.error("Orchestration startup error", err));
 
 // ELLIE-374: Validate all archetype files on startup
@@ -374,6 +376,10 @@ setBroadcastToEllieChat(broadcastToEllieChatClients);
 // Initialize classifiers
 if (anthropic && supabase) initClassifier(anthropic, supabase);
 if (anthropic) initEntailmentClassifier(anthropic);
+
+// ELLIE-388: Load workflow templates
+import { loadWorkflowTemplates } from "./workflow-templates.ts";
+loadWorkflowTemplates();
 
 // ELLIE-235: Preload model costs at startup (avoids first-request latency)
 import { preloadModelCosts } from "./orchestrator.ts";

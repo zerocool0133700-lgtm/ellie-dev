@@ -37,6 +37,8 @@ export type NotificationEvent =
   | "incident_resolved"
   | "memory_contradiction"
   | "dispatch_confirm"
+  | "run_stale"
+  | "run_failed"
   | "error"
   | "rollup"
   | "weekly_review";
@@ -129,6 +131,21 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
   },
   dispatch_confirm: {
     priority: "normal",
+    channels: {
+      telegram: { enabled: true, minIntervalSec: 0 },
+      "google-chat": { enabled: true, minIntervalSec: 0 },
+    },
+  },
+  // ELLIE-387: Proactive status alerts for orchestration lifecycle
+  run_stale: {
+    priority: "high",
+    channels: {
+      telegram: { enabled: true, minIntervalSec: 120 }, // max 1 per 2 min per run
+      "google-chat": { enabled: true, minIntervalSec: 60 },
+    },
+  },
+  run_failed: {
+    priority: "critical",
     channels: {
       telegram: { enabled: true, minIntervalSec: 0 },
       "google-chat": { enabled: true, minIntervalSec: 0 },

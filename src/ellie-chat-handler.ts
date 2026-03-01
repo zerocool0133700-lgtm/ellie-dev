@@ -869,7 +869,7 @@ export async function handleEllieChatMessage(
       ecCrossChannel || undefined,
     );
 
-    // ── ELLIE-383: Context snapshot logging + extension broadcast ──
+    // ── ELLIE-383: Context snapshot logging (journal only) ──
     const ecBuildMetrics = getLastBuildMetrics();
     if (ecBuildMetrics) {
       const top5 = [...ecBuildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
@@ -878,16 +878,6 @@ export async function handleEllieChatMessage(
         `tokens=${ecBuildMetrics.totalTokens} sections=${ecBuildMetrics.sectionCount} budget=${ecBuildMetrics.budget} ` +
         `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
       );
-      broadcastExtension({
-        type: "context_snapshot",
-        channel: "ellie-chat",
-        creature: ecBuildMetrics.creature || "general",
-        contextMode: ecBuildMetrics.mode || "conversation",
-        totalTokens: ecBuildMetrics.totalTokens,
-        sectionCount: ecBuildMetrics.sectionCount,
-        budget: ecBuildMetrics.budget,
-        top5: top5.map(s => ({ label: s.label, tokens: s.tokens })),
-      });
     }
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -1123,7 +1113,7 @@ export async function runSpecialistAsync(
       ecCrossChannel || undefined,
     );
 
-    // ── ELLIE-383: Context snapshot logging for specialist ──
+    // ── ELLIE-383: Context snapshot logging for specialist (journal only) ──
     const specBuildMetrics = getLastBuildMetrics();
     if (specBuildMetrics) {
       const top5 = [...specBuildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
@@ -1132,16 +1122,6 @@ export async function runSpecialistAsync(
         `tokens=${specBuildMetrics.totalTokens} sections=${specBuildMetrics.sectionCount} budget=${specBuildMetrics.budget} ` +
         `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
       );
-      broadcastExtension({
-        type: "context_snapshot",
-        channel: "ellie-chat",
-        creature: specBuildMetrics.creature || "general",
-        contextMode: specBuildMetrics.mode || "conversation",
-        totalTokens: specBuildMetrics.totalTokens,
-        sectionCount: specBuildMetrics.sectionCount,
-        budget: specBuildMetrics.budget,
-        top5: top5.map(s => ({ label: s.label, tokens: s.tokens })),
-      });
     }
 
     const agentTools = agentResult.dispatch.agent.tools_enabled;

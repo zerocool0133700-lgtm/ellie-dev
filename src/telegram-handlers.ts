@@ -483,7 +483,7 @@ bot.on("message:text", withQueue(async (ctx) => {
     tgCrossChannel || undefined,
   );
 
-  // ── ELLIE-383: Context snapshot logging + extension broadcast ──
+  // ── ELLIE-383: Context snapshot logging (journal only, not broadcast) ──
   const buildMetrics = getLastBuildMetrics();
   if (buildMetrics) {
     const top5 = [...buildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
@@ -492,16 +492,6 @@ bot.on("message:text", withQueue(async (ctx) => {
       `tokens=${buildMetrics.totalTokens} sections=${buildMetrics.sectionCount} budget=${buildMetrics.budget} ` +
       `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
     );
-    broadcastExtension({
-      type: "context_snapshot",
-      channel: "telegram",
-      creature: buildMetrics.creature || "general",
-      contextMode: buildMetrics.mode || "conversation",
-      totalTokens: buildMetrics.totalTokens,
-      sectionCount: buildMetrics.sectionCount,
-      budget: buildMetrics.budget,
-      top5: top5.map(s => ({ label: s.label, tokens: s.tokens })),
-    });
   }
 
   const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -813,16 +803,6 @@ bot.on("message:voice", withQueue(async (ctx) => {
         `tokens=${voiceBuildMetrics.totalTokens} sections=${voiceBuildMetrics.sectionCount} budget=${voiceBuildMetrics.budget} ` +
         `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
       );
-      broadcastExtension({
-        type: "context_snapshot",
-        channel: "telegram",
-        creature: voiceBuildMetrics.creature || "general",
-        contextMode: voiceBuildMetrics.mode || "conversation",
-        totalTokens: voiceBuildMetrics.totalTokens,
-        sectionCount: voiceBuildMetrics.sectionCount,
-        budget: voiceBuildMetrics.budget,
-        top5: top5.map(s => ({ label: s.label, tokens: s.tokens })),
-      });
     }
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;

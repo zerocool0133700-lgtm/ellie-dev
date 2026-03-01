@@ -10,8 +10,18 @@
 
 import { log } from "./logger.ts";
 import { emitEvent, getUnterminated } from "./orchestration-ledger.ts";
+import type { NotifyContext, NotifyOptions } from "./notification-policy.ts";
 
 const logger = log.child("orchestration-tracker");
+
+// ELLIE-387: Notification callback — set by relay.ts after deps are ready
+let _notifyFn: ((ctx: NotifyContext, opts: NotifyOptions) => Promise<void>) | null = null;
+let _notifyCtx: NotifyContext | null = null;
+
+export function setWatchdogNotify(fn: typeof _notifyFn, ctx: NotifyContext): void {
+  _notifyFn = fn;
+  _notifyCtx = ctx;
+}
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -198,6 +208,16 @@ export function startWatchdog(): void {
             reason: "watchdog_stale",
             silence_ms: silenceMs,
           });
+          // ELLIE-387: Proactive notification — run went stale
+          if (_notifyFn && _notifyCtx) {
+            const staleMin = Math.round(silenceMs / 60_000);
+            _notifyFn(_notifyCtx, {
+              event: "run_stale",
+              workItemId: run.workItemId || runId.slice(0, 8),
+              telegramMessage: `⚠️ ${run.agentType} stalled (no heartbeat ${staleMin}min) on ${run.workItemId || "unknown"}`,
+              gchatMessage: `${run.agentType} agent stalled — no heartbeat for ${staleMin} minutes on ${run.workItemId || "unknown task"}`,
+            }).catch(() => {});
+          }
         }
 
         // ELLIE-376: Reap stale runs with dead processes
@@ -230,6 +250,16 @@ export function startWatchdog(): void {
         reason: "reaped_dead_process",
         stale_for_ms: now - run.lastHeartbeat,
       });
+      // ELLIE-387: Proactive notification — run failed (reaped)
+      if (_notifyFn && _notifyCtx) {
+        const staleMin = Math.round((now - run.lastHeartbeat) / 60_000);
+        _notifyFn(_notifyCtx, {
+          event: "run_failed",
+          workItemId: run.workItemId || runId.slice(0, 8),
+          telegramMessage: `❌ ${run.agentType} failed — process died after ${staleMin}min stall on ${run.workItemId || "unknown"}`,
+          gchatMessage: `${run.agentType} agent failed — process died after ${staleMin} minutes stalled on ${run.workItemId || "unknown task"}. Run reaped.`,
+        }).catch(() => {});
+      }
       endRun(runId, "failed");
     }
   }, WATCHDOG_INTERVAL_MS);
