@@ -24,6 +24,7 @@ import {
 } from "./plane.ts";
 import { dispatchAgent, syncResponse } from "./agent-router.ts";
 import { processMemoryIntents } from "./memory.ts";
+import { emitEvent } from "./orchestration-ledger.ts";
 
 // ────────────────────────────────────────────────────────────────
 // Types
@@ -151,6 +152,9 @@ export async function executePlaybookCommands(
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
       logger.error("Command execution failed", { command: cmd.type, ticket: cmd.ticketId }, err);
+      if (cmd.type === "send") {
+        emitEvent(crypto.randomUUID(), "failed", cmd.agentName || "dev", cmd.ticketId, { error: errMsg.slice(0, 500), source: "playbook" });
+      }
       await notify(getNotifyCtx(ctx), {
         event: "error",
         workItemId: cmd.ticketId || "playbook",
@@ -168,8 +172,9 @@ export async function executePlaybookCommands(
 async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<void> {
   const ticketId = cmd.ticketId!;
   const agentName = cmd.agentName || "dev";
+  const runId = crypto.randomUUID();
 
-  console.log(`[playbook] send ${ticketId} to ${agentName}`);
+  console.log(`[playbook] send ${ticketId} to ${agentName} (run ${runId.slice(0, 8)})`);
 
   // 1. Fetch ticket details
   const details = await fetchWorkItemDetails(ticketId);
@@ -182,13 +187,14 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
     return;
   }
 
-  // 2. Notify dispatch
+  // 2. Notify dispatch + emit orchestration event
   await notify(getNotifyCtx(ctx), {
     event: "dispatch_confirm",
     workItemId: ticketId,
     telegramMessage: `Dispatching ${agentName} to ${ticketId}: ${details.name}`,
     gchatMessage: `Playbook: dispatching ${agentName} to ${ticketId}: ${details.name}`,
   });
+  emitEvent(runId, "dispatched", agentName, ticketId, { ticket_title: details.name, source: "playbook" });
 
   // 3. Start work session (creates forest tree)
   let sessionResult: Record<string, unknown> | undefined;
@@ -255,7 +261,14 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
     model: dispatch.agent.model,
     allowedTools: dispatch.agent.tools_enabled,
   });
-  const durationMin = Math.round((Date.now() - startTime) / 1000 / 60);
+  const durationMs = Date.now() - startTime;
+  const durationMin = Math.round(durationMs / 1000 / 60);
+
+  // 6b. Emit completion event
+  emitEvent(runId, "completed", agentName, ticketId, {
+    duration_ms: durationMs,
+    response_length: rawResponse.length,
+  });
 
   // 7. Process memory intents from the dev agent's response
   await processMemoryIntents(ctx.supabase, rawResponse, agentName, "shared", sessionIds);

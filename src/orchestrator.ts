@@ -23,6 +23,7 @@ import type { ExecutionMode } from "./intent-classifier.ts";
 import { log } from "./logger.ts";
 import { estimateTokens } from "./relay-utils.ts";
 import { writeToDisk, readFromDisk } from "./config-cache.ts";
+import { emitEvent } from "./orchestration-ledger.ts";
 
 const logger = log.child("orchestrator");
 
@@ -182,10 +183,17 @@ export async function executeOrchestrated(
   options: OrchestratorOptions,
 ): Promise<ExecutionResult> {
   const effectiveSteps = steps.slice(0, MAX_PIPELINE_DEPTH);
+  const orchestrationRunId = crypto.randomUUID();
 
   if (effectiveSteps.length === 0) {
     throw new Error(`Orchestrator received empty steps array for mode "${mode}"`);
   }
+
+  emitEvent(orchestrationRunId, "dispatched", effectiveSteps[0]?.agent_name, null, {
+    mode,
+    step_count: effectiveSteps.length,
+    source: "orchestrator",
+  });
 
   // Create execution plan record
   const planId = await createExecutionPlan(options.supabase, {
@@ -225,6 +233,11 @@ export async function executeOrchestrated(
 
     // Complete execution plan
     await completeExecutionPlan(options.supabase, planId, artifacts, "completed");
+    emitEvent(orchestrationRunId, "completed", effectiveSteps[0]?.agent_name, null, {
+      mode,
+      duration_ms: artifacts.total_duration_ms,
+      cost_usd: artifacts.total_cost_usd,
+    });
 
     // Cost enforcement
     if (artifacts.total_cost_usd > MAX_COST_PER_EXECUTION) {
@@ -245,6 +258,10 @@ export async function executeOrchestrated(
       options.supabase, planId, artifacts, "failed",
       err instanceof Error ? err.message : String(err),
     );
+    emitEvent(orchestrationRunId, "failed", effectiveSteps[0]?.agent_name, null, {
+      mode,
+      error: err instanceof Error ? err.message : String(err),
+    });
     throw err;
   }
 }

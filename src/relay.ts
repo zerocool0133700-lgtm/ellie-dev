@@ -57,6 +57,7 @@ import { expireStaleItems } from "./api/agent-queue.ts";
 import { archiveCompletedEphemeralChannels } from "./chat-channels.ts";
 import { isWorkItemDone } from "./plane.ts";
 import { startPlaneQueueWorker, purgeCompleted as purgePlaneQueue } from "./plane-queue.ts";
+import { startWatchdog, recoverActiveRuns } from "./orchestration-tracker.ts";
 import { onBridgeWrite } from "./api/bridge.ts";
 import { setBroadcastToEllieChat } from "./tool-approval.ts";
 import { getSummaryState } from "./ums/consumers/summary.ts";
@@ -146,6 +147,9 @@ startPlaneQueueWorker();
 setInterval(() => {
   purgePlaneQueue().catch(err => logger.error("Plane queue purge error", err));
 }, 24 * 60 * 60_000);
+
+// Orchestration tracker — ELLIE-349: heartbeat watchdog + orphan recovery
+recoverActiveRuns().then(() => startWatchdog()).catch(err => logger.error("Orchestration startup error", err));
 
 // Bridge write notifications — Telegram + ellie-chat (ELLIE-199)
 onBridgeWrite(({ collaborator, content, memoryId, type, workItemId }) => {

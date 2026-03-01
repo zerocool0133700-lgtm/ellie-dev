@@ -11,6 +11,7 @@
  */
 
 import { log } from "./logger.ts";
+import { writeToDisk, readFromDisk } from "./config-cache.ts";
 
 const logger = log.child("context:mode");
 
@@ -185,7 +186,7 @@ export function isContextRefresh(message: string): boolean {
 // ── Mode-to-priority mapping ────────────────────────────────
 // From context-strategy SKILL.md tables
 
-const MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
+const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
   conversation: {
     "soul": 2,
     "archetype": 2,
@@ -202,6 +203,7 @@ const MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "work-commands": 9,
     "queue": 8,
     "skills": 6,
+    "orchestration-status": 8,
   },
   strategy: {
     "soul": 5,
@@ -220,6 +222,7 @@ const MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "work-commands": 7,
     "queue": 6,
     "skills": 5,
+    "orchestration-status": 5,
   },
   workflow: {
     "soul": 7,
@@ -238,6 +241,7 @@ const MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "work-commands": 2,
     "queue": 2,
     "skills": 5,
+    "orchestration-status": 2,
   },
   "deep-work": {
     "soul": 7,
@@ -256,24 +260,98 @@ const MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "work-commands": 3,
     "queue": 7,
     "skills": 5,
+    "orchestration-status": 6,
   },
 };
 
-const MODE_TOKEN_BUDGETS: Record<ContextMode, number> = {
-  conversation: 80_000,    // ~30k active content after trimming
-  strategy: 150_000,       // broad awareness
-  workflow: 120_000,       // operational
-  "deep-work": 190_000,    // room for codebase context
+const DEFAULT_MODE_TOKEN_BUDGETS: Record<ContextMode, number> = {
+  conversation: 80_000,
+  strategy: 150_000,
+  workflow: 120_000,
+  "deep-work": 190_000,
 };
+
+// ── Active config (mutable, persisted to disk) ──────────────
+
+export interface ModeConfig {
+  priorities: Record<ContextMode, Record<string, number>>;
+  budgets: Record<ContextMode, number>;
+}
+
+const CACHE_KEY = "context-mode-config";
+
+function deepClone<T>(obj: T): T {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+let _activePriorities: Record<ContextMode, Record<string, number>> = deepClone(DEFAULT_MODE_PRIORITIES);
+let _activeBudgets: Record<ContextMode, number> = { ...DEFAULT_MODE_TOKEN_BUDGETS };
+
+// Load persisted config on startup
+(async () => {
+  const saved = await readFromDisk<ModeConfig>(CACHE_KEY);
+  if (saved) {
+    // Merge saved over defaults — new sections from defaults are preserved
+    for (const mode of Object.keys(DEFAULT_MODE_PRIORITIES) as ContextMode[]) {
+      _activePriorities[mode] = { ...DEFAULT_MODE_PRIORITIES[mode], ...(saved.priorities?.[mode] || {}) };
+    }
+    if (saved.budgets) {
+      _activeBudgets = { ...DEFAULT_MODE_TOKEN_BUDGETS, ...saved.budgets };
+    }
+    logger.info("Loaded persisted mode config from disk");
+  }
+})();
+
+/** Get the full config (active + defaults for diffing). */
+export function getModeConfig(): { priorities: Record<ContextMode, Record<string, number>>; budgets: Record<ContextMode, number>; defaults: { priorities: Record<ContextMode, Record<string, number>>; budgets: Record<ContextMode, number> } } {
+  return {
+    priorities: deepClone(_activePriorities),
+    budgets: { ..._activeBudgets },
+    defaults: {
+      priorities: deepClone(DEFAULT_MODE_PRIORITIES),
+      budgets: { ...DEFAULT_MODE_TOKEN_BUDGETS },
+    },
+  };
+}
+
+/** Update mode config. Merges over current, persists to disk. */
+export function updateModeConfig(
+  priorities?: Partial<Record<ContextMode, Record<string, number>>>,
+  budgets?: Partial<Record<ContextMode, number>>,
+): void {
+  if (priorities) {
+    for (const [mode, sections] of Object.entries(priorities)) {
+      if (_activePriorities[mode as ContextMode]) {
+        _activePriorities[mode as ContextMode] = {
+          ..._activePriorities[mode as ContextMode],
+          ...sections,
+        };
+      }
+    }
+  }
+  if (budgets) {
+    _activeBudgets = { ..._activeBudgets, ...budgets };
+  }
+  writeToDisk(CACHE_KEY, { priorities: _activePriorities, budgets: _activeBudgets });
+  logger.info("Mode config updated and persisted");
+}
+
+/** Reset config to hardcoded defaults. */
+export function resetModeConfig(): void {
+  _activePriorities = deepClone(DEFAULT_MODE_PRIORITIES);
+  _activeBudgets = { ...DEFAULT_MODE_TOKEN_BUDGETS };
+  writeToDisk(CACHE_KEY, { priorities: _activePriorities, budgets: _activeBudgets });
+  logger.info("Mode config reset to defaults");
+}
 
 /** Get section priority overrides for a mode. */
 export function getModeSectionPriorities(mode: ContextMode): Record<string, number> {
-  return MODE_PRIORITIES[mode];
+  return _activePriorities[mode];
 }
 
 /** Get token budget for a mode. */
 export function getModeTokenBudget(mode: ContextMode): number {
-  return MODE_TOKEN_BUDGETS[mode];
+  return _activeBudgets[mode];
 }
 
 // ── Transition handling ─────────────────────────────────────

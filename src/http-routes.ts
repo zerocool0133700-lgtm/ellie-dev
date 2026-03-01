@@ -148,7 +148,12 @@ import { detectAndCaptureCorrection } from "./correction-detector.ts";
 import { detectAndLinkCalendarEvents } from "./calendar-linker.ts";
 import { freshnessTracker, autoRefreshStaleSources, detectConflicts } from "./context-freshness.ts";
 import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hierarchy.ts";
+import { getModeConfig, updateModeConfig, resetModeConfig, type ContextMode } from "./context-mode.ts";
+import { getSectionContents, updateSectionContent } from "./api/context-sections.ts";
 import type { ApiRequest, ApiResponse } from "./api/types.ts";
+import { getActiveRunStates, getRunState, killRun } from "./orchestration-tracker.ts";
+import { getRecentEvents, getRunEvents } from "./orchestration-ledger.ts";
+import { executeTrackedDispatch } from "./orchestration-dispatch.ts";
 
 const logger = log.child("http");
 
@@ -955,7 +960,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
   if (url.pathname === "/api/freshness" && req.method === "GET") {
     const modeParam = url.searchParams.get("mode") || "conversation";
     const validModes = ["conversation", "strategy", "workflow", "deep-work"];
-    const mode = validModes.includes(modeParam) ? modeParam as import("./context-mode.ts").ContextMode : "conversation";
+    const mode = validModes.includes(modeParam) ? modeParam as ContextMode : "conversation";
 
     const snapshot = freshnessTracker.getSnapshot(mode);
     const conflicts = detectConflicts();
@@ -966,6 +971,243 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
       conflicts,
       timestamp: new Date().toISOString(),
     }));
+    return;
+  }
+
+  // ── Context Mode Config — GET /api/context-modes ──────────
+  if (url.pathname === "/api/context-modes" && req.method === "GET") {
+    const config = getModeConfig();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(config));
+    return;
+  }
+
+  // ── Context Mode Config — PUT /api/context-modes ──────────
+  if (url.pathname === "/api/context-modes" && req.method === "PUT") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", () => {
+      try {
+        const data = JSON.parse(body);
+        if (data.reset) {
+          resetModeConfig();
+        } else {
+          updateModeConfig(data.priorities, data.budgets);
+        }
+        const config = getModeConfig();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(config));
+      } catch (err: any) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Invalid request body" }));
+      }
+    });
+    return;
+  }
+
+  // ── Context Sections — GET /api/context-sections ──────────
+  if (url.pathname === "/api/context-sections" && req.method === "GET") {
+    (async () => {
+      try {
+        const sections = await getSectionContents();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ sections }));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Failed to load sections" }));
+      }
+    })();
+    return;
+  }
+
+  // ── Context Sections — PUT /api/context-sections/:name ────
+  if (url.pathname.startsWith("/api/context-sections/") && req.method === "PUT") {
+    const sectionName = url.pathname.split("/api/context-sections/")[1];
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { content } = JSON.parse(body);
+        if (typeof content !== "string") {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "content must be a string" }));
+          return;
+        }
+        const result = await updateSectionContent(sectionName, content);
+        if (!result.ok) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: result.error }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (err: any) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Invalid request body" }));
+      }
+    });
+    return;
+  }
+
+  // ── Orchestration Status — GET /api/orchestration/status ────
+  if (url.pathname === "/api/orchestration/status" && req.method === "GET") {
+    (async () => {
+      try {
+        const activeRuns = getActiveRunStates();
+        const recentEvents = await getRecentEvents(50);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ activeRuns, recentEvents }));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Failed to get orchestration status" }));
+      }
+    })();
+    return;
+  }
+
+  // ── Orchestration Run Detail — GET /api/orchestration/status/:runId ──
+  if (url.pathname.startsWith("/api/orchestration/status/") && req.method === "GET") {
+    const runId = url.pathname.split("/api/orchestration/status/")[1];
+    if (!runId) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Missing runId" }));
+      return;
+    }
+    (async () => {
+      try {
+        const run = getRunState(runId);
+        const events = await getRunEvents(runId);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ run, events }));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Failed to get run detail" }));
+      }
+    })();
+    return;
+  }
+
+  // ── Orchestration Dispatch — POST /api/orchestration/dispatch ──
+  if (url.pathname === "/api/orchestration/dispatch" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body);
+        const { agent_type, work_item_id, message } = data;
+        if (!agent_type || !work_item_id) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "agent_type and work_item_id are required" }));
+          return;
+        }
+
+        // Build a minimal playbook context from relay deps
+        const { bot: relayBot, supabase: relaySb } = getRelayDeps();
+        if (!relayBot) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Relay not fully initialized" }));
+          return;
+        }
+
+        const { runId } = executeTrackedDispatch({
+          agentType: agent_type,
+          workItemId: work_item_id,
+          channel: "api",
+          message: message || `Work on ${work_item_id}`,
+          playbookCtx: {
+            bot: relayBot,
+            supabase: relaySb,
+            telegramUserId: ALLOWED_USER_ID,
+            channel: "api",
+            callClaudeFn: (p, o) => callClaude(p, { ...o, runId }),
+            buildPromptFn: buildPrompt,
+          },
+        });
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ run_id: runId, status: "dispatched" }));
+      } catch (err: any) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Invalid request body" }));
+      }
+    });
+    return;
+  }
+
+  // ── Orchestration Cancel — POST /api/orchestration/:runId/cancel ──
+  const cancelMatch = url.pathname.match(/^\/api\/orchestration\/([0-9a-f-]+)\/cancel$/);
+  if (cancelMatch && req.method === "POST") {
+    const runId = cancelMatch[1];
+    (async () => {
+      try {
+        const killed = await killRun(runId);
+        if (!killed) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Run not found or already ended" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, run_id: runId, status: "cancelled" }));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Cancel failed" }));
+      }
+    })();
+    return;
+  }
+
+  // ── Orchestration Retry — POST /api/orchestration/:runId/retry ──
+  const retryMatch = url.pathname.match(/^\/api\/orchestration\/([0-9a-f-]+)\/retry$/);
+  if (retryMatch && req.method === "POST") {
+    const runId = retryMatch[1];
+    (async () => {
+      try {
+        // Look up the original dispatched event to get params
+        const events = await getRunEvents(runId);
+        const dispatchedEvt = events.find(e => e.event_type === "dispatched");
+        if (!dispatchedEvt) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Original dispatch event not found" }));
+          return;
+        }
+
+        // Emit retried event on old run
+        const { emitEvent } = await import("./orchestration-ledger.ts");
+        emitEvent(runId, "retried", dispatchedEvt.agent_type, dispatchedEvt.work_item_id, { original_run_id: runId });
+
+        // Start a new tracked dispatch with same params
+        const { bot: relayBot, supabase: relaySb } = getRelayDeps();
+        if (!relayBot) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Relay not fully initialized" }));
+          return;
+        }
+
+        const agentType = dispatchedEvt.agent_type || "dev";
+        const workItemId = dispatchedEvt.work_item_id || "";
+
+        const { runId: newRunId } = executeTrackedDispatch({
+          agentType,
+          workItemId,
+          channel: "api",
+          message: `Retry of ${runId.slice(0, 8)}`,
+          playbookCtx: {
+            bot: relayBot,
+            supabase: relaySb,
+            telegramUserId: ALLOWED_USER_ID,
+            channel: "api",
+            callClaudeFn: (p, o) => callClaude(p, { ...o, runId: newRunId }),
+            buildPromptFn: buildPrompt,
+          },
+        });
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, original_run_id: runId, new_run_id: newRunId, status: "retried" }));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Retry failed" }));
+      }
+    })();
     return;
   }
 
@@ -1586,10 +1828,10 @@ Return ONLY valid JSON (no markdown, no explanation) in this format:
 
 If no actionable ideas are found, return: { "ideas": [] }`;
 
-        // Call Claude CLI
-        const cliArgs = [CLAUDE_PATH, "-p", prompt, "--output-format", "text"];
+        // Call Claude CLI — pipe prompt via stdin to avoid E2BIG
+        const cliArgs = [CLAUDE_PATH, "-p", "--output-format", "text"];
         const proc = spawn(cliArgs, {
-          stdin: "ignore",
+          stdin: new Blob([prompt]),
           stdout: "pipe",
           stderr: "pipe",
           env: { ...process.env, CLAUDECODE: "", ANTHROPIC_API_KEY: "" },
@@ -1777,10 +2019,10 @@ Return ONLY valid JSON (no markdown, no explanation):
 
 If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
 
-        // Call Claude CLI
-        const cliArgs = [CLAUDE_PATH, "-p", prompt, "--output-format", "text"];
+        // Call Claude CLI — pipe prompt via stdin to avoid E2BIG
+        const cliArgs = [CLAUDE_PATH, "-p", "--output-format", "text"];
         const proc = spawn(cliArgs, {
-          stdin: "ignore",
+          stdin: new Blob([prompt]),
           stdout: "pipe",
           stderr: "pipe",
           env: { ...process.env, CLAUDECODE: "", ANTHROPIC_API_KEY: "" },

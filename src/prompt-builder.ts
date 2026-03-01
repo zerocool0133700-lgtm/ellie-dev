@@ -27,6 +27,7 @@ import { getModeSectionPriorities, getModeTokenBudget } from "./context-mode.ts"
 import { freshnessTracker, buildStalenessWarning } from "./context-freshness.ts";
 import type { ChannelContextProfile } from "./chat-channels.ts";
 import { buildSourceHierarchyInstruction } from "./source-hierarchy.ts";
+import { getActiveRunStates } from "./orchestration-tracker.ts";
 
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
 
@@ -541,6 +542,24 @@ export function buildPrompt(
 
   // Priority 4: Queue items for this agent (ELLIE-201 — injected on new session)
   if (queueContext) sections.push({ label: "queue", content: `\n${queueContext}`, priority: 4 });
+
+  // Priority 4: Orchestration status — ELLIE-351 (in-memory, zero latency)
+  {
+    const runs = getActiveRunStates();
+    if (runs.length > 0) {
+      const lines = ["ACTIVE AGENT RUNS:"];
+      for (const r of runs) {
+        const elapsed = Math.floor((Date.now() - r.startedAt) / 1000);
+        const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m`;
+        const hb = Math.floor((Date.now() - r.lastHeartbeat) / 1000);
+        const hbStr = hb < 10 ? "now" : hb < 60 ? `${hb}s ago` : `${Math.floor(hb / 60)}m ago`;
+        const workItem = r.workItemId ? ` on ${r.workItemId}` : "";
+        const stale = r.status === "stale" ? " [STALE]" : "";
+        lines.push(`- ${r.agentType} agent${workItem} (running ${elapsedStr}, last heartbeat ${hbStr})${stale}`);
+      }
+      sections.push({ label: "orchestration-status", content: `\n${lines.join("\n")}`, priority: 4 });
+    }
+  }
 
   // Priority 5: Variable context sources (can grow large)
   if (profileContext) sections.push({ label: "profile", content: `\nProfile:\n${profileContext}`, priority: 5 });

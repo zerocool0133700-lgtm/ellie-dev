@@ -13,6 +13,8 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { setTimeoutRecoveryLock } from "./plane.ts";
 import { notify, type NotifyContext } from "./notification-policy.ts";
 import { log } from "./logger.ts";
+import { emitEvent } from "./orchestration-ledger.ts";
+import { heartbeat as trackerHeartbeat, setRunPid } from "./orchestration-tracker.ts";
 
 const logger = log.child("claude-cli");
 
@@ -114,9 +116,11 @@ process.on("SIGTERM", async () => {
 
 export async function callClaude(
   prompt: string,
-  options?: { resume?: boolean; imagePath?: string; allowedTools?: string[]; model?: string; sessionId?: string; timeoutMs?: number }
+  options?: { resume?: boolean; imagePath?: string; allowedTools?: string[]; model?: string; sessionId?: string; timeoutMs?: number; runId?: string }
 ): Promise<string> {
-  const args = [CLAUDE_PATH, "-p", prompt];
+  // Prompt is piped via stdin to avoid E2BIG (ARG_MAX) on large prompts.
+  // The positional [prompt] arg is omitted; claude -p reads from stdin.
+  const args = [CLAUDE_PATH, "-p"];
 
   const resumeSessionId = options?.sessionId || session.sessionId;
   if (options?.resume && resumeSessionId) {
@@ -144,7 +148,7 @@ export async function callClaude(
 
   try {
     const proc = spawn(args, {
-      stdin: "ignore",
+      stdin: new Blob([prompt]),
       stdout: "pipe",
       stderr: "pipe",
       cwd: PROJECT_DIR || undefined,
@@ -154,6 +158,21 @@ export async function callClaude(
         ANTHROPIC_API_KEY: "",
       },
     });
+
+    // ELLIE-349: Track PID and start heartbeat for orchestrated runs
+    let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+    let heartbeatDbThrottle = 0;
+    if (options?.runId) {
+      setRunPid(options.runId, proc.pid);
+      heartbeatInterval = setInterval(() => {
+        trackerHeartbeat(options.runId!);
+        // Throttle DB writes to 1 per 60s
+        if (Date.now() - heartbeatDbThrottle > 60_000) {
+          emitEvent(options.runId!, "heartbeat", null, null, { pid: proc.pid });
+          heartbeatDbThrottle = Date.now();
+        }
+      }, 30_000);
+    }
 
     const TIMEOUT_MS = options?.timeoutMs ?? CLI_TIMEOUT_MS;
     let timedOut = false;
@@ -182,6 +201,7 @@ export async function callClaude(
     const stderr = await new Response(proc.stderr).text();
     clearTimeout(timeout);
     if (killTimer) clearTimeout(killTimer);
+    if (heartbeatInterval) clearInterval(heartbeatInterval);
 
     const exitCode = await proc.exited;
 
@@ -203,6 +223,9 @@ export async function callClaude(
       if (timedOut) {
         _broadcastExtension({ type: "error", source: "callClaude", message: `Timeout after ${TIMEOUT_MS / 1000}s${forceKilled ? " (force-killed)" : ""}` });
         setTimeoutRecoveryLock(60_000);
+        if (options?.runId) {
+          emitEvent(options.runId, "timeout", null, null, { timeout_ms: TIMEOUT_MS, force_killed: forceKilled });
+        }
 
         const timeoutSec = TIMEOUT_MS / 1000;
         const processStatus = forceKilled
@@ -338,14 +361,14 @@ export async function callClaudeVoice(systemPrompt: string, userMessage: string)
     }
   }
 
-  // Fallback: CLI without tools
+  // Fallback: CLI without tools — pipe via stdin to avoid E2BIG
   const prompt = `${systemPrompt}\n\n${userMessage}`;
-  const args = [CLAUDE_PATH, "-p", prompt, "--output-format", "text", "--model", "claude-haiku-4-5-20251001"];
+  const args = [CLAUDE_PATH, "-p", "--output-format", "text", "--model", "claude-haiku-4-5-20251001"];
 
   console.log(`[voice] Claude CLI fallback: ${userMessage.substring(0, 80)}...`);
 
   const proc = spawn(args, {
-    stdin: "ignore",
+    stdin: new Blob([prompt]),
     stdout: "pipe", stderr: "pipe",
     cwd: PROJECT_DIR || undefined,
     env: { ...process.env, CLAUDECODE: "", ANTHROPIC_API_KEY: "" },
