@@ -57,6 +57,7 @@ import {
   syncResponse,
 } from "./agent-router.ts";
 import { getSkillSnapshot } from "./skills/index.ts";
+import { getCreatureProfile } from "./creature-profile.ts";
 import {
   formatForestMetrics,
   estimateTokens,
@@ -420,7 +421,7 @@ bot.on("message:text", withQueue(async (ctx) => {
           queueContext || undefined,
           liveForest.incidents || undefined,
           liveForest.awareness || undefined,
-          (await getSkillSnapshot()).prompt || undefined,
+          (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills)).prompt || undefined,
           contextMode,
         );
         const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
@@ -464,7 +465,7 @@ bot.on("message:text", withQueue(async (ctx) => {
     queueContext || undefined,
     liveForest.incidents || undefined,
     tgForestAwareness || undefined,
-    (await getSkillSnapshot()).prompt || undefined,
+    (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills)).prompt || undefined,
     contextMode,
     tgRefreshed,
     undefined, // channelProfile (Telegram doesn't use channels yet)
@@ -722,7 +723,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
             voiceQueueContext || undefined,
             liveForest.incidents || undefined,
             liveForest.awareness || undefined,
-            (await getSkillSnapshot()).prompt || undefined,
+            (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills)).prompt || undefined,
             voiceContextMode,
           );
           const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
@@ -764,7 +765,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
       voiceQueueContext || undefined,
       liveForest.incidents || undefined,
       voiceForestAwareness || undefined,
-      (await getSkillSnapshot()).prompt || undefined,
+      (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills)).prompt || undefined,
       voiceContextMode,
       voiceRefreshed,
     );

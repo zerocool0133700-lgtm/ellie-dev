@@ -95,6 +95,7 @@ import { freshnessTracker, autoRefreshStaleSources } from "./context-freshness.t
 import { refreshSource } from "./context-sources.ts";
 import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hierarchy.ts";
 import { logVerificationTrail } from "./data-quality.ts";
+import { getCreatureProfile } from "./creature-profile.ts";
 
 export async function handleEllieChatMessage(
   ws: WebSocket,
@@ -610,8 +611,14 @@ export async function handleEllieChatMessage(
     }
 
     // Mode-aware fetch gating — skip sources that would be suppressed (priority >= 7)
+    // ELLIE-367: creature priorities take precedence over mode priorities
     const modePriorities = getModeSectionPriorities(contextMode);
-    const shouldFetch = (label: string) => (modePriorities[label] ?? 0) < 7;
+    const ecCreatureProfile = getCreatureProfile(ellieChatActiveAgent);
+    const shouldFetch = (label: string) => {
+      const creaturePrio = ecCreatureProfile?.section_priorities?.[label];
+      if (creaturePrio !== undefined) return creaturePrio < 7;
+      return (modePriorities[label] ?? 0) < 7;
+    };
 
     const [ecConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, ecQueueContext, liveForest] = await Promise.all([
       ecConvoId && supabase ? getConversationMessages(supabase, ecConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
@@ -843,7 +850,7 @@ export async function handleEllieChatMessage(
       ecQueueContext || undefined,
       liveForest.incidents || undefined,
       ecForestAwareness || undefined,
-      (await getSkillSnapshot()).prompt || undefined,
+      (await getSkillSnapshot(ecCreatureProfile?.allowed_skills)).prompt || undefined,
       contextMode,
       ecRefreshed,
       channelProfile,
@@ -1004,8 +1011,14 @@ export async function runSpecialistAsync(
     const specConvoKey = specConvoId || "ellie-chat-default";
     const specContextMode = channelProfile?.contextMode || processMessageMode(specConvoKey, effectiveText).mode;
     // Mode-aware fetch gating — skip sources that would be suppressed (priority >= 7)
+    // ELLIE-367: creature priorities take precedence over mode priorities
     const specModePriorities = getModeSectionPriorities(specContextMode);
-    const shouldFetch = (label: string) => (specModePriorities[label] ?? 0) < 7;
+    const specCreatureProfile = getCreatureProfile(ellieChatActiveAgent);
+    const shouldFetch = (label: string) => {
+      const creaturePrio = specCreatureProfile?.section_priorities?.[label];
+      if (creaturePrio !== undefined) return creaturePrio < 7;
+      return (specModePriorities[label] ?? 0) < 7;
+    };
     const [specConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, specQueueContext, liveForest] = await Promise.all([
       specConvoId && supabase ? getConversationMessages(supabase, specConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
       shouldFetch("context-docket") ? getContextDocket() : Promise.resolve(""),
@@ -1070,7 +1083,7 @@ export async function runSpecialistAsync(
       specQueueContext || undefined,
       liveForest.incidents || undefined,
       liveForest.awareness || undefined,
-      (await getSkillSnapshot()).prompt || undefined,
+      (await getSkillSnapshot(specCreatureProfile?.allowed_skills)).prompt || undefined,
       specContextMode,
       undefined, // refreshedSources
       channelProfile,

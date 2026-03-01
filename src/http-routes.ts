@@ -86,6 +86,7 @@ import {
   type RouteResult,
 } from "./agent-router.ts";
 import { getSkillSnapshot } from "./skills/index.ts";
+import { getCreatureProfile } from "./creature-profile.ts";
 import {
   formatForestMetrics,
   estimateTokens,
@@ -624,7 +625,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               gchatQueueContext || undefined,
               liveForest.incidents || undefined,
               gchatForestAwareness || undefined,
-              (await getSkillSnapshot()).prompt || undefined,
+              (await getSkillSnapshot(getCreatureProfile(gchatAgentResult?.dispatch.agent?.name)?.allowed_skills)).prompt || undefined,
               gchatContextMode,
               gchatRefreshed,
               undefined, // channelProfile (Google Chat doesn't use channels)
@@ -841,7 +842,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               alexaQueueContext || undefined,
               liveForest.incidents || undefined,
               liveForest.awareness || undefined,
-              (await getSkillSnapshot()).prompt || undefined,
+              (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills)).prompt || undefined,
               undefined, // contextMode
               undefined, // refreshedSources
               undefined, // channelProfile

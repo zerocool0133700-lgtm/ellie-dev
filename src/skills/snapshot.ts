@@ -9,33 +9,44 @@ import { loadSkillEntries } from "./loader.ts";
 import { filterEligibleSkills } from "./eligibility.ts";
 import { SKILL_LIMITS, type SkillEntry, type SkillSnapshot } from "./types.ts";
 
-let cachedSnapshot: SkillSnapshot | null = null;
+// ELLIE-367: Per-filter cache keyed by allowed skills list (or "all" for unfiltered)
+const snapshotCache: Map<string, SkillSnapshot> = new Map();
 let snapshotVersion = 0;
 
 /**
  * Get the current skills snapshot. Rebuilds if version has changed.
+ * Optionally filter to only include specific skills (ELLIE-367: creature skill allow-lists).
  */
-export async function getSkillSnapshot(): Promise<SkillSnapshot> {
-  if (cachedSnapshot && cachedSnapshot.version === snapshotVersion) {
-    return cachedSnapshot;
+export async function getSkillSnapshot(allowedSkills?: string[]): Promise<SkillSnapshot> {
+  const cacheKey = allowedSkills ? allowedSkills.slice().sort().join(",") : "all";
+  const cached = snapshotCache.get(cacheKey);
+  if (cached && cached.version === snapshotVersion) {
+    return cached;
   }
 
   const allSkills = await loadSkillEntries();
-  const eligible = await filterEligibleSkills(allSkills);
+  let eligible = await filterEligibleSkills(allSkills);
+
+  if (allowedSkills) {
+    const allowed = new Set(allowedSkills);
+    eligible = eligible.filter(s => allowed.has(s.name));
+  }
+
   const prompt = buildSkillsPrompt(eligible);
 
-  cachedSnapshot = {
+  const snapshot: SkillSnapshot = {
     prompt,
     skills: eligible,
     version: snapshotVersion,
     totalChars: prompt.length,
   };
+  snapshotCache.set(cacheKey, snapshot);
 
   console.log(
-    `[skills] Snapshot built: ${eligible.length}/${allSkills.length} eligible, ${prompt.length} chars`
+    `[skills] Snapshot built (${cacheKey}): ${eligible.length}/${allSkills.length} eligible, ${prompt.length} chars`
   );
 
-  return cachedSnapshot;
+  return snapshot;
 }
 
 /**
@@ -43,7 +54,7 @@ export async function getSkillSnapshot(): Promise<SkillSnapshot> {
  */
 export function bumpSnapshotVersion(): void {
   snapshotVersion = Date.now();
-  cachedSnapshot = null;
+  snapshotCache.clear();
 }
 
 /**

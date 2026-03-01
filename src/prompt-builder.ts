@@ -9,6 +9,7 @@
 import { readFile } from "fs/promises";
 import { watch, type FSWatcher } from "fs";
 import { log } from "./logger.ts";
+import { parseCreatureProfile, setCreatureProfile, getCreatureProfile } from "./creature-profile.ts";
 
 const logger = log.child("prompt-builder");
 import { join, dirname } from "path";
@@ -181,9 +182,12 @@ export async function getAgentArchetype(agentName?: string): Promise<string> {
 
   try {
     const filePath = join(ARCHETYPES_DIR, `${normalized}.md`);
-    const content = await readFile(filePath, "utf-8");
-    _agentArchetypeCache.set(normalized, { content, loadedAt: Date.now() });
-    return content;
+    const raw = await readFile(filePath, "utf-8");
+    // ELLIE-367: Parse creature profile from frontmatter, cache body without frontmatter
+    const { profile, body } = parseCreatureProfile(raw);
+    if (profile) setCreatureProfile(normalized, profile);
+    _agentArchetypeCache.set(normalized, { content: body, loadedAt: Date.now() });
+    return body;
   } catch {
     // No creature-specific archetype — fall back to Forest chain owner
     return getArchetypeContext();
@@ -723,6 +727,24 @@ export function buildPrompt(
     }
   }
 
+  // ── ELLIE-367: Apply creature-specific section priorities ──
+  const creatureProfile = getCreatureProfile(agentConfig?.name);
+  if (creatureProfile?.section_priorities) {
+    for (const s of sections) {
+      if (creatureProfile.section_priorities[s.label] !== undefined) {
+        s.priority = creatureProfile.section_priorities[s.label];
+      }
+    }
+    const CREATURE_SUPPRESS = 7;
+    const creatureSuppCount = sections.filter(s => s.priority >= CREATURE_SUPPRESS).length;
+    if (creatureSuppCount > 0) {
+      for (let i = sections.length - 1; i >= 0; i--) {
+        if (sections[i].priority >= CREATURE_SUPPRESS) sections.splice(i, 1);
+      }
+      logger.debug(`Creature ${agentConfig?.name}: suppressed ${creatureSuppCount} sections`);
+    }
+  }
+
   const excludedSections = getStrategyExcludedSections(activeStrategy);
   let filteredSections = excludedSections.size > 0
     ? sections.filter(s => !excludedSections.has(s.label))
@@ -734,12 +756,14 @@ export function buildPrompt(
     filteredSections = filteredSections.filter(s => !suppressed.has(s.label));
   }
 
-  // ── Apply token budget (ELLIE-185 + ELLIE-261 + ELLIE-334 budget control) ──
-  // Channel profile budget > mode budget > strategy budget
+  // ── Apply token budget (ELLIE-185 + ELLIE-261 + ELLIE-334 + ELLIE-367 budget control) ──
+  // Channel profile budget > creature budget > mode budget > strategy budget
   const budget = channelProfile?.tokenBudget
     ? channelProfile.tokenBudget
-    : contextMode
-      ? getModeTokenBudget(contextMode)
-      : getStrategyTokenBudget(activeStrategy);
+    : creatureProfile?.token_budget
+      ? creatureProfile.token_budget
+      : contextMode
+        ? getModeTokenBudget(contextMode)
+        : getStrategyTokenBudget(activeStrategy);
   return applyTokenBudget(filteredSections, budget);
 }
