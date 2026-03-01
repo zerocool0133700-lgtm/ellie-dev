@@ -299,6 +299,26 @@ export async function fetchWorkItemDetails(workItemId: string): Promise<WorkItem
   }
 }
 
+/**
+ * Check if a work item (e.g. "ELLIE-237") is in a Done/Cancelled state.
+ * Used by ephemeral channel auto-archive (ELLIE-334).
+ */
+export async function isWorkItemDone(workItemId: string): Promise<boolean> {
+  if (!isPlaneConfigured()) return false;
+  try {
+    const parsed = parseWorkItemId(workItemId);
+    if (!parsed) return false;
+    const projectId = await getProjectByIdentifier(parsed.projectIdentifier);
+    if (!projectId) return false;
+    const issue = await getIssueBySequenceId(projectId, parsed.sequenceId);
+    if (!issue) return false;
+    const group = (issue.state_detail as Record<string, string>)?.group;
+    return group === "completed" || group === "cancelled";
+  } catch {
+    return false;
+  }
+}
+
 export interface WorkItemSummary {
   sequenceId: number;
   name: string;

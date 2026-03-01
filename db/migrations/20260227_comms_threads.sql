@@ -62,6 +62,6 @@ CREATE POLICY "Allow all" ON comms_preferences FOR ALL USING (true) WITH CHECK (
 -- Seed default preferences
 INSERT INTO comms_preferences (key, value) VALUES
   ('stale_thresholds', '{"telegram": 4, "gchat": 4, "gmail": 48}'),
-  ('auto_gtd_create', 'false'),
+  ('auto_gtd_create', 'true'),
   ('gtd_threshold_hours', '72')
 ON CONFLICT (key) DO NOTHING;

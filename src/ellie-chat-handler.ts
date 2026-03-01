@@ -31,6 +31,7 @@ import {
   getPsyContext,
   getPhaseContext,
   getHealthContext,
+  getLastBuildMetrics,
 } from "./prompt-builder.ts";
 import {
   callClaude,
@@ -90,7 +91,7 @@ import {
 } from "./api/agent-queue.ts";
 import { detectAndCaptureCorrection } from "./correction-detector.ts";
 import { detectAndLinkCalendarEvents } from "./calendar-linker.ts";
-import { processMessageMode, isContextRefresh, getModeSectionPriorities } from "./context-mode.ts";
+import { processMessageMode, isContextRefresh, getModeSectionPriorities, detectMode } from "./context-mode.ts";
 import { freshnessTracker, autoRefreshStaleSources } from "./context-freshness.ts";
 import { refreshSource } from "./context-sources.ts";
 import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hierarchy.ts";
@@ -542,7 +543,15 @@ export async function handleEllieChatMessage(
   // ── Normal text mode: full agent routing + context gathering (mirrors Google Chat) ──
   await enqueueEllieChat(async () => {
     const ellieChatWorkItem = text.match(/\b([A-Z]+-\d+)\b/)?.[1];
-    const agentResult = await routeAndDispatch(supabase, text, "ellie-chat", "dashboard", ellieChatWorkItem);
+
+    // ELLIE-381: Pre-routing mode check — skill-only → road-runner override
+    const preRouteDetection = detectMode(text);
+    const skillOnlyOverride = preRouteDetection?.mode === "skill-only" ? "road-runner" : undefined;
+    if (skillOnlyOverride) {
+      console.log(`[routing] skill-only mode detected — routing to road-runner`);
+    }
+
+    const agentResult = await routeAndDispatch(supabase, text, "ellie-chat", "dashboard", ellieChatWorkItem, skillOnlyOverride);
     let effectiveText = agentResult?.route.strippedMessage || text;
     // Prepend image file reference so Claude Code CLI can see the image
     if (imagePath) {
@@ -550,10 +559,12 @@ export async function handleEllieChatMessage(
     }
     if (agentResult) {
       setActiveAgent("ellie-chat", agentResult.dispatch.agent.name);
+      // ELLIE-383: Include contextMode from pre-route detection in route broadcast
       broadcastExtension({
         type: "route", channel: "ellie-chat",
         agent: agentResult.dispatch.agent.name,
         mode: agentResult.route.execution_mode,
+        contextMode: preRouteDetection?.mode || undefined,
       });
 
       // Dispatch notification (ELLIE-80 pattern from Google Chat)
@@ -858,6 +869,27 @@ export async function handleEllieChatMessage(
       ecCrossChannel || undefined,
     );
 
+    // ── ELLIE-383: Context snapshot logging + extension broadcast ──
+    const ecBuildMetrics = getLastBuildMetrics();
+    if (ecBuildMetrics) {
+      const top5 = [...ecBuildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
+      console.log(
+        `[context:snapshot] creature=${ecBuildMetrics.creature || "general"} mode=${ecBuildMetrics.mode || "default"} ` +
+        `tokens=${ecBuildMetrics.totalTokens} sections=${ecBuildMetrics.sectionCount} budget=${ecBuildMetrics.budget} ` +
+        `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
+      );
+      broadcastExtension({
+        type: "context_snapshot",
+        channel: "ellie-chat",
+        creature: ecBuildMetrics.creature || "general",
+        contextMode: ecBuildMetrics.mode || "conversation",
+        totalTokens: ecBuildMetrics.totalTokens,
+        sectionCount: ecBuildMetrics.sectionCount,
+        budget: ecBuildMetrics.budget,
+        top5: top5.map(s => ({ label: s.label, tokens: s.tokens })),
+      });
+    }
+
     const agentTools = agentResult?.dispatch.agent.tools_enabled;
     const agentModel = agentResult?.dispatch.agent.model;
     const startTime = Date.now();
@@ -1090,6 +1122,27 @@ export async function runSpecialistAsync(
       ecGroundTruthConflicts || undefined,
       ecCrossChannel || undefined,
     );
+
+    // ── ELLIE-383: Context snapshot logging for specialist ──
+    const specBuildMetrics = getLastBuildMetrics();
+    if (specBuildMetrics) {
+      const top5 = [...specBuildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
+      console.log(
+        `[context:snapshot] creature=${specBuildMetrics.creature || "general"} mode=${specBuildMetrics.mode || "default"} ` +
+        `tokens=${specBuildMetrics.totalTokens} sections=${specBuildMetrics.sectionCount} budget=${specBuildMetrics.budget} ` +
+        `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
+      );
+      broadcastExtension({
+        type: "context_snapshot",
+        channel: "ellie-chat",
+        creature: specBuildMetrics.creature || "general",
+        contextMode: specBuildMetrics.mode || "conversation",
+        totalTokens: specBuildMetrics.totalTokens,
+        sectionCount: specBuildMetrics.sectionCount,
+        budget: specBuildMetrics.budget,
+        top5: top5.map(s => ({ label: s.label, tokens: s.tokens })),
+      });
+    }
 
     const agentTools = agentResult.dispatch.agent.tools_enabled;
     const agentModel = agentResult.dispatch.agent.model;

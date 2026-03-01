@@ -678,10 +678,10 @@ export async function expireIdleConversations(
 // --- Helpers ---
 
 async function callClaudeCLI(prompt: string): Promise<string> {
-  const args = [CLAUDE_PATH, "-p", prompt, "--output-format", "text"];
+  const args = [CLAUDE_PATH, "-p", "--output-format", "text"];
 
   const proc = spawn(args, {
-    stdin: "ignore",
+    stdin: new Blob([prompt]),
     stdout: "pipe",
     stderr: "pipe",
     env: {

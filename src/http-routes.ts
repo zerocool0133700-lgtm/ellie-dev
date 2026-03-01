@@ -43,6 +43,7 @@ import {
   runPostMessageAssessment,
   getPlanningMode,
   setPlanningMode,
+  getLastBuildMetrics,
   USER_NAME,
   USER_TIMEZONE,
 } from "./prompt-builder.ts";
@@ -438,11 +439,13 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         (async () => {
           try {
             const gchatWorkItem = parsed.text.match(/\b([A-Z]+-\d+)\b/)?.[1];
-            const gchatAgentResult = await routeAndDispatch(supabase, parsed.text, "google-chat", parsed.senderEmail, gchatWorkItem);
+            const gchatPreRoute = detectMode(parsed.text);
+            const gchatSkillOverride = gchatPreRoute?.mode === "skill-only" ? "road-runner" : undefined;
+            const gchatAgentResult = await routeAndDispatch(supabase, parsed.text, "google-chat", parsed.senderEmail, gchatWorkItem, gchatSkillOverride);
             const effectiveGchatText = gchatAgentResult?.route.strippedMessage || parsed.text;
             if (gchatAgentResult) {
               setActiveAgent("google-chat", gchatAgentResult.dispatch.agent.name);
-              broadcastExtension({ type: "route", channel: "google-chat", agent: gchatAgentResult.dispatch.agent.name, mode: gchatAgentResult.route.execution_mode });
+              broadcastExtension({ type: "route", channel: "google-chat", agent: gchatAgentResult.dispatch.agent.name, mode: gchatAgentResult.route.execution_mode, confidence: gchatAgentResult.route.confidence, contextMode: gchatPreRoute?.mode || undefined });
 
               // Dispatch confirmation — routed through notification policy (ELLIE-80)
               if (gchatAgentResult.dispatch.agent.name !== "general" && gchatAgentResult.dispatch.is_new) {
@@ -633,6 +636,27 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               gchatCrossChannel || undefined,
             );
 
+            // ELLIE-383: Context snapshot logging + extension broadcast
+            const gchatBuildMetrics = getLastBuildMetrics();
+            if (gchatBuildMetrics) {
+              const top5 = [...gchatBuildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
+              console.log(
+                `[context:snapshot] creature=${gchatBuildMetrics.creature || "general"} mode=${gchatBuildMetrics.mode || "default"} ` +
+                `tokens=${gchatBuildMetrics.totalTokens} sections=${gchatBuildMetrics.sectionCount} budget=${gchatBuildMetrics.budget} ` +
+                `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
+              );
+              broadcastExtension({
+                type: "context_snapshot",
+                channel: "google-chat",
+                creature: gchatBuildMetrics.creature || "general",
+                contextMode: gchatBuildMetrics.mode || "conversation",
+                totalTokens: gchatBuildMetrics.totalTokens,
+                sectionCount: gchatBuildMetrics.sectionCount,
+                budget: gchatBuildMetrics.budget,
+                top5: top5.map(s => ({ label: s.label, tokens: s.tokens })),
+              });
+            }
+
             const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
             const gchatAgentModel = gchatAgentResult?.dispatch.agent.model;
 
@@ -798,10 +822,12 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
 
             // Route first, then gather context with correct agent
             const alexaWorkItem = query.match(/\b([A-Z]+-\d+)\b/)?.[1];
-            const agentResult = await routeAndDispatch(supabase, query, "alexa", parsed.userId, alexaWorkItem);
+            const alexaPreRoute = detectMode(query);
+            const alexaSkillOverride = alexaPreRoute?.mode === "skill-only" ? "road-runner" : undefined;
+            const agentResult = await routeAndDispatch(supabase, query, "alexa", parsed.userId, alexaWorkItem, alexaSkillOverride);
             if (agentResult) {
               setActiveAgent("alexa", agentResult.dispatch.agent.name);
-              broadcastExtension({ type: "route", channel: "alexa", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode });
+              broadcastExtension({ type: "route", channel: "alexa", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode, confidence: agentResult.route.confidence, contextMode: alexaPreRoute?.mode || undefined });
             }
             const effectiveQuery = agentResult?.route.strippedMessage || query;
 
@@ -847,6 +873,27 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               undefined, // refreshedSources
               undefined, // channelProfile
             );
+
+            // ELLIE-383: Context snapshot logging + extension broadcast
+            const alexaBuildMetrics = getLastBuildMetrics();
+            if (alexaBuildMetrics) {
+              const top5 = [...alexaBuildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
+              console.log(
+                `[context:snapshot] creature=${alexaBuildMetrics.creature || "general"} mode=${alexaBuildMetrics.mode || "default"} ` +
+                `tokens=${alexaBuildMetrics.totalTokens} sections=${alexaBuildMetrics.sectionCount} budget=${alexaBuildMetrics.budget} ` +
+                `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
+              );
+              broadcastExtension({
+                type: "context_snapshot",
+                channel: "alexa",
+                creature: alexaBuildMetrics.creature || "general",
+                contextMode: alexaBuildMetrics.mode || "conversation",
+                totalTokens: alexaBuildMetrics.totalTokens,
+                sectionCount: alexaBuildMetrics.sectionCount,
+                budget: alexaBuildMetrics.budget,
+                top5: top5.map(s => ({ label: s.label, tokens: s.tokens })),
+              });
+            }
 
             const ALEXA_TIMEOUT_MS = 6_000;
             const claudePromise = (async () => {

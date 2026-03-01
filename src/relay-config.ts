@@ -9,6 +9,7 @@ import { join, dirname } from "path";
 import type { IncomingMessage } from "http";
 import { log } from "./logger.ts";
 import { writeToDisk, readFromDisk } from "./config-cache.ts";
+import { freshnessTracker } from "./context-freshness.ts";
 
 const logger = log.child("relay-config");
 
@@ -93,14 +94,19 @@ const CONTEXT_CACHE_MS = 5 * 60_000; // cache for 5 minutes
 export async function getContextDocket(): Promise<string> {
   const now = Date.now();
   if (cachedContext && now - cachedContext.fetchedAt < CONTEXT_CACHE_MS) {
+    // ELLIE-327: Don't re-record — freshnessTracker retains the original fetchedAt
+    // so staleness detection works correctly against the actual data age
     return cachedContext.document;
   }
+  const fetchStart = Date.now();
   try {
     const res = await fetch(CONTEXT_ENDPOINT);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     cachedContext = { document: data.document, fetchedAt: now };
     writeToDisk("context-docket", data.document);
+    // ELLIE-327: Track context docket freshness
+    freshnessTracker.recordFetch("context-docket", Date.now() - fetchStart);
     console.log("[context] Loaded context docket");
     return data.document;
   } catch (err) {

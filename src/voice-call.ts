@@ -76,7 +76,7 @@ const MCP_TOOLS = "mcp__google-workspace__*,mcp__github__*,mcp__memory__*,mcp__s
 const ALLOWED_TOOLS = (process.env.ALLOWED_TOOLS || `${DEFAULT_TOOLS},${MCP_TOOLS}`).split(",").map(t => t.trim());
 
 async function callClaude(prompt: string): Promise<string> {
-  const args = [CLAUDE_PATH, "-p", prompt, "--output-format", "text"];
+  const args = [CLAUDE_PATH, "-p", "--output-format", "text"];
   if (AGENT_MODE) {
     args.push("--allowedTools", ...ALLOWED_TOOLS);
   }
@@ -84,6 +84,7 @@ async function callClaude(prompt: string): Promise<string> {
   console.log(`[voice] Claude: ${prompt.substring(0, 80)}...`);
 
   const proc = spawn(args, {
+    stdin: new Blob([prompt]),
     stdout: "pipe",
     stderr: "pipe",
     cwd: PROJECT_DIR || undefined,

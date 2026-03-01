@@ -19,6 +19,7 @@ import { isPlaneConfigured } from "./plane.ts";
 import {
   trimSearchContext,
   applyTokenBudget,
+  estimateTokens,
   mapHealthToMemoryCategory,
   type PromptSection,
 } from "./relay-utils.ts";
@@ -31,6 +32,22 @@ import { buildSourceHierarchyInstruction } from "./source-hierarchy.ts";
 import { getActiveRunStates } from "./orchestration-tracker.ts";
 
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
+
+// ── ELLIE-383: Build metrics (last prompt's section breakdown) ──
+
+export interface BuildMetrics {
+  sections: Array<{ label: string; tokens: number; priority: number }>;
+  totalTokens: number;
+  sectionCount: number;
+  budget: number;
+  mode?: string;
+  creature?: string;
+}
+
+let _lastBuildMetrics: BuildMetrics | null = null;
+
+/** Get metrics from the most recent buildPrompt call. */
+export function getLastBuildMetrics(): BuildMetrics | null { return _lastBuildMetrics; }
 
 // ── Planning mode state ─────────────────────────────────────
 
@@ -834,5 +851,22 @@ export function buildPrompt(
       : contextMode
         ? getModeTokenBudget(contextMode)
         : getStrategyTokenBudget(activeStrategy);
+
+  // ── ELLIE-383: Capture build metrics before budget trimming ──
+  const sectionMetrics = filteredSections.map(s => ({
+    label: s.label,
+    tokens: estimateTokens(s.content),
+    priority: s.priority,
+  }));
+  const totalTokens = sectionMetrics.reduce((sum, s) => sum + s.tokens, 0);
+  _lastBuildMetrics = {
+    sections: sectionMetrics,
+    totalTokens,
+    sectionCount: filteredSections.length,
+    budget,
+    mode: contextMode,
+    creature: agentConfig?.name,
+  };
+
   return applyTokenBudget(filteredSections, budget);
 }

@@ -1,6 +1,5 @@
 ---
 token_budget: 16000
-allowed_skills: [plane, github]
 section_priorities:
   queue: 1
   archetype: 2

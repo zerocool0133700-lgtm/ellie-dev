@@ -118,17 +118,20 @@ export { initForestConsumer } from "./consumers/forest.ts";
 export { initAlertConsumer } from "./consumers/alert.ts";
 export { initCommsConsumer } from "./consumers/comms.ts";
 export { initCalendarIntelConsumer } from "./consumers/calendar-intel.ts";
+export { initRelationshipConsumer } from "./consumers/relationship.ts";
 
 // ── Consumers (pull) ──────────────────────────────────────────
 export { generateBriefing } from "./consumers/briefing.ts";
 export type { DailyBriefing, BriefingSection, BriefingItem } from "./consumers/briefing.ts";
-export { generateRelationshipReport } from "./consumers/relationship.ts";
-export type { RelationshipReport, ContactStats } from "./consumers/relationship.ts";
-export { generateAnalyticsReport } from "./consumers/analytics.ts";
-export type { ActivityReport, ChannelVolume, HourlyDistribution } from "./consumers/analytics.ts";
+export { generateRelationshipReport, getProfileCount, getFollowUpProfiles, getHealthBreakdown, getTopContacts, invalidateRelationshipCache } from "./consumers/relationship.ts";
+export type { RelationshipReport, ContactStats, RelationshipProfile } from "./consumers/relationship.ts";
+export { initAnalyticsConsumer, generateAnalyticsReport, getDailySummary, getTimeDistribution, getPatterns, getFocusBlocks, rollupDay, getTodayMinutes, getTodayFocusMin, getTodayMeetingMin, getTodayMessages, getAnalyticsStats, getTrends, detectAnomalies, getEnergyCurve, assessBurnoutRisk, getBestFocusWindows, getCommTimeBySource } from "./consumers/analytics.ts";
+export type { ActivityReport, ChannelVolume, HourlyDistribution, DaySummary, TimeDistribution, WeeklyPattern, FocusBlock, TrendAnalysis, AnomalyDay, HourlyEnergy, BurnoutSignals } from "./consumers/analytics.ts";
 export { getStaleThreads, getActiveThreads } from "./consumers/comms.ts";
-export { getCalendarInsights, getCalendarAlerts, clearInsights } from "./consumers/calendar-intel.ts";
-export type { CalendarInsight } from "./consumers/calendar-intel.ts";
+export { getCalendarInsights, getCalendarAlerts, clearInsights, getUpcomingIntel, getEventsNeedingPrep, getConflictingEvents, suggestFocusBlocks, generatePrepForEvent } from "./consumers/calendar-intel.ts";
+export type { CalendarInsight, CalendarIntelRow, CalendarPattern } from "./consumers/calendar-intel.ts";
+export { getFactCount, getGoalCount, getConflictCount, getOverdueGoalCount, getLastExtraction, getMemoryHealth, getMemoryStats } from "./consumers/memory.ts";
+export type { ConversationFact, MemoryHealth } from "./consumers/memory.ts";
 
 // ── Summary Bar (ELLIE-315) ──────────────────────────────────
 export { getSummaryState } from "./consumers/summary.ts";

@@ -12,8 +12,11 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getActiveThreads, getStaleThreads } from "./comms.ts";
-import { getCalendarInsights, getCalendarAlerts } from "./calendar-intel.ts";
+import { getCalendarInsights, getCalendarAlerts, getUpcomingIntel, getEventsNeedingPrep, getConflictingEvents } from "./calendar-intel.ts";
 import { getActiveAlertCount, getCachedRules } from "./alert.ts";
+import { getProfileCount, getFollowUpProfiles, getHealthBreakdown as getRelHealthBreakdown } from "./relationship.ts";
+import { getFactCount, getGoalCount, getConflictCount, getOverdueGoalCount, getMemoryHealth } from "./memory.ts";
+import { getTodayMinutes, getTodayFocusMin, getTodayMeetingMin, getTodayMessages } from "./analytics.ts";
 import { log } from "../../logger.ts";
 
 const logger = log.child("ums-consumer-summary");
@@ -137,39 +140,42 @@ async function getGtdSummary(supabase: SupabaseClient): Promise<ModuleSummary> {
   };
 }
 
-async function getMemorySummary(supabase: SupabaseClient): Promise<ModuleSummary> {
-  const { count } = await supabase
-    .from("memory")
-    .select("*", { count: "exact", head: true })
-    .eq("visibility", "internal");
+async function getMemorySummary(_supabase: SupabaseClient): Promise<ModuleSummary> {
+  try {
+    const facts = getFactCount();
+    const goals = getGoalCount();
+    const conflicts = getConflictCount();
+    const overdue = getOverdueGoalCount();
+    const health = getMemoryHealth();
 
-  const total = count ?? 0;
+    const parts: string[] = [];
+    parts.push(`${facts} facts`);
+    if (goals > 0) parts.push(`${goals} goals`);
+    if (conflicts > 0) parts.push(`${conflicts} conflicts`);
+    if (overdue > 0) parts.push(`${overdue} overdue`);
+    if (health.staleFacts > 5) parts.push(`${health.staleFacts} stale`);
 
-  // Check latest entry timestamp
-  const { data: latest } = await supabase
-    .from("memory")
-    .select("created_at")
-    .eq("visibility", "internal")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .single();
+    const hasNew = conflicts > (lastSeen["memory"] ?? 0);
 
-  let recency = "";
-  if (latest?.created_at) {
-    const hoursAgo = Math.round((Date.now() - new Date(latest.created_at).getTime()) / (1000 * 60 * 60));
-    recency = hoursAgo < 1 ? ", last write <1h ago" : `, last write ${hoursAgo}h ago`;
+    // Red: contradictions or many overdue goals
+    // Green: conflicts to review, stale facts, or health issues
+    const status = conflicts > 3 || overdue > 3 ? "red"
+      : conflicts > 0 || overdue > 0 || health.staleFacts > 10 ? "green"
+      : "white";
+
+    return {
+      module: "memory",
+      label: "Memory",
+      icon: "&#128065;", // 👁
+      status,
+      text: parts.join(" | "),
+      path: "/forest",
+      has_new: hasNew,
+      count: facts + goals,
+    };
+  } catch {
+    return fallback("memory", "Memory", "/forest");
   }
-
-  return {
-    module: "memory",
-    label: "Memory",
-    icon: "&#128065;", // 👁
-    status: "white",
-    text: `${total} memories${recency}`,
-    path: "/forest",
-    has_new: false,
-    count: total,
-  };
 }
 
 async function getBriefingSummary(supabase: SupabaseClient): Promise<ModuleSummary> {
@@ -219,58 +225,64 @@ function getCommsSummary(): Promise<ModuleSummary> {
 }
 
 function getCalendarSummary(): Promise<ModuleSummary> {
-  const insights = getCalendarInsights();
   const alerts = getCalendarAlerts();
+  const upcoming = getUpcomingIntel();
+  const conflicts = getConflictingEvents();
+  const needPrep = getEventsNeedingPrep();
 
-  let text = "No calendar signals";
-  if (insights.length > 0) {
-    const prepCount = insights.filter(i => i.type === "prep_needed").length;
-    const conflictCount = insights.filter(i => i.type === "conflict").length;
-    const parts: string[] = [];
-    if (conflictCount > 0) parts.push(`${conflictCount} conflicts`);
-    if (prepCount > 0) parts.push(`${prepCount} need prep`);
-    if (parts.length === 0) parts.push(`${insights.length} insights`);
-    text = parts.join(", ");
-  }
+  const parts: string[] = [];
+  if (conflicts.length > 0) parts.push(`${conflicts.length} conflicts`);
+  if (needPrep.length > 0) parts.push(`${needPrep.length} need prep`);
+  if (upcoming.length > 0) parts.push(`${upcoming.length} upcoming`);
+  const text = parts.length > 0 ? parts.join(", ") : "No upcoming events";
+
+  const status = conflicts.length > 0 || alerts.length > 0 ? "red"
+    : needPrep.length > 0 ? "green"
+    : "white";
 
   return Promise.resolve({
     module: "calendar",
     label: "Calendar",
     icon: "&#128197;", // 📅
-    status: alerts.length > 0 ? "red" : insights.length > 0 ? "green" : "white",
+    status,
     text,
     path: "/",
-    has_new: insights.length > 0,
-    count: insights.length,
+    has_new: conflicts.length > 0 || needPrep.length > 0,
+    count: upcoming.length,
   });
 }
 
 async function getForestSummary(): Promise<ModuleSummary> {
-  // Try to get recent findings count from Bridge
   try {
-    const resp = await fetch("http://localhost:3001/api/bridge/read", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-bridge-key": "bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e740f6577a",
-      },
-      body: JSON.stringify({ query: "recent", scope_path: "2", limit: 1 }),
-      signal: AbortSignal.timeout(3000),
-    });
-    if (resp.ok) {
-      const data = await resp.json();
-      const count = data.total ?? data.results?.length ?? 0;
-      return {
-        module: "forest",
-        label: "Forest",
-        icon: "&#127794;", // 🌲
-        status: "white",
-        text: `${count} findings`,
-        path: "/forest",
-        has_new: false,
-        count,
-      };
-    }
+    const { getMemoryCount, listUnresolvedContradictions, sql } = await import("../../../ellie-forest/src/index");
+
+    const [total, recentResult, contradictions] = await Promise.all([
+      getMemoryCount(),
+      sql`SELECT COUNT(*)::int AS count FROM shared_memories
+          WHERE status = 'active' AND created_at >= NOW() - INTERVAL '24 hours'`,
+      listUnresolvedContradictions().catch(() => []),
+    ]);
+
+    const recent = recentResult[0]?.count ?? 0;
+    const contradictionCount = contradictions.length;
+
+    const parts: string[] = [];
+    if (recent > 0) parts.push(`${recent} new (24h)`);
+    if (contradictionCount > 0) parts.push(`${contradictionCount} contradictions`);
+    parts.push(`${total} total`);
+
+    const hasNew = recent > (lastSeen["forest"] ?? 0);
+
+    return {
+      module: "forest",
+      label: "Forest",
+      icon: "&#127794;", // 🌲
+      status: contradictionCount > 0 ? "green" : "white",
+      text: parts.join(", "),
+      path: "/forest",
+      has_new: hasNew,
+      count: total,
+    };
   } catch {
     // Forest unavailable — show degraded
   }
@@ -304,53 +316,68 @@ function getAlertSummary(): ModuleSummary {
   }
 }
 
-async function getRelationshipSummary(supabase: SupabaseClient): Promise<ModuleSummary> {
-  // Count distinct senders in last 30 days
-  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+async function getRelationshipSummary(_supabase: SupabaseClient): Promise<ModuleSummary> {
   try {
-    const { data } = await supabase
-      .from("unified_messages")
-      .select("sender")
-      .gte("received_at", since)
-      .not("sender", "is", null)
-      .limit(500);
+    const total = getProfileCount();
+    const followUps = getFollowUpProfiles();
+    const breakdown = getRelHealthBreakdown();
+    const atRisk = breakdown["at_risk"] || 0;
+    const declining = breakdown["declining"] || 0;
 
-    const unique = new Set((data || []).map(d => JSON.stringify(d.sender))).size;
+    const parts: string[] = [];
+    if (followUps.length > 0) parts.push(`${followUps.length} need follow-up`);
+    if (atRisk > 0) parts.push(`${atRisk} at risk`);
+    if (declining > 0) parts.push(`${declining} declining`);
+    if (parts.length === 0) parts.push(`${total} contacts tracked`);
+
+    const hasNew = followUps.length > (lastSeen["relationship"] ?? 0);
+    const status = followUps.length > 0 || atRisk > 0 ? "green" : "white";
+
     return {
       module: "relationship",
       label: "Relationships",
       icon: "&#128101;", // 👥
-      status: "white",
-      text: `${unique} contacts (30d)`,
+      status,
+      text: parts.join(", "),
       path: "/entities",
-      has_new: false,
-      count: unique,
+      has_new: hasNew,
+      count: total,
     };
   } catch {
     return fallback("relationship", "Relationships", "/entities");
   }
 }
 
-async function getAnalyticsSummary(supabase: SupabaseClient): Promise<ModuleSummary> {
-  // Count messages in last 7 days for daily average
-  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+async function getAnalyticsSummary(_supabase: SupabaseClient): Promise<ModuleSummary> {
   try {
-    const { count } = await supabase
-      .from("unified_messages")
-      .select("*", { count: "exact", head: true })
-      .gte("received_at", since);
+    const totalMin = getTodayMinutes();
+    const focusMin = getTodayFocusMin();
+    const meetingMin = getTodayMeetingMin();
+    const messages = getTodayMessages();
 
-    const total = count ?? 0;
-    const daily = Math.round(total / 7);
+    const hours = (min: number) => (min / 60).toFixed(1);
+
+    const parts: string[] = [];
+    parts.push(`${hours(totalMin)}h today`);
+    if (focusMin > 0) parts.push(`${hours(focusMin)}h focus`);
+    if (meetingMin > 0) parts.push(`${hours(meetingMin)}h meetings`);
+
+    // Warnings
+    let status: ModuleStatus = "white";
+    if (totalMin > 0 && meetingMin / totalMin > 0.6) status = "red";
+    else if (totalMin > 60 && focusMin === 0) status = "green";
+
+    const hasNew = messages > (lastSeen["analytics"] ?? 0);
+
     return {
       module: "analytics",
       label: "Analytics",
       icon: "&#128200;", // 📈
-      status: "white",
-      text: `~${daily} msgs/day (7d avg)`,
+      status,
+      text: parts.join(" | "),
       path: "/analytics",
-      has_new: false,
-      count: daily,
+      has_new: hasNew,
+      count: messages,
     };
   } catch {
     return fallback("analytics", "Analytics", "/analytics");

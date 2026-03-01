@@ -31,6 +31,7 @@ import {
   getPsyContext,
   getPhaseContext,
   getHealthContext,
+  getLastBuildMetrics,
 } from "./prompt-builder.ts";
 import {
   callClaude,
@@ -92,7 +93,7 @@ import {
 } from "./api/agent-queue.ts";
 import { detectAndCaptureCorrection } from "./correction-detector.ts";
 import { detectAndLinkCalendarEvents } from "./calendar-linker.ts";
-import { processMessageMode, isContextRefresh } from "./context-mode.ts";
+import { processMessageMode, isContextRefresh, detectMode } from "./context-mode.ts";
 import { freshnessTracker, autoRefreshStaleSources } from "./context-freshness.ts";
 import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hierarchy.ts";
 import { logVerificationTrail } from "./data-quality.ts";
@@ -226,11 +227,20 @@ bot.on("message:text", withQueue(async (ctx) => {
 
   // Route message to appropriate agent via LLM classifier (falls back gracefully)
   const detectedWorkItem = text.match(/\b([A-Z]+-\d+)\b/)?.[1];
-  const agentResult = await routeAndDispatch(supabase, text, "telegram", userId, detectedWorkItem);
+
+  // ELLIE-381: Pre-routing mode check — skill-only → road-runner override
+  const preRouteDetection = detectMode(text);
+  const skillOnlyOverride = preRouteDetection?.mode === "skill-only" ? "road-runner" : undefined;
+  if (skillOnlyOverride) {
+    console.log(`[routing] skill-only mode detected — routing to road-runner`);
+  }
+
+  const agentResult = await routeAndDispatch(supabase, text, "telegram", userId, detectedWorkItem, skillOnlyOverride);
   const effectiveText = agentResult?.route.strippedMessage || text;
   if (agentResult) {
     setActiveAgent("telegram", agentResult.dispatch.agent.name);
-    broadcastExtension({ type: "route", channel: "telegram", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode, confidence: agentResult.route.confidence });
+    // ELLIE-383: Include contextMode from pre-route detection in route broadcast
+    broadcastExtension({ type: "route", channel: "telegram", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode, confidence: agentResult.route.confidence, contextMode: preRouteDetection?.mode || undefined });
 
     // Dispatch confirmation — routed through notification policy (ELLIE-80)
     if (agentResult.dispatch.agent.name !== "general" && agentResult.dispatch.is_new) {
@@ -473,6 +483,27 @@ bot.on("message:text", withQueue(async (ctx) => {
     tgCrossChannel || undefined,
   );
 
+  // ── ELLIE-383: Context snapshot logging + extension broadcast ──
+  const buildMetrics = getLastBuildMetrics();
+  if (buildMetrics) {
+    const top5 = [...buildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
+    console.log(
+      `[context:snapshot] creature=${buildMetrics.creature || "general"} mode=${buildMetrics.mode || "default"} ` +
+      `tokens=${buildMetrics.totalTokens} sections=${buildMetrics.sectionCount} budget=${buildMetrics.budget} ` +
+      `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
+    );
+    broadcastExtension({
+      type: "context_snapshot",
+      channel: "telegram",
+      creature: buildMetrics.creature || "general",
+      contextMode: buildMetrics.mode || "conversation",
+      totalTokens: buildMetrics.totalTokens,
+      sectionCount: buildMetrics.sectionCount,
+      budget: buildMetrics.budget,
+      top5: top5.map(s => ({ label: s.label, tokens: s.tokens })),
+    });
+  }
+
   const agentTools = agentResult?.dispatch.agent.tools_enabled;
   const agentModel = agentResult?.dispatch.agent.model;
 
@@ -582,11 +613,14 @@ bot.on("message:voice", withQueue(async (ctx) => {
     await saveMessage("user", `[Voice ${voice.duration}s]: ${transcription}`, undefined, "telegram", voiceUserId);
     broadcastExtension({ type: "message_in", channel: "telegram", preview: `[Voice ${voice.duration}s]: ${transcription.substring(0, 150)}` });
     const voiceWorkItem = transcription.match(/\b([A-Z]+-\d+)\b/)?.[1];
-    const agentResult = await routeAndDispatch(supabase, transcription, "telegram", voiceUserId, voiceWorkItem);
+    const voicePreRoute = detectMode(transcription);
+    const voiceSkillOverride = voicePreRoute?.mode === "skill-only" ? "road-runner" : undefined;
+    const agentResult = await routeAndDispatch(supabase, transcription, "telegram", voiceUserId, voiceWorkItem, voiceSkillOverride);
     const effectiveTranscription = agentResult?.route.strippedMessage || transcription;
     if (agentResult) {
       setActiveAgent("telegram", agentResult.dispatch.agent.name);
-      broadcastExtension({ type: "route", channel: "telegram", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode });
+      // ELLIE-383: Include contextMode from pre-route detection in route broadcast
+      broadcastExtension({ type: "route", channel: "telegram", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode, contextMode: voicePreRoute?.mode || undefined });
 
       // Dispatch confirmation for voice (matches text handler)
       if (agentResult.dispatch.agent.name !== "general" && agentResult.dispatch.is_new) {
@@ -769,6 +803,27 @@ bot.on("message:voice", withQueue(async (ctx) => {
       voiceContextMode,
       voiceRefreshed,
     );
+
+    // ── ELLIE-383: Context snapshot logging for voice ──
+    const voiceBuildMetrics = getLastBuildMetrics();
+    if (voiceBuildMetrics) {
+      const top5 = [...voiceBuildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
+      console.log(
+        `[context:snapshot] creature=${voiceBuildMetrics.creature || "general"} mode=${voiceBuildMetrics.mode || "default"} ` +
+        `tokens=${voiceBuildMetrics.totalTokens} sections=${voiceBuildMetrics.sectionCount} budget=${voiceBuildMetrics.budget} ` +
+        `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
+      );
+      broadcastExtension({
+        type: "context_snapshot",
+        channel: "telegram",
+        creature: voiceBuildMetrics.creature || "general",
+        contextMode: voiceBuildMetrics.mode || "conversation",
+        totalTokens: voiceBuildMetrics.totalTokens,
+        sectionCount: voiceBuildMetrics.sectionCount,
+        budget: voiceBuildMetrics.budget,
+        top5: top5.map(s => ({ label: s.label, tokens: s.tokens })),
+      });
+    }
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;
     const agentModel = agentResult?.dispatch.agent.model;

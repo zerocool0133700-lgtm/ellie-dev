@@ -7,7 +7,9 @@
  *
  * Uses the Anthropic API directly with Haiku for cost efficiency.
  *
- * Usage: bun run scripts/verify-behavior-369.ts [--creature dev] [--verbose]
+ * Usage:
+ *   bun run scripts/verify-behavior-369.ts [--creature dev] [--verbose]
+ *   bun run scripts/verify-behavior-369.ts --show-trends
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -21,6 +23,7 @@ const ARCHETYPES_DIR = join(import.meta.dir, "../config/archetypes");
 const MODEL = "claude-haiku-4-5-20251001";
 const MAX_TOKENS = 600;
 const RESULTS_DIR = "/tmp/ellie-369-results";
+const TRENDS_FILE = join(import.meta.dir, "verify-trends.json");
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
@@ -158,10 +161,101 @@ function formatResult(creature: string, response: string, check: BehaviorCheck, 
   return { pass, includeHits, excludeHits, concise, summary: parts.join("; ") };
 }
 
+// ── Trends Analysis ─────────────────────────────────────────
+
+async function showTrends() {
+  try {
+    const data = await readFile(TRENDS_FILE, "utf-8");
+    const trends: { runs: any[] } = JSON.parse(data);
+
+    if (trends.runs.length === 0) {
+      console.log("No trend data available yet. Run the verification script first.\n");
+      return;
+    }
+
+    console.log(`\n=== ELLIE-369: Behavioral Trends ===`);
+    console.log(`Total runs tracked: ${trends.runs.length}`);
+    console.log(`Date range: ${new Date(trends.runs[0].timestamp).toLocaleDateString()} to ${new Date(trends.runs[trends.runs.length - 1].timestamp).toLocaleDateString()}\n`);
+
+    // Overall pass rate trend
+    console.log(`=== Overall Pass Rate ===\n`);
+    trends.runs.forEach((run, i) => {
+      const date = new Date(run.timestamp).toLocaleString();
+      const passRate = run.totals.passed / (run.totals.passed + run.totals.failed) * 100;
+      console.log(`  Run ${i + 1} (${date}): ${passRate.toFixed(1)}% pass (${run.totals.passed}/${run.totals.passed + run.totals.failed})`);
+    });
+
+    // Per-creature trends
+    const creatures = new Set<string>();
+    trends.runs.forEach(run => {
+      run.results.forEach((r: any) => {
+        if (r.creature !== "CONTROL (no archetype)") creatures.add(r.creature);
+      });
+    });
+
+    console.log(`\n=== Per-Creature Trends ===\n`);
+
+    for (const creature of Array.from(creatures).sort()) {
+      console.log(`${creature}:`);
+
+      const creatureData = trends.runs.map(run => {
+        const result = run.results.find((r: any) => r.creature === creature);
+        return result || null;
+      }).filter(Boolean);
+
+      if (creatureData.length === 0) continue;
+
+      // Pass rate
+      const passes = creatureData.filter((r: any) => r.pass).length;
+      const passRate = (passes / creatureData.length * 100).toFixed(1);
+      console.log(`  Pass rate: ${passRate}% (${passes}/${creatureData.length})`);
+
+      // Length trend
+      const lengths = creatureData.map((r: any) => r.responseLength);
+      const avgLength = (lengths.reduce((a, b) => a + b, 0) / lengths.length).toFixed(0);
+      const minLength = Math.min(...lengths);
+      const maxLength = Math.max(...lengths);
+      console.log(`  Response length: avg ${avgLength} chars (range: ${minLength}-${maxLength})`);
+
+      // Speed trend
+      const durations = creatureData.map((r: any) => r.durationMs);
+      const avgDuration = (durations.reduce((a, b) => a + b, 0) / durations.length).toFixed(0);
+      console.log(`  Response time: avg ${avgDuration}ms`);
+
+      // Signal consistency
+      const signalCounts = creatureData.map((r: any) => r.includeHits?.length || 0);
+      const avgSignals = (signalCounts.reduce((a, b) => a + b, 0) / signalCounts.length).toFixed(1);
+      console.log(`  Signal hits: avg ${avgSignals} per run\n`);
+    }
+
+    // Mode detection trends
+    console.log(`=== Mode Detection Trends ===\n`);
+    trends.runs.forEach((run, i) => {
+      const date = new Date(run.timestamp).toLocaleString();
+      const total = run.modeDetection.passed + run.modeDetection.failed;
+      const rate = (run.modeDetection.passed / total * 100).toFixed(1);
+      console.log(`  Run ${i + 1} (${date}): ${rate}% pass (${run.modeDetection.passed}/${total})`);
+    });
+
+    console.log("\n");
+
+  } catch (err) {
+    console.error("Error reading trends file:", err);
+    console.log("Run the verification script at least once to generate trend data.\n");
+  }
+}
+
 // ── Main ────────────────────────────────────────────────────
 
 async function main() {
   const args = process.argv.slice(2);
+
+  // Show trends and exit
+  if (args.includes("--show-trends")) {
+    await showTrends();
+    process.exit(0);
+  }
+
   const verbose = args.includes("--verbose");
   const singleCreature = args.find((a, i) => args[i - 1] === "--creature");
 
@@ -295,6 +389,17 @@ async function main() {
     { input: "run and return", expectMode: "skill-only", expectConfidence: "high", label: "run and return → skill-only" },
     { input: "skill-only mode", expectMode: "skill-only", expectConfidence: "high", label: "manual: skill-only mode" },
     { input: "triage mode", expectMode: "skill-only", expectConfidence: "high", label: "manual: triage mode" },
+    // ELLIE-380: Slash commands trigger skill-only
+    { input: "/weather", expectMode: "skill-only", expectConfidence: "high", label: "/weather → skill-only" },
+    { input: "/plane list issues", expectMode: "skill-only", expectConfidence: "high", label: "/plane → skill-only" },
+    { input: "/briefing", expectMode: "skill-only", expectConfidence: "high", label: "/briefing → skill-only" },
+    { input: "/calendar", expectMode: "skill-only", expectConfidence: "high", label: "/calendar → skill-only" },
+    // ELLIE-380: Skill invocation phrases
+    { input: "check the weather", expectMode: "skill-only", expectConfidence: "high", label: "check the weather → skill-only" },
+    { input: "what's on my calendar", expectMode: "skill-only", expectConfidence: "high", label: "what's on my calendar → skill-only" },
+    { input: "what's the weather", expectMode: "skill-only", expectConfidence: "high", label: "what's the weather → skill-only" },
+    { input: "daily briefing", expectMode: "skill-only", expectConfidence: "high", label: "daily briefing → skill-only" },
+    { input: "send an email to John", expectMode: "skill-only", expectConfidence: "high", label: "send email → skill-only" },
     // Negative: these should NOT trigger skill-only
     { input: "work on ELLIE-5", expectMode: "deep-work", expectConfidence: "high", label: "work on ELLIE-5 → deep-work (not skill-only)" },
     { input: "let's plan", expectMode: "strategy", expectConfidence: "high", label: "let's plan → strategy (not skill-only)" },
@@ -382,7 +487,7 @@ async function main() {
 
   // ── Save detailed results ─────────────────────────────
 
-  await Bun.write(join(RESULTS_DIR, "summary.json"), JSON.stringify({
+  const runResult = {
     timestamp: new Date().toISOString(),
     model: MODEL,
     testPrompt: TEST_PROMPT,
@@ -393,10 +498,18 @@ async function main() {
       durationMs: r.durationMs,
       includeHits: r.check?.includeHits ?? [],
       excludeHits: r.check?.excludeHits ?? [],
+      concise: r.check?.concise ?? null,
       summary: r.check?.summary ?? "control",
     })),
+    modeDetection: {
+      passed: modeTestsPassed,
+      failed: modeTestsFailed,
+    },
     totals: { passed, failed, skipped },
-  }, null, 2));
+  };
+
+  // Save current run to /tmp for quick review
+  await Bun.write(join(RESULTS_DIR, "summary.json"), JSON.stringify(runResult, null, 2));
 
   // Save individual responses for manual review
   for (const r of results) {
@@ -404,7 +517,22 @@ async function main() {
     await Bun.write(join(RESULTS_DIR, `${safeName}.txt`), r.response);
   }
 
-  console.log(`Detailed results saved to ${RESULTS_DIR}/\n`);
+  console.log(`Detailed results saved to ${RESULTS_DIR}/`);
+
+  // ── Append to trends file ──────────────────────────────
+
+  let trends: { runs: typeof runResult[] } = { runs: [] };
+  try {
+    const existing = await readFile(TRENDS_FILE, "utf-8");
+    trends = JSON.parse(existing);
+  } catch {
+    // First run — create new trends file
+  }
+
+  trends.runs.push(runResult);
+  await writeFile(TRENDS_FILE, JSON.stringify(trends, null, 2));
+
+  console.log(`Trends updated: ${trends.runs.length} total runs tracked in ${TRENDS_FILE}\n`);
 
   if (failed > 0) {
     console.log("Some creatures failed behavioral verification. Review the responses and tune archetypes as needed.\n");

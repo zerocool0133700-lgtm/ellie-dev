@@ -54,6 +54,9 @@ let staleThresholds: Record<string, number> = {
   gmail: 48,
 };
 
+/** Owner identities — emails, usernames, names that identify the user's own messages. */
+let ownerIdentities: string[] = [];
+
 // ── Initialization ───────────────────────────────────────────
 
 export function initCommsConsumer(supabase: SupabaseClient): void {
@@ -62,6 +65,7 @@ export function initCommsConsumer(supabase: SupabaseClient): void {
   // Load from DB on startup
   refreshCache().catch(err => logger.error("Initial cache load failed", err));
   loadPreferences().catch(err => logger.error("Preferences load failed", err));
+  loadOwnerIdentities().catch(err => logger.error("Owner identities load failed", err));
 
   subscribe("consumer:comms", {}, async (message) => {
     try {
@@ -126,6 +130,27 @@ async function loadPreferences(): Promise<void> {
     }
   } catch {
     // Use defaults
+  }
+}
+
+async function loadOwnerIdentities(): Promise<void> {
+  if (!supabaseRef) return;
+  try {
+    const { data } = await supabaseRef
+      .from("comms_preferences")
+      .select("value")
+      .eq("key", "owner_identities")
+      .single();
+
+    if (data?.value) {
+      const val = typeof data.value === "string" ? JSON.parse(data.value) : data.value;
+      if (Array.isArray(val)) {
+        ownerIdentities = val.map((v: string) => v.toLowerCase());
+        logger.info("Loaded owner identities", { count: ownerIdentities.length });
+      }
+    }
+  } catch {
+    // No identities configured — isDave falls back to empty list
   }
 }
 
@@ -219,7 +244,7 @@ async function createGtdItemsForStaleThreads(): Promise<void> {
 
 /** Force cache invalidation (after API writes). */
 export async function invalidateCommsCache(): Promise<void> {
-  await refreshCache();
+  await Promise.all([refreshCache(), loadOwnerIdentities()]);
 }
 
 // ── Message Handler ──────────────────────────────────────────
@@ -232,7 +257,7 @@ async function handleMessage(message: UnifiedMessage): Promise<void> {
   const threadId = resolveThreadId(message);
   const senderName = message.sender?.name || message.sender?.username || message.sender?.email || null;
   const now = new Date().toISOString();
-  const isUser = isDave(message);
+  const isUser = isOwner(message);
 
   const existing = threadCache.get(threadId);
 
@@ -333,12 +358,21 @@ function resolveThreadId(message: UnifiedMessage): string {
   return message.channel || `${message.provider}:${message.provider_id}`;
 }
 
-function isDave(message: UnifiedMessage): boolean {
+/** Check if a message was sent by the owner (Dave) using configured identities. */
+function isOwner(message: UnifiedMessage): boolean {
   const s = message.sender;
   if (!s) return false;
-  const name = (s.name || "").toLowerCase();
+  if (ownerIdentities.length === 0) return false;
+
   const email = (s.email || "").toLowerCase();
-  return name.includes("dave") || email.includes("dave");
+  const username = (s.username || "").toLowerCase();
+  const name = (s.name || "").toLowerCase();
+
+  return ownerIdentities.some(id =>
+    (email && email === id) ||
+    (username && username === id) ||
+    (name && name === id)
+  );
 }
 
 // ── Exports for Summary Bar & API ────────────────────────────

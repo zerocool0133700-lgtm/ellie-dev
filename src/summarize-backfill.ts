@@ -13,10 +13,10 @@ const supabase = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_AN
 const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
 
 async function callClaudeCLI(prompt: string): Promise<string> {
-  const args = [CLAUDE_PATH, "-p", prompt, "--output-format", "text"];
+  const args = [CLAUDE_PATH, "-p", "--output-format", "text"];
 
   const proc = spawn(args, {
-    stdin: "ignore",
+    stdin: new Blob([prompt]),
     stdout: "pipe",
     stderr: "pipe",
     env: {

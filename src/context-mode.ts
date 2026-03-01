@@ -91,6 +91,7 @@ const WORKFLOW_SIGNALS: Array<{ pattern: RegExp; confidence: "high" | "medium" }
 ];
 
 const SKILL_ONLY_SIGNALS: Array<{ pattern: RegExp; confidence: "high" | "medium" }> = [
+  // Triage / dispatch phrases
   { pattern: /\brun\s+skill\b/i, confidence: "high" },
   { pattern: /\bjust\s+run\b/i, confidence: "high" },
   { pattern: /\bquick\s+run\b/i, confidence: "high" },
@@ -100,6 +101,17 @@ const SKILL_ONLY_SIGNALS: Array<{ pattern: RegExp; confidence: "high" | "medium"
   { pattern: /\bjust\s+(dispatch|route|triage)\b/i, confidence: "high" },
   { pattern: /\brun\s+and\s+return\b/i, confidence: "high" },
   { pattern: /\bquick\s+dispatch\b/i, confidence: "high" },
+  // ELLIE-380: Slash commands trigger skill-only mode
+  { pattern: /^\/\w+/, confidence: "high" },
+  // ELLIE-380: Common skill invocation phrases
+  { pattern: /\bcheck\s+(the\s+)?weather\b/i, confidence: "high" },
+  { pattern: /\bwhat'?s?\s+(the\s+)?weather\b/i, confidence: "high" },
+  { pattern: /\bwhat'?s?\s+(on\s+)?my\s+calendar\b/i, confidence: "high" },
+  { pattern: /\bcheck\s+my\s+calendar\b/i, confidence: "high" },
+  { pattern: /\bsend\s+(an?\s+)?email\s+to\b/i, confidence: "high" },
+  { pattern: /\bmy\s+briefing\b/i, confidence: "high" },
+  { pattern: /\bdaily\s+briefing\b/i, confidence: "high" },
+  { pattern: /\brun\s+the\s+briefing\b/i, confidence: "high" },
 ];
 
 const CONVERSATION_SIGNALS: Array<{ pattern: RegExp; confidence: "high" | "medium" }> = [
@@ -228,7 +240,7 @@ const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "forest-awareness": 8,
     "search": 9,
     "context-docket": 7,
-    "work-item": 9,
+    "work-item": 5,
     "playbook-commands": 9,
     "work-commands": 9,
     "queue": 8,
@@ -249,7 +261,7 @@ const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "forest-awareness": 3,
     "search": 8,
     "context-docket": 3,
-    "work-item": 9,
+    "work-item": 5,
     "playbook-commands": 7,
     "work-commands": 7,
     "queue": 6,
@@ -270,7 +282,7 @@ const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "forest-awareness": 5,
     "search": 7,
     "context-docket": 4,
-    "work-item": 9,
+    "work-item": 4,
     "playbook-commands": 2,
     "work-commands": 2,
     "queue": 2,

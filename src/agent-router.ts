@@ -371,6 +371,7 @@ export async function routeAndDispatch(
   channel: string,
   userId: string,
   workItemId?: string,
+  agentOverride?: string,
 ): Promise<{
   route: RouteResult;
   dispatch: DispatchResult;
@@ -385,6 +386,13 @@ export async function routeAndDispatch(
     const edgeRoute = await routeMessage(supabase, message, channel, userId);
     if (!edgeRoute) return null;
     route = { ...edgeRoute, confidence: edgeRoute.confidence || 0.5, execution_mode: edgeRoute.execution_mode || "single" as const };
+  }
+
+  // ELLIE-381: Mode-based agent override (skill-only → road-runner)
+  if (agentOverride && route.agent_name !== agentOverride) {
+    logger.info(`[routing] Agent override: ${route.agent_name} → ${agentOverride} (mode-based)`);
+    route.agent_name = agentOverride;
+    route.rule_name = "mode_override";
   }
 
   const effectiveWorkItemId = workItemId;
