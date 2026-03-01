@@ -68,6 +68,19 @@ export async function saveSession(state: SessionState): Promise<void> {
 
 export let session = await loadSession();
 
+// ── Session write mutex (prevent concurrent writes) ─────
+let _sessionWriteLock: Promise<void> = Promise.resolve();
+
+async function saveSessionSafe(state: SessionState): Promise<void> {
+  // Queue behind any in-flight write
+  const prev = _sessionWriteLock;
+  _sessionWriteLock = (async () => {
+    await prev;
+    await saveSession(state);
+  })();
+  await _sessionWriteLock;
+}
+
 // ── Lock file (prevent multiple instances) ──────────────────
 
 export async function acquireLock(): Promise<boolean> {
@@ -288,7 +301,7 @@ export async function callClaude(
         logger.warn("Resetting session after exit error", { sessionId: session.sessionId.slice(0, 8), exitCode });
         session.sessionId = null;
         session.lastActivity = new Date().toISOString();
-        await saveSession(session);
+        await saveSessionSafe(session);
       }
 
       const stderrPreview = stderr ? stderr.substring(0, 300) : null;
@@ -300,6 +313,11 @@ export async function callClaude(
       return message;
     }
 
+    // Always log stderr — even on success, it may contain diagnostic info
+    if (stderr?.trim()) {
+      logger.info("CLI stderr (exit 0)", { stderr: stderr.substring(0, 500), outputLength: output.length });
+    }
+
     console.log(`[claude] Success: ${output.length} chars, exit ${exitCode}`);
 
     if (options?.resume !== false) {
@@ -307,12 +325,26 @@ export async function callClaude(
       if (sessionMatch) {
         session.sessionId = sessionMatch[1];
         session.lastActivity = new Date().toISOString();
-        await saveSession(session);
+        await saveSessionSafe(session);
         console.log(`[claude] Session ID: ${session.sessionId.slice(0, 8)}`);
       }
     }
 
-    return output.trim();
+    // Empty response guard — model likely spent entire turn on tool calls
+    // with no text output (--output-format text only captures text blocks)
+    const trimmed = output.trim();
+    if (trimmed.length < 5) {
+      logger.warn("Empty/near-empty response from CLI", {
+        outputLength: output.length,
+        trimmedLength: trimmed.length,
+        rawPreview: JSON.stringify(output.substring(0, 50)),
+        stderr: stderr?.substring(0, 300) || null,
+        prompt_length: prompt.length,
+      });
+      return "I completed the work but didn't produce a text summary. You can ask \"what did you get done?\" to check, or retry the request.";
+    }
+
+    return trimmed;
   } catch (error) {
     logger.error("Spawn error", error);
     return `Error: Could not run Claude CLI`;

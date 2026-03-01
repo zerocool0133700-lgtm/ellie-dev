@@ -16,6 +16,7 @@ import type { Bot } from "grammy";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { notify, type NotifyContext } from "./notification-policy.ts";
 import { log } from "./logger.ts";
+import { getAgentArchetype, getPsyContext, getPhaseContext, getHealthContext } from "./prompt-builder.ts";
 
 const logger = log.child("playbook");
 import {
@@ -61,6 +62,10 @@ export interface PlaybookContext {
     forestContext?: string,
     agentMemoryContext?: string,
     sessionIds?: { tree_id: string; branch_id?: string; creature_id?: string; entity_id?: string; work_item_id?: string },
+    archetypeContext?: string,
+    psyContext?: string,
+    phaseContext?: string,
+    healthContext?: string,
   ) => string;
 }
 
@@ -237,6 +242,14 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
     `Priority: ${details.priority}\n` +
     `Description: ${details.description}\n`;
 
+  // Load personality context for the dispatched agent
+  const [archetype, psy, phase, health] = await Promise.all([
+    getAgentArchetype(agentName),
+    getPsyContext(),
+    getPhaseContext(),
+    getHealthContext(),
+  ]);
+
   const prompt = ctx.buildPromptFn(
     `Work on ${ticketId}: ${details.name}\n\n${details.description}`,
     undefined, // contextDocket
@@ -251,6 +264,10 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
     undefined, // forestContext
     undefined, // agentMemoryContext
     sessionIds, // forest sessionIds
+    archetype,
+    psy,
+    phase,
+    health,
   );
 
   // 6. Call Claude

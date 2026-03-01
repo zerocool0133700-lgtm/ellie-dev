@@ -27,6 +27,7 @@ import {
   setPlanningMode,
   USER_NAME,
   getArchetypeContext,
+  getAgentArchetype,
   getPsyContext,
   getPhaseContext,
   getHealthContext,
@@ -835,7 +836,7 @@ export async function handleEllieChatMessage(
       forestContext,
       ecAgentMem || undefined,
       agentMemory.sessionIds,
-      shouldFetch("archetype") ? await getArchetypeContext() : undefined,
+      shouldFetch("archetype") ? await getAgentArchetype(agentResult?.dispatch.agent?.name) : undefined,
       shouldFetch("psy") ? await getPsyContext() : undefined,
       shouldFetch("phase") ? await getPhaseContext() : undefined,
       await getHealthContext(),
@@ -1002,15 +1003,18 @@ export async function runSpecialistAsync(
     // ── ELLIE-325/334: Use channel profile or conversation mode ──
     const specConvoKey = specConvoId || "ellie-chat-default";
     const specContextMode = channelProfile?.contextMode || processMessageMode(specConvoKey, effectiveText).mode;
+    // Mode-aware fetch gating — skip sources that would be suppressed (priority >= 7)
+    const specModePriorities = getModeSectionPriorities(specContextMode);
+    const shouldFetch = (label: string) => (specModePriorities[label] ?? 0) < 7;
     const [specConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, specQueueContext, liveForest] = await Promise.all([
       specConvoId && supabase ? getConversationMessages(supabase, specConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
-      getContextDocket(),
+      shouldFetch("context-docket") ? getContextDocket() : Promise.resolve(""),
       getRelevantContext(supabase, effectiveText, "ellie-chat", ellieChatActiveAgent, specConvoId),
       searchElastic(effectiveText, { limit: 5, recencyBoost: true, channel: "ellie-chat", sourceAgent: ellieChatActiveAgent, excludeConversationId: specConvoId }),
-      getAgentStructuredContext(supabase, ellieChatActiveAgent),
+      shouldFetch("structured-context") ? getAgentStructuredContext(supabase, ellieChatActiveAgent) : Promise.resolve(""),
       getForestContext(effectiveText),
       getAgentMemoryContext(ellieChatActiveAgent, workItemId, getMaxMemoriesForModel(agentResult.dispatch.agent.model)),
-      agentResult.dispatch.is_new ? getQueueContext(ellieChatActiveAgent) : Promise.resolve(""),
+      shouldFetch("queue") && agentResult.dispatch.is_new ? getQueueContext(ellieChatActiveAgent) : Promise.resolve(""),
       getLiveForestContext(effectiveText),
     ]);
     const recentMessages = specConvoContext.text;
@@ -1059,7 +1063,7 @@ export async function runSpecialistAsync(
       forestContext,
       agentMemory.memoryContext || undefined,
       agentMemory.sessionIds,
-      shouldFetch("archetype") ? await getArchetypeContext() : undefined,
+      shouldFetch("archetype") ? await getAgentArchetype(agentResult.dispatch.agent.name) : undefined,
       shouldFetch("psy") ? await getPsyContext() : undefined,
       shouldFetch("phase") ? await getPhaseContext() : undefined,
       await getHealthContext(),

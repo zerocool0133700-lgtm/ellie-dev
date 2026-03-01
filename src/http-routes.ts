@@ -36,6 +36,7 @@ import { signToken, authenticateRequest } from "./api/jwt-auth.ts";
 import {
   buildPrompt,
   getArchetypeContext,
+  getAgentArchetype,
   getPsyContext,
   getPhaseContext,
   getHealthContext,
@@ -616,7 +617,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               forestContext,
               gchatAgentMem || undefined,
               agentMemory.sessionIds,
-              await getArchetypeContext(),
+              await getAgentArchetype(gchatAgentResult?.dispatch.agent?.name),
               await getPsyContext(),
               await getPhaseContext(),
               await getHealthContext(),
@@ -833,7 +834,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               forestContext,
               agentMemory.memoryContext || undefined,
               agentMemory.sessionIds,
-              await getArchetypeContext(),
+              await getAgentArchetype(agentResult?.dispatch.agent?.name),
               await getPsyContext(),
               await getPhaseContext(),
               await getHealthContext(),
@@ -841,6 +842,9 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               liveForest.incidents || undefined,
               liveForest.awareness || undefined,
               (await getSkillSnapshot()).prompt || undefined,
+              undefined, // contextMode
+              undefined, // refreshedSources
+              undefined, // channelProfile
             );
 
             const ALEXA_TIMEOUT_MS = 6_000;

@@ -162,6 +162,34 @@ export async function getArchetypeContext(): Promise<string> {
   return _archetypeContext;
 }
 
+// ── Per-agent archetype loader (file-based) ─────────────────
+
+const _agentArchetypeCache: Map<string, { content: string; loadedAt: number }> = new Map();
+const AGENT_ARCHETYPE_CACHE_MS = 60_000;
+const ARCHETYPES_DIR = join(PROJECT_ROOT, "config", "archetypes");
+
+/**
+ * Load a creature-specific archetype from config/archetypes/{agentName}.md.
+ * Falls back to the Forest chain-owner archetype if no file exists.
+ */
+export async function getAgentArchetype(agentName?: string): Promise<string> {
+  if (!agentName) return getArchetypeContext();
+
+  const normalized = agentName.toLowerCase().replace(/[^a-z0-9-]/g, "");
+  const cached = _agentArchetypeCache.get(normalized);
+  if (cached && Date.now() - cached.loadedAt < AGENT_ARCHETYPE_CACHE_MS) return cached.content;
+
+  try {
+    const filePath = join(ARCHETYPES_DIR, `${normalized}.md`);
+    const content = await readFile(filePath, "utf-8");
+    _agentArchetypeCache.set(normalized, { content, loadedAt: Date.now() });
+    return content;
+  } catch {
+    // No creature-specific archetype — fall back to Forest chain owner
+    return getArchetypeContext();
+  }
+}
+
 let _psyContext = "";
 let _psyLastLoaded = 0;
 const PSY_CACHE_MS = 60_000;

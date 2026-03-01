@@ -15,6 +15,7 @@ import { fetchWorkItemDetails } from "./plane.ts";
 import { dispatchAgent, syncResponse } from "./agent-router.ts";
 import { processMemoryIntents } from "./memory.ts";
 import { notify, type NotifyContext } from "./notification-policy.ts";
+import { getAgentArchetype, getPsyContext, getPhaseContext, getHealthContext } from "./prompt-builder.ts";
 import type { PlaybookContext } from "./playbook.ts";
 
 const logger = log.child("orchestration-dispatch");
@@ -126,9 +127,16 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       return;
     }
 
-    // 5. Build prompt
+    // 5. Build prompt with personality context
     const workItemContext = `\nACTIVE WORK ITEM: ${workItemId}\n` +
       `Title: ${details.name}\nPriority: ${details.priority}\nDescription: ${details.description}\n`;
+
+    const [archetype, psy, phase, health] = await Promise.all([
+      getAgentArchetype(agentType),
+      getPsyContext(),
+      getPhaseContext(),
+      getHealthContext(),
+    ]);
 
     const prompt = ctx.buildPromptFn(
       `Work on ${workItemId}: ${details.name}\n\n${details.description}`,
@@ -136,6 +144,7 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       channel, dispatch.agent, workItemContext,
       undefined, undefined, undefined, undefined, undefined,
       sessionIds,
+      archetype, psy, phase, health,
     );
 
     // 6. Call Claude with runId for heartbeat tracking
