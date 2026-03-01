@@ -172,19 +172,10 @@ export async function callClaude(
       },
     });
 
-    // ELLIE-349: Track PID and start heartbeat for orchestrated runs
-    let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+    // ELLIE-349/390: Track PID and emit heartbeats on stdout activity
     let heartbeatDbThrottle = 0;
     if (options?.runId) {
       setRunPid(options.runId, proc.pid);
-      heartbeatInterval = setInterval(() => {
-        trackerHeartbeat(options.runId!);
-        // Throttle DB writes to 1 per 60s
-        if (Date.now() - heartbeatDbThrottle > 60_000) {
-          emitEvent(options.runId!, "heartbeat", null, null, { pid: proc.pid });
-          heartbeatDbThrottle = Date.now();
-        }
-      }, 30_000);
     }
 
     const TIMEOUT_MS = options?.timeoutMs ?? CLI_TIMEOUT_MS;
@@ -210,11 +201,30 @@ export async function callClaude(
       }, 5_000);
     }, TIMEOUT_MS);
 
-    const output = await new Response(proc.stdout).text();
+    // ELLIE-390: Stream stdout — emit heartbeats on actual data activity.
+    // This means a hung process with no output gets correctly flagged stale,
+    // while a slow-but-active process (long code review) stays alive.
+    const chunks: string[] = [];
+    const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(decoder.decode(value, { stream: true }));
+      // Heartbeat on every stdout chunk — the tracker deduplicates internally
+      if (options?.runId) {
+        trackerHeartbeat(options.runId);
+        if (Date.now() - heartbeatDbThrottle > 60_000) {
+          emitEvent(options.runId, "heartbeat", null, null, { pid: proc.pid });
+          heartbeatDbThrottle = Date.now();
+        }
+      }
+    }
+    const output = chunks.join("");
     const stderr = await new Response(proc.stderr).text();
     clearTimeout(timeout);
     if (killTimer) clearTimeout(killTimer);
-    if (heartbeatInterval) clearInterval(heartbeatInterval);
 
     const exitCode = await proc.exited;
 
@@ -356,7 +366,7 @@ export async function callClaude(
 export async function callClaudeWithTyping(
   ctx: Context,
   prompt: string,
-  options?: { resume?: boolean; imagePath?: string; allowedTools?: string[]; model?: string }
+  options?: { resume?: boolean; imagePath?: string; allowedTools?: string[]; model?: string; runId?: string }
 ): Promise<string> {
   const interval = setInterval(() => {
     ctx.replyWithChatAction("typing").catch(() => {});

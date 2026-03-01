@@ -24,6 +24,7 @@ import { log } from "./logger.ts";
 import { estimateTokens } from "./relay-utils.ts";
 import { writeToDisk, readFromDisk } from "./config-cache.ts";
 import { emitEvent } from "./orchestration-ledger.ts";
+import { startRun, endRun } from "./orchestration-tracker.ts";
 
 const logger = log.child("orchestrator");
 
@@ -109,8 +110,10 @@ export interface OrchestratorOptions {
   ) => string;
   callClaudeFn: (
     prompt: string,
-    options?: { resume?: boolean; allowedTools?: string[]; model?: string },
+    options?: { resume?: boolean; allowedTools?: string[]; model?: string; runId?: string },
   ) => Promise<string>;
+  /** ELLIE-390: Run ID for heartbeat tracking during long pipeline steps */
+  runId?: string;
 }
 
 export class PipelineStepError extends Error {
@@ -183,11 +186,19 @@ export async function executeOrchestrated(
   options: OrchestratorOptions,
 ): Promise<ExecutionResult> {
   const effectiveSteps = steps.slice(0, MAX_PIPELINE_DEPTH);
-  const orchestrationRunId = crypto.randomUUID();
+  const orchestrationRunId = options.runId || crypto.randomUUID();
+  // ELLIE-390: Ensure runId is available for heartbeat threading through steps
+  if (!options.runId) options.runId = orchestrationRunId;
 
   if (effectiveSteps.length === 0) {
     throw new Error(`Orchestrator received empty steps array for mode "${mode}"`);
   }
+
+  // ELLIE-390: Register with tracker so watchdog monitors this run
+  startRun(orchestrationRunId, effectiveSteps[0]?.agent_name || "orchestrator", undefined, undefined, {
+    channel: options.channel,
+    message: `${mode}: ${effectiveSteps.length} steps`,
+  });
 
   emitEvent(orchestrationRunId, "dispatched", effectiveSteps[0]?.agent_name, null, {
     mode,
@@ -233,6 +244,7 @@ export async function executeOrchestrated(
 
     // Complete execution plan
     await completeExecutionPlan(options.supabase, planId, artifacts, "completed");
+    endRun(orchestrationRunId, "completed");
     emitEvent(orchestrationRunId, "completed", effectiveSteps[0]?.agent_name, null, {
       mode,
       duration_ms: artifacts.total_duration_ms,
@@ -258,6 +270,7 @@ export async function executeOrchestrated(
       options.supabase, planId, artifacts, "failed",
       err instanceof Error ? err.message : String(err),
     );
+    endRun(orchestrationRunId, "failed");
     emitEvent(orchestrationRunId, "failed", effectiveSteps[0]?.agent_name, null, {
       mode,
       error: err instanceof Error ? err.message : String(err),
@@ -650,6 +663,7 @@ async function executeStep(
         ? dispatch.agent.tools_enabled
         : undefined,
       model: dispatch.agent.model || undefined,
+      runId: options.runId,
     });
     // Token estimation via proper tokenizer (ELLIE-245)
     inputTokens = estimateTokens(stepPrompt);

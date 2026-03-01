@@ -42,9 +42,29 @@ export interface RunState {
 const activeRuns = new Map<string, RunState>();
 let _watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
-const STALE_THRESHOLD_MS = 90_000; // 90s without heartbeat = stale
+const DEFAULT_STALE_THRESHOLD_MS = 90_000; // 90s without heartbeat = stale
 const WATCHDOG_INTERVAL_MS = 60_000; // check every 60s
 const REAPER_THRESHOLD_MS = 300_000; // 5min stale with dead process = reap
+
+// ELLIE-390: Adaptive stale thresholds per creature type.
+// Heavy-thinking creatures (dev, strategy, critic) get longer leashes.
+// Fast-turnaround creatures (road-runner, ops) keep shorter thresholds.
+const CREATURE_STALE_THRESHOLDS: Record<string, number> = {
+  dev: 600_000,         // 10min — code reviews, architecture, multi-file changes
+  strategy: 600_000,    // 10min — deep analysis, planning
+  critic: 480_000,      // 8min — thorough reviews
+  research: 480_000,    // 8min — web research, data gathering
+  content: 300_000,     // 5min — writing, drafting
+  finance: 180_000,     // 3min — calculations, lookups
+  general: 180_000,     // 3min — general chat
+  "road-runner": 120_000, // 2min — quick tasks
+  ops: 120_000,         // 2min — deployments, restarts
+  orchestrator: 600_000, // 10min — multi-step pipelines
+};
+
+function getStaleThreshold(agentType: string): number {
+  return CREATURE_STALE_THRESHOLDS[agentType] ?? DEFAULT_STALE_THRESHOLD_MS;
+}
 
 // ── Run lifecycle ──────────────────────────────────────────
 
@@ -195,8 +215,9 @@ export function startWatchdog(): void {
       try {
         const silenceMs = now - run.lastHeartbeat;
 
-        // Mark running → stale
-        if (run.status === "running" && silenceMs > STALE_THRESHOLD_MS) {
+        // Mark running → stale (ELLIE-390: adaptive threshold per creature)
+        const staleThreshold = getStaleThreshold(run.agentType);
+        if (run.status === "running" && silenceMs > staleThreshold) {
           run.status = "stale";
           logger.warn("Run stale — no heartbeat", {
             runId: runId.slice(0, 8),
