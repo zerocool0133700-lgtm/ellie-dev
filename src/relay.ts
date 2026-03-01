@@ -149,8 +149,7 @@ setInterval(() => {
 }, 24 * 60 * 60_000);
 
 // Orchestration tracker — ELLIE-349: heartbeat watchdog + orphan recovery
-// ELLIE-387: Wire proactive notifications to watchdog
-setWatchdogNotify(notify, getNotifyCtx());
+// ELLIE-387: Wire proactive notifications to watchdog (deferred — needs setRelayDeps first)
 recoverActiveRuns().then(() => startWatchdog()).catch(err => logger.error("Orchestration startup error", err));
 
 // ELLIE-374: Validate all archetype files on startup
@@ -367,6 +366,8 @@ const anthropic = process.env.ANTHROPIC_API_KEY
 setRelayDeps({ bot, anthropic, supabase });
 setBroadcastExtension(broadcastExtension);
 setNotifyCtx(getNotifyCtx);
+// ELLIE-387: Wire watchdog notifications (after setRelayDeps so getNotifyCtx works)
+setWatchdogNotify(notify, getNotifyCtx());
 setAnthropicClient(anthropic);
 setQueueBroadcast(broadcastExtension);
 setSenderDeps({ supabase, getActiveAgent });
