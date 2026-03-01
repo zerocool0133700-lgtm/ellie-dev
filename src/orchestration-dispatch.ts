@@ -18,6 +18,8 @@ import { notify, type NotifyContext } from "./notification-policy.ts";
 import { getAgentArchetype, getPsyContext, getPhaseContext, getHealthContext } from "./prompt-builder.ts";
 import type { PlaybookContext } from "./playbook.ts";
 import { withRetry, classifyError } from "./dispatch-retry.ts";
+import { enqueue, getQueueDepth } from "./dispatch-queue.ts";
+import { withTrace, getTraceId, generateTraceId } from "./trace.ts";
 
 const logger = log.child("orchestration-dispatch");
 
@@ -40,20 +42,48 @@ export interface TrackedDispatchResult {
  */
 export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispatchResult {
   // ELLIE-376: Dispatch locking — prevent duplicate dispatches to same ticket
+  // ELLIE-396: Queue instead of rejecting when agent is busy
   const existingRun = getActiveRunForWorkItem(opts.workItemId);
   if (existingRun) {
-    logger.warn("Dispatch blocked — active run exists for work item", {
+    const queueId = crypto.randomUUID();
+    const notifyCtx: NotifyContext = {
+      bot: opts.playbookCtx.bot,
+      telegramUserId: opts.playbookCtx.telegramUserId,
+      gchatSpaceName: opts.playbookCtx.gchatSpaceName,
+    };
+
+    const { position } = enqueue({
+      id: queueId,
+      agentType: opts.agentType,
+      workItemId: opts.workItemId,
+      channel: opts.channel,
+      message: opts.message,
+      enqueuedAt: Date.now(),
+      notifyCtx,
+      execute: () => {
+        // Re-dispatch when the current run completes
+        executeTrackedDispatch(opts);
+      },
+    });
+
+    logger.info("Dispatch queued — active run exists", {
       workItemId: opts.workItemId,
       existingRunId: existingRun.runId.slice(0, 8),
-      existingAgent: existingRun.agentType,
-      status: existingRun.status,
       requestedAgent: opts.agentType,
+      queuePosition: position,
     });
-    // Return the existing runId with a no-op promise so callers don't crash
-    return { runId: existingRun.runId, promise: Promise.resolve() };
+
+    notify(notifyCtx, {
+      event: "dispatch_confirm",
+      workItemId: opts.workItemId,
+      telegramMessage: `${opts.workItemId} queued for ${opts.agentType} (position ${position}) — waiting for current ${existingRun.agentType} run to finish`,
+    }).catch(() => {});
+
+    return { runId: queueId, promise: Promise.resolve() };
   }
 
   const runId = crypto.randomUUID();
+  const traceId = getTraceId() || generateTraceId();
 
   // Register in tracker immediately
   startRun(runId, opts.agentType, opts.workItemId, undefined, {
@@ -61,16 +91,20 @@ export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispat
     message: opts.message,
   });
 
-  // Emit dispatched event
+  // Emit dispatched event (include traceId for end-to-end correlation)
   emitEvent(runId, "dispatched", opts.agentType, opts.workItemId, {
     source: "formal_dispatch",
     channel: opts.channel,
+    trace_id: traceId,
   });
 
-  // Run the actual dispatch async
-  const promise = runDispatch(runId, opts).catch((err) => {
-    logger.error("Tracked dispatch failed", { runId: runId.slice(0, 8), error: err.message });
-  });
+  // Run the actual dispatch async within trace context
+  const promise = withTrace(
+    () => runDispatch(runId, opts).catch((err) => {
+      logger.error("Tracked dispatch failed", { runId: runId.slice(0, 8), error: err.message });
+    }),
+    traceId,
+  );
 
   return { runId, promise };
 }
@@ -222,6 +256,7 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     emitEvent(runId, "completed", agentType, workItemId, {
       duration_ms: durationMs,
       response_length: rawResponse.length,
+      trace_id: getTraceId(),
     });
     endRun(runId, "completed");
 
@@ -241,6 +276,7 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       error: errMsg.slice(0, 500),
       error_class: errorClass,
       error_reason: reason,
+      trace_id: getTraceId(),
     });
     endRun(runId, "failed");
 

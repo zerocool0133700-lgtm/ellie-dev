@@ -27,6 +27,8 @@ import { dispatchAgent, syncResponse } from "./agent-router.ts";
 import { processMemoryIntents } from "./memory.ts";
 import { emitEvent } from "./orchestration-ledger.ts";
 import { startRun, endRun, getActiveRunForWorkItem } from "./orchestration-tracker.ts";
+import { enqueue } from "./dispatch-queue.ts";
+import { withTrace, getTraceId } from "./trace.ts";
 
 // ────────────────────────────────────────────────────────────────
 // Types
@@ -179,20 +181,36 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
   const ticketId = cmd.ticketId!;
   const agentName = cmd.agentName || "dev";
 
-  // ELLIE-376: Dispatch locking — prevent duplicate dispatches to same ticket
+  // ELLIE-376 + ELLIE-396: Queue instead of rejecting when agent is busy
   const existingRun = getActiveRunForWorkItem(ticketId);
   if (existingRun) {
-    logger.warn("Playbook dispatch blocked — active run exists", {
+    const queueId = crypto.randomUUID();
+    const notifyCtx = getNotifyCtx(ctx);
+
+    const { position } = enqueue({
+      id: queueId,
+      agentType: agentName,
+      workItemId: ticketId,
+      channel: ctx.channel,
+      message: `Work on ${ticketId}`,
+      enqueuedAt: Date.now(),
+      notifyCtx,
+      execute: () => {
+        handleSend(cmd, ctx);
+      },
+    });
+
+    logger.info("Playbook dispatch queued — active run exists", {
       ticketId,
       existingRunId: existingRun.runId.slice(0, 8),
-      existingAgent: existingRun.agentType,
-      status: existingRun.status,
       requestedAgent: agentName,
+      queuePosition: position,
     });
-    await notify(getNotifyCtx(ctx), {
-      event: "error",
+
+    await notify(notifyCtx, {
+      event: "dispatch_confirm",
       workItemId: ticketId,
-      telegramMessage: `${ticketId} already has an active ${existingRun.agentType} run (${existingRun.runId.slice(0, 8)}) — skipping duplicate dispatch`,
+      telegramMessage: `${ticketId} queued for ${agentName} (position ${position}) — waiting for current ${existingRun.agentType} run`,
     });
     return;
   }
@@ -224,7 +242,7 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
     telegramMessage: `Dispatching ${agentName} to ${ticketId}: ${details.name}`,
     gchatMessage: `Playbook: dispatching ${agentName} to ${ticketId}: ${details.name}`,
   });
-  emitEvent(runId, "dispatched", agentName, ticketId, { ticket_title: details.name, source: "playbook" });
+  emitEvent(runId, "dispatched", agentName, ticketId, { ticket_title: details.name, source: "playbook", trace_id: getTraceId() });
 
   // 3. Start work session (creates forest tree)
   let sessionResult: Record<string, unknown> | undefined;

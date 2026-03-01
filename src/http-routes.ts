@@ -157,6 +157,8 @@ import type { ApiRequest, ApiResponse } from "./api/types.ts";
 import { getActiveRunStates, getRunState, killRun } from "./orchestration-tracker.ts";
 import { getRecentEvents, getRunEvents } from "./orchestration-ledger.ts";
 import { executeTrackedDispatch } from "./orchestration-dispatch.ts";
+import { withTrace } from "./trace.ts";
+import { getQueueStatus } from "./dispatch-queue.ts";
 
 const logger = log.child("http");
 
@@ -436,7 +438,8 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         }));
 
         // All remaining work is async — response delivered via Chat API
-        (async () => {
+        // ELLIE-398: Wrap async processing in trace context
+        withTrace(() => (async () => {
           try {
             // ELLIE-391: Context refresh — bust all caches so this message gets fully fresh data
             if (isContextRefresh(parsed.text)) {
@@ -720,7 +723,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               maxRetries: 1,
             }).catch(() => {});
           }
-        })();
+        })());
 
       } catch (err) {
         logger.error("Webhook error", err);
@@ -1110,8 +1113,9 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
       try {
         const activeRuns = getActiveRunStates();
         const recentEvents = await getRecentEvents(50);
+        const queue = getQueueStatus(); // ELLIE-396: Include queue status
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ activeRuns, recentEvents }));
+        res.end(JSON.stringify({ activeRuns, recentEvents, queue }));
       } catch (err: any) {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: err?.message || "Failed to get orchestration status" }));
@@ -1164,7 +1168,8 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
           return;
         }
 
-        const { runId } = executeTrackedDispatch({
+        // ELLIE-398: Wrap dispatch in trace context
+        const { runId } = withTrace(() => executeTrackedDispatch({
           agentType: agent_type,
           workItemId: work_item_id,
           channel: "api",
@@ -1177,7 +1182,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
             callClaudeFn: (p, o) => callClaude(p, { ...o, runId }),
             buildPromptFn: buildPrompt,
           },
-        });
+        }));
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ run_id: runId, status: "dispatched" }));

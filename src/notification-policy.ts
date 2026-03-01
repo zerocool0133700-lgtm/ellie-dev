@@ -144,11 +144,12 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
       "google-chat": { enabled: true, minIntervalSec: 60 },
     },
   },
+  // ELLIE-397: Added throttle for parity with run_stale
   run_failed: {
     priority: "critical",
     channels: {
-      telegram: { enabled: true, minIntervalSec: 0 },
-      "google-chat": { enabled: true, minIntervalSec: 0 },
+      telegram: { enabled: true, minIntervalSec: 30 },
+      "google-chat": { enabled: true, minIntervalSec: 30 },
     },
   },
   error: {
@@ -216,6 +217,142 @@ function markSent(event: NotificationEvent, channel: NotificationChannel, workIt
 }
 
 // ============================================================
+// ELLIE-397: FAILURE COALESCING
+// ============================================================
+
+/** Events eligible for coalescing — multiple within window → single summary. */
+const COALESCABLE_EVENTS: Set<NotificationEvent> = new Set(["run_stale", "run_failed", "error"]);
+const COALESCE_WINDOW_MS = 30_000; // 30s window
+const COALESCE_IMMEDIATE_MS = 2_000; // send immediately if only 1 after 2s
+
+interface CoalesceEntry {
+  workItemId: string;
+  telegramMessage: string;
+  gchatMessage?: string;
+  event: NotificationEvent;
+}
+
+interface CoalesceBuffer {
+  entries: CoalesceEntry[];
+  timer: ReturnType<typeof setTimeout>;
+  ctx: NotifyContext;
+  channel: NotificationChannel;
+  startedAt: number;
+}
+
+/** Per-channel coalescing buffers. Key = channel name. */
+const coalesceBuffers = new Map<NotificationChannel, CoalesceBuffer>();
+
+/**
+ * Try to coalesce a failure notification. Returns true if coalesced
+ * (caller should skip normal send), false if not coalescable.
+ */
+function tryCoalesce(ctx: NotifyContext, options: NotifyOptions): boolean {
+  if (!COALESCABLE_EVENTS.has(options.event)) return false;
+
+  const channels: NotificationChannel[] = [];
+  const policy = NOTIFICATION_POLICY[options.event];
+  if (policy.channels.telegram.enabled) channels.push("telegram");
+  if (policy.channels["google-chat"].enabled && ctx.gchatSpaceName) channels.push("google-chat");
+
+  for (const channel of channels) {
+    const existing = coalesceBuffers.get(channel);
+    const entry: CoalesceEntry = {
+      workItemId: options.workItemId,
+      telegramMessage: options.telegramMessage,
+      gchatMessage: options.gchatMessage,
+      event: options.event,
+    };
+
+    if (existing) {
+      // Add to existing buffer
+      existing.entries.push(entry);
+      // Reset timer — extend window from original start but cap at COALESCE_WINDOW_MS
+      clearTimeout(existing.timer);
+      const elapsed = Date.now() - existing.startedAt;
+      const remaining = Math.max(0, COALESCE_WINDOW_MS - elapsed);
+      existing.timer = setTimeout(() => flushCoalesceBuffer(channel), remaining);
+    } else {
+      // Start new buffer — wait a short time to see if more arrive
+      const buf: CoalesceBuffer = {
+        entries: [entry],
+        timer: setTimeout(() => flushCoalesceBuffer(channel), COALESCE_IMMEDIATE_MS),
+        ctx,
+        channel,
+        startedAt: Date.now(),
+      };
+      coalesceBuffers.set(channel, buf);
+    }
+  }
+
+  return channels.length > 0;
+}
+
+/** Flush a coalesce buffer — send individual or summary message. */
+async function flushCoalesceBuffer(channel: NotificationChannel): Promise<void> {
+  const buf = coalesceBuffers.get(channel);
+  if (!buf || buf.entries.length === 0) {
+    coalesceBuffers.delete(channel);
+    return;
+  }
+  coalesceBuffers.delete(channel);
+
+  const { ctx, entries } = buf;
+
+  if (entries.length === 1) {
+    // Single event — send as-is (no coalescing overhead)
+    const e = entries[0];
+    await sendDirect(ctx, e.event, channel, e.workItemId,
+      channel === "telegram" ? e.telegramMessage : (e.gchatMessage || e.telegramMessage));
+    return;
+  }
+
+  // Multiple events — build coalesced summary
+  const byEvent = new Map<NotificationEvent, CoalesceEntry[]>();
+  for (const e of entries) {
+    let list = byEvent.get(e.event);
+    if (!list) { list = []; byEvent.set(e.event, list); }
+    list.push(e);
+  }
+
+  const lines: string[] = [];
+  for (const [event, items] of byEvent) {
+    const label = event === "run_failed" ? "failed" : event === "run_stale" ? "stalled" : "errored";
+    const itemList = items.map(i => i.workItemId).join(", ");
+    lines.push(`${items.length} ${label}: ${itemList}`);
+  }
+
+  const telegramSummary = `${entries.length} alerts in ${Math.round((Date.now() - buf.startedAt) / 1000)}s:\n${lines.join("\n")}`;
+  const gchatSummary = `${entries.length} alerts coalesced:\n${lines.join("\n")}`;
+
+  await sendDirect(ctx, "error", channel, "coalesced",
+    channel === "telegram" ? telegramSummary : gchatSummary);
+
+  console.log(`[notify] ${channel}/coalesced: ${entries.length} alerts combined`);
+}
+
+/** Low-level send to a specific channel (bypasses coalescing/throttle). */
+async function sendDirect(
+  ctx: NotifyContext,
+  event: NotificationEvent,
+  channel: NotificationChannel,
+  workItemId: string,
+  message: string,
+): Promise<void> {
+  markSent(event, channel, workItemId);
+  try {
+    if (channel === "telegram") {
+      await ctx.bot.api.sendMessage(ctx.telegramUserId, message, { parse_mode: "Markdown" });
+    } else if (channel === "google-chat" && ctx.gchatSpaceName) {
+      await sendGoogleChatMessage(ctx.gchatSpaceName, message);
+    }
+    console.log(`[notify] ${channel}/${event}/${workItemId}: sent`);
+  } catch (err: unknown) {
+    logger.error(`${channel} send failed`, { channel, event, work_item_id: workItemId }, err);
+  }
+}
+
+// ============================================================
 // NOTIFICATION DISPATCH
 // ============================================================
 
@@ -236,26 +373,23 @@ export interface NotifyOptions {
 
 /**
  * Send a notification through the policy engine.
- * Respects channel routing, throttling, and batching rules.
+ * Respects channel routing, throttling, batching, and coalescing rules.
  */
 export async function notify(ctx: NotifyContext, options: NotifyOptions): Promise<void> {
   const { event, workItemId, telegramMessage, gchatMessage } = options;
   const policy = NOTIFICATION_POLICY[event];
   if (!policy) return;
 
+  // ELLIE-397: Try coalescing for failure events
+  if (tryCoalesce(ctx, options)) return;
+
   const sends: Promise<void>[] = [];
 
   // Telegram
   if (policy.channels.telegram.enabled) {
     if (!isThrottled(event, "telegram", workItemId)) {
-      markSent(event, "telegram", workItemId);
-      sends.push(
-        ctx.bot.api.sendMessage(ctx.telegramUserId, telegramMessage, { parse_mode: "Markdown" })
-          .then(() => { console.log(`[notify] telegram/${event}/${workItemId}: sent`); })
-          .catch((err) => { logger.error("Telegram send failed", { channel: "telegram", event, work_item_id: workItemId }, err); }),
-      );
+      sends.push(sendDirect(ctx, event, "telegram", workItemId, telegramMessage));
     } else {
-      // Schedule a batched send when the throttle window expires
       scheduleBatchedSend(ctx, event, "telegram", workItemId, telegramMessage);
     }
   }
@@ -264,12 +398,7 @@ export async function notify(ctx: NotifyContext, options: NotifyOptions): Promis
   if (policy.channels["google-chat"].enabled && ctx.gchatSpaceName) {
     const msg = gchatMessage || telegramMessage;
     if (!isThrottled(event, "google-chat", workItemId)) {
-      markSent(event, "google-chat", workItemId);
-      sends.push(
-        sendGoogleChatMessage(ctx.gchatSpaceName, msg)
-          .then(() => { console.log(`[notify] gchat/${event}/${workItemId}: sent`); })
-          .catch((err) => { logger.error("Google Chat send failed", { channel: "google-chat", event, work_item_id: workItemId }, err); }),
-      );
+      sends.push(sendDirect(ctx, event, "google-chat", workItemId, msg));
     } else {
       scheduleBatchedSend(ctx, event, "google-chat", workItemId, msg);
     }
@@ -341,4 +470,6 @@ export function resetThrottleState(): void {
   lastSent.clear();
   for (const { timer } of pendingBatch.values()) clearTimeout(timer);
   pendingBatch.clear();
+  for (const { timer } of coalesceBuffers.values()) clearTimeout(timer);
+  coalesceBuffers.clear();
 }

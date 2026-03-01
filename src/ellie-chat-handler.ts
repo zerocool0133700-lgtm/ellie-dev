@@ -98,11 +98,23 @@ import { refreshSource } from "./context-sources.ts";
 import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hierarchy.ts";
 import { logVerificationTrail } from "./data-quality.ts";
 import { getCreatureProfile } from "./creature-profile.ts";
+import { withTrace } from "./trace.ts";
 
 export async function handleEllieChatMessage(
   ws: WebSocket,
   text: string,
   phoneMode: boolean = false,
+  image?: { data: string; mime_type: string; name: string },
+  channelId?: string,
+  clientId?: string,
+): Promise<void> {
+  return withTrace(async () => _handleEllieChatMessage(ws, text, phoneMode, image, channelId, clientId));
+}
+
+async function _handleEllieChatMessage(
+  ws: WebSocket,
+  text: string,
+  phoneMode: boolean,
   image?: { data: string; mime_type: string; name: string },
   channelId?: string,
   clientId?: string,

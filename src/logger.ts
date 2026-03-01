@@ -18,6 +18,8 @@
  *   log.error("Something broke", { module: "relay" });
  */
 
+import { getTraceId } from "./trace.ts";
+
 const ES_URL = process.env.ELASTICSEARCH_URL || "";
 const LOG_LEVEL = (process.env.LOG_LEVEL || "info") as LogLevel;
 const ES_LOG_ENABLED = process.env.ES_LOG_ENABLED !== "false";
@@ -32,6 +34,7 @@ interface LogEntry {
   module: string;
   message: string;
   context?: Record<string, unknown>;
+  trace_id?: string;
   conversation_id?: string;
   session_id?: string;
   work_item_id?: string;
@@ -43,6 +46,7 @@ interface LogEntry {
 }
 
 interface LogContext {
+  trace_id?: string;
   conversation_id?: string;
   session_id?: string;
   work_item_id?: string;
@@ -138,6 +142,10 @@ function emitLog(
     message,
   };
 
+  // ELLIE-398: Auto-inject trace ID from async context
+  const traceId = context?.trace_id as string || getTraceId();
+  if (traceId) entry.trace_id = traceId;
+
   // Extract correlation IDs from context
   if (context) {
     if (context.conversation_id) entry.conversation_id = context.conversation_id as string;
@@ -145,7 +153,7 @@ function emitLog(
     if (context.work_item_id) entry.work_item_id = context.work_item_id as string;
 
     // Remaining context fields
-    const { conversation_id, session_id, work_item_id, ...rest } = context;
+    const { conversation_id, session_id, work_item_id, trace_id: _t, ...rest } = context;
     if (Object.keys(rest).length > 0) entry.context = rest;
   }
 
@@ -153,22 +161,23 @@ function emitLog(
 
   // Console output — human-readable with bracket prefix for compatibility
   const prefix = `[${module}]`;
+  const traceStr = entry.trace_id ? ` [t:${entry.trace_id.slice(0, 8)}]` : "";
   const contextStr = entry.context ? ` ${JSON.stringify(entry.context)}` : "";
   const errorStr = entry.error ? ` ${entry.error.message}` : "";
 
   switch (level) {
     case "debug":
-      console.log(`${prefix} ${message}${contextStr}${errorStr}`);
+      console.log(`${prefix}${traceStr} ${message}${contextStr}${errorStr}`);
       break;
     case "info":
-      console.log(`${prefix} ${message}${contextStr}${errorStr}`);
+      console.log(`${prefix}${traceStr} ${message}${contextStr}${errorStr}`);
       break;
     case "warn":
-      console.warn(`${prefix} ${message}${contextStr}${errorStr}`);
+      console.warn(`${prefix}${traceStr} ${message}${contextStr}${errorStr}`);
       break;
     case "error":
     case "fatal":
-      console.error(`${prefix} ${message}${contextStr}${errorStr}`);
+      console.error(`${prefix}${traceStr} ${message}${contextStr}${errorStr}`);
       break;
   }
 

@@ -11,6 +11,7 @@
 import { log } from "./logger.ts";
 import { emitEvent, getUnterminated } from "./orchestration-ledger.ts";
 import type { NotifyContext, NotifyOptions } from "./notification-policy.ts";
+import { drainNext } from "./dispatch-queue.ts";
 
 const logger = log.child("orchestration-tracker");
 
@@ -111,6 +112,11 @@ export function endRun(runId: string, status: "completed" | "failed"): void {
     run.status = status;
     activeRuns.delete(runId);
     logger.info("Run ended", { runId: runId.slice(0, 8), status, duration_ms: Date.now() - run.startedAt });
+
+    // ELLIE-396: Drain next queued dispatch for this work item
+    if (run.workItemId) {
+      drainNext(run.workItemId);
+    }
   }
 }
 

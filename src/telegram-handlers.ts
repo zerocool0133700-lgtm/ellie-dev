@@ -97,6 +97,7 @@ import { processMessageMode, isContextRefresh, detectMode } from "./context-mode
 import { freshnessTracker, autoRefreshStaleSources } from "./context-freshness.ts";
 import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hierarchy.ts";
 import { logVerificationTrail } from "./data-quality.ts";
+import { withTrace } from "./trace.ts";
 
 const logger = log.child("telegram");
 
@@ -127,7 +128,7 @@ bot.use(async (ctx, next) => {
 // ============================================================
 
 // Text messages
-bot.on("message:text", withQueue(async (ctx) => {
+bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   const text = ctx.message.text;
   const userId = ctx.from?.id.toString() || "";
   console.log(`Message: ${text.substring(0, 50)}...`);
@@ -572,7 +573,7 @@ bot.on("message:text", withQueue(async (ctx) => {
   }
 
   resetTelegramIdleTimer();
-}));
+})));
 
 // Voice messages
 bot.on("message:voice", withQueue(async (ctx) => {
