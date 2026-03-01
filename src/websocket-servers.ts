@@ -273,7 +273,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
       }
 
       if (msg.type === "message" && (msg.text || msg.image)) {
-        handleEllieChatMessage(ws, msg.text || "", !!msg.phone_mode, msg.image, msg.channel_id);
+        handleEllieChatMessage(ws, msg.text || "", !!msg.phone_mode, msg.image, msg.channel_id, msg.id);
         return;
       }
 

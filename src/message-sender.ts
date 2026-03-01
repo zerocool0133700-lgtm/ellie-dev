@@ -47,6 +47,7 @@ export async function saveMessage(
   metadata?: Record<string, unknown>,
   channel: string = "telegram",
   userId?: string,
+  clientId?: string,
 ): Promise<string | null> {
   if (!_supabase) return null;
   try {
@@ -60,6 +61,7 @@ export async function saveMessage(
       conversation_id: conversationId,
     };
     if (userId) row.user_id = userId;
+    if (clientId) row.id = clientId;
 
     const { data } = await _supabase.from("messages").insert(row).select("id").single();
 
@@ -191,6 +193,7 @@ export function sendWithApprovalsEllieChat(
   response: string,
   currentSessionId: string | null,
   agentName: string,
+  memoryId?: string | null,
 ): { cleanedText: string; hadConfirmations: boolean } {
   const { cleanedText, confirmations } = extractApprovalTags(response);
 
@@ -201,6 +204,7 @@ export function sendWithApprovalsEllieChat(
         type: "response",
         text: cleanedText,
         agent: agentName,
+        memoryId: memoryId || undefined,
         ts: Date.now(),
       }));
     }

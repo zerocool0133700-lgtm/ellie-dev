@@ -43,6 +43,7 @@ import {
   saveMessage,
   sendWithApprovalsEllieChat,
 } from "./message-sender.ts";
+import { extractApprovalTags } from "./approval.ts";
 import {
   processMemoryIntents,
   getRelevantContext,
@@ -104,6 +105,7 @@ export async function handleEllieChatMessage(
   phoneMode: boolean = false,
   image?: { data: string; mime_type: string; name: string },
   channelId?: string,
+  clientId?: string,
 ): Promise<void> {
   const { bot, anthropic, supabase } = getRelayDeps();
   console.log(`[ellie-chat] User${phoneMode ? " (phone)" : ""}${image ? " [+image]" : ""}${channelId ? ` [ch:${channelId.substring(0, 8)}]` : ""}: ${text.substring(0, 80)}...`);
@@ -112,7 +114,7 @@ export async function handleEllieChatMessage(
   const ecUser = wsAppUserMap.get(ws);
   const ecUserId = ecUser?.id || ecUser?.anonymous_id || undefined;
 
-  await saveMessage("user", text, image ? { image_name: image.name, image_mime: image.mime_type } : {}, "ellie-chat", ecUserId);
+  await saveMessage("user", text, image ? { image_name: image.name, image_mime: image.mime_type } : {}, "ellie-chat", ecUserId, clientId);
   broadcastExtension({ type: "message_in", channel: "ellie-chat", preview: text.substring(0, 200) });
 
   // ELLIE-334: Resolve channel context profile if channelId provided
@@ -518,7 +520,7 @@ export async function handleEllieChatMessage(
       // Post-message psy assessment (ELLIE-330)
       runPostMessageAssessment(text, cleanedText, anthropic).catch(err => logger.error("Post-message assessment failed", err));
 
-      await saveMessage("assistant", cleanedText, {}, "ellie-chat", ecUserId);
+      const phoneMemoryId = await saveMessage("assistant", cleanedText, {}, "ellie-chat", ecUserId);
       broadcastExtension({
         type: "message_out", channel: "ellie-chat",
         agent: "general",
@@ -530,6 +532,7 @@ export async function handleEllieChatMessage(
           type: "response",
           text: cleanedText,
           agent: "general",
+          memoryId: phoneMemoryId,
           ts: Date.now(),
           duration_ms: durationMs,
         }));
@@ -762,9 +765,11 @@ export async function handleEllieChatMessage(
         const orcAgent = result.finalDispatch?.agent?.name || agentResult.dispatch.agent.name || "general";
         const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, orcAgent, "shared", agentMemory.sessionIds);
         const { cleanedText: ellieChatOrcPlaybookClean, commands: ellieChatOrcPlaybookCmds } = extractPlaybookCommands(pipelineResponse);
-        const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, ellieChatOrcPlaybookClean, session.sessionId, orcAgent);
+        // ELLIE-389: Save first to get memoryId, then send with it
+        const { cleanedText: orcPreClean } = extractApprovalTags(ellieChatOrcPlaybookClean);
+        const orcMemoryId = await saveMessage("assistant", orcPreClean, {}, "ellie-chat", ecUserId);
+        const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, ellieChatOrcPlaybookClean, session.sessionId, orcAgent, orcMemoryId);
 
-        await saveMessage("assistant", cleanedText, {}, "ellie-chat", ecUserId);
         broadcastExtension({
           type: "message_out", channel: "ellie-chat", agent: orcAgent,
           preview: cleanedText.substring(0, 200),
@@ -781,6 +786,7 @@ export async function handleEllieChatMessage(
             type: "response",
             text: cleanedText,
             agent: orcAgent,
+            memoryId: orcMemoryId,
             ts: Date.now(),
             duration_ms: result.artifacts.total_duration_ms,
           }));
@@ -953,9 +959,11 @@ export async function handleEllieChatMessage(
     const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general", "shared", effectiveSessionIds);
     const { cleanedText: ecPlaybookClean, commands: ecPlaybookCmds } = extractPlaybookCommands(response);
     const ecAgent = agentResult?.dispatch.agent.name || "general";
-    const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, ecPlaybookClean, session.sessionId, ecAgent);
+    // ELLIE-389: Save first to get memoryId, then send with it
+    const { cleanedText: ecPreClean } = extractApprovalTags(ecPlaybookClean);
+    const ecMemoryId = await saveMessage("assistant", ecPreClean, {}, "ellie-chat", ecUserId);
+    const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, ecPlaybookClean, session.sessionId, ecAgent, ecMemoryId);
 
-    await saveMessage("assistant", cleanedText, {}, "ellie-chat", ecUserId);
     broadcastExtension({
       type: "message_out", channel: "ellie-chat",
       agent: ecAgent,
@@ -967,6 +975,7 @@ export async function handleEllieChatMessage(
         type: "response",
         text: cleanedText,
         agent: ecAgent,
+        memoryId: ecMemoryId,
         ts: Date.now(),
         duration_ms: durationMs,
       }));
@@ -1144,9 +1153,11 @@ export async function runSpecialistAsync(
 
     const response = await processMemoryIntents(supabase, rawResponse, agentName, "shared", agentMemory.sessionIds);
     const { cleanedText: playClean, commands: playCmds } = extractPlaybookCommands(response);
-    const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, playClean, session.sessionId, agentName);
+    // ELLIE-389: Save first to get memoryId, then send with it
+    const { cleanedText: specPreClean } = extractApprovalTags(playClean);
+    const specMemoryId = await saveMessage("assistant", specPreClean, {}, "ellie-chat", ecUserId);
+    const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, playClean, session.sessionId, agentName, specMemoryId);
 
-    await saveMessage("assistant", cleanedText, {}, "ellie-chat", ecUserId);
     broadcastExtension({
       type: "message_out", channel: "ellie-chat",
       agent: agentName,
@@ -1158,6 +1169,7 @@ export async function runSpecialistAsync(
         type: "response",
         text: cleanedText,
         agent: agentName,
+        memoryId: specMemoryId,
         ts: Date.now(),
         duration_ms: durationMs,
       }));
@@ -1165,13 +1177,13 @@ export async function runSpecialistAsync(
       // Original WS closed — send to same user's other connections only (ELLIE-197)
       const payload = JSON.stringify({
         type: "response", text: cleanedText, agent: agentName,
-        ts: Date.now(), duration_ms: durationMs,
+        memoryId: specMemoryId, ts: Date.now(), duration_ms: durationMs,
       });
       for (const client of ellieChatClients) {
         if (client.readyState === WebSocket.OPEN) {
           const clientUser = wsAppUserMap.get(client);
-          const clientId = clientUser?.id || clientUser?.anonymous_id;
-          if (clientId && clientId === ecUserId) {
+          const clientAppId = clientUser?.id || clientUser?.anonymous_id;
+          if (clientAppId && clientAppId === ecUserId) {
             client.send(payload);
           }
         }
