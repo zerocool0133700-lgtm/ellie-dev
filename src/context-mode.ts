@@ -26,23 +26,92 @@ export interface ModeDetectionResult {
   workItemId?: string;     // extracted ELLIE-XXX if present
 }
 
-// ── Per-conversation mode state ─────────────────────────────
+// ── Per-conversation mode state (ELLIE-395: persisted to disk) ──
 
-const conversationModes: Map<string, ContextMode> = new Map();
+interface ModeEntry {
+  mode: ContextMode;
+  lastActivity: number; // epoch ms
+}
+
+const MODE_STATE_CACHE_KEY = "conversation-mode-state";
+const MODE_TTL_MS = 30 * 60_000; // 30 minutes — stale modes reset to conversation
+
+const conversationModes: Map<string, ModeEntry> = new Map();
+let _persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Persist mode state to disk (debounced — batches rapid changes). */
+function persistModeState(): void {
+  if (_persistTimer) return; // already scheduled
+  _persistTimer = setTimeout(() => {
+    _persistTimer = null;
+    const serialized: Record<string, ModeEntry> = {};
+    for (const [key, entry] of conversationModes) {
+      serialized[key] = entry;
+    }
+    writeToDisk(MODE_STATE_CACHE_KEY, serialized);
+  }, 500);
+}
+
+/** Restore mode state from disk on startup. Expires stale entries. */
+export async function restoreModeState(): Promise<void> {
+  const saved = await readFromDisk<Record<string, ModeEntry>>(MODE_STATE_CACHE_KEY);
+  if (!saved) return;
+
+  const now = Date.now();
+  let restored = 0;
+  let expired = 0;
+
+  for (const [key, entry] of Object.entries(saved)) {
+    if (!entry?.mode || !entry?.lastActivity) continue;
+    if (now - entry.lastActivity > MODE_TTL_MS) {
+      expired++;
+      continue;
+    }
+    conversationModes.set(key, entry);
+    restored++;
+  }
+
+  if (restored > 0 || expired > 0) {
+    logger.info(`Mode state restored`, { restored, expired });
+    for (const [key, entry] of conversationModes) {
+      logger.info(`[mode] restored ${entry.mode} for conversation ${key}`);
+    }
+  }
+}
 
 /** Get the current mode for a conversation. Defaults to conversation. */
 export function getConversationMode(conversationId: string): ContextMode {
-  return conversationModes.get(conversationId) || "conversation";
+  const entry = conversationModes.get(conversationId);
+  if (!entry) return "conversation";
+  // ELLIE-395: Expire stale modes on access
+  if (Date.now() - entry.lastActivity > MODE_TTL_MS) {
+    conversationModes.delete(conversationId);
+    persistModeState();
+    logger.info(`[mode] expired stale ${entry.mode} for ${conversationId} (${Math.round((Date.now() - entry.lastActivity) / 60_000)}min inactive)`);
+    return "conversation";
+  }
+  return entry.mode;
 }
 
 /** Set the mode for a conversation (manual override or detection). */
 export function setConversationMode(conversationId: string, mode: ContextMode): void {
-  conversationModes.set(conversationId, mode);
+  conversationModes.set(conversationId, { mode, lastActivity: Date.now() });
+  persistModeState();
+}
+
+/** Touch the last activity timestamp without changing mode. */
+export function touchConversationMode(conversationId: string): void {
+  const entry = conversationModes.get(conversationId);
+  if (entry) {
+    entry.lastActivity = Date.now();
+    persistModeState();
+  }
 }
 
 /** Clear mode state for a conversation (on session end). */
 export function clearConversationMode(conversationId: string): void {
   conversationModes.delete(conversationId);
+  persistModeState();
 }
 
 // ── Signal patterns ─────────────────────────────────────────
@@ -440,6 +509,8 @@ export function processMessageMode(
   const detection = detectMode(userMessage);
 
   if (!detection) {
+    // ELLIE-395: Touch activity timestamp to keep TTL fresh
+    touchConversationMode(conversationId);
     return { mode: previousMode, changed: false, detection: null };
   }
 

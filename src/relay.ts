@@ -59,6 +59,7 @@ import { isWorkItemDone } from "./plane.ts";
 import { startPlaneQueueWorker, purgeCompleted as purgePlaneQueue } from "./plane-queue.ts";
 import { startWatchdog, recoverActiveRuns, setWatchdogNotify } from "./orchestration-tracker.ts";
 import { reconcileOnStartup, startReconciler } from "./orchestration-reconciler.ts";
+import { restoreModeState } from "./context-mode.ts";
 import { onBridgeWrite } from "./api/bridge.ts";
 import { setBroadcastToEllieChat } from "./tool-approval.ts";
 import { getSummaryState } from "./ums/consumers/summary.ts";
@@ -158,6 +159,9 @@ recoverActiveRuns()
     startReconciler(supabase);
   })
   .catch(err => logger.error("Orchestration startup error", err));
+
+// ELLIE-395: Restore conversation mode state from disk
+restoreModeState().catch(err => logger.warn("Mode state restore failed (non-fatal)", err));
 
 // ELLIE-374: Validate all archetype files on startup
 import("./prompt-builder.ts").then(({ validateArchetypes }) => validateArchetypes()).catch(() => {});
