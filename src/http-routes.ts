@@ -150,7 +150,7 @@ import { detectAndCaptureCorrection } from "./correction-detector.ts";
 import { detectAndLinkCalendarEvents } from "./calendar-linker.ts";
 import { freshnessTracker, autoRefreshStaleSources, detectConflicts } from "./context-freshness.ts";
 import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hierarchy.ts";
-import { getModeConfig, updateModeConfig, resetModeConfig, type ContextMode } from "./context-mode.ts";
+import { getModeConfig, updateModeConfig, resetModeConfig, detectMode, type ContextMode } from "./context-mode.ts";
 import { getSectionContents, updateSectionContent } from "./api/context-sections.ts";
 import type { ApiRequest, ApiResponse } from "./api/types.ts";
 import { getActiveRunStates, getRunState, killRun } from "./orchestration-tracker.ts";
@@ -984,6 +984,22 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
     const config = getModeConfig();
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(config));
+    return;
+  }
+
+  // ── ELLIE-375: Test mode detection — POST /api/context-modes/detect ──
+  if (url.pathname === "/api/context-modes/detect" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", () => {
+      try {
+        const { message } = JSON.parse(body);
+        if (!message) { res.writeHead(400); res.end('{"error":"message required"}'); return; }
+        const detection = detectMode(message);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ detection, input: message }));
+      } catch { res.writeHead(400); res.end('{"error":"invalid json"}'); }
+    });
     return;
   }
 

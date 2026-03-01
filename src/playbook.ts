@@ -26,6 +26,7 @@ import {
 import { dispatchAgent, syncResponse } from "./agent-router.ts";
 import { processMemoryIntents } from "./memory.ts";
 import { emitEvent } from "./orchestration-ledger.ts";
+import { startRun, endRun, getActiveRunForWorkItem } from "./orchestration-tracker.ts";
 
 // ────────────────────────────────────────────────────────────────
 // Types
@@ -47,7 +48,7 @@ export interface PlaybookContext {
   telegramUserId: string;
   gchatSpaceName?: string;
   channel: string;
-  callClaudeFn: (prompt: string, options?: { resume?: boolean; allowedTools?: string[]; model?: string }) => Promise<string>;
+  callClaudeFn: (prompt: string, options?: { resume?: boolean; allowedTools?: string[]; model?: string; runId?: string }) => Promise<string>;
   buildPromptFn: (
     userMessage: string,
     contextDocket?: string,
@@ -177,9 +178,31 @@ export async function executePlaybookCommands(
 async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<void> {
   const ticketId = cmd.ticketId!;
   const agentName = cmd.agentName || "dev";
+
+  // ELLIE-376: Dispatch locking — prevent duplicate dispatches to same ticket
+  const existingRun = getActiveRunForWorkItem(ticketId);
+  if (existingRun) {
+    logger.warn("Playbook dispatch blocked — active run exists", {
+      ticketId,
+      existingRunId: existingRun.runId.slice(0, 8),
+      existingAgent: existingRun.agentType,
+      status: existingRun.status,
+      requestedAgent: agentName,
+    });
+    await notify(getNotifyCtx(ctx), {
+      event: "error",
+      workItemId: ticketId,
+      telegramMessage: `${ticketId} already has an active ${existingRun.agentType} run (${existingRun.runId.slice(0, 8)}) — skipping duplicate dispatch`,
+    });
+    return;
+  }
+
   const runId = crypto.randomUUID();
 
   console.log(`[playbook] send ${ticketId} to ${agentName} (run ${runId.slice(0, 8)})`);
+
+  // Register with orchestration tracker (ELLIE-371: was missing, caused zombie runs)
+  startRun(runId, agentName, ticketId, undefined, { channel: ctx.channel, message: `Work on ${ticketId}` });
 
   // 1. Fetch ticket details
   const details = await fetchWorkItemDetails(ticketId);
@@ -189,6 +212,8 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
       workItemId: ticketId,
       telegramMessage: `Could not find ${ticketId} in Plane`,
     });
+    emitEvent(runId, "failed", agentName, ticketId, { error: "ticket_not_found", source: "playbook" });
+    endRun(runId, "failed");
     return;
   }
 
@@ -233,6 +258,8 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
       workItemId: ticketId,
       telegramMessage: `Failed to dispatch ${agentName} agent for ${ticketId}`,
     });
+    emitEvent(runId, "failed", agentName, ticketId, { error: "dispatch_failed", source: "playbook" });
+    endRun(runId, "failed");
     return;
   }
 
@@ -270,43 +297,55 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
     health,
   );
 
-  // 6. Call Claude
-  console.log(`[playbook] Calling ${agentName} for ${ticketId}...`);
-  const startTime = Date.now();
-  const rawResponse = await ctx.callClaudeFn(prompt, {
-    resume: false,
-    model: dispatch.agent.model,
-    allowedTools: dispatch.agent.tools_enabled,
-  });
-  const durationMs = Date.now() - startTime;
-  const durationMin = Math.round(durationMs / 1000 / 60);
-
-  // 6b. Emit completion event
-  emitEvent(runId, "completed", agentName, ticketId, {
-    duration_ms: durationMs,
-    response_length: rawResponse.length,
-  });
-
-  // 7. Process memory intents from the dev agent's response
-  await processMemoryIntents(ctx.supabase, rawResponse, agentName, "shared", sessionIds);
-
-  // 7b. Close agent session in Supabase
-  if (dispatch.session_id) {
-    await syncResponse(ctx.supabase, dispatch.session_id, rawResponse, {
-      duration_ms: Date.now() - startTime,
-      status: "completed",
-      agent_name: agentName,
+  // 6-8. Execute agent, process results, notify — all wrapped to ensure endRun() fires
+  try {
+    // 6. Call Claude (pass runId for heartbeat tracking)
+    console.log(`[playbook] Calling ${agentName} for ${ticketId}...`);
+    const startTime = Date.now();
+    const rawResponse = await ctx.callClaudeFn(prompt, {
+      resume: false,
+      model: dispatch.agent.model,
+      allowedTools: dispatch.agent.tools_enabled,
+      runId,
     });
-  }
+    const durationMs = Date.now() - startTime;
+    const durationMin = Math.round(durationMs / 1000 / 60);
 
-  // 8. Notify completion
-  const preview = rawResponse.replace(/\[MEMORY:[^\]]*\]/gi, "").trim().slice(0, 300);
-  await notify(getNotifyCtx(ctx), {
-    event: "session_complete",
-    workItemId: ticketId,
-    telegramMessage: `${agentName} finished ${ticketId} (${durationMin}min):\n${preview}`,
-    gchatMessage: `${agentName} agent completed ${ticketId} (${durationMin}min):\n${rawResponse.slice(0, 800)}`,
-  });
+    // 6b. Emit completion event and terminate run in tracker
+    emitEvent(runId, "completed", agentName, ticketId, {
+      duration_ms: durationMs,
+      response_length: rawResponse.length,
+    });
+    endRun(runId, "completed");
+
+    // 7. Process memory intents from the dev agent's response
+    await processMemoryIntents(ctx.supabase, rawResponse, agentName, "shared", sessionIds);
+
+    // 7b. Close agent session in Supabase
+    if (dispatch.session_id) {
+      await syncResponse(ctx.supabase, dispatch.session_id, rawResponse, {
+        duration_ms: Date.now() - startTime,
+        status: "completed",
+        agent_name: agentName,
+      });
+    }
+
+    // 8. Notify completion
+    const preview = rawResponse.replace(/\[MEMORY:[^\]]*\]/gi, "").trim().slice(0, 300);
+    await notify(getNotifyCtx(ctx), {
+      event: "session_complete",
+      workItemId: ticketId,
+      telegramMessage: `${agentName} finished ${ticketId} (${durationMin}min):\n${preview}`,
+      gchatMessage: `${agentName} agent completed ${ticketId} (${durationMin}min):\n${rawResponse.slice(0, 800)}`,
+    });
+  } catch (execErr: unknown) {
+    // Ensure run is terminated even on crash
+    const errMsg = execErr instanceof Error ? execErr.message : String(execErr);
+    logger.error("Playbook agent execution failed", { runId: runId.slice(0, 8), agentName, ticketId }, execErr);
+    emitEvent(runId, "failed", agentName, ticketId, { error: errMsg.slice(0, 500), source: "playbook" });
+    endRun(runId, "failed");
+    throw execErr; // Re-throw so outer catch can notify
+  }
 
   console.log(`[playbook] ${agentName} completed ${ticketId} in ${durationMin}min`);
 }

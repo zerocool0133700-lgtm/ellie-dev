@@ -13,6 +13,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { readFile, readdir, writeFile } from "fs/promises";
 import { join } from "path";
+import { detectMode, getModeSectionPriorities, getModeTokenBudget } from "../src/context-mode.ts";
 
 // ── Config ──────────────────────────────────────────────────
 
@@ -36,6 +37,7 @@ interface BehaviorCheck {
   mustInclude: string[];      // At least one of these phrases/patterns must appear
   mustExclude: string[];      // None of these should appear
   description: string;        // What we expect
+  maxLengthVsControl?: number; // Max ratio of response length vs control (e.g. 0.5 = half)
 }
 
 const CHECKS: BehaviorCheck[] = [
@@ -53,7 +55,7 @@ const CHECKS: BehaviorCheck[] = [
   },
   {
     creature: "critic",
-    mustInclude: ["concern", "risk", "failure", "missing", "assumption", "question", "what if", "issue", "problem", "gap"],
+    mustInclude: ["concern", "risk", "failure", "missing", "assumption", "question", "what if", "issue", "problem", "gap", "before", "verify", "regression", "what works", "what doesn't"],
     mustExclude: ["I'll fix", "here's the implementation"],
     description: "Finds failure modes, probes assumptions, doesn't implement",
   },
@@ -91,7 +93,8 @@ const CHECKS: BehaviorCheck[] = [
     creature: "road-runner",
     mustInclude: ["rout", "triag", "assign", "quick", "priority", "dispatch", "dev", "ops"],
     mustExclude: [],
-    description: "Fast triage, classifies, routes immediately, telegraphic",
+    description: "Fast triage, classifies, routes immediately, telegraphic — must be concise vs control",
+    maxLengthVsControl: 0.5,  // Road-runner should be ≤50% of control length (skill-only = 40k budget)
   },
   {
     creature: "chipmunk",
@@ -114,10 +117,11 @@ function containsAny(text: string, patterns: string[]): string[] {
   return patterns.filter(p => lower.includes(p.toLowerCase()));
 }
 
-function formatResult(creature: string, response: string, check: BehaviorCheck): {
+function formatResult(creature: string, response: string, check: BehaviorCheck, controlLength?: number): {
   pass: boolean;
   includeHits: string[];
   excludeHits: string[];
+  concise: boolean | null;
   summary: string;
 } {
   const includeHits = containsAny(response, check.mustInclude);
@@ -125,14 +129,33 @@ function formatResult(creature: string, response: string, check: BehaviorCheck):
 
   const includePass = includeHits.length > 0;
   const excludePass = excludeHits.length === 0;
-  const pass = includePass && excludePass;
+
+  // Conciseness check — if maxLengthVsControl is set and we have a control baseline
+  let concise: boolean | null = null;
+  if (check.maxLengthVsControl != null && controlLength && controlLength > 0) {
+    const ratio = response.length / controlLength;
+    concise = ratio <= check.maxLengthVsControl;
+  }
+
+  const pass = includePass && excludePass && (concise !== false);
 
   const parts: string[] = [];
   if (!includePass) parts.push(`MISSING expected signals (wanted one of: ${check.mustInclude.join(", ")})`);
   if (!excludePass) parts.push(`ANTI-PATTERN detected: ${excludeHits.join(", ")}`);
-  if (pass) parts.push(`OK — matched: [${includeHits.join(", ")}]`);
+  if (concise === false) {
+    const ratio = controlLength ? (response.length / controlLength).toFixed(2) : "?";
+    parts.push(`TOO VERBOSE: ${response.length} chars = ${ratio}x control (max ${check.maxLengthVsControl}x)`);
+  }
+  if (pass) {
+    let msg = `OK — matched: [${includeHits.join(", ")}]`;
+    if (concise === true) {
+      const ratio = controlLength ? (response.length / controlLength).toFixed(2) : "?";
+      msg += ` — concise: ${ratio}x control`;
+    }
+    parts.push(msg);
+  }
 
-  return { pass, includeHits, excludeHits, summary: parts.join("; ") };
+  return { pass, includeHits, excludeHits, concise, summary: parts.join("; ") };
 }
 
 // ── Main ────────────────────────────────────────────────────
@@ -236,7 +259,9 @@ async function main() {
     const durationMs = Date.now() - start;
 
     const check = CHECKS.find(c => c.creature === creature);
-    const result = check ? formatResult(creature, text, check) : null;
+    const controlResult = results.find(r => r.creature === "CONTROL (no archetype)");
+    const controlLen = controlResult?.responseLength;
+    const result = check ? formatResult(creature, text, check, controlLen) : null;
 
     results.push({
       creature,
@@ -255,6 +280,78 @@ async function main() {
       console.log(`--- END ---\n`);
     }
   }
+
+  // ── Skill-only mode detection tests ────────────────────
+
+  console.log(`\n=== SKILL-ONLY MODE DETECTION ===\n`);
+
+  const modeTests: Array<{ input: string; expectMode: string; expectConfidence: string; label: string }> = [
+    { input: "triage this", expectMode: "skill-only", expectConfidence: "high", label: "triage this → skill-only" },
+    { input: "triage ELLIE-999", expectMode: "skill-only", expectConfidence: "high", label: "triage ELLIE-999 → skill-only" },
+    { input: "route this to dev", expectMode: "skill-only", expectConfidence: "high", label: "route this → skill-only" },
+    { input: "route ELLIE-42", expectMode: "skill-only", expectConfidence: "high", label: "route ELLIE-42 → skill-only" },
+    { input: "just dispatch it", expectMode: "skill-only", expectConfidence: "high", label: "just dispatch → skill-only" },
+    { input: "quick dispatch", expectMode: "skill-only", expectConfidence: "high", label: "quick dispatch → skill-only" },
+    { input: "run and return", expectMode: "skill-only", expectConfidence: "high", label: "run and return → skill-only" },
+    { input: "skill-only mode", expectMode: "skill-only", expectConfidence: "high", label: "manual: skill-only mode" },
+    { input: "triage mode", expectMode: "skill-only", expectConfidence: "high", label: "manual: triage mode" },
+    // Negative: these should NOT trigger skill-only
+    { input: "work on ELLIE-5", expectMode: "deep-work", expectConfidence: "high", label: "work on ELLIE-5 → deep-work (not skill-only)" },
+    { input: "let's plan", expectMode: "strategy", expectConfidence: "high", label: "let's plan → strategy (not skill-only)" },
+    { input: "good morning", expectMode: "conversation", expectConfidence: "high", label: "greeting → conversation (not skill-only)" },
+  ];
+
+  let modeTestsPassed = 0;
+  let modeTestsFailed = 0;
+
+  for (const t of modeTests) {
+    const result = detectMode(t.input);
+    const gotMode = result?.mode ?? "null";
+    const gotConf = result?.confidence ?? "null";
+    const modeOk = gotMode === t.expectMode;
+    const confOk = gotConf === t.expectConfidence;
+    const ok = modeOk && confOk;
+
+    if (ok) {
+      modeTestsPassed++;
+      console.log(`  PASS  ${t.label}`);
+    } else {
+      modeTestsFailed++;
+      console.log(`  FAIL  ${t.label} — got ${gotMode} (${gotConf})`);
+    }
+  }
+
+  // Verify skill-only mode priorities load correctly
+  const skillOnlyPriorities = getModeSectionPriorities("skill-only");
+  const priorityChecks = [
+    { label: "skills", expected: 1, got: skillOnlyPriorities["skills"] },
+    { label: "archetype", expected: 2, got: skillOnlyPriorities["archetype"] },
+    { label: "playbook-commands", expected: 2, got: skillOnlyPriorities["playbook-commands"] },
+    { label: "soul (suppressed)", expected: 9, got: skillOnlyPriorities["soul"] },
+    { label: "structured-context (suppressed)", expected: 9, got: skillOnlyPriorities["structured-context"] },
+  ];
+
+  for (const pc of priorityChecks) {
+    if (pc.got === pc.expected) {
+      modeTestsPassed++;
+      console.log(`  PASS  skill-only priority: ${pc.label} = ${pc.got}`);
+    } else {
+      modeTestsFailed++;
+      console.log(`  FAIL  skill-only priority: ${pc.label} — expected ${pc.expected}, got ${pc.got}`);
+    }
+  }
+
+  // Verify token budget
+  const skillOnlyBudget = getModeTokenBudget("skill-only");
+  if (skillOnlyBudget === 40_000) {
+    modeTestsPassed++;
+    console.log(`  PASS  skill-only token budget = ${skillOnlyBudget}`);
+  } else {
+    modeTestsFailed++;
+    console.log(`  FAIL  skill-only token budget — expected 40000, got ${skillOnlyBudget}`);
+  }
+
+  console.log(`\n  Mode tests: ${modeTestsPassed} passed, ${modeTestsFailed} failed\n`);
 
   // ── Summary ─────────────────────────────────────────────
 
@@ -276,6 +373,10 @@ async function main() {
       console.log(`  FAIL  ${r.creature} — ${r.check.summary}`);
     }
   }
+
+  // Include mode detection tests in totals
+  passed += modeTestsPassed;
+  failed += modeTestsFailed;
 
   console.log(`\n  Total: ${passed} passed, ${failed} failed, ${skipped} skipped\n`);
 

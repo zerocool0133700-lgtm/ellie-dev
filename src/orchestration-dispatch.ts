@@ -10,7 +10,7 @@
 
 import { log } from "./logger.ts";
 import { emitEvent } from "./orchestration-ledger.ts";
-import { startRun, endRun } from "./orchestration-tracker.ts";
+import { startRun, endRun, getActiveRunForWorkItem } from "./orchestration-tracker.ts";
 import { fetchWorkItemDetails } from "./plane.ts";
 import { dispatchAgent, syncResponse } from "./agent-router.ts";
 import { processMemoryIntents } from "./memory.ts";
@@ -38,6 +38,20 @@ export interface TrackedDispatchResult {
  * the actual agent work runs in the background.
  */
 export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispatchResult {
+  // ELLIE-376: Dispatch locking — prevent duplicate dispatches to same ticket
+  const existingRun = getActiveRunForWorkItem(opts.workItemId);
+  if (existingRun) {
+    logger.warn("Dispatch blocked — active run exists for work item", {
+      workItemId: opts.workItemId,
+      existingRunId: existingRun.runId.slice(0, 8),
+      existingAgent: existingRun.agentType,
+      status: existingRun.status,
+      requestedAgent: opts.agentType,
+    });
+    // Return the existing runId with a no-op promise so callers don't crash
+    return { runId: existingRun.runId, promise: Promise.resolve() };
+  }
+
   const runId = crypto.randomUUID();
 
   // Register in tracker immediately

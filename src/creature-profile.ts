@@ -22,6 +22,24 @@ export interface CreatureProfile {
   allowed_skills?: string[];
 }
 
+/**
+ * Canonical section labels from prompt-builder.ts.
+ * Used to validate section_priorities keys in creature frontmatter —
+ * typos like "forest-context" instead of "forest-awareness" would
+ * silently do nothing without this check.
+ */
+const VALID_SECTION_LABELS = new Set([
+  "user-message", "soul", "archetype", "psy", "phase", "health",
+  "base-prompt", "skill", "tools", "user-name", "time", "channel-context",
+  "memory-protocol", "confirm-protocol", "forest-memory-writes",
+  "conversation", "incidents", "skills", "queue", "orchestration-status",
+  "profile", "structured-context", "context-docket", "agent-memory",
+  "forest-awareness", "search", "freshness", "staleness-warning",
+  "source-hierarchy", "ground-truth-conflicts", "cross-channel-corrections",
+  "work-item", "dev-protocol", "playbook-commands", "work-commands",
+  "planning-mode",
+]);
+
 // ── Parser ───────────────────────────────────────────────────
 
 const FRONTMATTER_RE = /^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/;
@@ -78,6 +96,14 @@ export function getCreatureProfile(name?: string): CreatureProfile | null {
 /** Store a creature profile in the cache. Called from getAgentArchetype(). */
 export function setCreatureProfile(name: string, profile: CreatureProfile): void {
   _profileCache.set(name.toLowerCase().replace(/[^a-z0-9-]/g, ""), profile);
+}
+
+/**
+ * Validate section_priorities labels against the canonical set.
+ * Returns unknown labels (typos or stale references).
+ */
+export function validateSectionLabels(profile: CreatureProfile): string[] {
+  return Object.keys(profile.section_priorities).filter(k => !VALID_SECTION_LABELS.has(k));
 }
 
 // ── YAML parser (copied from skills/frontmatter.ts — module-private there) ──

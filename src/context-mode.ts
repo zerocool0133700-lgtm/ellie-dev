@@ -17,7 +17,7 @@ const logger = log.child("context:mode");
 
 // ── Types ────────────────────────────────────────────────────
 
-export type ContextMode = "conversation" | "strategy" | "workflow" | "deep-work";
+export type ContextMode = "conversation" | "strategy" | "workflow" | "deep-work" | "skill-only";
 
 export interface ModeDetectionResult {
   mode: ContextMode;
@@ -90,6 +90,18 @@ const WORKFLOW_SIGNALS: Array<{ pattern: RegExp; confidence: "high" | "medium" }
   { pattern: /\bassign\b/i, confidence: "medium" },
 ];
 
+const SKILL_ONLY_SIGNALS: Array<{ pattern: RegExp; confidence: "high" | "medium" }> = [
+  { pattern: /\brun\s+skill\b/i, confidence: "high" },
+  { pattern: /\bjust\s+run\b/i, confidence: "high" },
+  { pattern: /\bquick\s+run\b/i, confidence: "high" },
+  { pattern: /\btriage\s+this\b/i, confidence: "high" },
+  { pattern: /\btriage\s+ELLIE-\d+/i, confidence: "high" },
+  { pattern: /\broute\s+(this|it|ELLIE-\d+)\b/i, confidence: "high" },
+  { pattern: /\bjust\s+(dispatch|route|triage)\b/i, confidence: "high" },
+  { pattern: /\brun\s+and\s+return\b/i, confidence: "high" },
+  { pattern: /\bquick\s+dispatch\b/i, confidence: "high" },
+];
+
 const CONVERSATION_SIGNALS: Array<{ pattern: RegExp; confidence: "high" | "medium" }> = [
   { pattern: /^(hey|hi|hello|good\s+morning|good\s+evening|good\s+afternoon|morning|howdy|yo|sup)\b/i, confidence: "high" },
   { pattern: /\bhow'?s?\s+it\s+going\b/i, confidence: "high" },
@@ -109,6 +121,9 @@ const MANUAL_OVERRIDES: Array<{ pattern: RegExp; mode: ContextMode }> = [
   { pattern: /\blet'?s\s+just\s+talk\b/i, mode: "conversation" },
   { pattern: /\bdeep\s+work\b/i, mode: "deep-work" },
   { pattern: /\bfocus\s+mode\b/i, mode: "deep-work" },
+  { pattern: /\bskill[\s-]*only\b/i, mode: "skill-only" },
+  { pattern: /\btriage\s+mode\b/i, mode: "skill-only" },
+  { pattern: /\blight\s+mode\b/i, mode: "skill-only" },
   { pattern: /\bload\s+everything\b/i, mode: "conversation" },  // disable filtering
   { pattern: /\bfull\s+context\b/i, mode: "conversation" },
 ];
@@ -127,7 +142,7 @@ const REFRESH_SIGNALS: RegExp[] = [
 /**
  * Detect the interaction mode from a user message.
  *
- * Priority: manual overrides > deep-work > strategy > workflow > conversation
+ * Priority: manual overrides > deep-work > strategy > workflow > skill-only > conversation
  * Returns null if no clear signal detected (stay in current mode).
  */
 export function detectMode(message: string): ModeDetectionResult | null {
@@ -158,14 +173,29 @@ export function detectMode(message: string): ModeDetectionResult | null {
     }
   }
 
-  // 4. Workflow signals
+  // 4. Skill-only signals (triage, quick dispatch, run-and-return)
+  //    Checked BEFORE workflow because "just dispatch" / "quick dispatch"
+  //    would otherwise match the generic \bdispatch\b workflow signal.
+  for (const { pattern, confidence } of SKILL_ONLY_SIGNALS) {
+    if (pattern.test(message)) {
+      const ticketMatch = message.match(/ELLIE-(\d+)/i);
+      return {
+        mode: "skill-only",
+        confidence,
+        signal: pattern.source,
+        workItemId: ticketMatch ? `ELLIE-${ticketMatch[1]}` : undefined,
+      };
+    }
+  }
+
+  // 5. Workflow signals
   for (const { pattern, confidence } of WORKFLOW_SIGNALS) {
     if (pattern.test(message)) {
       return { mode: "workflow", confidence, signal: pattern.source };
     }
   }
 
-  // 5. Conversation signals (greetings, casual)
+  // 6. Conversation signals (greetings, casual)
   for (const { pattern, confidence } of CONVERSATION_SIGNALS) {
     if (pattern.test(message)) {
       return { mode: "conversation", confidence, signal: pattern.source };
@@ -204,6 +234,8 @@ const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "queue": 8,
     "skills": 6,
     "orchestration-status": 8,
+    "health": 4,
+    "incidents": 8,
   },
   strategy: {
     "soul": 5,
@@ -223,6 +255,8 @@ const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "queue": 6,
     "skills": 5,
     "orchestration-status": 5,
+    "health": 5,
+    "incidents": 4,
   },
   workflow: {
     "soul": 7,
@@ -242,6 +276,8 @@ const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "queue": 2,
     "skills": 5,
     "orchestration-status": 2,
+    "health": 3,
+    "incidents": 3,
   },
   "deep-work": {
     "soul": 7,
@@ -261,6 +297,29 @@ const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "queue": 7,
     "skills": 5,
     "orchestration-status": 6,
+    "health": 8,
+    "incidents": 8,
+  },
+  "skill-only": {
+    "soul": 9,
+    "archetype": 2,
+    "psy": 9,
+    "phase": 9,
+    "profile": 9,
+    "structured-context": 9,
+    "conversation": 6,
+    "agent-memory": 9,
+    "forest-awareness": 9,
+    "search": 9,
+    "context-docket": 9,
+    "work-item": 4,
+    "playbook-commands": 2,
+    "work-commands": 2,
+    "queue": 3,
+    "skills": 1,
+    "orchestration-status": 3,
+    "health": 9,
+    "incidents": 9,
   },
 };
 
@@ -269,6 +328,7 @@ const DEFAULT_MODE_TOKEN_BUDGETS: Record<ContextMode, number> = {
   strategy: 150_000,
   workflow: 120_000,
   "deep-work": 190_000,
+  "skill-only": 40_000,
 };
 
 // ── Active config (mutable, persisted to disk) ──────────────
@@ -371,16 +431,26 @@ export function processMessageMode(
     return { mode: previousMode, changed: false, detection: null };
   }
 
+  // ELLIE-375: Log all detections at info level for visibility
+  logger.info(`mode detected: ${detection.mode} (${detection.confidence})`, {
+    signal: detection.signal,
+    currentMode: previousMode,
+    wouldSwitch: detection.mode !== previousMode,
+    conversationId,
+    workItemId: detection.workItemId,
+  });
+
   // Only switch on high confidence, or if it's a manual override
   if (detection.confidence === "medium" && detection.mode !== previousMode) {
-    logger.debug(`potential shift: ${previousMode} -> ${detection.mode} (medium confidence, staying)`, {
+    logger.info(`mode held: ${previousMode} (medium confidence ${detection.mode} signal ignored)`, {
       signal: detection.signal,
+      conversationId,
     });
     return { mode: previousMode, changed: false, detection };
   }
 
   if (detection.mode !== previousMode) {
-    logger.info(`transition: ${previousMode} -> ${detection.mode}`, {
+    logger.info(`mode transition: ${previousMode} -> ${detection.mode}`, {
       signal: detection.signal,
       confidence: detection.confidence,
       conversationId,

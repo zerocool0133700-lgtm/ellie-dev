@@ -34,6 +34,7 @@ let _watchdogTimer: ReturnType<typeof setInterval> | null = null;
 
 const STALE_THRESHOLD_MS = 90_000; // 90s without heartbeat = stale
 const WATCHDOG_INTERVAL_MS = 60_000; // check every 60s
+const REAPER_THRESHOLD_MS = 300_000; // 5min stale with dead process = reap
 
 // ── Run lifecycle ──────────────────────────────────────────
 
@@ -103,6 +104,20 @@ export function getRunState(runId: string): RunState | null {
   return activeRuns.get(runId) || null;
 }
 
+/**
+ * ELLIE-371: Check if a work item already has an active run.
+ * Returns the active RunState if found, null otherwise.
+ * Used for dispatch locking — prevents duplicate dispatches to same ticket.
+ */
+export function getActiveRunForWorkItem(workItemId: string): RunState | null {
+  for (const run of activeRuns.values()) {
+    if (run.workItemId === workItemId && (run.status === "running" || run.status === "stale")) {
+      return run;
+    }
+  }
+  return null;
+}
+
 // ── Kill / Cancel ─────────────────────────────────────────
 
 /**
@@ -164,12 +179,14 @@ export function startWatchdog(): void {
 
   _watchdogTimer = setInterval(() => {
     const now = Date.now();
+    const toReap: string[] = [];
+
     for (const [runId, run] of activeRuns) {
       try {
-        if (run.status !== "running") continue;
-
         const silenceMs = now - run.lastHeartbeat;
-        if (silenceMs > STALE_THRESHOLD_MS) {
+
+        // Mark running → stale
+        if (run.status === "running" && silenceMs > STALE_THRESHOLD_MS) {
           run.status = "stale";
           logger.warn("Run stale — no heartbeat", {
             runId: runId.slice(0, 8),
@@ -182,9 +199,38 @@ export function startWatchdog(): void {
             silence_ms: silenceMs,
           });
         }
+
+        // ELLIE-376: Reap stale runs with dead processes
+        if (run.status === "stale" && silenceMs > REAPER_THRESHOLD_MS) {
+          let processAlive = false;
+          if (run.pid) {
+            try { process.kill(run.pid, 0); processAlive = true; } catch { /* dead */ }
+          }
+          if (!processAlive) {
+            toReap.push(runId);
+          }
+        }
       } catch (err) {
         logger.error("Watchdog check error", { runId: runId.slice(0, 8) }, err);
       }
+    }
+
+    // Reap dead stale runs outside iteration
+    for (const runId of toReap) {
+      const run = activeRuns.get(runId);
+      if (!run) continue;
+      logger.warn("Reaping dead stale run", {
+        runId: runId.slice(0, 8),
+        agentType: run.agentType,
+        workItemId: run.workItemId,
+        stale_for_ms: now - run.lastHeartbeat,
+        pid: run.pid,
+      });
+      emitEvent(runId, "failed", run.agentType, run.workItemId, {
+        reason: "reaped_dead_process",
+        stale_for_ms: now - run.lastHeartbeat,
+      });
+      endRun(runId, "failed");
     }
   }, WATCHDOG_INTERVAL_MS);
 
@@ -216,9 +262,19 @@ export async function recoverActiveRuns(): Promise<void> {
 
     logger.warn(`Recovering ${unterminated.length} orphaned run(s)`);
     for (const run of unterminated) {
+      const ageMs = Date.now() - new Date(run.dispatched_at).getTime();
+      const ageMin = Math.round(ageMs / 60_000);
+      logger.info("Recovering orphaned run", {
+        runId: run.run_id.slice(0, 8),
+        agentType: run.agent_type,
+        workItemId: run.work_item_id,
+        dispatched_at: run.dispatched_at,
+        age_min: ageMin,
+      });
       emitEvent(run.run_id, "failed", run.agent_type, run.work_item_id, {
         reason: "relay_restart",
         dispatched_at: run.dispatched_at,
+        orphaned_age_ms: ageMs,
       });
     }
   } catch (err) {

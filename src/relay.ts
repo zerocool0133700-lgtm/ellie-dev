@@ -151,6 +151,9 @@ setInterval(() => {
 // Orchestration tracker — ELLIE-349: heartbeat watchdog + orphan recovery
 recoverActiveRuns().then(() => startWatchdog()).catch(err => logger.error("Orchestration startup error", err));
 
+// ELLIE-374: Validate all archetype files on startup
+import("./prompt-builder.ts").then(({ validateArchetypes }) => validateArchetypes()).catch(() => {});
+
 // Bridge write notifications — Telegram + ellie-chat (ELLIE-199)
 onBridgeWrite(({ collaborator, content, memoryId, type, workItemId }) => {
   const preview = content.length > 80 ? content.slice(0, 80) + '...' : content;

@@ -131,13 +131,22 @@ async function localDispatch(
   }
 
   // 2. Check for existing active session
-  const { data: existingSession } = await supabase
+  // ELLIE-376: Include work_item_id to isolate sessions per ticket.
+  // Without this, two dispatches to the same agent for different tickets
+  // could share a session, leaking context between work items.
+  let sessionQuery = supabase
     .from("agent_sessions")
     .select("id, context_summary")
     .eq("agent_id", agent.id)
     .eq("user_id", userId || "")
     .eq("channel", channel || "telegram")
-    .eq("state", "active")
+    .eq("state", "active");
+  if (workItemId) {
+    sessionQuery = sessionQuery.eq("work_item_id", workItemId);
+  } else {
+    sessionQuery = sessionQuery.is("work_item_id", null);
+  }
+  const { data: existingSession } = await sessionQuery
     .order("last_activity", { ascending: false })
     .limit(1)
     .single();

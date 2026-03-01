@@ -6,10 +6,10 @@
  * runPostMessageAssessment, planning mode state.
  */
 
-import { readFile } from "fs/promises";
+import { readFile, readdir } from "fs/promises";
 import { watch, type FSWatcher } from "fs";
 import { log } from "./logger.ts";
-import { parseCreatureProfile, setCreatureProfile, getCreatureProfile } from "./creature-profile.ts";
+import { parseCreatureProfile, setCreatureProfile, getCreatureProfile, validateSectionLabels } from "./creature-profile.ts";
 
 const logger = log.child("prompt-builder");
 import { join, dirname } from "path";
@@ -185,13 +185,68 @@ export async function getAgentArchetype(agentName?: string): Promise<string> {
     const raw = await readFile(filePath, "utf-8");
     // ELLIE-367: Parse creature profile from frontmatter, cache body without frontmatter
     const { profile, body } = parseCreatureProfile(raw);
-    if (profile) setCreatureProfile(normalized, profile);
+    if (profile) {
+      const badLabels = validateSectionLabels(profile);
+      if (badLabels.length > 0) {
+        logger.warn(`Archetype ${normalized}: unknown section_priorities labels (typos?): ${badLabels.join(", ")}`);
+      }
+      setCreatureProfile(normalized, profile);
+    } else {
+      // ELLIE-374: Warn when frontmatter parse yields no profile
+      logger.warn(`Archetype ${normalized}: no creature profile parsed from frontmatter (missing section_priorities?)`);
+    }
     _agentArchetypeCache.set(normalized, { content: body, loadedAt: Date.now() });
     return body;
-  } catch {
-    // No creature-specific archetype — fall back to Forest chain owner
+  } catch (err: unknown) {
+    // ELLIE-374: Log fallback so it's visible, not silent
+    logger.warn(`Archetype ${normalized}: file load failed, falling back to Forest chain-owner`, err instanceof Error ? err.message : err);
     return getArchetypeContext();
   }
+}
+
+/**
+ * ELLIE-374: Validate all archetype files on startup.
+ * Logs warnings for missing files, parse failures, or missing profile keys.
+ */
+export async function validateArchetypes(): Promise<{ valid: number; warnings: string[] }> {
+  const warnings: string[] = [];
+  let valid = 0;
+  try {
+    const files = await readdir(ARCHETYPES_DIR);
+    const archetypes = files.filter(f => f.endsWith(".md"));
+    if (archetypes.length === 0) {
+      warnings.push("No archetype files found in config/archetypes/");
+      logger.warn("ELLIE-374: No archetype files found", { dir: ARCHETYPES_DIR });
+      return { valid: 0, warnings };
+    }
+    for (const file of archetypes) {
+      const name = file.replace(".md", "");
+      try {
+        const raw = await readFile(join(ARCHETYPES_DIR, file), "utf-8");
+        const { profile } = parseCreatureProfile(raw);
+        if (!profile) {
+          warnings.push(`${name}: no creature profile (missing section_priorities)`);
+        } else {
+          if (!profile.token_budget) warnings.push(`${name}: no token_budget in frontmatter`);
+          if (!profile.allowed_skills?.length) warnings.push(`${name}: no allowed_skills in frontmatter`);
+          const badLabels = validateSectionLabels(profile);
+          if (badLabels.length > 0) warnings.push(`${name}: unknown section_priorities labels: ${badLabels.join(", ")}`);
+          valid++;
+        }
+      } catch (err: unknown) {
+        warnings.push(`${name}: failed to read — ${err instanceof Error ? err.message : err}`);
+      }
+    }
+    if (warnings.length > 0) {
+      logger.warn(`ELLIE-374: Archetype validation: ${valid} valid, ${warnings.length} warning(s)`, { warnings });
+    } else {
+      logger.info(`ELLIE-374: All ${valid} archetypes validated successfully`);
+    }
+  } catch (err: unknown) {
+    warnings.push(`Cannot read archetypes directory: ${err instanceof Error ? err.message : err}`);
+    logger.error("ELLIE-374: Archetype validation failed", err);
+  }
+  return { valid, warnings };
 }
 
 let _psyContext = "";
@@ -700,6 +755,8 @@ export function buildPrompt(
   // ── ELLIE-262: Apply per-mode soul/personality priority overrides ──
   const activeStrategy = getLastResolvedStrategy();
   const sectionPriorityOverrides = getStrategySectionPriorities(activeStrategy);
+  // ELLIE-378: Track priority overrides for conflict logging
+  const priorityConflicts: Array<{ label: string; from: number; to: number; source: string }> = [];
   for (const s of sections) {
     if (sectionPriorityOverrides[s.label] !== undefined) {
       s.priority = sectionPriorityOverrides[s.label];
@@ -711,38 +768,50 @@ export function buildPrompt(
     const modePriorities = getModeSectionPriorities(contextMode);
     for (const s of sections) {
       if (modePriorities[s.label] !== undefined) {
+        const prev = s.priority;
         s.priority = modePriorities[s.label];
+        if (prev !== s.priority) {
+          priorityConflicts.push({ label: s.label, from: prev, to: s.priority, source: `mode:${contextMode}` });
+        }
       }
     }
-
-    // Actively suppress sections with priority >= 7 — these are "suppressed" per
-    // the context-strategy skill, not just deprioritized for budget trimming.
-    const SUPPRESS_THRESHOLD = 7;
-    const suppCount = sections.filter(s => s.priority >= SUPPRESS_THRESHOLD).length;
-    if (suppCount > 0) {
-      for (let i = sections.length - 1; i >= 0; i--) {
-        if (sections[i].priority >= SUPPRESS_THRESHOLD) sections.splice(i, 1);
-      }
-      logger.debug(`Mode ${contextMode}: suppressed ${suppCount} sections (priority >= ${SUPPRESS_THRESHOLD})`);
-    }
+    // NOTE: Suppression deferred to after creature overrides — creature profiles
+    // can rescue mode-suppressed sections (e.g. deep-work suppresses archetype:8,
+    // but dev creature needs archetype:1). Single pass below handles both.
   }
 
-  // ── ELLIE-367: Apply creature-specific section priorities ──
+  // ── ELLIE-367: Apply creature-specific section priorities (override mode) ──
   const creatureProfile = getCreatureProfile(agentConfig?.name);
   if (creatureProfile?.section_priorities) {
     for (const s of sections) {
       if (creatureProfile.section_priorities[s.label] !== undefined) {
+        const prev = s.priority;
         s.priority = creatureProfile.section_priorities[s.label];
+        if (prev !== s.priority) {
+          priorityConflicts.push({ label: s.label, from: prev, to: s.priority, source: `creature:${agentConfig?.name}` });
+        }
       }
     }
-    const CREATURE_SUPPRESS = 7;
-    const creatureSuppCount = sections.filter(s => s.priority >= CREATURE_SUPPRESS).length;
-    if (creatureSuppCount > 0) {
-      for (let i = sections.length - 1; i >= 0; i--) {
-        if (sections[i].priority >= CREATURE_SUPPRESS) sections.splice(i, 1);
-      }
-      logger.debug(`Creature ${agentConfig?.name}: suppressed ${creatureSuppCount} sections`);
+  }
+
+  // ELLIE-378: Log priority conflicts between layers
+  if (priorityConflicts.length > 0) {
+    logger.info("Priority overrides applied", {
+      mode: contextMode,
+      creature: agentConfig?.name,
+      strategy: activeStrategy,
+      conflicts: priorityConflicts,
+    });
+  }
+
+  // ── Suppress sections with priority >= 7 (after all priority layers applied) ──
+  const SUPPRESS_THRESHOLD = 7;
+  const suppCount = sections.filter(s => s.priority >= SUPPRESS_THRESHOLD).length;
+  if (suppCount > 0) {
+    for (let i = sections.length - 1; i >= 0; i--) {
+      if (sections[i].priority >= SUPPRESS_THRESHOLD) sections.splice(i, 1);
     }
+    logger.debug(`Suppressed ${suppCount} sections (priority >= ${SUPPRESS_THRESHOLD}, mode=${contextMode}, creature=${agentConfig?.name})`);
   }
 
   const excludedSections = getStrategyExcludedSections(activeStrategy);
