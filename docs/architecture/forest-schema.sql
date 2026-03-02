@@ -4,11 +4,13 @@
 --
 -- Three layers:
 --   Entities (domain working areas) → Trees (processes) → Forest (all trees)
+--   Vines connect trees to each other (cross-tree relationships)
 --
 -- Core principles:
 --   - Git is the storage layer; metadata lives here in the DB
 --   - All trees share a common base abstraction
---   - Complex workflows = branches within one tree, not tree dependencies
+--   - Complex workflows = branches within one tree
+--   - Vines connect trees across the forest (depends_on, spawned_from, etc.)
 --   - Forest creatures coordinate push/pull between entities and trees
 --   - Trees evolve: nursery (ephemeral) → seedling → mature → archived
 --   - Some trees support multiple trunks (parallel main branches)
@@ -96,7 +98,48 @@ CREATE TYPE event_kind AS ENUM (
   'creature.failed',
   'gate.requested',
   'gate.approved',
-  'gate.rejected'
+  'gate.rejected',
+  'vine.created',
+  'vine.removed'
+);
+
+-- Creature lifecycle states (replaces CHECK constraint)
+CREATE TYPE creature_state AS ENUM (
+  'pending',
+  'dispatched',
+  'working',
+  'completed',
+  'failed',
+  'cancelled'
+);
+
+-- Conflict resolution strategies
+CREATE TYPE conflict_strategy AS ENUM (
+  'last_writer_wins',
+  'manual',
+  'merge_all',
+  'priority'
+);
+
+-- Gate approval strategies
+CREATE TYPE gate_strategy AS ENUM (
+  'all_must_approve',
+  'any_can_approve',
+  'majority'
+);
+
+-- Vine link types — cross-tree connections
+CREATE TYPE link_type AS ENUM (
+  'related',
+  'depends_on',
+  'spawned_from',
+  'parent',
+  'child',
+  'source',
+  'contradicts',
+  'refines',
+  'blocks',
+  'complements'
 );
 
 
@@ -119,7 +162,7 @@ CREATE TABLE entities (
   config          JSONB DEFAULT '{}',            -- Entity-specific configuration
   active          BOOLEAN DEFAULT TRUE,
   created_at      TIMESTAMPTZ DEFAULT NOW(),
-  updated_at      TIMESTAMPTZ DEFAULT NOW()
+  updated_at      TIMESTAMPTZ DEFAULT NOW()     -- Auto-set by trg_set_updated_at
 );
 
 CREATE INDEX idx_entities_type ON entities(type);
@@ -161,7 +204,8 @@ CREATE TABLE trees (
   -- Configuration & metadata
   tree_config     JSONB DEFAULT '{}',            -- Type-specific settings
   tags            TEXT[] DEFAULT '{}',
-  metadata        JSONB DEFAULT '{}'
+  metadata        JSONB DEFAULT '{}',
+  updated_at      TIMESTAMPTZ DEFAULT NOW()      -- Auto-set by trg_set_updated_at
 );
 
 CREATE INDEX idx_trees_type ON trees(type);
@@ -189,6 +233,7 @@ CREATE TABLE trunks (
   is_primary      BOOLEAN DEFAULT FALSE,          -- The default trunk for merges
   description     TEXT,
   created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW(),      -- Auto-set by trg_set_updated_at
   head_commit_id  UUID,                           -- Points to latest commit (FK added after commits table)
 
   UNIQUE(tree_id, name),
@@ -209,14 +254,15 @@ CREATE TABLE branches (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tree_id         UUID NOT NULL REFERENCES trees(id) ON DELETE CASCADE,
   trunk_id        UUID NOT NULL REFERENCES trunks(id) ON DELETE CASCADE,
-  entity_id       UUID REFERENCES entities(id),  -- Which entity is doing the work
+  entity_id       UUID REFERENCES entities(id) ON DELETE SET NULL,  -- Which entity is doing the work
   name            TEXT NOT NULL,                  -- Branch name
   git_branch      TEXT NOT NULL,                  -- Actual git branch name
   state           branch_state NOT NULL DEFAULT 'open',
   reason          TEXT,                           -- Why this branch was created
-  parent_branch_id UUID REFERENCES branches(id), -- For nested branching
+  parent_branch_id UUID REFERENCES branches(id) ON DELETE SET NULL, -- For nested branching
 
   created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW(),      -- Auto-set by trg_set_updated_at
   merged_at       TIMESTAMPTZ,
   closed_at       TIMESTAMPTZ,
   head_commit_id  UUID,                           -- Latest commit on this branch
@@ -239,13 +285,13 @@ CREATE INDEX idx_branches_tree_state ON branches(tree_id, state);
 CREATE TABLE commits (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tree_id         UUID NOT NULL REFERENCES trees(id) ON DELETE CASCADE,
-  branch_id       UUID REFERENCES branches(id),  -- NULL if on trunk directly
-  trunk_id        UUID REFERENCES trunks(id),     -- Which trunk (if committed to trunk)
-  entity_id       UUID REFERENCES entities(id),   -- Who made this commit
+  branch_id       UUID REFERENCES branches(id) ON DELETE SET NULL,   -- NULL if on trunk directly
+  trunk_id        UUID REFERENCES trunks(id) ON DELETE SET NULL,     -- Which trunk (if committed to trunk)
+  entity_id       UUID REFERENCES entities(id) ON DELETE SET NULL,   -- Who made this commit
   git_sha         TEXT,                           -- Actual git commit SHA
   message         TEXT NOT NULL,
   content_summary TEXT,                           -- AI-generated summary of changes
-  parent_id       UUID REFERENCES commits(id),    -- Parent commit (for ordering)
+  parent_id       UUID REFERENCES commits(id) ON DELETE SET NULL,    -- Parent commit (for ordering)
 
   created_at      TIMESTAMPTZ DEFAULT NOW(),
   metadata        JSONB DEFAULT '{}'
@@ -257,12 +303,13 @@ CREATE INDEX idx_commits_trunk ON commits(trunk_id);
 CREATE INDEX idx_commits_entity ON commits(entity_id);
 CREATE INDEX idx_commits_created ON commits(created_at DESC);
 CREATE INDEX idx_commits_git_sha ON commits(git_sha) WHERE git_sha IS NOT NULL;
+CREATE INDEX idx_commits_parent ON commits(parent_id) WHERE parent_id IS NOT NULL;
 
 -- Add FK for head_commit references now that commits table exists
 ALTER TABLE trunks ADD CONSTRAINT fk_trunks_head_commit
-  FOREIGN KEY (head_commit_id) REFERENCES commits(id);
+  FOREIGN KEY (head_commit_id) REFERENCES commits(id) ON DELETE SET NULL;
 ALTER TABLE branches ADD CONSTRAINT fk_branches_head_commit
-  FOREIGN KEY (head_commit_id) REFERENCES commits(id);
+  FOREIGN KEY (head_commit_id) REFERENCES commits(id) ON DELETE SET NULL;
 
 
 -- ============================================================
@@ -302,9 +349,9 @@ CREATE TABLE creatures (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   type            creature_type NOT NULL,
   tree_id         UUID NOT NULL REFERENCES trees(id) ON DELETE CASCADE,
-  entity_id       UUID NOT NULL REFERENCES entities(id),
-  branch_id       UUID REFERENCES branches(id),   -- Branch created for this work (if any)
-  parent_creature_id UUID REFERENCES creatures(id), -- Chain link: which creature spawned this one
+  entity_id       UUID NOT NULL REFERENCES entities(id) ON DELETE RESTRICT,
+  branch_id       UUID REFERENCES branches(id) ON DELETE SET NULL,   -- Branch created for this work (if any)
+  parent_creature_id UUID REFERENCES creatures(id) ON DELETE SET NULL, -- Chain link: which creature spawned this one
 
   -- What triggered this creature
   trigger_event   TEXT,                            -- Event that spawned this creature
@@ -315,8 +362,7 @@ CREATE TABLE creatures (
   instructions    JSONB DEFAULT '{}',              -- Detailed instructions for the entity
 
   -- Lifecycle
-  state           TEXT NOT NULL DEFAULT 'pending'
-                  CHECK (state IN ('pending', 'dispatched', 'working', 'completed', 'failed', 'cancelled')),
+  state           creature_state NOT NULL DEFAULT 'pending',
   dispatched_at   TIMESTAMPTZ,
   started_at      TIMESTAMPTZ,
   completed_at    TIMESTAMPTZ,
@@ -333,6 +379,7 @@ CREATE TABLE creatures (
   error           TEXT,                            -- If failed, why
 
   created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW(),       -- Auto-set by trg_set_updated_at
   metadata        JSONB DEFAULT '{}'
 );
 
@@ -342,6 +389,8 @@ CREATE INDEX idx_creatures_state ON creatures(state) WHERE state NOT IN ('comple
 CREATE INDEX idx_creatures_type ON creatures(type);
 CREATE INDEX idx_creatures_branch ON creatures(branch_id) WHERE branch_id IS NOT NULL;
 CREATE INDEX idx_creatures_parent ON creatures(parent_creature_id) WHERE parent_creature_id IS NOT NULL;
+CREATE INDEX idx_creatures_timeout ON creatures(timeout_at) WHERE timeout_at IS NOT NULL AND state IN ('dispatched', 'working');
+CREATE INDEX idx_creatures_dispatched ON creatures(dispatched_at DESC) WHERE dispatched_at IS NOT NULL;
 
 
 -- ============================================================
@@ -381,6 +430,7 @@ CREATE INDEX idx_events_kind ON forest_events(kind);
 CREATE INDEX idx_events_tree ON forest_events(tree_id) WHERE tree_id IS NOT NULL;
 CREATE INDEX idx_events_entity ON forest_events(entity_id) WHERE entity_id IS NOT NULL;
 CREATE INDEX idx_events_tree_kind ON forest_events(tree_id, kind);
+CREATE INDEX idx_events_creature ON forest_events(creature_id) WHERE creature_id IS NOT NULL;
 
 
 -- ============================================================
@@ -396,22 +446,21 @@ CREATE TABLE contribution_policies (
 
   -- Scope: which trees does this policy apply to?
   tree_type       tree_type,                       -- NULL = applies to all types
-  tree_id         UUID REFERENCES trees(id),       -- NULL = applies to type broadly
+  tree_id         UUID REFERENCES trees(id) ON DELETE CASCADE, -- NULL = applies to type broadly
 
   -- Rules
   allowed_entities UUID[],                         -- NULL = any entity can contribute
   max_concurrent_branches INTEGER DEFAULT 5,       -- Per entity, per tree
   require_approval BOOLEAN DEFAULT FALSE,          -- Must a creature be approved before work?
   auto_merge      BOOLEAN DEFAULT TRUE,            -- Auto-merge on completion?
-  conflict_strategy TEXT DEFAULT 'last_writer_wins'
-                  CHECK (conflict_strategy IN ('last_writer_wins', 'manual', 'merge_all', 'priority')),
+  conflict_resolution conflict_strategy NOT NULL DEFAULT 'last_writer_wins',
 
   -- QA Gating
   gate_entities   UUID[],                          -- Entities that must approve before trunk merge
-  gate_strategy   TEXT DEFAULT NULL                 -- How gate approval works
-                  CHECK (gate_strategy IN ('all_must_approve', 'any_can_approve', 'majority')),
+  gate_mode       gate_strategy DEFAULT NULL,       -- How gate approval works
 
   created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW(),       -- Auto-set by trg_set_updated_at
   metadata        JSONB DEFAULT '{}'
 );
 
@@ -419,7 +468,40 @@ CREATE INDEX idx_policies_tree_type ON contribution_policies(tree_type);
 
 
 -- ============================================================
--- 10. SEED DATA — Initial entities from ellie-dev & ellie-home
+-- 10. VINES (TREE_LINKS) — Cross-tree connections
+-- ============================================================
+-- Vines connect trees to each other. Directed edges with type,
+-- confidence, and soft deletes. This is how the forest becomes
+-- a graph instead of isolated silos.
+
+CREATE TABLE tree_links (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  source_tree_id  UUID NOT NULL REFERENCES trees(id) ON DELETE CASCADE,
+  target_tree_id  UUID NOT NULL REFERENCES trees(id) ON DELETE CASCADE,
+  link_type       link_type NOT NULL,
+  confidence      NUMERIC(3,2) DEFAULT 0.70 CHECK (confidence BETWEEN 0 AND 1),
+  created_by      UUID REFERENCES entities(id) ON DELETE SET NULL,
+  note            TEXT,                            -- Why this vine exists
+  metadata        JSONB DEFAULT '{}',
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW(),       -- Auto-set by trg_set_updated_at
+  deleted_at      TIMESTAMPTZ,                     -- Soft delete
+
+  -- One vine of each type per direction between two trees
+  UNIQUE(source_tree_id, target_tree_id, link_type),
+  -- No self-links
+  CHECK (source_tree_id != target_tree_id)
+);
+
+CREATE INDEX idx_tree_links_source ON tree_links(source_tree_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_tree_links_target ON tree_links(target_tree_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_tree_links_type ON tree_links(link_type) WHERE deleted_at IS NULL;
+CREATE INDEX idx_tree_links_source_type ON tree_links(source_tree_id, link_type) WHERE deleted_at IS NULL;
+CREATE INDEX idx_tree_links_confidence ON tree_links(confidence DESC) WHERE deleted_at IS NULL;
+
+
+-- ============================================================
+-- 11. SEED DATA — Initial entities from ellie-dev & ellie-home
 -- ============================================================
 
 INSERT INTO entities (name, display_name, type, source_repo, source_path, contribution) VALUES
@@ -454,11 +536,13 @@ SELECT
   t.*,
   count(DISTINCT te.entity_id) FILTER (WHERE te.active) AS entity_count,
   count(DISTINCT b.id) FILTER (WHERE b.state = 'open') AS open_branches,
-  count(DISTINCT tr.id) AS trunk_count
+  count(DISTINCT tr.id) AS trunk_count,
+  count(DISTINCT tl.id) AS vine_count
 FROM trees t
 LEFT JOIN tree_entities te ON te.tree_id = t.id
 LEFT JOIN branches b ON b.tree_id = t.id
 LEFT JOIN trunks tr ON tr.tree_id = t.id
+LEFT JOIN tree_links tl ON (tl.source_tree_id = t.id OR tl.target_tree_id = t.id) AND tl.deleted_at IS NULL
 WHERE t.state NOT IN ('archived', 'composted')
 GROUP BY t.id;
 
@@ -651,6 +735,41 @@ CREATE TRIGGER trg_creature_timeout
   BEFORE INSERT OR UPDATE OF state ON creatures
   FOR EACH ROW
   EXECUTE FUNCTION set_creature_timeout();
+
+
+-- ============================================================
+-- TRIGGERS — Auto-set updated_at on every write
+-- ============================================================
+-- Reusable trigger function. Apply to any table with an updated_at column.
+
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at := NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_set_updated_at BEFORE UPDATE ON entities
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER trg_set_updated_at BEFORE UPDATE ON trees
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER trg_set_updated_at BEFORE UPDATE ON trunks
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER trg_set_updated_at BEFORE UPDATE ON branches
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER trg_set_updated_at BEFORE UPDATE ON creatures
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER trg_set_updated_at BEFORE UPDATE ON contribution_policies
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER trg_set_updated_at BEFORE UPDATE ON tree_links
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 
 -- ============================================================

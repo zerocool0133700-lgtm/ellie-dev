@@ -556,6 +556,7 @@ export async function processMemoryIntents(
           content,
           type: memType as 'fact' | 'decision' | 'preference' | 'finding' | 'hypothesis',
           confidence,
+          scope_path: '2/1/2',
         });
         console.log(`[memory] Forest memory: [${memType}:${confidence}] ${content.slice(0, 60)}...`);
       } catch (err) {

@@ -13,7 +13,7 @@ import { log } from "./logger.ts";
 
 const logger = log.child("queue");
 
-const QUEUE_TASK_TIMEOUT_MS = parseInt(process.env.QUEUE_TASK_TIMEOUT_MS || "480000"); // 8 min (above CLI 420s + buffer)
+const QUEUE_TASK_TIMEOUT_MS = parseInt(process.env.QUEUE_TASK_TIMEOUT_MS || "720000"); // 12 min (above CLI 600s + buffer)
 
 // ── External dependency (registered by relay.ts at startup) ──
 

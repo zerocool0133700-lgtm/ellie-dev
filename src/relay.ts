@@ -49,7 +49,7 @@ import { initForestSync } from "./elasticsearch/context.ts";
 import { initGoogleChat, sendGoogleChatMessage, isGoogleChatEnabled } from "./google-chat.ts";
 const GOOGLE_CHAT_SPACE = process.env.GOOGLE_CHAT_SPACE_NAME || "";
 import { startNudgeChecker } from "./delivery.ts";
-import { initClassifier } from "./intent-classifier.ts";
+import { initClassifier, warmTreeRoutingRules } from "./intent-classifier.ts";
 import { initEntailmentClassifier } from "./entailment-classifier.ts";
 import { startSkillWatcher, getSkillSnapshot } from "./skills/index.ts";
 import { syncAllCalendars } from "./calendar-sync.ts";
@@ -420,6 +420,9 @@ setBroadcastToEllieChat(broadcastToEllieChatClients);
 // Initialize classifiers
 if (anthropic && supabase) initClassifier(anthropic, supabase);
 if (anthropic) initEntailmentClassifier(anthropic);
+
+// ELLIE-435: Pre-warm orchestrator routing rules from Forest tree
+warmTreeRoutingRules().catch(err => logger.warn("[ELLIE-435] Tree routing warm failed", err));
 
 // ELLIE-388: Load workflow templates
 import { loadWorkflowTemplates } from "./workflow-templates.ts";

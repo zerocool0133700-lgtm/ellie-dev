@@ -4390,6 +4390,97 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // ELLIE-437: GET /api/forest/branches?tree_id=&prefix= — list branches by prefix
+  if (url.pathname === "/api/forest/branches" && req.method === "GET") {
+    const treeId = url.searchParams.get("tree_id");
+    const prefix = url.searchParams.get("prefix") ?? undefined;
+    if (!treeId) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "tree_id required" }));
+      return;
+    }
+    (async () => {
+      try {
+        const { listBranches, getLatestCommit } = await import("../../ellie-forest/src/index.ts");
+        const branches = await listBranches(treeId, prefix);
+        const results = await Promise.all(branches.map(async (b) => {
+          const commit = await getLatestCommit(b.id);
+          return { branch_id: b.id, branch_name: b.name, content: commit?.content_summary ?? null };
+        }));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ branches: results }));
+      } catch (err) { logger.error("Forest branches GET error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  // ELLIE-437: POST /api/forest/reload-profiles — invalidate agent profile cache
+  if (url.pathname === "/api/forest/reload-profiles" && req.method === "POST") {
+    (async () => {
+      try {
+        const { invalidateProfileCache } = await import("./agent-profile-builder.ts");
+        invalidateProfileCache();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ confirmed: true }));
+      } catch (err) { logger.error("Reload profiles error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  // ELLIE-436: GET /api/forest/branch?tree_id=&name= — read branch content
+  if (url.pathname === "/api/forest/branch" && req.method === "GET") {
+    const treeId = url.searchParams.get("tree_id");
+    const branchName = url.searchParams.get("name");
+    if (!treeId || !branchName) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "tree_id and name required" }));
+      return;
+    }
+    (async () => {
+      try {
+        const { getBranchByName, getLatestCommit } = await import("../../ellie-forest/src/index.ts");
+        const branch = await getBranchByName(treeId, branchName);
+        if (!branch) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Branch not found" }));
+          return;
+        }
+        const commit = await getLatestCommit(branch.id);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ branch_id: branch.id, branch_name: branch.name, content: commit?.content_summary ?? null, commit_id: commit?.id ?? null }));
+      } catch (err) { logger.error("Forest branch GET error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  // ELLIE-436: PATCH /api/forest/branch — write new commit to branch, invalidate cache
+  if (url.pathname === "/api/forest/branch" && req.method === "PATCH") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { tree_id, branch_name, content } = JSON.parse(body) as { tree_id: string; branch_name: string; content: string };
+        if (!tree_id || !branch_name || content === undefined) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "tree_id, branch_name and content required" }));
+          return;
+        }
+        const { getBranchByName, addCommit } = await import("../../ellie-forest/src/index.ts");
+        const branch = await getBranchByName(tree_id, branch_name);
+        if (!branch) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Branch not found" }));
+          return;
+        }
+        const commit = await addCommit({ tree_id, branch_id: branch.id, message: "Updated via dashboard", content_summary: content });
+        try { const { invalidateProfileCache } = await import("./agent-profile-builder.ts"); invalidateProfileCache(); } catch { /* non-fatal */ }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ commit_id: commit.id, branch_id: branch.id }));
+      } catch (err) { logger.error("Forest branch PATCH error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    });
+    return;
+  }
+
   // Relationship Tracker endpoints (ELLIE-320)
   if (url.pathname.startsWith("/api/relationships/") && !supabase) {
     res.writeHead(500, { "Content-Type": "application/json" });

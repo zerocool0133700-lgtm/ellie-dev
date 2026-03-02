@@ -171,6 +171,10 @@ export async function classifyIntent(
 
   // Tier 1.8: ELLIE-386 — Regex fast-path for obvious specialist patterns (0ms)
   // Skips ~300ms Haiku call when the intent is unambiguous
+  // ELLIE-435: Tree rules are checked first (via cache), falls back to hardcoded
+  if (!_treePatternCache || Date.now() - _treePatternCacheTime > TREE_RULE_CACHE_TTL_MS) {
+    loadTreeRoutingRules().catch(() => {}); // async warm — don't await
+  }
   const smartRoute = matchSmartPattern(message);
   if (smartRoute) {
     console.log(`[classifier] Smart pattern → "${smartRoute.agent_name}" (${smartRoute.rule_name})`);
@@ -298,7 +302,87 @@ const SMART_PATTERNS: SmartPattern[] = [
   { pattern: /\bhealth\s+check\b/i, agent: "ops", rule: "ops_health" },
 ];
 
+// ── Tree-based routing rules — ELLIE-435 ─────────────────────────────────
+// Hot-reloadable routing rules from the Orchestrator tree.
+// Takes precedence over SMART_PATTERNS; falls back to SMART_PATTERNS if unavailable.
+
+let _treePatternCache: SmartPattern[] | null = null;
+let _treePatternCacheTime = 0;
+const TREE_RULE_CACHE_TTL_MS = 5 * 60_000; // 5 min
+
+/**
+ * Parse the routing/intent-rules branch content into SmartPattern[].
+ * Format: YAML blocks under "rules:" with name/pattern/agent/confidence fields.
+ */
+function parseTreeRoutingRules(content: string): SmartPattern[] {
+  const patterns: SmartPattern[] = [];
+  // Match each "- name: ..." block
+  const ruleBlocks = content.split(/\n\s*-\s+name:\s*/);
+  for (const block of ruleBlocks.slice(1)) { // skip preamble before first rule
+    const nameMatch = block.match(/^(\S+)/);
+    const patternMatch = block.match(/\n\s+pattern:\s+(.+)/);
+    const agentMatch = block.match(/\n\s+agent:\s+(\S+)/);
+    if (!nameMatch || !patternMatch || !agentMatch) continue;
+
+    const name = nameMatch[1].trim();
+    const patternStr = patternMatch[1].trim();
+    const agent = agentMatch[1].trim();
+
+    try {
+      patterns.push({ pattern: new RegExp(patternStr, "i"), agent, rule: name });
+    } catch {
+      // Invalid regex — skip
+      logger.warn(`[classifier] Invalid tree routing rule pattern: ${name}`);
+    }
+  }
+  return patterns;
+}
+
+async function loadTreeRoutingRules(): Promise<SmartPattern[]> {
+  if (_treePatternCache && Date.now() - _treePatternCacheTime < TREE_RULE_CACHE_TTL_MS) {
+    return _treePatternCache;
+  }
+
+  try {
+    const { readFileSync } = await import("fs");
+    const { resolve } = await import("path");
+    const cfgPath = resolve(import.meta.dir, "../config/orchestrator-tree.json");
+    const cfg = JSON.parse(readFileSync(cfgPath, "utf-8"));
+    if (!cfg.tree_id) return [];
+
+    const { getBranchByName, getLatestCommit } = await import("../../ellie-forest/src/index");
+    const branch = await getBranchByName(cfg.tree_id, "routing/intent-rules");
+    if (!branch) return [];
+
+    const commit = await getLatestCommit(branch.id);
+    if (!commit?.content_summary) return [];
+
+    const rules = parseTreeRoutingRules(commit.content_summary);
+    _treePatternCache = rules;
+    _treePatternCacheTime = Date.now();
+    logger.info(`[classifier] Loaded ${rules.length} routing rules from Orchestrator tree`);
+    return rules;
+  } catch {
+    return [];
+  }
+}
+
 export function matchSmartPattern(message: string): ClassificationResult | null {
+  // Check tree-loaded rules first (synchronously from cache)
+  if (_treePatternCache) {
+    for (const { pattern, agent, rule } of _treePatternCache) {
+      if (pattern.test(message)) {
+        return {
+          agent_name: agent,
+          rule_name: `tree_rule:${rule}`,
+          confidence: 0.9,
+          execution_mode: "single",
+        };
+      }
+    }
+  }
+
+  // Fallback: hardcoded patterns
   for (const { pattern, agent, rule } of SMART_PATTERNS) {
     if (pattern.test(message)) {
       return {
@@ -310,6 +394,15 @@ export function matchSmartPattern(message: string): ClassificationResult | null 
     }
   }
   return null;
+}
+
+/** Pre-warm the tree routing rules cache at startup. */
+export async function warmTreeRoutingRules(): Promise<void> {
+  try {
+    await loadTreeRoutingRules();
+  } catch {
+    // Non-fatal — fallback to hardcoded patterns
+  }
 }
 
 // ────────────────────────────────────────────────────────────────

@@ -224,6 +224,7 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
           resume: false,
           model: dispatch.agent.model,
           allowedTools: dispatch.agent.tools_enabled,
+          timeoutMs: 600_000, // 10 min — dispatched agents need time for multi-step work
         }),
         retryOpts,
       );

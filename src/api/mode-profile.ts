@@ -45,14 +45,45 @@ const MODE_LABELS: Record<string, string> = {
   strategy: "Strategy",
 };
 
+/** Maps short mode names to their Forest profile names. */
+const AGENT_PROFILE_MAP: Record<string, string> = {
+  general: "general-squirrel",
+  dev: "dev-ant",
+  research: "research-squirrel",
+  strategy: "strategy-squirrel",
+};
+
 /**
  * Resolve an archetype profile for the given mode.
- * Falls back to general defaults if the archetype file is not found.
+ * Priority: Forest wiring (token_budget, context_mode) → file-based → defaults.
  */
 export async function resolveArchetypeProfile(mode: string): Promise<ChannelContextProfile> {
   const normalizedMode = (mode || "general").toLowerCase().replace(/[^a-z0-9-]/g, "");
   const contextMode: ContextMode = MODE_CONTEXT_MAP[normalizedMode] ?? "conversation";
   const defaultBudget = getModeTokenBudget(contextMode);
+
+  // ELLIE-413-416: Try Forest wiring first for token_budget and context_mode
+  const forestProfileName = AGENT_PROFILE_MAP[normalizedMode];
+  if (forestProfileName) {
+    try {
+      const { getAgentWiring } = await import("../agent-profile-builder.ts");
+      const wiring = await getAgentWiring(forestProfileName);
+      if (wiring) {
+        return {
+          channelName: MODE_LABELS[normalizedMode] ?? normalizedMode,
+          channelSlug: normalizedMode,
+          contextMode: (wiring.context_mode as ContextMode) ?? contextMode,
+          tokenBudget: wiring.token_budget ?? defaultBudget,
+          contextPriority: null,
+          criticalSources: [],
+          suppressedSections: [],
+          workItemId: null,
+        };
+      }
+    } catch {
+      // Forest unavailable — fall through to file-based
+    }
+  }
 
   try {
     const filePath = join(ARCHETYPES_DIR, `${normalizedMode}.md`);

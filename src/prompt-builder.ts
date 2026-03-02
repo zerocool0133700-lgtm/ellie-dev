@@ -180,15 +180,25 @@ export async function getArchetypeContext(): Promise<string> {
   return _archetypeContext;
 }
 
-// ── Per-agent archetype loader (file-based) ─────────────────
+// ── Per-agent archetype loader ───────────────────────────────
+// ELLIE-413-416: Forest-backed profiles are tried first for mapped agents.
+// Falls back to config/archetypes/{name}.md, then to the Forest chain-owner.
 
 const _agentArchetypeCache: Map<string, { content: string; loadedAt: number }> = new Map();
 const AGENT_ARCHETYPE_CACHE_MS = 60_000;
 const ARCHETYPES_DIR = join(PROJECT_ROOT, "config", "archetypes");
 
+/** Maps short agent names to their Forest profile names. */
+const AGENT_PROFILE_MAP: Record<string, string> = {
+  general: "general-squirrel",
+  dev: "dev-ant",
+  research: "research-squirrel",
+  strategy: "strategy-squirrel",
+};
+
 /**
- * Load a creature-specific archetype from config/archetypes/{agentName}.md.
- * Falls back to the Forest chain-owner archetype if no file exists.
+ * Load a creature-specific archetype.
+ * Priority: Forest profile (creature+role layers) → file-based → Forest chain-owner.
  */
 export async function getAgentArchetype(agentName?: string): Promise<string> {
   if (!agentName) return getArchetypeContext();
@@ -197,6 +207,28 @@ export async function getAgentArchetype(agentName?: string): Promise<string> {
   const cached = _agentArchetypeCache.get(normalized);
   if (cached && Date.now() - cached.loadedAt < AGENT_ARCHETYPE_CACHE_MS) return cached.content;
 
+  // ELLIE-413-416: Try Forest-backed profile (creature + role layers)
+  const forestProfileName = AGENT_PROFILE_MAP[normalized];
+  if (forestProfileName) {
+    try {
+      const { buildCreatureRoleContent } = await import("./agent-profile-builder.ts");
+      const built = await buildCreatureRoleContent(forestProfileName);
+      if (built) {
+        setCreatureProfile(normalized, {
+          section_priorities: built.wiring.section_priorities,
+          token_budget: built.wiring.token_budget,
+          allowed_skills: built.wiring.skills,
+        });
+        _agentArchetypeCache.set(normalized, { content: built.content, loadedAt: Date.now() });
+        logger.info(`Archetype ${normalized}: loaded from Forest (${built.layersLoaded.join(", ")})`);
+        return built.content;
+      }
+    } catch (err) {
+      logger.warn(`Archetype ${normalized}: Forest profile load failed, falling back to file`, err instanceof Error ? err.message : err);
+    }
+  }
+
+  // Fall back to file-based archetype
   try {
     const filePath = join(ARCHETYPES_DIR, `${normalized}.md`);
     const raw = await readFile(filePath, "utf-8");
