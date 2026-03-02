@@ -22,6 +22,22 @@ services:
         soft: -1
         hard: -1
 
+  obsidian-remote:
+    image: ghcr.io/sytone/obsidian-remote:latest
+    container_name: ellie-obsidian
+    ports:
+      - "127.0.0.1:8083:8080"
+    volumes:
+      - /home/ellie/obsidian-vault:/vaults/vault
+      - ellie-obsidian-config:/config
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago
+    restart: unless-stopped
+
 volumes:
   ellie-es-data:
+    driver: local
+  ellie-obsidian-config:
     driver: local
