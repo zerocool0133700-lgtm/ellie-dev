@@ -13,6 +13,7 @@ import {
   extensionClients, ellieChatClients, wsAppUserMap, ellieChatPhoneHistories,
   broadcastExtension, getRelayDeps,
 } from "./relay-state.ts";
+import { getUndeliveredMessages, markDelivered, getProcessingState } from "./ws-delivery.ts";
 import { resetEllieChatIdleTimer } from "./relay-idle.ts";
 import { handleVoiceConnection } from "./voice-pipeline.ts";
 import {
@@ -184,6 +185,45 @@ async function deliverPendingReadouts(ws: WebSocket): Promise<void> {
   }
 }
 
+/** ELLIE-399: Deliver undelivered messages + processing state on reconnect. */
+async function deliverCatchUp(ws: WebSocket, userId: string, sinceTs?: number): Promise<void> {
+  try {
+    const messages = await getUndeliveredMessages(userId, sinceTs);
+    if (messages.length > 0) {
+      const deliveredIds: string[] = [];
+      for (const msg of messages) {
+        if (ws.readyState !== WebSocket.OPEN) break;
+        ws.send(JSON.stringify({
+          type: "response",
+          text: msg.content,
+          agent: (msg.metadata as Record<string, unknown>)?.agent || "general",
+          memoryId: msg.id,
+          ts: new Date(msg.created_at).getTime(),
+          catchUp: true,
+        }));
+        deliveredIds.push(msg.id);
+      }
+      if (deliveredIds.length > 0) {
+        await markDelivered(deliveredIds);
+        console.log(`[ellie-chat] Catch-up: delivered ${deliveredIds.length} missed message(s) to ${userId}`);
+      }
+    }
+
+    // Send processing state if something is in-flight for this user
+    const processing = getProcessingState(userId);
+    if (processing && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "typing",
+        ts: Date.now(),
+        processing: true,
+        startedAt: processing.startedAt,
+      }));
+    }
+  } catch (err) {
+    logger.error("Catch-up delivery failed", err);
+  }
+}
+
 // WsAppUser, wsAppUserMap, ellieChatPhoneHistories imported from relay-state.ts (ELLIE-184)
 // ellieChatPendingActions imported from ./message-sender.ts (ELLIE-207)
 
@@ -210,6 +250,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
           ws.send(JSON.stringify({ type: "auth_ok", ts: Date.now() }));
           console.log(`[ellie-chat] Client authenticated via key (${ellieChatClients.size} connected)`);
           deliverPendingReadouts(ws).catch(() => {});
+          deliverCatchUp(ws, "system-dashboard", msg.since).catch(() => {});
           return;
         }
 
@@ -227,6 +268,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
               ws.send(JSON.stringify({ type: "auth_ok", ts: Date.now(), user: { id: user.id, name: user.name, onboarding_state: user.onboarding_state } }));
               console.log(`[ellie-chat] App user authenticated: ${user.name || user.id} (${ellieChatClients.size} connected)`);
               deliverPendingReadouts(ws).catch(() => {});
+              deliverCatchUp(ws, user.id, msg.since).catch(() => {});
             } catch (err) {
               logger.error("Token auth error", err);
               ws.close(4003, "Auth error");
@@ -251,6 +293,14 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
       }
 
       if (msg.type === "pong") return;
+
+      // ELLIE-399: Explicit catch-up request from reconnecting client
+      if (msg.type === "sync") {
+        const syncUser = wsAppUserMap.get(ws);
+        const syncUserId = syncUser?.id || syncUser?.anonymous_id || "anonymous";
+        deliverCatchUp(ws, syncUserId, msg.since).catch(() => {});
+        return;
+      }
 
       // Session upgrade: anonymous → authenticated (ELLIE-176)
       if (msg.type === "session_upgrade" && msg.token) {

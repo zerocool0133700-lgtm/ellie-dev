@@ -31,6 +31,29 @@ interface PendingToolApproval {
   createdAt: number;
 }
 
+// ── Dispatch mode (system-dispatched agents get wider auto-approve) ──
+
+let _activeDispatches = 0;
+
+/** Dev tools auto-approved when a system dispatch is active */
+const DISPATCH_AUTO_APPROVED_TOOLS = new Set([
+  "Bash", "Edit", "Write", "Task", "NotebookEdit",
+]);
+
+export function enterDispatchMode(): void {
+  _activeDispatches++;
+  logger.info("Entered dispatch mode", { activeDispatches: _activeDispatches });
+}
+
+export function exitDispatchMode(): void {
+  _activeDispatches = Math.max(0, _activeDispatches - 1);
+  logger.info("Exited dispatch mode", { activeDispatches: _activeDispatches });
+}
+
+export function isDispatchActive(): boolean {
+  return _activeDispatches > 0;
+}
+
 // ── Auto-approved tools (read-only / safe) ───────────────────
 
 const AUTO_APPROVED_TOOLS = new Set([
@@ -114,12 +137,18 @@ function isAutoApproved(toolName: string): boolean {
   if (AUTO_APPROVED_TOOLS.has(toolName)) return true;
   // Non-MCP built-in tools that are read-only
   if (["Read", "Glob", "Grep", "WebSearch", "WebFetch", "Task", "TodoWrite"].includes(toolName)) return true;
+  // Fix 2: Auto-approve dev tools when a system dispatch is active
+  if (_activeDispatches > 0 && DISPATCH_AUTO_APPROVED_TOOLS.has(toolName)) {
+    logger.info("Auto-approved (dispatch mode)", { tool: toolName, activeDispatches: _activeDispatches });
+    return true;
+  }
   return false;
 }
 
 // ── Session approvals (per-tool, remembered with TTL) ────────
 
 const SESSION_APPROVAL_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const DISPATCHED_SESSION_APPROVAL_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours for system-dispatched agents
 
 /** tool_name → timestamp when approval was granted */
 const sessionApprovals = new Map<string, number>();
@@ -133,18 +162,24 @@ export function getSessionApprovals(): string[] {
   return [...sessionApprovals.keys()];
 }
 
+/** Get the effective TTL — longer when dispatches are active */
+function getEffectiveTTL(): number {
+  return _activeDispatches > 0 ? DISPATCHED_SESSION_APPROVAL_TTL_MS : SESSION_APPROVAL_TTL_MS;
+}
+
 /** Remove expired session approvals and notify about them. */
 function pruneExpiredSessionApprovals(): string[] {
   const now = Date.now();
+  const ttl = getEffectiveTTL();
   const expired: string[] = [];
   for (const [tool, grantedAt] of sessionApprovals) {
-    if (now - grantedAt > SESSION_APPROVAL_TTL_MS) {
+    if (now - grantedAt > ttl) {
       sessionApprovals.delete(tool);
       expired.push(tool);
     }
   }
   if (expired.length > 0) {
-    logger.info("Session approvals expired", { tools: expired, ttl_ms: SESSION_APPROVAL_TTL_MS });
+    logger.info("Session approvals expired", { tools: expired, ttl_ms: ttl, dispatch_active: _activeDispatches > 0 });
   }
   return expired;
 }
@@ -153,6 +188,7 @@ function pruneExpiredSessionApprovals(): string[] {
 
 const pendingApprovals = new Map<string, PendingToolApproval>();
 const APPROVAL_TIMEOUT_MS = 60_000; // 60 seconds
+const DISPATCH_APPROVAL_TIMEOUT_MS = 5 * 60_000; // 5 minutes for re-requests during dispatches
 
 // ── WebSocket broadcaster (set by relay.ts at startup) ───────
 
@@ -174,12 +210,13 @@ export async function checkToolApproval(req: ToolApprovalRequest): Promise<{ app
   // Fast-path: session-remembered approvals (with TTL check)
   const grantedAt = sessionApprovals.get(tool_name);
   if (grantedAt !== undefined) {
-    if (Date.now() - grantedAt <= SESSION_APPROVAL_TTL_MS) {
+    const ttl = getEffectiveTTL();
+    if (Date.now() - grantedAt <= ttl) {
       return { approved: true };
     }
     // Expired — remove and fall through to re-request
     sessionApprovals.delete(tool_name);
-    logger.info("Session approval expired, re-requesting", { tool: tool_name, expired_after_ms: Date.now() - grantedAt });
+    logger.info("Session approval expired, re-requesting", { tool: tool_name, expired_after_ms: Date.now() - grantedAt, ttl_ms: ttl });
   }
 
   // Check if this is a re-request (previously approved but expired)
@@ -217,11 +254,14 @@ export async function checkToolApproval(req: ToolApprovalRequest): Promise<{ app
       approval_id: id.slice(0, 8),
     });
 
-    // Timeout — deny after 60s and notify user
+    // Timeout — deny after timeout and notify user
+    // Fix 3: Use longer timeout (5min) during active dispatches
+    const timeoutMs = _activeDispatches > 0 ? DISPATCH_APPROVAL_TIMEOUT_MS : APPROVAL_TIMEOUT_MS;
+    const timeoutLabel = _activeDispatches > 0 ? "5min" : "60s";
     setTimeout(() => {
       if (pendingApprovals.has(id)) {
         pendingApprovals.delete(id);
-        logger.info("Approval timed out", { tool: tool_name, approval_id: id.slice(0, 8) });
+        logger.info("Approval timed out", { tool: tool_name, approval_id: id.slice(0, 8), timeout_ms: timeoutMs, dispatch_active: _activeDispatches > 0 });
 
         // Notify frontend that this approval expired
         _broadcastToEllieChat({
@@ -232,9 +272,9 @@ export async function checkToolApproval(req: ToolApprovalRequest): Promise<{ app
           ts: Date.now(),
         });
 
-        resolve({ approved: false, reason: "Approval timed out (60s). The tool can be re-requested — ask Ellie to try again." });
+        resolve({ approved: false, reason: `Approval timed out (${timeoutLabel}). The tool can be re-requested — ask Ellie to try again.` });
       }
-    }, APPROVAL_TIMEOUT_MS);
+    }, timeoutMs);
   });
 }
 

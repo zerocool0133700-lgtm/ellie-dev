@@ -41,6 +41,7 @@ import {
 import { setQueueBroadcast } from "./message-queue.ts";
 import { setVoicePipelineDeps } from "./voice-pipeline.ts";
 import { ellieChatPendingActions, setSenderDeps } from "./message-sender.ts";
+import { initDelivery } from "./ws-delivery.ts";
 import { initForestSync } from "./elasticsearch/context.ts";
 import { initGoogleChat, sendGoogleChatMessage, isGoogleChatEnabled } from "./google-chat.ts";
 const GOOGLE_CHAT_SPACE = process.env.GOOGLE_CHAT_SPACE_NAME || "";
@@ -382,6 +383,7 @@ setWatchdogNotify(notify, getNotifyCtx());
 setAnthropicClient(anthropic);
 setQueueBroadcast(broadcastExtension);
 setSenderDeps({ supabase, getActiveAgent });
+initDelivery(supabase);
 setVoicePipelineDeps({ supabase, getActiveAgent, broadcastExtension, getContextDocket, triggerConsolidation });
 setBroadcastToEllieChat(broadcastToEllieChatClients);
 

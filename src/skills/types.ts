@@ -21,6 +21,7 @@ export interface SkillFrontmatter {
   mcp?: string;             // MCP tool pattern this skill uses (e.g. "mcp__github__*")
   triggers?: string[];      // intent-routing hints
   help?: string;            // how to get credentials / setup info (shown in dashboard)
+  instant_commands?: string[];  // subcommands that return static content (no Claude call)
   // Tool dispatch
   "command-dispatch"?: "tool";
   "command-tool"?: string;

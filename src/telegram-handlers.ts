@@ -57,7 +57,7 @@ import {
   routeAndDispatch,
   syncResponse,
 } from "./agent-router.ts";
-import { getSkillSnapshot } from "./skills/index.ts";
+import { getSkillSnapshot, matchInstantCommand } from "./skills/index.ts";
 import { getCreatureProfile } from "./creature-profile.ts";
 import {
   formatForestMetrics,
@@ -214,6 +214,18 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
     resetEllieChatIdleTimer();
     broadcastExtension({ type: "planning_mode", active: getPlanningMode() });
     return;
+  }
+
+  // Instant skill commands — static content, no Claude call (sub-100ms)
+  try {
+    const instant = await matchInstantCommand(text);
+    if (instant) {
+      console.log(`[telegram] Instant command: /${instant.skillName} ${instant.subcommand}`);
+      await sendResponse(ctx, instant.response);
+      return;
+    }
+  } catch (err) {
+    console.warn("[telegram] Instant command match failed", err);
   }
 
   // ELLIE:: user-typed commands — bypass classifier, execute directly

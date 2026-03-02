@@ -20,6 +20,7 @@ import type { PlaybookContext } from "./playbook.ts";
 import { withRetry, classifyError } from "./dispatch-retry.ts";
 import { enqueue, getQueueDepth } from "./dispatch-queue.ts";
 import { withTrace, getTraceId, generateTraceId } from "./trace.ts";
+import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
 
 const logger = log.child("orchestration-dispatch");
 
@@ -212,16 +213,23 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     );
 
     // 6. Call Claude with runId for heartbeat tracking (with retry for transient failures)
+    // Enter dispatch mode — auto-approves dev tools + extends TTL/timeouts
+    enterDispatchMode();
     emitEvent(runId, "progress", agentType, workItemId, { step: "calling_claude" });
     const startTime = Date.now();
-    const claudeResult = await withRetry(
-      () => ctx.callClaudeFn(prompt, {
-        resume: false,
-        model: dispatch.agent.model,
-        allowedTools: dispatch.agent.tools_enabled,
-      }),
-      retryOpts,
-    );
+    let claudeResult;
+    try {
+      claudeResult = await withRetry(
+        () => ctx.callClaudeFn(prompt, {
+          resume: false,
+          model: dispatch.agent.model,
+          allowedTools: dispatch.agent.tools_enabled,
+        }),
+        retryOpts,
+      );
+    } finally {
+      exitDispatchMode();
+    }
     if (!claudeResult.success || !claudeResult.result) {
       const retryNote = claudeResult.attempts > 1 ? ` (after ${claudeResult.attempts} attempts)` : "";
       emitEvent(runId, "failed", agentType, workItemId, {

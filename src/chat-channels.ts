@@ -27,9 +27,11 @@ export interface ChatChannel {
   sort_order: number;
   context_mode: ContextMode | null;
   token_budget: number | null;
+  context_priority: number | null;
   critical_sources: string[] | null;
   suppressed_sections: string[] | null;
   is_ephemeral: boolean;
+  is_command_bar: boolean;
   work_item_id: string | null;
   archived_at: string | null;
   description: string | null;
@@ -47,6 +49,7 @@ export interface ChannelContextProfile {
   channelSlug: string;
   contextMode: ContextMode;
   tokenBudget: number;
+  contextPriority: number | null;
   criticalSources: string[];
   suppressedSections: string[];
   workItemId: string | null;
@@ -227,6 +230,7 @@ export async function resolveContextProfile(
     channelSlug: channel?.slug || "general",
     contextMode,
     tokenBudget: findInChain(chain, c => c.token_budget) || getModeTokenBudget(contextMode),
+    contextPriority: findInChain(chain, c => c.context_priority),
     criticalSources: findInChain(chain, c => c.critical_sources) || modeDefaults.critical,
     suppressedSections: findInChain(chain, c => c.suppressed_sections) || [],
     workItemId: channel?.work_item_id || null,

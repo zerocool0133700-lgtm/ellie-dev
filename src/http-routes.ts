@@ -86,7 +86,7 @@ import {
   syncResponse,
   type RouteResult,
 } from "./agent-router.ts";
-import { getSkillSnapshot } from "./skills/index.ts";
+import { getSkillSnapshot, matchInstantCommand } from "./skills/index.ts";
 import { getCreatureProfile } from "./creature-profile.ts";
 import {
   formatForestMetrics,
@@ -428,6 +428,21 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
             hostAppDataAction: { chatDataAction: { createMessageAction: { message: { text: responseText } } } },
           }));
           return;
+        }
+
+        // Instant skill commands — static content, no Claude call (sub-100ms)
+        try {
+          const instant = await matchInstantCommand(parsed.text);
+          if (instant) {
+            console.log(`[gchat] Instant command: /${instant.skillName} ${instant.subcommand}`);
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({
+              hostAppDataAction: { chatDataAction: { createMessageAction: { message: { text: instant.response } } } },
+            }));
+            return;
+          }
+        } catch (err) {
+          console.warn("[gchat] Instant command match failed", err);
         }
 
         // Immediately acknowledge — all routing + Claude work happens async.

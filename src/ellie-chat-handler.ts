@@ -50,6 +50,7 @@ import {
 } from "./memory.ts";
 import { searchElastic } from "./elasticsearch.ts";
 import { log } from "./logger.ts";
+import { deliverResponse, markProcessing, clearProcessing } from "./ws-delivery.ts";
 
 const logger = log.child("ellie-chat");
 import { getForestContext } from "./elasticsearch/context.ts";
@@ -60,7 +61,7 @@ import {
   type RouteResult,
   type DispatchResult,
 } from "./agent-router.ts";
-import { getSkillSnapshot } from "./skills/index.ts";
+import { getSkillSnapshot, matchInstantCommand } from "./skills/index.ts";
 import {
   getSpecialistAck,
   estimateTokens,
@@ -141,6 +142,17 @@ async function _handleEllieChatMessage(
     }
   }
 
+  // ELLIE-400: Extract scope context from command bar messages
+  let commandBarContext: string | undefined;
+  if (channelId === "a0000000-0000-0000-0000-000000000100") {
+    const scopeMatch = text.match(/^\[scope:\s*([^\]]+)\]\s*/);
+    if (scopeMatch) {
+      const scopePath = scopeMatch[1].trim();
+      commandBarContext = `FOREST EDITOR CONTEXT:\nYou are operating in the inline Forest Editor command bar on the Knowledge Tree page.\nThe user is viewing scope: ${scopePath}\nWhen writing memories, use scope_path: "${scopePath}"\nWhen browsing or searching, start from this scope.\nKeep responses concise — this is an inline editor, not a full chat.`;
+      text = text.slice(scopeMatch[0].length);
+    }
+  }
+
   // Correction detection + calendar linking (ELLIE-250)
   if (supabase) {
     const convId = await getOrCreateConversation(supabase, "ellie-chat", "general", channelId);
@@ -186,7 +198,7 @@ async function _handleEllieChatMessage(
 
   // Send typing indicator
   if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "typing", ts: Date.now() }));
+    ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId }));
   }
 
   // /plan on|off — toggle planning mode
@@ -250,6 +262,20 @@ async function _handleEllieChatMessage(
       }
     })();
     return;
+  }
+
+  // Instant skill commands — static content, no Claude call (sub-100ms)
+  try {
+    const instant = await matchInstantCommand(text);
+    if (instant) {
+      console.log(`[ellie-chat] Instant command: /${instant.skillName} ${instant.subcommand}`);
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "response", text: instant.response, agent: "system", ts: Date.now() }));
+      }
+      return;
+    }
+  } catch (err) {
+    console.warn("[ellie-chat] Instant command match failed", err);
   }
 
   // ELLIE:: user-typed commands — bypass classifier, execute directly
@@ -357,6 +383,7 @@ async function _handleEllieChatMessage(
   if (phoneMode) {
     // ── Phone mode fast path: 6-turn context, Haiku, brevity prompt, no agent routing ──
     await enqueueEllieChat(async () => {
+      markProcessing(ecUserId || "anonymous", text);
       // Per-user phone history (ELLIE-197)
       const phoneHistKey = ecUserId || 'anonymous';
       if (!ellieChatPhoneHistories.has(phoneHistKey)) ellieChatPhoneHistories.set(phoneHistKey, []);
@@ -539,16 +566,16 @@ async function _handleEllieChatMessage(
         preview: cleanedText.substring(0, 200),
       });
 
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          type: "response",
-          text: cleanedText,
-          agent: "general",
-          memoryId: phoneMemoryId,
-          ts: Date.now(),
-          duration_ms: durationMs,
-        }));
-      }
+      deliverResponse(ws, {
+        type: "response",
+        text: cleanedText,
+        agent: "general",
+        memoryId: phoneMemoryId,
+        ts: Date.now(),
+        duration_ms: durationMs,
+        channelId,
+      });
+      clearProcessing(ecUserId || "anonymous");
 
       resetEllieChatIdleTimer();
     }, text.substring(0, 100));
@@ -557,6 +584,7 @@ async function _handleEllieChatMessage(
 
   // ── Normal text mode: full agent routing + context gathering (mirrors Google Chat) ──
   await enqueueEllieChat(async () => {
+    markProcessing(ecUserId || "anonymous", text);
     // ELLIE-391: Context refresh — bust all caches so this message gets fully fresh data
     if (isContextRefresh(text)) {
       freshnessTracker.clear();
@@ -892,6 +920,7 @@ async function _handleEllieChatMessage(
       channelProfile,
       ecGroundTruthConflicts || undefined,
       ecCrossChannel || undefined,
+      commandBarContext,
     );
 
     // ── ELLIE-383: Context snapshot logging (journal only) ──
@@ -912,7 +941,7 @@ async function _handleEllieChatMessage(
     // Send typing heartbeat every 4s so the user knows we're still working
     const typingInterval = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "typing", ts: Date.now() }));
+        ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId }));
       }
     }, 4_000);
 
@@ -989,16 +1018,18 @@ async function _handleEllieChatMessage(
       preview: cleanedText.substring(0, 200),
     });
 
-    if (!hadConfirmations && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
+    if (!hadConfirmations) {
+      deliverResponse(ws, {
         type: "response",
         text: cleanedText,
         agent: ecAgent,
         memoryId: ecMemoryId,
         ts: Date.now(),
         duration_ms: durationMs,
-      }));
+        channelId,
+      });
     }
+    clearProcessing(ecUserId || "anonymous");
 
     if (agentResult) {
       syncResponse(supabase, agentResult.dispatch.session_id, cleanedText, {
@@ -1042,12 +1073,13 @@ export async function runSpecialistAsync(
   const ecUserId = specUser?.id || specUser?.anonymous_id || undefined;
   const startTime = Date.now();
   console.log(`[ellie-chat] Specialist ${agentName} starting async`);
+  markProcessing(ecUserId || "anonymous", effectiveText);
 
   try {
     // Typing heartbeat while specialist works
     const heartbeat = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "typing", ts: Date.now() }));
+        ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId }));
       } else {
         clearInterval(heartbeat);
       }
@@ -1183,31 +1215,32 @@ export async function runSpecialistAsync(
       preview: cleanedText.substring(0, 200),
     });
 
-    if (!hadConfirmations && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: "response",
+    if (!hadConfirmations) {
+      const payload = {
+        type: "response" as const,
         text: cleanedText,
         agent: agentName,
         memoryId: specMemoryId,
         ts: Date.now(),
         duration_ms: durationMs,
-      }));
-    } else if (!hadConfirmations) {
-      // Original WS closed — send to same user's other connections only (ELLIE-197)
-      const payload = JSON.stringify({
-        type: "response", text: cleanedText, agent: agentName,
-        memoryId: specMemoryId, ts: Date.now(), duration_ms: durationMs,
-      });
-      for (const client of ellieChatClients) {
-        if (client.readyState === WebSocket.OPEN) {
-          const clientUser = wsAppUserMap.get(client);
-          const clientAppId = clientUser?.id || clientUser?.anonymous_id;
-          if (clientAppId && clientAppId === ecUserId) {
-            client.send(payload);
+        channelId,
+      };
+      const sent = deliverResponse(ws, payload);
+      if (!sent) {
+        // Original WS closed — send to same user's other connections only (ELLIE-197)
+        const json = JSON.stringify(payload);
+        for (const client of ellieChatClients) {
+          if (client.readyState === WebSocket.OPEN) {
+            const clientUser = wsAppUserMap.get(client);
+            const clientAppId = clientUser?.id || clientUser?.anonymous_id;
+            if (clientAppId && clientAppId === ecUserId) {
+              client.send(json);
+            }
           }
         }
       }
     }
+    clearProcessing(ecUserId || "anonymous");
 
     syncResponse(supabase, agentResult.dispatch.session_id, cleanedText, {
       duration_ms: durationMs,
@@ -1228,9 +1261,8 @@ export async function runSpecialistAsync(
     const durationMs = Date.now() - startTime;
     logger.error("Specialist failed", { agent: agentName, durationMs }, err);
     const errorMsg = `Sorry, the ${agentName} specialist ran into an issue. You can try again or rephrase.`;
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "response", text: errorMsg, agent: agentName, ts: Date.now() }));
-    }
-    await saveMessage("assistant", errorMsg, {}, "ellie-chat", ecUserId).catch(() => {});
+    const errMemoryId = await saveMessage("assistant", errorMsg, {}, "ellie-chat", ecUserId).catch(() => null);
+    deliverResponse(ws, { type: "response", text: errorMsg, agent: agentName, memoryId: errMemoryId, ts: Date.now(), channelId });
+    clearProcessing(ecUserId || "anonymous");
   }
 }

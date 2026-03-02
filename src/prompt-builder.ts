@@ -486,6 +486,7 @@ export function buildPrompt(
   channelProfile?: ChannelContextProfile | null,
   groundTruthConflicts?: string,
   crossChannelCorrections?: string,
+  commandBarContext?: string,
 ): string {
   const channelLabel = channel === "google-chat" ? "Google Chat" : channel === "ellie-chat" ? "Ellie Chat (dashboard)" : "Telegram";
 
@@ -502,6 +503,9 @@ export function buildPrompt(
   if (psyContext) sections.push({ label: "psy", content: `# Psychological Profile\n${psyContext}\n---\n`, priority: 2 });
   if (phaseContext) sections.push({ label: "phase", content: `# Relationship Phase\n${phaseContext}\n---\n`, priority: 2 });
   if (healthContext) sections.push({ label: "health", content: `# Health & Life Context\n${healthContext}\n---\n`, priority: 3 });
+
+  // Command bar context (ELLIE-400) — priority configurable per channel, default 2
+  if (commandBarContext) sections.push({ label: "command-bar-context", content: commandBarContext, priority: channelProfile?.contextPriority ?? 2 });
 
   // Priority 2: Base system prompt
   const basePrompt = agentConfig?.system_prompt
