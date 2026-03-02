@@ -100,6 +100,14 @@ import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hi
 import { logVerificationTrail } from "./data-quality.ts";
 import { getCreatureProfile } from "./creature-profile.ts";
 import { withTrace } from "./trace.ts";
+import {
+  isFallbackActive,
+  isOutageError,
+  recordAnthropicSuccess,
+  recordAnthropicFailure,
+  consumeFallbackJustActivated,
+  callOpenAiFallback,
+} from "./llm-provider.ts";
 
 export async function handleEllieChatMessage(
   ws: WebSocket,
@@ -955,6 +963,28 @@ async function _handleEllieChatMessage(
         model: agentModel || undefined,
         timeoutMs: 600_000, // 10 min — async coordinator needs time for multi-step work
       });
+      recordAnthropicSuccess();
+    } catch (err) {
+      clearInterval(typingInterval);
+      if (isOutageError(err)) recordAnthropicFailure(err);
+      if (isFallbackActive()) {
+        if (consumeFallbackJustActivated()) {
+          ws.send(JSON.stringify({
+            type: "response",
+            text: "⚡ Anthropic appears to be down. Switching to OpenAI (GPT-4o) for basic conversation. Complex tasks and tools are paused until Claude returns.",
+            agent: "system",
+            ts: Date.now(),
+          }));
+          notify(getNotifyCtx(), {
+            event: "error",
+            telegramMessage: "⚡ Anthropic outage — Ellie switched to OpenAI fallback",
+          });
+        }
+        rawResponse = await callOpenAiFallback(effectiveText);
+        rawResponse = `_(Running on GPT-4o — Claude unavailable)_\n\n${rawResponse}`;
+      } else {
+        throw err;
+      }
     } finally {
       clearInterval(typingInterval);
     }
@@ -1197,6 +1227,23 @@ export async function runSpecialistAsync(
         model: agentModel || undefined,
         timeoutMs: 600_000, // 10 min — specialists may do multi-step tool use
       });
+      recordAnthropicSuccess();
+    } catch (err) {
+      clearInterval(heartbeat);
+      if (isOutageError(err)) recordAnthropicFailure(err);
+      if (isFallbackActive()) {
+        // Specialists need tools — just let the user know to retry when Claude returns
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: "response",
+            text: "⚡ Claude is currently unavailable. This task requires the specialist agent — I'll be ready to help once Claude is back.",
+            agent: agentName,
+            ts: Date.now(),
+          }));
+        }
+        return;
+      }
+      throw err;
     } finally {
       clearInterval(heartbeat);
     }

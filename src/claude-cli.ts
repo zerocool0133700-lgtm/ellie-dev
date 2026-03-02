@@ -30,8 +30,8 @@ const MCP_TOOLS = "mcp__google-workspace__*,mcp__github__*,mcp__memory__*,mcp__s
 const ALLOWED_TOOLS = (process.env.ALLOWED_TOOLS || `${DEFAULT_TOOLS},${MCP_TOOLS}`).split(",").map(t => t.trim());
 const SESSION_FILE = join(RELAY_DIR, "session.json");
 const LOCK_FILE = join(RELAY_DIR, "bot.lock");
-// ELLIE-239: Configurable CLI timeout (default 300s agent, 60s non-agent)
-const CLI_TIMEOUT_MS = parseInt(process.env.CLI_TIMEOUT_MS || (AGENT_MODE ? "300000" : "60000"));
+// ELLIE-239: Configurable CLI timeout (default 600s agent, 60s non-agent)
+const CLI_TIMEOUT_MS = parseInt(process.env.CLI_TIMEOUT_MS || (AGENT_MODE ? "600000" : "60000"));
 
 // ── External dependency setters ─────────────────────────────
 // These are registered by relay.ts at startup since the actual
@@ -399,6 +399,8 @@ export async function callClaudeVoice(systemPrompt: string, userMessage: string)
       console.log(`[voice] API responded in ${Date.now() - start}ms`);
       return text.trim();
     } catch (err) {
+      const { recordAnthropicFailure } = await import("./llm-provider.ts");
+      recordAnthropicFailure(err);
       logger.error("Voice API error, falling back to CLI", err);
     }
   }

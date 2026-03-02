@@ -26,6 +26,9 @@ import {
   getActiveAgent, broadcastExtension, broadcastToEllieChatClients,
   setRelayDeps, getNotifyCtx,
 } from "./relay-state.ts";
+import {
+  isFallbackActive, shouldProbeRecovery, markRecoveryProbeAttempted, recordAnthropicSuccess,
+} from "./llm-provider.ts";
 import { triggerConsolidation } from "./relay-idle.ts";
 import { handleHttpRequest } from "./http-routes.ts";
 import { registerTelegramHandlers } from "./telegram-handlers.ts";
@@ -111,6 +114,27 @@ setInterval(async () => {
       logger.error("Stale conversation cleanup error", { error: err instanceof Error ? err.message : String(err) });
     }
     expireStaleAgentSessions(supabase).catch(() => {});
+  }
+  // ELLIE-408: Probe Anthropic recovery while in fallback mode
+  if (isFallbackActive() && shouldProbeRecovery() && anthropic) {
+    markRecoveryProbeAttempted();
+    anthropic.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 1,
+      messages: [{ role: "user", content: "ok" }],
+    }).then(() => {
+      recordAnthropicSuccess();
+      broadcastToEllieChatClients({
+        type: "response",
+        text: "✓ Claude is back — resuming normal operation.",
+        agent: "system",
+        ts: Date.now(),
+      });
+      notify(getNotifyCtx(), {
+        event: "incident_resolved",
+        telegramMessage: "✓ Claude recovered — Ellie back to normal",
+      });
+    }).catch(() => {}); // still down, stay in fallback
   }
   // Expire Ellie Chat pending confirm actions (15-min TTL)
   const now = Date.now();

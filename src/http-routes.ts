@@ -1478,6 +1478,13 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         }
       }
 
+      // ELLIE-408: Include fallback status
+      const { isFallbackActive: getFallbackActive } = await import("./llm-provider.ts");
+      (result as Record<string, unknown>).fallback_active = getFallbackActive();
+      (result as Record<string, unknown>).openai = {
+        status: process.env.OPENAI_API_KEY ? "configured" : "not_configured",
+      };
+
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
     })();
