@@ -11,7 +11,7 @@ instant_commands: [help]
 
 The vault is a folder of Markdown files at `/home/ellie/obsidian-vault/`. You can read and write files directly using Bash or the `obsidian-vault` MCP filesystem tools.
 
-**Browser access:** `http://<server-ip>:8082/` — full Obsidian UI in a browser tab
+**Browser access:** `http://<server-ip>:8080/` — full Obsidian UI in a browser tab (port 8080 is Cloudflare-proxied)
 **Dashboard:** `/obsidian` page in LE Home
 
 ---
