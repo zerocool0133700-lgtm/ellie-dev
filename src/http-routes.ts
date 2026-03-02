@@ -1892,6 +1892,29 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
     return;
   }
 
+  // ELLIE-406: On-demand data integrity audit
+  if (url.pathname === "/api/audit/data-integrity" && req.method === "GET") {
+    (async () => {
+      try {
+        if (!supabase) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Supabase not configured" }));
+          return;
+        }
+        const days = Math.min(Number(url.searchParams.get("days")) || 7, 30);
+        const { runDataIntegrityAudit } = await import("./api/data-integrity-audit.ts");
+        const result = await runDataIntegrityAudit(supabase, { lookbackDays: days });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, ...result }));
+      } catch (err) {
+        logger.error("Data integrity audit API error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: String(err) }));
+      }
+    })();
+    return;
+  }
+
   // Extract ideas from recent conversations
   if (url.pathname === "/api/extract-ideas" && req.method === "POST") {
     (async () => {

@@ -344,6 +344,31 @@ setInterval(async () => {
   }
 }, 15 * 60_000);
 
+// Data integrity audit — weekly, Sunday 11 PM CST (ELLIE-406)
+setInterval(async () => {
+  if (!supabase) return;
+  const now = new Date();
+  const cst = new Date(now.toLocaleString("en-US", { timeZone: "America/Chicago" }));
+  // Sunday = 0, run in the same 11 PM window as the channel gardener
+  if (cst.getDay() === 0 && cst.getHours() === 23 && cst.getMinutes() < 15) {
+    try {
+      const { runDataIntegrityAudit } = await import("./api/data-integrity-audit.ts");
+      const result = await runDataIntegrityAudit(supabase, { lookbackDays: 7 });
+      if (!result.clean) {
+        notify(getNotifyCtx(), {
+          event: "incident_raised",
+          text: `⚠️ Weekly data integrity audit found issues:\n${result.summary}`,
+          workItemId: "data-integrity",
+        });
+      } else {
+        logger.info("[audit] Weekly audit passed — all clear.");
+      }
+    } catch (err: unknown) {
+      logger.error("[audit] Weekly data integrity audit failed", { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+}, 15 * 60_000);
+
 // Note: expireStaleWorkSessions (old Supabase work_sessions table) removed in ELLIE-88.
 // Forest is now the source of truth for work sessions. See ellie-forest/src/work-sessions.ts.
 
