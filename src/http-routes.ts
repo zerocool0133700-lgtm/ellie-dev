@@ -131,6 +131,7 @@ import {
   closeConversation,
   getConversationContext,
   getConversationMessages,
+  getConversationById,
 } from "./conversations.ts";
 import {
   getQueueContext,
@@ -1819,6 +1820,71 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         res.end(JSON.stringify({ ok: true, context }));
       } catch (err) {
         logger.error("Conversation context API error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: String(err) }));
+      }
+    })();
+    return;
+  }
+
+  // ELLIE-405: Retrieve a conversation by ID (for agent access to past conversations)
+  const convoByIdMatch = url.pathname.match(/^\/api\/conversations\/([0-9a-f-]{36})$/i);
+  if (convoByIdMatch && req.method === "GET") {
+    const convoId = convoByIdMatch[1];
+    (async () => {
+      try {
+        if (!supabase) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Supabase not configured" }));
+          return;
+        }
+
+        const format = url.searchParams.get("format") || "full";
+
+        if (format === "text") {
+          // Smart-truncated text output via existing getConversationMessages()
+          const result = await getConversationMessages(supabase, convoId);
+          if (!result.messageCount) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ ok: false, error: "Conversation not found" }));
+            return;
+          }
+          // Also fetch conversation metadata
+          const { data: convo } = await supabase
+            .from("conversations")
+            .select("id, channel, agent, status, summary, message_count, started_at, ended_at")
+            .eq("id", convoId)
+            .single();
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, conversation: convo, text: result.text }));
+          return;
+        }
+
+        // Structured JSON output with pagination
+        const limit = Math.min(Number(url.searchParams.get("limit")) || 50, 200);
+        const offset = Number(url.searchParams.get("offset")) || 0;
+        const result = await getConversationById(supabase, convoId, { limit, offset });
+
+        if (!result) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: "Conversation not found" }));
+          return;
+        }
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          ok: true,
+          conversation: result.conversation,
+          messages: result.messages,
+          pagination: {
+            total: result.total,
+            limit,
+            offset,
+            has_more: offset + limit < result.total,
+          },
+        }));
+      } catch (err) {
+        logger.error("Conversation by ID API error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: String(err) }));
       }

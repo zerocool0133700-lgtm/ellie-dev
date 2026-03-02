@@ -580,6 +580,54 @@ export async function getConversationMessages(
 }
 
 /**
+ * Retrieve a conversation by ID with paginated messages — ELLIE-405.
+ * Returns structured data suitable for API responses.
+ */
+export async function getConversationById(
+  supabase: SupabaseClient,
+  conversationId: string,
+  opts?: { limit?: number; offset?: number },
+): Promise<{
+  conversation: any;
+  messages: any[];
+  total: number;
+} | null> {
+  const limit = Math.min(opts?.limit ?? 50, 200);
+  const offset = opts?.offset ?? 0;
+
+  try {
+    const [convoResult, msgsResult, countResult] = await Promise.all([
+      supabase
+        .from("conversations")
+        .select("id, channel, agent, status, summary, message_count, started_at, ended_at")
+        .eq("id", conversationId)
+        .single(),
+      supabase
+        .from("messages")
+        .select("id, role, content, created_at")
+        .eq("conversation_id", conversationId)
+        .order("created_at", { ascending: true })
+        .range(offset, offset + limit - 1),
+      supabase
+        .from("messages")
+        .select("id", { count: "exact", head: true })
+        .eq("conversation_id", conversationId),
+    ]);
+
+    if (convoResult.error || !convoResult.data) return null;
+
+    return {
+      conversation: convoResult.data,
+      messages: msgsResult.data || [],
+      total: countResult.count ?? 0,
+    };
+  } catch (err) {
+    logger.error("getConversationById error", { conversationId }, err);
+    return null;
+  }
+}
+
+/**
  * Get conversation context for ELLIE-50 classifier.
  * Returns structured info about the active conversation on a channel.
  */
