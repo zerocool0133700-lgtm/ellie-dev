@@ -323,7 +323,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
       }
 
       if (msg.type === "message" && (msg.text || msg.image)) {
-        handleEllieChatMessage(ws, msg.text || "", !!msg.phone_mode, msg.image, msg.channel_id, msg.id);
+        handleEllieChatMessage(ws, msg.text || "", !!msg.phone_mode, msg.image, msg.channel_id, msg.id, msg.mode);
         return;
       }
 
@@ -335,14 +335,12 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
             const ncUserId = ncUser?.id || ncUser?.anonymous_id || undefined;
             if (supabase) {
               // Close conversations scoped to this user (ELLIE-197)
-              // ELLIE-334: Scope by channel_id when provided — don't close other channels' conversations
               let convQuery = supabase
                 .from("conversations")
                 .update({ status: "closed" })
                 .in("channel", ["ellie-chat", "la-comms"])
                 .eq("status", "active");
               if (ncUserId) convQuery = convQuery.eq("user_id", ncUserId);
-              if (msg.channel_id) convQuery = convQuery.eq("channel_id", msg.channel_id);
               await convQuery;
 
               let sessQuery = supabase

@@ -27,7 +27,7 @@ import { getLastResolvedStrategy, getStrategyExcludedSections, getStrategyTokenB
 import type { ContextMode } from "./context-mode.ts";
 import { getModeSectionPriorities, getModeTokenBudget } from "./context-mode.ts";
 import { freshnessTracker, buildStalenessWarning } from "./context-freshness.ts";
-import type { ChannelContextProfile } from "./chat-channels.ts";
+import type { ChannelContextProfile } from "./api/mode-profile.ts";
 import { buildSourceHierarchyInstruction } from "./source-hierarchy.ts";
 import { getActiveRunStates } from "./orchestration-tracker.ts";
 

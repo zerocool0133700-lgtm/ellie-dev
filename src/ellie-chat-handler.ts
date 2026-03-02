@@ -108,8 +108,9 @@ export async function handleEllieChatMessage(
   image?: { data: string; mime_type: string; name: string },
   channelId?: string,
   clientId?: string,
+  mode?: string,
 ): Promise<void> {
-  return withTrace(async () => _handleEllieChatMessage(ws, text, phoneMode, image, channelId, clientId));
+  return withTrace(async () => _handleEllieChatMessage(ws, text, phoneMode, image, channelId, clientId, mode));
 }
 
 async function _handleEllieChatMessage(
@@ -119,9 +120,10 @@ async function _handleEllieChatMessage(
   image?: { data: string; mime_type: string; name: string },
   channelId?: string,
   clientId?: string,
+  mode?: string,
 ): Promise<void> {
   const { bot, anthropic, supabase } = getRelayDeps();
-  console.log(`[ellie-chat] User${phoneMode ? " (phone)" : ""}${image ? " [+image]" : ""}${channelId ? ` [ch:${channelId.substring(0, 8)}]` : ""}: ${text.substring(0, 80)}...`);
+  console.log(`[ellie-chat] User${phoneMode ? " (phone)" : ""}${image ? " [+image]" : ""}${mode ? ` [mode:${mode}]` : ""}${channelId ? ` [ch:${channelId.substring(0, 8)}]` : ""}: ${text.substring(0, 80)}...`);
   acknowledgeChannel("ellie-chat");
 
   const ecUser = wsAppUserMap.get(ws);
@@ -130,15 +132,15 @@ async function _handleEllieChatMessage(
   await saveMessage("user", text, image ? { image_name: image.name, image_mime: image.mime_type } : {}, "ellie-chat", ecUserId, clientId);
   broadcastExtension({ type: "message_in", channel: "ellie-chat", preview: text.substring(0, 200) });
 
-  // ELLIE-334: Resolve channel context profile if channelId provided
-  let channelProfile: import("./chat-channels.ts").ChannelContextProfile | null = null;
-  if (channelId && supabase) {
+  // ELLIE-426: Resolve archetype profile from mode
+  let channelProfile: import("./api/mode-profile.ts").ChannelContextProfile | null = null;
+  if (mode) {
     try {
-      const { resolveContextProfile } = await import("./chat-channels.ts");
-      channelProfile = await resolveContextProfile(supabase, channelId);
-      console.log(`[ellie-chat] Channel profile: mode=${channelProfile.contextMode} budget=${channelProfile.tokenBudget}`);
+      const { resolveArchetypeProfile } = await import("./api/mode-profile.ts");
+      channelProfile = await resolveArchetypeProfile(mode);
+      console.log(`[ellie-chat] Mode profile: mode=${mode} contextMode=${channelProfile.contextMode} budget=${channelProfile.tokenBudget}`);
     } catch (err) {
-      logger.warn("Channel profile resolution failed, falling back to mode detection", err);
+      logger.warn("Mode profile resolution failed, falling back to mode detection", err);
     }
   }
 
@@ -1065,7 +1067,7 @@ export async function runSpecialistAsync(
   imagePath: string | undefined,
   workItemId: string | undefined,
   channelId?: string,
-  channelProfile?: import("./chat-channels.ts").ChannelContextProfile | null,
+  channelProfile?: import("./api/mode-profile.ts").ChannelContextProfile | null,
 ): Promise<void> {
   const { bot, anthropic } = getRelayDeps();
   const agentName = agentResult.dispatch.agent.name;

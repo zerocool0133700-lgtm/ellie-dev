@@ -55,8 +55,6 @@ import { startExpiryCleanup } from "./approval.ts";
 import { notify } from "./notification-policy.ts";
 import { expireIdleConversations } from "./conversations.ts";
 import { expireStaleItems } from "./api/agent-queue.ts";
-import { archiveCompletedEphemeralChannels } from "./chat-channels.ts";
-import { isWorkItemDone } from "./plane.ts";
 import { startPlaneQueueWorker, purgeCompleted as purgePlaneQueue } from "./plane-queue.ts";
 import { startWatchdog, recoverActiveRuns, setWatchdogNotify } from "./orchestration-tracker.ts";
 import { reconcileOnStartup, startReconciler } from "./orchestration-reconciler.ts";
@@ -113,8 +111,6 @@ setInterval(async () => {
       logger.error("Stale conversation cleanup error", { error: err instanceof Error ? err.message : String(err) });
     }
     expireStaleAgentSessions(supabase).catch(() => {});
-    // ELLIE-334: Auto-archive ephemeral channels whose tickets are Done
-    archiveCompletedEphemeralChannels(supabase, isWorkItemDone).catch(() => {});
   }
   // Expire Ellie Chat pending confirm actions (15-min TTL)
   const now = Date.now();
@@ -325,21 +321,6 @@ setInterval(async () => {
       await runMorningBriefing(supabase, bot);
     } catch (err: unknown) {
       logger.error("Morning briefing error", { error: err instanceof Error ? err.message : String(err) });
-    }
-  }
-}, 15 * 60_000);
-
-// Channel gardener — runs at 11 PM CST nightly (ELLIE-335)
-setInterval(async () => {
-  if (!supabase) return;
-  const now = new Date();
-  const cst = new Date(now.toLocaleString("en-US", { timeZone: "America/Chicago" }));
-  if (cst.getHours() === 23 && cst.getMinutes() < 15) {
-    try {
-      const { runNightlyGardener } = await import("./api/channel-gardener.ts");
-      await runNightlyGardener(supabase);
-    } catch (err: unknown) {
-      logger.error("[gardener] Nightly run failed", { error: err instanceof Error ? err.message : String(err) });
     }
   }
 }, 15 * 60_000);
