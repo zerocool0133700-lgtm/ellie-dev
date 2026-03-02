@@ -20,7 +20,9 @@ instant_commands: [help]
 1. **ES ↔ Supabase message count** — Verifies Elasticsearch and Supabase have the same number of messages per day
 2. **Orphaned messages** — Counts messages with `conversation_id = null` (unlinked from any conversation)
 3. **Conversation count integrity** — Verifies each conversation's stated `message_count` matches actual linked messages
-4. **Per-day summary** — Tabular breakdown of all metrics for each day in the window
+4. **ID-level cross-reference** — Finds specific messages present in one store but not the other (by UUID)
+5. **Error log scan** — Checks `ellie-logs` for save/write failures in the audit window
+6. **Per-day summary** — Tabular breakdown of all metrics for each day in the window
 
 ## How to Run
 
@@ -39,6 +41,8 @@ For a formatted report with the same table layout as the ELLIE-406 manual audit,
   - `es_mismatch` — ES and SB message counts differ for a day (data loss risk)
   - `orphaned_messages` — Messages exist with null conversation_id (invisible to UI and agents)
   - `broken_conv_count` — A conversation's stated count doesn't match actual linked messages
+  - `id_mismatch` — Specific messages found in one store but not the other (includes UUIDs)
+  - `save_errors` — Save-related errors/warnings found in ellie-logs
 
 ## History / Trends
 
