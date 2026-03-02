@@ -30,10 +30,12 @@ services:
     volumes:
       - /home/ellie/obsidian-vault:/vaults/vault
       - ellie-obsidian-config:/config
+      - ./obsidian-autostart:/config/.config/openbox/autostart:ro
     environment:
       - PUID=1000
       - PGID=1000
       - TZ=America/Chicago
+      - CUSTOM_RES=1920x1080
     restart: unless-stopped
 
 volumes:
