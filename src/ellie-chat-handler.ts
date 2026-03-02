@@ -270,7 +270,7 @@ async function _handleEllieChatMessage(
     if (instant) {
       console.log(`[ellie-chat] Instant command: /${instant.skillName} ${instant.subcommand}`);
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "response", text: instant.response, agent: "system", ts: Date.now() }));
+        ws.send(JSON.stringify({ type: "response", text: instant.response, agent: "system", ts: Date.now(), channelId }));
       }
       return;
     }
