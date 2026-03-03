@@ -12,6 +12,21 @@ bun.lockb
 config/profile.md
 config/schedule.json
 
+# Runtime-generated config (Forest tree IDs, etc.)
+config/*tree.json
+config/stt-corrections.json
+
+# Credentials — NEVER commit
+config/client_secret_*.json
+config/wida*.json
+
+# Build artifacts
+dist/
+
+# Work session / scratch artifacts
+work-space/
+supabase/.temp/
+
 # Runtime files
 *.lock
 *.log
