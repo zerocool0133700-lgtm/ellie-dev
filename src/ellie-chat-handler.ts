@@ -101,6 +101,7 @@ import { logVerificationTrail } from "./data-quality.ts";
 import { getCreatureProfile } from "./creature-profile.ts";
 import { withTrace } from "./trace.ts";
 import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost } from "./jobs-ledger.ts";
+import { checkContextPressure, shouldNotify, getCompactionNotice, checkpointSessionToForest } from "./api/session-compaction.ts";
 import {
   isFallbackActive,
   isOutageError,
@@ -646,10 +647,8 @@ async function _handleEllieChatMessage(
 
     if (isSpecialist && !isMultiStep && agentResult) {
       const ack = getSpecialistAck(ecRouteAgent);
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "response", text: ack, agent: "general", ts: Date.now() }));
-      }
-      await saveMessage("assistant", ack, {}, "ellie-chat", ecUserId);
+      const ackMemoryId = await saveMessage("assistant", ack, { agent: "general" }, "ellie-chat", ecUserId);
+      deliverResponse(ws, { type: "response", text: ack, agent: "general", memoryId: ackMemoryId, ts: Date.now() });
       broadcastExtension({ type: "message_out", channel: "ellie-chat", agent: "general", preview: ack });
 
       // Fire-and-forget: specialist runs outside the queue
@@ -825,7 +824,7 @@ async function _handleEllieChatMessage(
         const { cleanedText: ellieChatOrcPlaybookClean, commands: ellieChatOrcPlaybookCmds } = extractPlaybookCommands(pipelineResponse);
         // ELLIE-389: Save first to get memoryId, then send with it
         const { cleanedText: orcPreClean } = extractApprovalTags(ellieChatOrcPlaybookClean);
-        const orcMemoryId = await saveMessage("assistant", orcPreClean, {}, "ellie-chat", ecUserId);
+        const orcMemoryId = await saveMessage("assistant", orcPreClean, { agent: orcAgent }, "ellie-chat", ecUserId);
         const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, ellieChatOrcPlaybookClean, session.sessionId, orcAgent, orcMemoryId);
 
         broadcastExtension({
@@ -1042,7 +1041,7 @@ async function _handleEllieChatMessage(
     const ecAgent = agentResult?.dispatch.agent.name || "general";
     // ELLIE-389: Save first to get memoryId, then send with it
     const { cleanedText: ecPreClean } = extractApprovalTags(ecPlaybookClean);
-    const ecMemoryId = await saveMessage("assistant", ecPreClean, {}, "ellie-chat", ecUserId);
+    const ecMemoryId = await saveMessage("assistant", ecPreClean, { agent: ecAgent }, "ellie-chat", ecUserId);
     const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, ecPlaybookClean, session.sessionId, ecAgent, ecMemoryId);
 
     broadcastExtension({
@@ -1239,6 +1238,9 @@ export async function runSpecialistAsync(
       );
     }
 
+    // ELLIE-450: Check context pressure and notify Dave if approaching budget ceiling
+    const contextPressure = specBuildMetrics ? checkContextPressure(specBuildMetrics) : null;
+
     if (jobId) {
       // Bug 4: increment completed_steps when context gathering finishes
       updateJob(jobId, { current_step: "calling_claude", model: agentModel || undefined, last_heartbeat: new Date(), increment_completed_steps: 1 });
@@ -1299,11 +1301,27 @@ export async function runSpecialistAsync(
       }
     }
 
+    // ELLIE-450: Append compaction notice and async-checkpoint if threshold crossed
+    if (contextPressure && specConvoId && shouldNotify(specConvoId, contextPressure.level)) {
+      rawResponse += getCompactionNotice(contextPressure);
+      if (contextPressure.level === "critical" && specBuildMetrics) {
+        checkpointSessionToForest({
+          conversationId: specConvoId,
+          agentName,
+          mode: specBuildMetrics.mode ?? specContextMode,
+          workItemId,
+          pressure: contextPressure,
+          sections: specBuildMetrics.sections,
+          lastUserMessage: effectiveText,
+        }).catch(err => logger.warn("[compaction] Checkpoint failed", { error: err instanceof Error ? err.message : String(err) }));
+      }
+    }
+
     const response = await processMemoryIntents(supabase, rawResponse, agentName, "shared", agentMemory.sessionIds);
     const { cleanedText: playClean, commands: playCmds } = extractPlaybookCommands(response);
     // ELLIE-389: Save first to get memoryId, then send with it
     const { cleanedText: specPreClean } = extractApprovalTags(playClean);
-    const specMemoryId = await saveMessage("assistant", specPreClean, {}, "ellie-chat", ecUserId);
+    const specMemoryId = await saveMessage("assistant", specPreClean, { agent: agentName }, "ellie-chat", ecUserId);
     const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, playClean, session.sessionId, agentName, specMemoryId);
 
     broadcastExtension({
