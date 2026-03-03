@@ -13,7 +13,7 @@ import {
   extensionClients, ellieChatClients, wsAppUserMap, ellieChatPhoneHistories,
   broadcastExtension, getRelayDeps,
 } from "./relay-state.ts";
-import { getUndeliveredMessages, markDelivered, getProcessingState, getRecentHistory } from "./ws-delivery.ts";
+import { getUndeliveredMessages, markDelivered, getProcessingState, getRecentHistory, drainMemoryBuffer } from "./ws-delivery.ts";
 import { resetEllieChatIdleTimer } from "./relay-idle.ts";
 import { handleVoiceConnection } from "./voice-pipeline.ts";
 import {
@@ -206,10 +206,13 @@ async function deliverPendingReadouts(ws: WebSocket): Promise<void> {
   }
 }
 
-/** ELLIE-399: Deliver undelivered messages + processing state + conversation history on reconnect. */
+/** ELLIE-399/463: Deliver undelivered messages + processing state + conversation history on reconnect. */
 async function deliverCatchUp(ws: WebSocket, userId: string, sinceTs?: number): Promise<void> {
   try {
-    // 1. Deliver any undelivered messages first (original ELLIE-399 behavior)
+    // ELLIE-463: Drain in-memory buffer first — covers the case where Supabase is also down
+    drainMemoryBuffer(userId, ws);
+
+    // 1. Deliver any undelivered messages (original ELLIE-399 behavior)
     const undelivered = await getUndeliveredMessages(userId, sinceTs);
     if (undelivered.length > 0) {
       const deliveredIds: string[] = [];

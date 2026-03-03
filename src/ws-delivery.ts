@@ -18,6 +18,59 @@ export function initDelivery(supabase: any) {
   _supabase = supabase;
 }
 
+// ── ELLIE-463: In-memory delivery buffer ─────────────────────
+//
+// Secondary safety net: holds messages that failed to send (WS closed)
+// so they can be delivered when the client reconnects — even if Supabase
+// is temporarily unavailable (no DB write / no DB read on reconnect).
+//
+// Per-userId ring buffer: max 20 messages, 15-min TTL.
+
+const MAX_BUFFER_PER_USER = 20;
+const BUFFER_TTL_MS = 15 * 60_000;
+
+interface BufferedMessage {
+  payload: Record<string, unknown>;
+  bufferedAt: number;
+}
+
+const _memoryBuffer = new Map<string, BufferedMessage[]>();
+
+function pushToMemoryBuffer(userId: string, payload: Record<string, unknown>): void {
+  if (!userId) return;
+  let buf = _memoryBuffer.get(userId);
+  if (!buf) { buf = []; _memoryBuffer.set(userId, buf); }
+  buf.push({ payload, bufferedAt: Date.now() });
+  // Trim to ring size
+  if (buf.length > MAX_BUFFER_PER_USER) buf.splice(0, buf.length - MAX_BUFFER_PER_USER);
+}
+
+/**
+ * Send any buffered messages to a reconnecting client.
+ * Called from websocket-servers.ts deliverCatchUp on every reconnect.
+ */
+export function drainMemoryBuffer(userId: string, ws: WebSocket): void {
+  if (!userId) return;
+  const buf = _memoryBuffer.get(userId);
+  if (!buf || buf.length === 0) return;
+
+  const now = Date.now();
+  const fresh = buf.filter(m => now - m.bufferedAt < BUFFER_TTL_MS);
+  _memoryBuffer.delete(userId);
+
+  if (fresh.length === 0) return;
+  logger.info(`[buffer] Draining ${fresh.length} buffered message(s) for ${userId}`);
+  for (const { payload } of fresh) {
+    if (ws.readyState !== WebSocket.OPEN) break;
+    try {
+      ws.send(JSON.stringify({ ...payload, buffered: true }));
+    } catch {
+      // Client closed again during drain — stop
+      break;
+    }
+  }
+}
+
 // ── In-flight processing tracker ─────────────────────────────
 
 /** Track which users have a response currently being generated. */
@@ -47,6 +100,7 @@ export function getProcessingState(userId: string): { startedAt: number; text: s
 /**
  * Send a response over WebSocket and update delivery_status in the DB.
  * If the socket is closed, marks the message as 'failed' so catch-up can recover it.
+ * ELLIE-463: On failure, also pushes to in-memory buffer for immediate drain on reconnect.
  */
 export function deliverResponse(
   ws: WebSocket,
@@ -59,10 +113,15 @@ export function deliverResponse(
     duration_ms?: number;
     channelId?: string;
   },
+  userId?: string,
 ): boolean {
   const sent = trySend(ws, payload);
   if (payload.memoryId) {
     updateDeliveryStatus(payload.memoryId, sent ? "sent" : "failed").catch(() => {});
+  }
+  // ELLIE-463: Buffer failed sends for immediate reconnect drain
+  if (!sent && userId) {
+    pushToMemoryBuffer(userId, payload as unknown as Record<string, unknown>);
   }
   return sent;
 }
@@ -132,6 +191,46 @@ export async function getUndeliveredMessages(
     return data || [];
   } catch (err) {
     logger.error("Catch-up query error", err);
+    return [];
+  }
+}
+
+/**
+ * Fetch recent conversation history for session restoration.
+ * Returns both user and assistant messages regardless of delivery_status.
+ * Used when a client reconnects and sessionStorage may be lost (mobile, new tab).
+ */
+export async function getRecentHistory(
+  channel: string,
+  userId?: string,
+  limit: number = 50,
+): Promise<Array<{ id: string; content: string; role: string; created_at: string; metadata: Record<string, unknown> }>> {
+  if (!_supabase) return [];
+  try {
+    // Get the last N messages from the channel (last 24 hours max)
+    const since = new Date(Date.now() - 86400_000).toISOString();
+    let query = _supabase
+      .from("messages")
+      .select("id, content, role, created_at, metadata")
+      .eq("channel", channel)
+      .gte("created_at", since)
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    // Filter to this user's messages (same guard as getUndeliveredMessages)
+    if (userId && userId !== "system-dashboard") {
+      query = query.eq("user_id", userId);
+    }
+
+    const { data, error } = await query;
+    if (error) {
+      logger.error("History query failed", error);
+      return [];
+    }
+    // Reverse to chronological order
+    return (data || []).reverse();
+  } catch (err) {
+    logger.error("History query error", err);
     return [];
   }
 }
