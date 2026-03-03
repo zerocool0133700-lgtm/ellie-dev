@@ -23,6 +23,7 @@ import { withTrace, getTraceId, generateTraceId } from "./trace.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
 import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost, writeJobTouchpointForAgent } from "./jobs-ledger.ts";
 import { startCreature, failCreature, completeCreature, dispatchPushCreature } from "../../ellie-forest/src/index";
+import { postCreatureEvent, postJobEvent } from "./channels/discord/observation.ts";
 
 const logger = log.child("orchestration-dispatch");
 
@@ -135,6 +136,8 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
   if (jobId) {
     await updateJob(jobId, { status: "running", current_step: "gathering_context", last_heartbeat: new Date() });
     appendJobEvent(jobId, "running", { agent_type: agentType });
+    // ELLIE-442: Post job creation to #job-tracker
+    postJobEvent("created", { agentType, workItemId });
   }
 
   // ELLIE-446: Periodic heartbeat so orphan cleanup doesn't claim long-running dispatches
@@ -257,6 +260,8 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       startCreature(sessionIds.creature_id).catch(err =>
         logger.warn("startCreature failed (non-fatal)", { creature_id: sessionIds.creature_id, err: err.message })
       );
+      // ELLIE-442: Post dispatched event to #creature-log
+      postCreatureEvent("dispatched", { agentType, workItemId });
     }
     // ELLIE-455: J scope touchpoint — job started
     if (jobId) {
@@ -351,13 +356,16 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     endRun(runId, "completed");
     // ELLIE-447: Complete creature with meaningful result data (response preview + timing)
     if (sessionIds?.creature_id) {
+      const responsePreview = rawResponse.replace(/\[MEMORY:[^\]]*\]/gi, "").trim().slice(0, 1000);
       completeCreature(sessionIds.creature_id, {
-        response_preview: rawResponse.replace(/\[MEMORY:[^\]]*\]/gi, "").trim().slice(0, 1000),
+        response_preview: responsePreview,
         duration_ms: durationMs,
         work_item_id: workItemId,
       }).catch(err =>
         logger.warn("completeCreature failed (non-fatal)", { creature_id: sessionIds.creature_id, err: err.message })
       );
+      // ELLIE-442: Post completed event to #creature-log
+      postCreatureEvent("completed", { agentType, workItemId, durationMs, responsePreview });
     }
     // ELLIE-445: Verify dev agents produced file changes before marking completed
     if (jobId) {
@@ -376,6 +384,8 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       // Bug 3: duration_ms belongs in opts (4th param), not details
       await appendJobEvent(jobId, finalStatus, { verified, verification_note: note }, { duration_ms: durationMs });
       if (!verified) logger.warn("Job marked 'responded' — work unverified", { jobId: jobId.slice(0, 8), note });
+      // ELLIE-442: Post job completion to #job-tracker
+      postJobEvent(finalStatus as "completed" | "responded", { agentType, workItemId, durationMs, costUsd });
       // ELLIE-455: J scope touchpoint — job completed/responded
       writeJobTouchpointForAgent(jobId, agentType, sessionIds?.creature_id,
         finalStatus === "completed" ? "completed" : "completed",
@@ -425,6 +435,8 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     // ELLIE-447: Mark creature failed on any unexpected error
     if (sessionIds?.creature_id) {
       failCreature(sessionIds.creature_id, errMsg.slice(0, 500)).catch(() => {});
+      // ELLIE-442: Post failure to #creature-log
+      postCreatureEvent("failed", { agentType, workItemId, error: errMsg.slice(0, 300) });
     }
     const { errorClass, reason } = classifyError(err);
     emitEvent(runId, "failed", agentType, workItemId, {
@@ -438,6 +450,8 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     if (jobId) {
       await updateJob(jobId, { status: "failed", error_count: 1, current_step: null });
       await appendJobEvent(jobId, "failed", { error: errMsg.slice(0, 500), error_class: errorClass });
+      // ELLIE-442: Post job failure to #job-tracker
+      postJobEvent("failed", { agentType, workItemId, error: errMsg.slice(0, 300) });
       // ELLIE-455: J scope touchpoint — unexpected failure
       writeJobTouchpointForAgent(jobId, agentType, sessionIds?.creature_id, "failed",
         `${agentType} failed on ${workItemId}: ${errMsg.slice(0, 200)}`,

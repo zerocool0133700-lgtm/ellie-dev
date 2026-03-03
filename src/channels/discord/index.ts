@@ -22,6 +22,7 @@ import { log } from "../../logger.ts";
 import { normalizeMessage, setBotId, type NormalizedDiscordMessage } from "./normalize.ts";
 import { sendToChannel, initWebhooks } from "./send.ts";
 import { initThreadBindings, cleanExpiredBindings } from "./thread-bindings.ts";
+import { initObservationChannels, setObservationClient } from "./observation.ts";
 import { enqueue } from "../../message-queue.ts";
 import { periodicTask } from "../../periodic-task.ts";
 
@@ -90,6 +91,7 @@ export function startDiscordGateway(supabase: any): void {
   }
 
   initWebhooks();
+  initObservationChannels();
   initThreadBindings(supabase);
   buildChannelMap();
 
@@ -104,6 +106,7 @@ export function startDiscordGateway(supabase: any): void {
 
   client.once(Events.ClientReady, (c) => {
     setBotId(c.user.id);
+    setObservationClient(c as unknown as Client);
     logger.info("Discord bot ready", { tag: c.user.tag, id: c.user.id });
   });
 
@@ -135,6 +138,7 @@ export async function stopDiscordGateway(): Promise<void> {
   if (_client) {
     await _client.destroy();
     _client = null;
+    setObservationClient(null);
     logger.info("Discord gateway disconnected");
   }
 }
