@@ -62,7 +62,7 @@ const AGENT_MODE = process.env.AGENT_MODE !== "false";
 // ── User identity ───────────────────────────────────────────
 
 export const USER_NAME = process.env.USER_NAME || "";
-export { USER_TIMEZONE } from "./timezone.ts";
+import { USER_TIMEZONE } from "./timezone.ts";
 
 // ── Soul context (hot-reloaded on file change — ELLIE-244) ──
 
