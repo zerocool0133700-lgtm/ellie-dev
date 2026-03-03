@@ -15,6 +15,7 @@ import { spawn } from "bun";
 import { writeFile, readFile, unlink } from "fs/promises";
 import { join } from "path";
 import { log } from "./logger.ts";
+import { applyTranscriptionCorrections } from "./transcription-postprocess.ts";
 
 const logger = log.child("transcribe");
 
@@ -213,7 +214,7 @@ export async function transcribe(audioBuffer: Buffer): Promise<string> {
   }
 
   const result = await tryChain(chain);
-  if (result !== null) return result;
+  if (result !== null) return applyTranscriptionCorrections(result);
 
   logger.error("[transcribe] All providers failed");
   return "Sorry, I couldn't transcribe that — please try again.";
@@ -248,7 +249,7 @@ export async function transcribeWav(wavBuffer: Buffer): Promise<string> {
     try {
       const result = await fn();
       logger.info(`[transcribe] WAV success via ${name}`);
-      return result;
+      return applyTranscriptionCorrections(result);
     } catch (err: unknown) {
       logger.warn(`[transcribe] WAV ${name} failed — trying next`, {
         error: err instanceof Error ? err.message : String(err),
