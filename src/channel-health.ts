@@ -41,8 +41,15 @@ let _health: ChannelHealth = {
   forest: { ...UNKNOWN },
 };
 
+// ELLIE-462: Consecutive failure tracking for active restart decisions
+let _telegramConsecutiveDown = 0;
+
 export function getChannelHealth(): ChannelHealth {
   return { ..._health };
+}
+
+export function getTelegramConsecutiveDown(): number {
+  return _telegramConsecutiveDown;
 }
 
 // ── Individual checks ─────────────────────────────────────────
@@ -111,6 +118,12 @@ async function checkForest(): Promise<ChannelHealthResult> {
 
 interface HealthMonitorDeps {
   getMe: () => Promise<unknown>;
+  /**
+   * ELLIE-462: Called after each check cycle with the new consecutive-down
+   * count for Telegram. relay.ts uses this to trigger an active bot restart.
+   * count = 0 means Telegram just recovered.
+   */
+  onTelegramDown?: (consecutiveDownCount: number) => void;
 }
 
 /**
@@ -129,6 +142,18 @@ export async function runHealthCheck(deps: HealthMonitorDeps): Promise<void> {
     telegram: telegramResult.status === "fulfilled" ? telegramResult.value : { status: "down", checkedAt: Date.now(), error: String((telegramResult as PromiseRejectedResult).reason) },
     forest: forestResult.status === "fulfilled" ? forestResult.value : { status: "down", checkedAt: Date.now(), error: String((forestResult as PromiseRejectedResult).reason) },
   };
+
+  // ELLIE-462: Update consecutive Telegram down counter and fire callback
+  if (_health.telegram.status === "down") {
+    _telegramConsecutiveDown++;
+    deps.onTelegramDown?.(_telegramConsecutiveDown);
+  } else {
+    if (_telegramConsecutiveDown > 0) {
+      logger.info("Telegram recovered", { after_consecutive_down: _telegramConsecutiveDown });
+      _telegramConsecutiveDown = 0;
+      deps.onTelegramDown?.(0); // signal recovery
+    }
+  }
 
   const degraded = Object.entries(_health)
     .filter(([, v]) => v.status !== "ok" && v.status !== "unknown")

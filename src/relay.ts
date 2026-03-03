@@ -106,6 +106,9 @@ export const bot = new Bot(BOT_TOKEN);
 
 // ── periodicTask imported from ./periodic-task.ts (ELLIE-465) ─
 
+// ELLIE-462: Bot restart gate — prevent concurrent restarts
+let _botRestarting = false;
+
 // Start approval expiry cleanup
 startExpiryCleanup();
 
@@ -151,8 +154,29 @@ setInterval(async () => {
       console.log(`[ellie-chat approval] Expired: ${action.description.substring(0, 60)}`);
     }
   }
-  // ELLIE-459/465: Channel health check
-  runHealthCheck({ getMe: () => bot.api.getMe() }).catch(() => {});
+  // ELLIE-459/465/462: Channel health check + active Telegram restart
+  runHealthCheck({
+    getMe: () => bot.api.getMe(),
+    onTelegramDown: (count) => {
+      // ELLIE-462: After 2 consecutive "down" results (= ~10 min), restart the bot
+      if (count >= 2 && !_botRestarting) {
+        _botRestarting = true;
+        logger.warn("[health-restart] Telegram down 2+ checks — restarting bot", { count });
+        bot.stop()
+          .then(() => bot.start())
+          .then(() => {
+            logger.info("[health-restart] Bot restarted successfully");
+            _botRestarting = false;
+          })
+          .catch(err => {
+            logger.error("[health-restart] Bot restart failed", { error: err instanceof Error ? err.message : String(err) });
+            _botRestarting = false;
+          });
+      } else if (count === 0) {
+        _botRestarting = false; // reset on recovery
+      }
+    },
+  }).catch(() => {});
 }, 5 * 60_000);
 
 // Calendar sync (every 5 minutes)
