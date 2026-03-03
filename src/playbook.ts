@@ -168,7 +168,9 @@ export async function executePlaybookCommands(
         workItemId: cmd.ticketId || "playbook",
         telegramMessage: `Playbook ${cmd.type} failed: ${errMsg.slice(0, 100) || "unknown error"}`,
         gchatMessage: `Playbook ${cmd.type} error:\n${errMsg.slice(0, 300) || "unknown error"}`,
-      }).catch(() => {});
+      }).catch(notifyErr => {
+        logger.warn("Playbook error notification failed", { command: cmd.type }, notifyErr);
+      });
     }
   }
 }

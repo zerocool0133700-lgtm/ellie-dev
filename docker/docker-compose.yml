@@ -8,7 +8,7 @@ services:
       - discovery.type=single-node
       - xpack.security.enabled=false
       - xpack.security.http.ssl.enabled=false
-      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
       - cluster.name=ellie-cluster
       - node.name=home-ellie-es
     ports:
@@ -16,7 +16,7 @@ services:
     volumes:
       - ellie-es-data:/usr/share/elasticsearch/data
     restart: unless-stopped
-    mem_limit: 4g
+    mem_limit: 1g
     ulimits:
       memlock:
         soft: -1
