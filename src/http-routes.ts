@@ -3658,6 +3658,11 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           bridgeWhoamiEndpoint, bridgeTagsEndpoint,
         } = await import("./api/bridge.ts");
 
+        const {
+          bridgeRiverSearchEndpoint, bridgeRiverCatalogEndpoint,
+          bridgeRiverDocEndpoint, bridgeRiverLinkEndpoint,
+        } = await import("./api/bridge-river.ts");
+
         const queryParams: Record<string, string> = {};
         url.searchParams.forEach((v: string, k: string) => { queryParams[k] = v; });
 
@@ -3704,6 +3709,22 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           case "tags":
             if (isPost) { res.writeHead(405); res.end(); return; }
             await bridgeTagsEndpoint(mockReq, mockRes);
+            break;
+          case "river/search":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await bridgeRiverSearchEndpoint(mockReq, mockRes);
+            break;
+          case "river/catalog":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await bridgeRiverCatalogEndpoint(mockReq, mockRes);
+            break;
+          case "river/doc":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await bridgeRiverDocEndpoint(mockReq, mockRes);
+            break;
+          case "river/link":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await bridgeRiverLinkEndpoint(mockReq, mockRes);
             break;
           default:
             res.writeHead(404, { "Content-Type": "application/json" });

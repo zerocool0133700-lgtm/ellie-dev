@@ -20,6 +20,7 @@ import {
   sql,
 } from '../../../ellie-forest/src/index'
 import { createQueueItemDirect } from './agent-queue'
+import { searchRiver } from './bridge-river.ts'
 import type { ApiRequest, ApiResponse } from "./types.ts";
 import { log } from "../logger.ts";
 
@@ -103,8 +104,30 @@ export async function bridgeReadEndpoint(req: ApiRequest, res: ApiResponse) {
       return res.status(400).json({ error: 'Missing required field: query' })
     }
 
-    if (scope_path && !isWithinAllowedScopes(scope_path, key.allowed_scopes)) {
+    // R scope is globally readable — bypass allowed_scopes check
+    const isRiverScope = scope_path?.startsWith('R')
+
+    if (scope_path && !isRiverScope && !isWithinAllowedScopes(scope_path, key.allowed_scopes)) {
       return res.status(403).json({ error: `Scope path '${scope_path}' is outside your allowed scopes` })
+    }
+
+    // ELLIE-457: R/R scope routes to QMD search instead of Forest memories
+    if (isRiverScope) {
+      const riverResults = await searchRiver(query, match_count ?? 10)
+      const memories = riverResults.map(r => ({
+        id: r.docid,
+        content: r.snippet,
+        type: 'document',
+        scope: 'tree',
+        scope_path: 'R/R',
+        source: 'river',
+        doc_id: r.docid,
+        file: r.file,
+        title: r.title,
+        confidence: Math.min(1, (r.score ?? 0) / 10 + 0.5),
+      }))
+      console.log(`[bridge:read] ${key.key_prefix} (${key.collaborator}) queried River "${query.slice(0, 60)}" → ${memories.length} results`)
+      return res.json({ success: true, count: memories.length, memories })
     }
 
     const effectiveScopePath = scope_path || key.allowed_scopes[0]

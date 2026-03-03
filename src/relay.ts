@@ -280,6 +280,12 @@ periodicTask(async () => {
   if (refreshed > 0) console.log(`[memory-maintenance] Refreshed weights for ${refreshed} memories`);
 }, 60 * 60_000, "weight-refresh");
 
+// ELLIE-457: Oak Catalog — daily QMD scan → R/1 manifest (every 24 hours)
+periodicTask(async () => {
+  const { syncOakCatalog } = await import('./api/bridge-river.ts');
+  await syncOakCatalog();
+}, 24 * 60 * 60_000, "oak-catalog-sync");
+
 // Summary Bar push — broadcast module summary state to Ellie Chat clients (ELLIE-315)
 // Runs every 30 seconds when clients are connected; skips if no listeners.
 periodicTask(async () => {
