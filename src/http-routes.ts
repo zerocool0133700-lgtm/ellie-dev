@@ -1373,8 +1373,18 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
           res.end(JSON.stringify({ error: "Job not found" }));
           return;
         }
+        // ELLIE-449: Include creature chain (pull creature + push child) if job has a creature_id
+        let creatures: unknown[] = [];
+        if (detail.job.creature_id) {
+          const { getCreature, getChildCreatures } = await import("../../ellie-forest/src/index");
+          const [root, children] = await Promise.all([
+            getCreature(detail.job.creature_id),
+            getChildCreatures(detail.job.creature_id),
+          ]);
+          creatures = [root, ...children].filter(Boolean);
+        }
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(detail));
+        res.end(JSON.stringify({ ...detail, creatures }));
       } catch (err: any) {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: err?.message || "Failed to get job" }));

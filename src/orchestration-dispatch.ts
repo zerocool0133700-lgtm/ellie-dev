@@ -22,7 +22,7 @@ import { enqueue, getQueueDepth } from "./dispatch-queue.ts";
 import { withTrace, getTraceId, generateTraceId } from "./trace.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
 import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost, writeJobTouchpointForAgent } from "./jobs-ledger.ts";
-import { startCreature, failCreature, completeCreature } from "../../ellie-forest/src/index";
+import { startCreature, failCreature, completeCreature, dispatchPushCreature } from "../../ellie-forest/src/index";
 
 const logger = log.child("orchestration-dispatch");
 
@@ -384,6 +384,27 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       ).catch(err => logger.warn("[touchpoint] completed failed", { err: err.message }));
     }
 
+    // ELLIE-449: Spawn a push creature to record notification delivery.
+    // Creates a child of the pull creature so the chain is traceable in the Forest.
+    let pushCreatureId: string | undefined;
+    if (sessionIds?.creature_id && sessionIds?.tree_id && sessionIds?.entity_id) {
+      dispatchPushCreature({
+        parent_creature_id: sessionIds.creature_id,
+        tree_id: sessionIds.tree_id,
+        entity_id: sessionIds.entity_id,
+        intent: `deliver result for ${workItemId}`,
+        instructions: {
+          notification_type: "job_completion",
+          work_item_id: workItemId,
+          duration_ms: durationMs,
+          agent_type: agentType,
+        },
+      }).then(pushCreature => {
+        pushCreatureId = pushCreature.id;
+        startCreature(pushCreature.id).catch(() => {});
+      }).catch(err => logger.warn("[push-creature] dispatch failed (non-fatal)", { err: err.message }));
+    }
+
     // 10. Notify
     const preview = rawResponse.replace(/\[MEMORY:[^\]]*\]/gi, "").trim().slice(0, 300);
     await notify(notifyCtx, {
@@ -392,6 +413,11 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       telegramMessage: `${agentType} finished ${workItemId} (${durationMin}min):\n${preview}`,
       gchatMessage: `${agentType} agent completed ${workItemId} (${durationMin}min):\n${rawResponse.slice(0, 800)}`,
     });
+
+    // Mark push creature delivered
+    if (pushCreatureId) {
+      completeCreature(pushCreatureId, { delivered_to: ["telegram"] }).catch(() => {});
+    }
 
   } catch (err: unknown) {
     if (heartbeatInterval) clearInterval(heartbeatInterval);
