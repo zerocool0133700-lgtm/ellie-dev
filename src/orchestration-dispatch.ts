@@ -22,7 +22,7 @@ import { enqueue, getQueueDepth } from "./dispatch-queue.ts";
 import { withTrace, getTraceId, generateTraceId } from "./trace.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
 import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost, writeJobTouchpointForAgent } from "./jobs-ledger.ts";
-import { startCreature, failCreature, completeCreature, dispatchPushCreature } from "../../ellie-forest/src/index";
+import { startCreature, failCreature, completeCreature, dispatchPushCreature, writeJobCompletionMetric } from "../../ellie-forest/src/index";
 import { postCreatureEvent, postJobEvent } from "./channels/discord/observation.ts";
 
 const logger = log.child("orchestration-dispatch");
@@ -386,6 +386,14 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       if (!verified) logger.warn("Job marked 'responded' — work unverified", { jobId: jobId.slice(0, 8), note });
       // ELLIE-442: Post job completion to #job-tracker
       postJobEvent(finalStatus as "completed" | "responded", { agentType, workItemId, durationMs, costUsd });
+      // ELLIE-454: Write performance metric to Forest C/1 scope
+      writeJobCompletionMetric({
+        agentType, workItemId, durationMs, costUsd,
+        tokensIn, tokensOut,
+        status: finalStatus as "completed" | "responded",
+        sourceTreeId: sessionIds?.tree_id,
+        sourceEntityId: sessionIds?.entity_id,
+      });
       // ELLIE-455: J scope touchpoint — job completed/responded
       writeJobTouchpointForAgent(jobId, agentType, sessionIds?.creature_id,
         finalStatus === "completed" ? "completed" : "completed",
