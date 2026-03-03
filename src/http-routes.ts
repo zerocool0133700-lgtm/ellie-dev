@@ -4877,6 +4877,43 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Channel Gardener endpoints (ELLIE-335)
+  if (url.pathname === "/api/channel-gardener/run" && req.method === "POST") {
+    (async () => {
+      try {
+        const { gardenerRunHandler } = await import("./api/channel-gardener.ts");
+        await gardenerRunHandler(req, res);
+      } catch (err) { logger.error("Channel gardener run error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/channel-gardener/suggestions" && req.method === "GET") {
+    (async () => {
+      try {
+        const { gardenerSuggestionsHandler } = await import("./api/channel-gardener.ts");
+        await gardenerSuggestionsHandler(req, res);
+      } catch (err) { logger.error("Channel gardener suggestions error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/channel-gardener/suggestions/") && req.method === "POST") {
+    const parts = url.pathname.split("/");
+    // /api/channel-gardener/suggestions/{id}/approve|dismiss  → parts[4]=id parts[5]=action
+    const suggestionId = parts[4];
+    const action = parts[5] as "approve" | "dismiss";
+    if (suggestionId && (action === "approve" || action === "dismiss")) {
+      (async () => {
+        try {
+          const { gardenerActionHandler } = await import("./api/channel-gardener.ts");
+          await gardenerActionHandler(req, res, suggestionId, action);
+        } catch (err) { logger.error("Channel gardener action error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+      })();
+      return;
+    }
+  }
+
   // Alert endpoints (ELLIE-317)
   if (url.pathname.startsWith("/api/alerts/") && !supabase) {
     res.writeHead(500, { "Content-Type": "application/json" });

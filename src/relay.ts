@@ -388,6 +388,23 @@ setInterval(async () => {
   }
 }, 15 * 60_000);
 
+// Channel Gardener — nightly at 3 AM CST (ELLIE-335)
+setInterval(async () => {
+  if (!supabase) return;
+  const now = new Date();
+  const cst = new Date(now.toLocaleString("en-US", { timeZone: "America/Chicago" }));
+  if (cst.getHours() === 3 && cst.getMinutes() < 15) {
+    try {
+      const { runNightlyGardener } = await import("./api/channel-gardener.ts");
+      const { anthropic } = getRelayDeps();
+      const result = await runNightlyGardener(supabase, anthropic ?? null);
+      logger.info("[gardener] Nightly run complete", result);
+    } catch (err: unknown) {
+      logger.error("[gardener] Nightly run failed", { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+}, 15 * 60_000);
+
 // Note: expireStaleWorkSessions (old Supabase work_sessions table) removed in ELLIE-88.
 // Forest is now the source of truth for work sessions. See ellie-forest/src/work-sessions.ts.
 
