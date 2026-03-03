@@ -51,6 +51,7 @@ import {
 import { searchElastic } from "./elasticsearch.ts";
 import { log } from "./logger.ts";
 import { deliverResponse, markProcessing, clearProcessing } from "./ws-delivery.ts";
+import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
 
 const logger = log.child("ellie-chat");
 import { getForestContext } from "./elasticsearch/context.ts";
@@ -1128,6 +1129,8 @@ export async function runSpecialistAsync(
     appendJobEvent(jobId, "running", { agent_type: agentName });
   }
 
+  // Auto-approve Bash/Edit/Write for specialist runs (same as orchestration-dispatch)
+  enterDispatchMode();
   try {
     // Typing heartbeat while specialist works; also touches job updated_at for orphan detection
     const heartbeat = setInterval(() => {
@@ -1356,6 +1359,7 @@ export async function runSpecialistAsync(
       }
     }
     clearProcessing(ecUserId || "anonymous");
+    exitDispatchMode();
 
     syncResponse(supabase, agentResult.dispatch.session_id, cleanedText, {
       duration_ms: durationMs,
@@ -1383,5 +1387,6 @@ export async function runSpecialistAsync(
     const errMemoryId = await saveMessage("assistant", errorMsg, {}, "ellie-chat", ecUserId).catch(() => null);
     deliverResponse(ws, { type: "response", text: errorMsg, agent: agentName, memoryId: errMemoryId, ts: Date.now(), channelId });
     clearProcessing(ecUserId || "anonymous");
+    exitDispatchMode();
   }
 }

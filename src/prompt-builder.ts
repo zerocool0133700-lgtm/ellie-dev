@@ -645,6 +645,7 @@ export function buildPrompt(
       "\n- Any difficult-to-undo external action" +
       "\nDo NOT use [CONFIRM:] for:" +
       "\n- Read-only: searching email, reading messages, checking calendar, listing tasks" +
+      "\n- Document search and retrieval (QMD / mcp__qmd__*): all read-only" +
       "\n- Google Tasks management: creating/completing/updating tasks (low-stakes, easily reversible)" +
       "\n- Actions the user explicitly and directly asked you to do in simple terms" +
       "\nThe user will see Approve/Deny buttons. If approved, you will be resumed with instructions to proceed." +
