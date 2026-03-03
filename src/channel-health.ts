@@ -47,15 +47,23 @@ export function getChannelHealth(): ChannelHealth {
 
 // ── Individual checks ─────────────────────────────────────────
 
-async function checkSupabase(
-  supabase: { from: (table: string) => { select: (col: string) => { limit: (n: number) => Promise<{ error: unknown }> } } },
-): Promise<ChannelHealthResult> {
+// ELLIE-465: Use Supabase REST root endpoint instead of querying a business table
+async function checkSupabase(): Promise<ChannelHealthResult> {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_ANON_KEY;
+  if (!url || !key) {
+    return { status: "unknown", checkedAt: Date.now(), error: "SUPABASE_URL or SUPABASE_ANON_KEY not configured" };
+  }
   const start = Date.now();
   try {
-    const { error } = await supabase.from("goals").select("id").limit(1);
+    const resp = await fetch(`${url}/rest/v1/`, {
+      headers: { apikey: key },
+      signal: AbortSignal.timeout(3000),
+    });
     const latencyMs = Date.now() - start;
-    if (error) {
-      return { status: "degraded", latencyMs, checkedAt: Date.now(), error: String(error) };
+    if (!resp.ok && resp.status !== 404) {
+      // 404 = endpoint exists but no specific resource — still means the API is up
+      return { status: "degraded", latencyMs, checkedAt: Date.now(), error: `HTTP ${resp.status}` };
     }
     return { status: latencyMs > 3000 ? "degraded" : "ok", latencyMs, checkedAt: Date.now() };
   } catch (err) {
@@ -77,7 +85,8 @@ async function checkTelegram(
 }
 
 const BRIDGE_URL = "http://localhost:3001/api/bridge/read";
-const BRIDGE_KEY = "bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e740f6577a";
+// ELLIE-465: Key from env — hardcoded value is a fallback for backward compat only
+const BRIDGE_KEY = process.env.BRIDGE_KEY ?? "bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e740f6577a";
 
 async function checkForest(): Promise<ChannelHealthResult> {
   const start = Date.now();
@@ -101,7 +110,6 @@ async function checkForest(): Promise<ChannelHealthResult> {
 // ── Monitor ──────────────────────────────────────────────────
 
 interface HealthMonitorDeps {
-  supabase: Parameters<typeof checkSupabase>[0] | null;
   getMe: () => Promise<unknown>;
 }
 
@@ -111,7 +119,7 @@ interface HealthMonitorDeps {
  */
 export async function runHealthCheck(deps: HealthMonitorDeps): Promise<void> {
   const [supabaseResult, telegramResult, forestResult] = await Promise.allSettled([
-    deps.supabase ? checkSupabase(deps.supabase) : Promise.resolve<ChannelHealthResult>({ status: "unknown", checkedAt: Date.now() }),
+    checkSupabase(),
     checkTelegram(deps.getMe),
     checkForest(),
   ]);

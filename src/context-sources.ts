@@ -15,18 +15,20 @@ const logger = log.child("context");
 
 import { USER_TIMEZONE } from "./timezone.ts";
 
-// ── ELLIE-458: Resilience helpers ────────────────────────────
+// ── ELLIE-458/465: Resilience helpers ────────────────────────
 
-/** Race a promise against a timeout; resolves to fallback on timeout. */
-function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+/** Race a promise against a timeout; resolves to fallback on timeout. Exported for tests. */
+export function _withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
   return Promise.race([
     promise,
     new Promise<T>(resolve => setTimeout(() => resolve(fallback), ms)),
   ]);
 }
+// Internal alias (unchanged callers inside this file use the private name)
+const withTimeout = _withTimeout;
 
-/** Extract fulfilled values from Promise.allSettled, logging rejections. */
-function settledValues<T>(
+/** Extract fulfilled values from Promise.allSettled, logging rejections. Exported for tests. */
+export function _settledValues<T>(
   results: PromiseSettledResult<T>[],
   label: string,
 ): T[] {
@@ -37,6 +39,19 @@ function settledValues<T>(
     return r.status === "fulfilled" ? r.value : undefined;
   }).filter((v): v is T => v !== undefined);
 }
+const settledValues = _settledValues;
+
+// ELLIE-465: Per-source timeout map — Forest and Google APIs can legitimately need 5-8s
+const SOURCE_TIMEOUTS: Record<string, number> = {
+  // Forest-backed sources
+  forest:    6_000,
+  incidents: 6_000,
+  // Google API sources
+  calendar:  6_000,
+  gmail:     6_000,
+  tasks:     6_000,
+};
+const DEFAULT_SOURCE_TIMEOUT_MS = 3_000;
 
 // ============================================================
 // PLANE: Open Work Items
@@ -440,7 +455,7 @@ export async function getUpcomingCalendarEvents(): Promise<string> {
   if (!googleAccounts.length) return "";
   try {
     const results = settledValues(
-      await Promise.allSettled(googleAccounts.map(a => withTimeout(getCalendarForAccount(a), 3000, { label: a.label, lines: [] }))),
+      await Promise.allSettled(googleAccounts.map(a => withTimeout(getCalendarForAccount(a), 6_000, { label: a.label, lines: [] }))),
       "calendar",
     );
     // Merge all events, tag with account label if multiple accounts
@@ -526,7 +541,7 @@ export async function getGmailSignal(): Promise<string> {
   if (!googleAccounts.length) return "";
   try {
     const results = settledValues(
-      await Promise.allSettled(googleAccounts.map(a => withTimeout(getGmailSignalForAccount(a), 3000, ""))),
+      await Promise.allSettled(googleAccounts.map(a => withTimeout(getGmailSignalForAccount(a), 6_000, ""))),
       "gmail",
     );
     const parts = results.filter(Boolean);
@@ -629,7 +644,7 @@ export async function getGoogleTasks(): Promise<string> {
   if (!googleAccounts.length) return "";
   try {
     const results = settledValues(
-      await Promise.allSettled(googleAccounts.map(a => withTimeout(getGoogleTasksForAccount(a), 3000, ""))),
+      await Promise.allSettled(googleAccounts.map(a => withTimeout(getGoogleTasksForAccount(a), 6_000, ""))),
       "tasks",
     );
     const parts = results.filter(Boolean);
@@ -689,7 +704,7 @@ export async function getGoogleTasksJSON(): Promise<{ accounts: { label: string;
   if (!googleAccounts.length) return { accounts: [] };
   try {
     const accounts = settledValues(
-      await Promise.allSettled(googleAccounts.map(a => withTimeout(getGoogleTasksJSONForAccount(a), 3000, { label: a.label, tasks: [] }))),
+      await Promise.allSettled(googleAccounts.map(a => withTimeout(getGoogleTasksJSONForAccount(a), 6_000, { label: a.label, tasks: [] }))),
       "tasks-json",
     );
     return { accounts };
@@ -942,11 +957,12 @@ export async function getAgentStructuredContext(
   }
 
   // Fetch all selected sources in parallel (ELLIE-327: with freshness tracking)
-  // ELLIE-458: allSettled + 3s timeout so one slow/failing source never kills context
+  // ELLIE-458/465: allSettled + per-source timeout so slow/failing sources never kill context
   const rawEntries = await Promise.allSettled(
     sourceNames.map(async (name) => {
       const start = Date.now();
-      const content = await withTimeout(SOURCE_REGISTRY[name](supabase), 3000, "");
+      const timeoutMs = SOURCE_TIMEOUTS[name] ?? DEFAULT_SOURCE_TIMEOUT_MS;
+      const content = await withTimeout(SOURCE_REGISTRY[name](supabase), timeoutMs, "");
       const latencyMs = Date.now() - start;
       freshnessTracker.recordFetch(name, latencyMs);
       return { name, content };
@@ -1287,11 +1303,12 @@ export async function getLiveForestContext(
 ): Promise<{ incidents: string; awareness: string }> {
   const start = Date.now();
   // ELLIE-458: allSettled so one failing Forest call doesn't kill all awareness context
+  // ELLIE-465: Forest lookups get 6s — they can legitimately take longer
   const [incidentsR, contradictionsR, creaturesR, personMentionsR] = await Promise.allSettled([
-    withTimeout(getActiveIncidentContext(), 3000, ""),
-    withTimeout(getContradictionContext(), 3000, ""),
-    withTimeout(getCreatureStatusContext(), 3000, ""),
-    userMessage ? withTimeout(getPersonMentionContext(userMessage), 3000, "") : Promise.resolve(""),
+    withTimeout(getActiveIncidentContext(), 6_000, ""),
+    withTimeout(getContradictionContext(), 6_000, ""),
+    withTimeout(getCreatureStatusContext(), 6_000, ""),
+    userMessage ? withTimeout(getPersonMentionContext(userMessage), 6_000, "") : Promise.resolve(""),
   ]);
   const incidents = incidentsR.status === "fulfilled" ? incidentsR.value : "";
   const contradictions = contradictionsR.status === "fulfilled" ? contradictionsR.value : "";

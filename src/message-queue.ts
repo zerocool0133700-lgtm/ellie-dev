@@ -45,7 +45,11 @@ export interface DeadLetterEntry {
 /**
  * Wraps a task with a timeout. Returns false if timed out or errored.
  * The queue is unblocked either way so processing can continue.
+ * Exported with _ prefix for unit testing (ELLIE-465).
  */
+export async function _withQueueTimeout(task: () => Promise<void>, channel: string, preview: string): Promise<boolean> {
+  return withTimeout(task, channel, preview);
+}
 async function withTimeout(task: () => Promise<void>, channel: string, preview: string): Promise<boolean> {
   let resolved = false;
   let success = true;
@@ -85,7 +89,8 @@ async function withTimeout(task: () => Promise<void>, channel: string, preview: 
 
 const MAX_DEAD_LETTERS = 100;
 
-class ChannelQueue {
+/** Exported for unit testing (ELLIE-465). */
+export class ChannelQueue {
   private _busy = false;
   private _current: { channel: string; preview: string; startedAt: number } | null = null;
   private _queue: QueueItem[] = [];

@@ -68,6 +68,7 @@ import { onBridgeWrite } from "./api/bridge.ts";
 import { setBroadcastToEllieChat } from "./tool-approval.ts";
 import { getSummaryState } from "./ums/consumers/summary.ts";
 import { runHealthCheck } from "./channel-health.ts";
+import { periodicTask, _startedAt, STARTUP_GRACE_MS } from "./periodic-task.ts";
 
 // ============================================================
 // SETUP
@@ -103,40 +104,7 @@ if (!(await acquireLock())) {
 
 export const bot = new Bot(BOT_TOKEN);
 
-// ── ELLIE-458: Stable periodic task runner ───────────────────
-// Gates execution during startup grace period. Tracks consecutive failures
-// and applies exponential backoff; disables the task after 3 failures.
-const _startedAt = Date.now();
-const STARTUP_GRACE_MS = 15_000; // skip first 15s — let deps initialize
-
-function periodicTask(
-  fn: () => Promise<void>,
-  intervalMs: number,
-  label: string,
-): void {
-  let consecutiveFailures = 0;
-  let skipUntil = 0;
-  setInterval(async () => {
-    if (Date.now() - _startedAt < STARTUP_GRACE_MS) return; // startup gate
-    if (Date.now() < skipUntil) return;                      // backoff skip
-    if (consecutiveFailures >= 3) return;                    // permanently disabled
-    try {
-      await fn();
-      consecutiveFailures = 0;
-      skipUntil = 0;
-    } catch (err) {
-      consecutiveFailures++;
-      const backoffMs = Math.min(5_000 * Math.pow(2, consecutiveFailures - 1), 20 * 60_000);
-      skipUntil = Date.now() + backoffMs;
-      const msg = err instanceof Error ? err.message : String(err);
-      if (consecutiveFailures >= 3) {
-        logger.error(`[periodic:${label}] Disabled after 3 consecutive failures`, { error: msg });
-      } else {
-        logger.warn(`[periodic:${label}] Failure ${consecutiveFailures}/3, backoff ${backoffMs}ms`, { error: msg });
-      }
-    }
-  }, intervalMs);
-}
+// ── periodicTask imported from ./periodic-task.ts (ELLIE-465) ─
 
 // Start approval expiry cleanup
 startExpiryCleanup();
@@ -183,8 +151,8 @@ setInterval(async () => {
       console.log(`[ellie-chat approval] Expired: ${action.description.substring(0, 60)}`);
     }
   }
-  // ELLIE-459: Channel health check
-  runHealthCheck({ supabase, getMe: () => bot.api.getMe() }).catch(() => {});
+  // ELLIE-459/465: Channel health check
+  runHealthCheck({ getMe: () => bot.api.getMe() }).catch(() => {});
 }, 5 * 60_000);
 
 // Calendar sync (every 5 minutes)
@@ -577,11 +545,16 @@ process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 // Logs then allows the process to exit so systemd restarts cleanly.
 
 process.on("uncaughtException", (err: Error, origin: string) => {
+  // ELLIE-465: Sync write first — logger may be async and drop the crash log if we exit too fast
+  const mem = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+  process.stderr.write(
+    JSON.stringify({ level: "fatal", event: "UNCAUGHT EXCEPTION", error: err.message, stack: err.stack, origin, memory_mb: mem, ts: new Date().toISOString() }) + "\n"
+  );
   logger.error("[UNCAUGHT EXCEPTION] Process will exit", {
     error: err.message,
     stack: err.stack,
     origin,
-    memory_mb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+    memory_mb: mem,
   });
   // Allow the process to exit — systemd restarts us
   process.exit(1);
