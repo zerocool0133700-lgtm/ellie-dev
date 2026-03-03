@@ -238,6 +238,22 @@ export function withQueue(
   };
 }
 
+// ── Graceful drain (ELLIE-460) ────────────────────────────────
+
+/**
+ * Wait for both queues to become idle, up to timeoutMs.
+ * Used by gracefulShutdown to avoid zombie tasks on relay restart.
+ * Resolves true if drained cleanly, false if timed out.
+ */
+export async function drainQueues(timeoutMs: number = 30_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (mainQueue.isBusy || ellieChatQueue.isBusy) {
+    if (Date.now() >= deadline) return false;
+    await new Promise<void>(r => setTimeout(r, 500));
+  }
+  return true;
+}
+
 // ── Queue status (for HTTP endpoint) ─────────────────────────
 
 export function getQueueStatus() {

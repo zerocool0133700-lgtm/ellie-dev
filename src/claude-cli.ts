@@ -152,12 +152,18 @@ export async function callClaude(
   const flagArgs = args.slice(1).filter(a => a.startsWith("--"));
   const resumeId = options?.resume && resumeSessionId ? resumeSessionId.slice(0, 8) : null;
   const toolCount = options?.allowedTools?.length || ALLOWED_TOOLS.length;
-  console.log(
-    `[claude] Invoking: prompt=${prompt.length} chars` +
-    `${resumeId ? `, resume=${resumeId}` : ""}` +
-    `, tools=${toolCount}` +
-    `, flags=[${flagArgs.join(", ")}]`
-  );
+
+  // ELLIE-460: Dispatch lifecycle — capture memory before spawn to detect OOM sequences
+  const dispatchStart = Date.now();
+  const memBefore = process.memoryUsage();
+  logger.info("Dispatch started", {
+    prompt_chars: prompt.length,
+    resume: resumeId ?? false,
+    tools: toolCount,
+    heap_mb: Math.round(memBefore.heapUsed / 1024 / 1024),
+    rss_mb: Math.round(memBefore.rss / 1024 / 1024),
+    run_id: options?.runId ?? null,
+  });
 
   try {
     const proc = spawn(args, {
@@ -227,6 +233,23 @@ export async function callClaude(
     if (killTimer) clearTimeout(killTimer);
 
     const exitCode = await proc.exited;
+
+    // ELLIE-460: Dispatch lifecycle — log completion with timing and memory delta
+    {
+      const memAfter = process.memoryUsage();
+      const durationMs = Date.now() - dispatchStart;
+      const heapDeltaMb = Math.round((memAfter.heapUsed - memBefore.heapUsed) / 1024 / 1024);
+      (exitCode === 0 ? logger.info : logger.warn)("Dispatch completed", {
+        exit_code: exitCode,
+        duration_ms: durationMs,
+        output_chars: output.length,
+        heap_mb: Math.round(memAfter.heapUsed / 1024 / 1024),
+        heap_delta_mb: heapDeltaMb,
+        rss_mb: Math.round(memAfter.rss / 1024 / 1024),
+        timed_out: timedOut,
+        run_id: options?.runId ?? null,
+      });
+    }
 
     if (exitCode !== 0) {
       logger.error("Non-zero exit code", {

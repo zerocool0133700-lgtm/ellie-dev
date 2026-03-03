@@ -1000,6 +1000,8 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         planeQueue,
         circuitBreakers,
         rateLimits: getRateLimitStatus(),
+        // ELLIE-460: Live dependency health (Supabase, Telegram, Forest)
+        dependencies: getChannelHealth(),
       }));
     }).catch(() => {
       res.writeHead(200, { "Content-Type": "application/json" });

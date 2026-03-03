@@ -41,7 +41,7 @@ import {
   setNotifyCtx,
   setAnthropicClient,
 } from "./claude-cli.ts";
-import { setQueueBroadcast } from "./message-queue.ts";
+import { setQueueBroadcast, drainQueues } from "./message-queue.ts";
 import { USER_TIMEZONE } from "./timezone.ts";
 import { setVoicePipelineDeps } from "./voice-pipeline.ts";
 import { ellieChatPendingActions, setSenderDeps } from "./message-sender.ts";
@@ -547,13 +547,21 @@ async function gracefulShutdown(signal: string): Promise<void> {
   try { await bot.stop(); } catch {}
   console.log("[relay] Telegram bot stopped");
 
-  // 2. Close HTTP server + file watchers
+  // 2. Wait for active queue tasks to finish (ELLIE-460: graceful drain)
+  const drained = await drainQueues(20_000); // 20s max wait
+  if (drained) {
+    console.log("[relay] Queues drained cleanly");
+  } else {
+    console.log("[relay] Queue drain timed out — proceeding anyway");
+  }
+
+  // 3. Close HTTP server + file watchers
   httpServer.close();
   const { stopPersonalityWatchers } = await import("./prompt-builder.ts");
   stopPersonalityWatchers();
   console.log("[relay] HTTP server closed, personality watchers stopped");
 
-  // 3. Release lock file
+  // 4. Release lock file
   const { releaseLock } = await import("./claude-cli.ts");
   await releaseLock();
 
@@ -563,3 +571,30 @@ async function gracefulShutdown(signal: string): Promise<void> {
 
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+// ── ELLIE-460: Process-level crash capture ───────────────────
+// Catches hard crashes that bypass individual .catch() handlers.
+// Logs then allows the process to exit so systemd restarts cleanly.
+
+process.on("uncaughtException", (err: Error, origin: string) => {
+  logger.error("[UNCAUGHT EXCEPTION] Process will exit", {
+    error: err.message,
+    stack: err.stack,
+    origin,
+    memory_mb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+  });
+  // Allow the process to exit — systemd restarts us
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason: unknown) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  const stack = reason instanceof Error ? reason.stack : undefined;
+  logger.error("[UNHANDLED REJECTION] Non-fatal — logged and continuing", {
+    reason: msg,
+    stack,
+    memory_mb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+  });
+  // Do NOT exit — unhandled rejections are common from fire-and-forget patterns.
+  // Only uncaughtException (sync throws) warrants a hard exit.
+});
