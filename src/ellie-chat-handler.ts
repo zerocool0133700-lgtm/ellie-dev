@@ -120,8 +120,25 @@ export async function handleEllieChatMessage(
   channelId?: string,
   clientId?: string,
   mode?: string,
+  abortSignal?: AbortSignal,
 ): Promise<void> {
-  return withTrace(async () => _handleEllieChatMessage(ws, text, phoneMode, image, channelId, clientId, mode));
+  // ELLIE-461: Top-level error boundary — any uncaught error gets a user-facing message
+  try {
+    return await withTrace(async () => _handleEllieChatMessage(ws, text, phoneMode, image, channelId, clientId, mode, abortSignal));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Don't send error to user for aborted dispatches — they closed the connection
+    if (msg.includes("aborted") || msg.includes("Aborted")) return;
+    logger.error("[ellie-chat] Unhandled dispatch error", { error: msg });
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "response",
+        text: "Something went wrong on my end. Please try again.",
+        agent: "system",
+        ts: Date.now(),
+      }));
+    }
+  }
 }
 
 async function _handleEllieChatMessage(
@@ -132,6 +149,7 @@ async function _handleEllieChatMessage(
   channelId?: string,
   clientId?: string,
   mode?: string,
+  abortSignal?: AbortSignal,
 ): Promise<void> {
   const { bot, anthropic, supabase } = getRelayDeps();
   console.log(`[ellie-chat] User${phoneMode ? " (phone)" : ""}${image ? " [+image]" : ""}${mode ? ` [mode:${mode}]` : ""}${channelId ? ` [ch:${channelId.substring(0, 8)}]` : ""}: ${text.substring(0, 80)}...`);
@@ -653,7 +671,7 @@ async function _handleEllieChatMessage(
       broadcastExtension({ type: "message_out", channel: "ellie-chat", agent: "general", preview: ack });
 
       // Fire-and-forget: specialist runs outside the queue
-      runSpecialistAsync(ws, supabase, effectiveText, text, agentResult, imagePath, ellieChatWorkItem, channelId, channelProfile).catch(err => {
+      runSpecialistAsync(ws, supabase, effectiveText, text, agentResult, imagePath, ellieChatWorkItem, channelId, channelProfile, abortSignal).catch(err => {
         logger.error("Specialist async error", err);
       });
 
@@ -963,6 +981,7 @@ async function _handleEllieChatMessage(
         allowedTools: agentTools?.length ? agentTools : undefined,
         model: agentModel || undefined,
         timeoutMs: 600_000, // 10 min — async coordinator needs time for multi-step work
+        abortSignal,         // ELLIE-461: cancel if WS closes mid-dispatch
       });
       recordAnthropicSuccess();
     } catch (err) {
@@ -1099,6 +1118,7 @@ export async function runSpecialistAsync(
   workItemId: string | undefined,
   channelId?: string,
   channelProfile?: import("./api/mode-profile.ts").ChannelContextProfile | null,
+  abortSignal?: AbortSignal,
 ): Promise<void> {
   const { bot, anthropic } = getRelayDeps();
   const agentName = agentResult.dispatch.agent.name;
@@ -1257,6 +1277,7 @@ export async function runSpecialistAsync(
         allowedTools: agentTools?.length ? agentTools : undefined,
         model: agentModel || undefined,
         timeoutMs: 600_000, // 10 min — specialists may do multi-step tool use
+        abortSignal,         // ELLIE-461: cancel if WS closes mid-dispatch
       });
       recordAnthropicSuccess();
     } catch (err) {

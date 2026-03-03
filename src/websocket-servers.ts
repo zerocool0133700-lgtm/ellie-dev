@@ -13,7 +13,7 @@ import {
   extensionClients, ellieChatClients, wsAppUserMap, ellieChatPhoneHistories,
   broadcastExtension, getRelayDeps,
 } from "./relay-state.ts";
-import { getUndeliveredMessages, markDelivered, getProcessingState } from "./ws-delivery.ts";
+import { getUndeliveredMessages, markDelivered, getProcessingState, getRecentHistory } from "./ws-delivery.ts";
 import { resetEllieChatIdleTimer } from "./relay-idle.ts";
 import { handleVoiceConnection } from "./voice-pipeline.ts";
 import {
@@ -40,6 +40,27 @@ import {
 } from "./tool-approval.ts";
 
 const logger = log.child("ws");
+
+// ELLIE-461: Per-WS AbortController — lets us cancel an in-progress dispatch when
+// the WebSocket connection closes mid-response. Keyed by WebSocket instance.
+const wsAbortControllers = new WeakMap<WebSocket, AbortController>();
+
+function getOrCreateAbortController(ws: WebSocket): AbortController {
+  let ctrl = wsAbortControllers.get(ws);
+  if (!ctrl || ctrl.signal.aborted) {
+    ctrl = new AbortController();
+    wsAbortControllers.set(ws, ctrl);
+  }
+  return ctrl;
+}
+
+function abortAndRemove(ws: WebSocket): void {
+  const ctrl = wsAbortControllers.get(ws);
+  if (ctrl && !ctrl.signal.aborted) {
+    ctrl.abort();
+    logger.info("[ws-abort] Aborted in-progress dispatch on WS close");
+  }
+}
 
 export function createWebSocketServers(httpServer: HttpServer): void {
   const { bot, supabase } = getRelayDeps();
@@ -185,13 +206,14 @@ async function deliverPendingReadouts(ws: WebSocket): Promise<void> {
   }
 }
 
-/** ELLIE-399: Deliver undelivered messages + processing state on reconnect. */
+/** ELLIE-399: Deliver undelivered messages + processing state + conversation history on reconnect. */
 async function deliverCatchUp(ws: WebSocket, userId: string, sinceTs?: number): Promise<void> {
   try {
-    const messages = await getUndeliveredMessages(userId, sinceTs);
-    if (messages.length > 0) {
+    // 1. Deliver any undelivered messages first (original ELLIE-399 behavior)
+    const undelivered = await getUndeliveredMessages(userId, sinceTs);
+    if (undelivered.length > 0) {
       const deliveredIds: string[] = [];
-      for (const msg of messages) {
+      for (const msg of undelivered) {
         if (ws.readyState !== WebSocket.OPEN) break;
         ws.send(JSON.stringify({
           type: "response",
@@ -209,7 +231,25 @@ async function deliverCatchUp(ws: WebSocket, userId: string, sinceTs?: number): 
       }
     }
 
-    // Send processing state if something is in-flight for this user
+    // 2. Send full conversation history for session restoration
+    //    Covers: user messages, specialist responses (marked 'sent'), ack messages
+    //    The frontend merges + dedupes with whatever's in sessionStorage
+    const history = await getRecentHistory("ellie-chat", userId, 150);
+    if (history.length > 0 && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "history",
+        messages: history.map(msg => ({
+          id: msg.id,
+          role: msg.role,
+          text: msg.content,
+          agent: (msg.metadata as Record<string, unknown>)?.agent || "general",
+          ts: new Date(msg.created_at).getTime(),
+        })),
+      }));
+      console.log(`[ellie-chat] History: sent ${history.length} message(s) to ${userId}`);
+    }
+
+    // 3. Send processing state if something is in-flight for this user
     const processing = getProcessingState(userId);
     if (processing && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
@@ -323,7 +363,9 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
       }
 
       if (msg.type === "message" && (msg.text || msg.image)) {
-        handleEllieChatMessage(ws, msg.text || "", !!msg.phone_mode, msg.image, msg.channel_id, msg.id, msg.mode);
+        // ELLIE-461: Fresh AbortController per message dispatch
+        const abortCtrl = getOrCreateAbortController(ws);
+        handleEllieChatMessage(ws, msg.text || "", !!msg.phone_mode, msg.image, msg.channel_id, msg.id, msg.mode, abortCtrl.signal);
         return;
       }
 
@@ -431,6 +473,8 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
   ws.on("close", () => {
     clearTimeout(authTimer);
     ellieChatClients.delete(ws);
+    // ELLIE-461: Abort any in-progress dispatch for this connection
+    abortAndRemove(ws);
     if (authenticated) {
       const dcUser = wsAppUserMap.get(ws);
       // Clean up phone history if no other connections for this user (ELLIE-197)
@@ -450,6 +494,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
   ws.on("error", () => {
     clearTimeout(authTimer);
     ellieChatClients.delete(ws);
+    abortAndRemove(ws); // ELLIE-461
   });
 });
 

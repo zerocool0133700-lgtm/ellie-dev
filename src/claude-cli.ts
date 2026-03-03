@@ -129,7 +129,7 @@ process.on("SIGTERM", async () => {
 
 export async function callClaude(
   prompt: string,
-  options?: { resume?: boolean; imagePath?: string; allowedTools?: string[]; model?: string; sessionId?: string; timeoutMs?: number; runId?: string }
+  options?: { resume?: boolean; imagePath?: string; allowedTools?: string[]; model?: string; sessionId?: string; timeoutMs?: number; runId?: string; abortSignal?: AbortSignal }
 ): Promise<string> {
   // Prompt is piped via stdin to avoid E2BIG (ARG_MAX) on large prompts.
   // The positional [prompt] arg is omitted; claude -p reads from stdin.
@@ -188,6 +188,20 @@ export async function callClaude(
     let timedOut = false;
     let forceKilled = false;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // ELLIE-461: Abort signal — kill subprocess immediately when the caller aborts
+    // (e.g. WS disconnected mid-dispatch)
+    if (options?.abortSignal) {
+      const sig = options.abortSignal;
+      if (sig.aborted) {
+        proc.kill();
+        throw new Error("Dispatch aborted before start");
+      }
+      sig.addEventListener("abort", () => {
+        logger.warn("Dispatch aborted via signal — killing subprocess", { pid: proc.pid });
+        proc.kill();
+      }, { once: true });
+    }
 
     const timeout = setTimeout(() => {
       timedOut = true;
