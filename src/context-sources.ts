@@ -1326,3 +1326,62 @@ export async function getLiveForestContext(
     awareness: awarenessParts.join("\n\n"),
   };
 }
+
+// ============================================================
+// RIVER CONTEXT — ELLIE-150: Role-relevant QMD docs at dispatch
+// ============================================================
+
+const RIVER_QUERIES_BY_AGENT: Record<string, string> = {
+  dev:      'architecture code implementation ellie-dev system design',
+  strategy: 'goals projects planning strategy overview',
+  research: 'research analysis findings insights knowledge',
+  content:  'content writing communication messaging',
+  finance:  'finance budget costs tracking',
+  general:  'system overview architecture documentation',
+}
+
+/**
+ * Query the River (QMD) for documents relevant to the agent's role
+ * and optional work item context. Returns a formatted context block
+ * for injection as forestContext in buildPrompt().
+ *
+ * Non-fatal — returns '' on any failure.
+ */
+export async function getRiverContextForAgent(
+  agentType: string,
+  workItemDescription?: string,
+): Promise<string> {
+  try {
+    const { searchRiver } = await import('./api/bridge-river.ts');
+
+    const roleQuery = RIVER_QUERIES_BY_AGENT[agentType] ?? 'system architecture documentation';
+
+    // Run both queries in parallel; role-based + work-item-specific
+    const [roleResults, itemResults] = await Promise.all([
+      searchRiver(roleQuery, 3),
+      workItemDescription
+        ? searchRiver(workItemDescription.slice(0, 120), 3)
+        : Promise.resolve([]),
+    ]);
+
+    // Merge, dedupe by docid, take top 4
+    const seen = new Set<string>();
+    const combined = [...roleResults, ...itemResults].filter(r => {
+      if (seen.has(r.docid)) return false;
+      seen.add(r.docid);
+      return true;
+    }).slice(0, 4);
+
+    if (combined.length === 0) return '';
+
+    const lines = combined.map(r => {
+      const path = r.file.replace('qmd://ellie-river/', '');
+      const snippet = r.snippet.replace(/@@ .+ @@\n/, '').slice(0, 200).trim();
+      return `• ${r.title || path}\n  ${snippet}`;
+    });
+
+    return `\nRIVER CONTEXT (relevant docs from Obsidian vault):\n${lines.join('\n\n')}\n`;
+  } catch {
+    return '';
+  }
+}

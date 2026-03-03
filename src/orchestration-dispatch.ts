@@ -16,6 +16,7 @@ import { dispatchAgent, syncResponse } from "./agent-router.ts";
 import { processMemoryIntents } from "./memory.ts";
 import { notify, type NotifyContext } from "./notification-policy.ts";
 import { getAgentArchetype, getPsyContext, getPhaseContext, getHealthContext } from "./prompt-builder.ts";
+import { getRiverContextForAgent } from "./context-sources.ts";
 import type { PlaybookContext } from "./playbook.ts";
 import { withRetry, classifyError } from "./dispatch-retry.ts";
 import { enqueue, getQueueDepth } from "./dispatch-queue.ts";
@@ -238,18 +239,19 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     const workItemContext = `\nACTIVE WORK ITEM: ${workItemId}\n` +
       `Title: ${details.name}\nPriority: ${details.priority}\nDescription: ${details.description}\n`;
 
-    const [archetype, psy, phase, health] = await Promise.all([
+    const [archetype, psy, phase, health, riverContext] = await Promise.all([
       getAgentArchetype(agentType),
       getPsyContext(),
       getPhaseContext(),
       getHealthContext(),
+      getRiverContextForAgent(agentType, details.description),  // ELLIE-150
     ]);
 
     const prompt = ctx.buildPromptFn(
       `Work on ${workItemId}: ${details.name}\n\n${details.description}`,
       undefined, undefined, undefined,
       channel, dispatch.agent, workItemContext,
-      undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, riverContext || undefined, undefined,
       sessionIds,
       archetype, psy, phase, health,
     );
