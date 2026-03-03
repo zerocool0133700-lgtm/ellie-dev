@@ -6,6 +6,10 @@
  *
  * ELLIE-239: Queue-level timeout guard prevents deadlocks if a task
  * hangs beyond the CLI timeout. Tasks are auto-killed after QUEUE_TASK_TIMEOUT_MS.
+ *
+ * ELLIE-459: Refactored into ChannelQueue class to eliminate dual-busy-flag
+ * race conditions. Dead letter queue tracks failed/timed-out tasks instead
+ * of silently dropping them.
  */
 
 import type { Context } from "grammy";
@@ -29,20 +33,27 @@ interface QueueItem {
   enqueuedAt: number;
 }
 
+export interface DeadLetterEntry {
+  channel: string;
+  preview: string;
+  error: string;
+  ts: number;
+}
+
 // ── Queue-level timeout wrapper (ELLIE-239) ─────────────────
 
 /**
- * Wraps a task with a timeout. If the task doesn't resolve/reject
- * within QUEUE_TASK_TIMEOUT_MS, the wrapper resolves (doesn't throw)
- * so the queue can advance. The underlying task continues running
- * but the queue is no longer blocked.
+ * Wraps a task with a timeout. Returns false if timed out or errored.
+ * The queue is unblocked either way so processing can continue.
  */
-async function withTimeout(task: () => Promise<void>, channel: string, preview: string): Promise<void> {
+async function withTimeout(task: () => Promise<void>, channel: string, preview: string): Promise<boolean> {
   let resolved = false;
+  let success = true;
 
   const timeoutPromise = new Promise<void>((resolve) => {
     setTimeout(() => {
       if (!resolved) {
+        success = false;
         logger.error("Queue task timeout — unblocking queue", {
           channel,
           preview,
@@ -61,33 +72,125 @@ async function withTimeout(task: () => Promise<void>, channel: string, preview: 
   try {
     await Promise.race([task(), timeoutPromise]);
   } catch (err) {
+    success = false;
     logger.error("Queue task error", { channel, preview }, err);
   } finally {
     resolved = true;
   }
+
+  return success;
 }
 
-// ── Main queue (Telegram + Google Chat) ──────────────────────
+// ── ChannelQueue class (ELLIE-459) ───────────────────────────
 
-let busy = false;
-let currentItem: { channel: string; preview: string; startedAt: number } | null = null;
-const messageQueue: QueueItem[] = [];
+const MAX_DEAD_LETTERS = 100;
 
-async function processQueue(): Promise<void> {
-  while (messageQueue.length > 0) {
-    const next = messageQueue.shift()!;
-    const waitMs = Date.now() - next.enqueuedAt;
-    if (waitMs > 60_000) {
-      logger.warn("Queue item waited too long", { channel: next.channel, preview: next.preview, waitMs });
-    }
-    currentItem = { channel: next.channel, preview: next.preview, startedAt: Date.now() };
-    _broadcastExtension({ type: "queue_status", busy: true, queueLength: messageQueue.length, current: currentItem });
-    await withTimeout(next.task, next.channel, next.preview);
+class ChannelQueue {
+  private _busy = false;
+  private _current: { channel: string; preview: string; startedAt: number } | null = null;
+  private _queue: QueueItem[] = [];
+  private _deadLetters: DeadLetterEntry[] = [];
+
+  constructor(private readonly name: string) {}
+
+  get isBusy(): boolean { return this._busy; }
+  get length(): number { return this._queue.length; }
+  get current() { return this._current; }
+
+  getDeadLetters(): DeadLetterEntry[] {
+    return [...this._deadLetters];
   }
-  currentItem = null;
-  busy = false;
-  _broadcastExtension({ type: "queue_status", busy: false, queueLength: 0, current: null });
+
+  private broadcast(): void {
+    _broadcastExtension({
+      type: "queue_status",
+      queue: this.name,
+      busy: this._busy,
+      queueLength: this._queue.length,
+      current: this._current,
+    });
+  }
+
+  private async process(): Promise<void> {
+    while (this._queue.length > 0) {
+      const next = this._queue.shift()!;
+      const waitMs = Date.now() - next.enqueuedAt;
+      if (waitMs > 60_000) {
+        logger.warn("Queue item waited too long", { queue: this.name, channel: next.channel, preview: next.preview, waitMs });
+      }
+      this._current = { channel: next.channel, preview: next.preview, startedAt: Date.now() };
+      this.broadcast();
+      const ok = await withTimeout(next.task, next.channel, next.preview);
+      if (!ok) {
+        const entry: DeadLetterEntry = {
+          channel: next.channel,
+          preview: next.preview,
+          error: "timed out or failed",
+          ts: Date.now(),
+        };
+        this._deadLetters.push(entry);
+        if (this._deadLetters.length > MAX_DEAD_LETTERS) this._deadLetters.shift();
+        logger.error("Task added to dead letter queue", { queue: this.name, channel: entry.channel, preview: entry.preview });
+      }
+    }
+    this._current = null;
+    this._busy = false;
+    this.broadcast();
+  }
+
+  enqueue(task: () => Promise<void>, channel: string, preview: string): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const item: QueueItem = {
+        task: async () => {
+          try {
+            await task();
+            resolve();
+          } catch (err) {
+            reject(err);
+          }
+        },
+        channel,
+        preview,
+        enqueuedAt: Date.now(),
+      };
+
+      if (this._busy) {
+        this._queue.push(item);
+        return;
+      }
+      this._busy = true;
+      this._current = { channel, preview, startedAt: Date.now() };
+      item.task().finally(() => this.process());
+    });
+  }
+
+  getStatus() {
+    return {
+      busy: this._busy,
+      queueLength: this._queue.length,
+      current: this._current
+        ? {
+            channel: this._current.channel,
+            preview: this._current.preview,
+            durationMs: Date.now() - this._current.startedAt,
+          }
+        : null,
+      queued: this._queue.map((item, index) => ({
+        position: index + 1,
+        channel: item.channel,
+        preview: item.preview,
+        waitingMs: Date.now() - item.enqueuedAt,
+      })),
+    };
+  }
 }
+
+// ── Queue instances ──────────────────────────────────────────
+
+const mainQueue = new ChannelQueue("main");           // Telegram + GChat
+const ellieChatQueue = new ChannelQueue("ellie-chat"); // Ellie Chat
+
+// ── Public API: Main queue (Telegram + Google Chat) ──────────
 
 /**
  * Enqueue a task for the shared Claude pipeline.
@@ -99,80 +202,16 @@ export function enqueue(
   channel: string = "google-chat",
   preview: string = "(message)",
 ): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    const item: QueueItem = {
-      task: async () => {
-        try {
-          await task();
-          resolve();
-        } catch (err) {
-          reject(err);
-        }
-      },
-      channel,
-      preview,
-      enqueuedAt: Date.now(),
-    };
-
-    if (busy) {
-      messageQueue.push(item);
-      return;
-    }
-    busy = true;
-    currentItem = { channel: item.channel, preview: item.preview, startedAt: Date.now() };
-    item.task().finally(() => processQueue());
-  });
+  return mainQueue.enqueue(task, channel, preview);
 }
 
-// ── Ellie Chat independent queue ─────────────────────────────
-
-let ellieChatQueueBusy = false;
-let ellieChatCurrentItem: { channel: string; preview: string; startedAt: number } | null = null;
-const ellieChatMessageQueue: QueueItem[] = [];
-
-async function processEllieChatQueue(): Promise<void> {
-  while (ellieChatMessageQueue.length > 0) {
-    const next = ellieChatMessageQueue.shift()!;
-    const waitMs = Date.now() - next.enqueuedAt;
-    if (waitMs > 60_000) {
-      logger.warn("Queue item waited too long", { channel: next.channel, preview: next.preview, waitMs });
-    }
-    ellieChatCurrentItem = { channel: next.channel, preview: next.preview, startedAt: Date.now() };
-    _broadcastExtension({ type: "queue_status", busy: busy || ellieChatQueueBusy, queueLength: messageQueue.length + ellieChatMessageQueue.length, current: ellieChatCurrentItem });
-    await withTimeout(next.task, next.channel, next.preview);
-  }
-  ellieChatCurrentItem = null;
-  ellieChatQueueBusy = false;
-  _broadcastExtension({ type: "queue_status", busy, queueLength: messageQueue.length, current: currentItem });
-}
+// ── Public API: Ellie Chat queue ─────────────────────────────
 
 export function enqueueEllieChat(
   task: () => Promise<void>,
   preview: string = "(message)",
 ): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    const item: QueueItem = {
-      task: async () => {
-        try {
-          await task();
-          resolve();
-        } catch (err) {
-          reject(err);
-        }
-      },
-      channel: "ellie-chat",
-      preview,
-      enqueuedAt: Date.now(),
-    };
-
-    if (ellieChatQueueBusy) {
-      ellieChatMessageQueue.push(item);
-      return;
-    }
-    ellieChatQueueBusy = true;
-    ellieChatCurrentItem = { channel: item.channel, preview: item.preview, startedAt: Date.now() };
-    item.task().finally(() => processEllieChatQueue());
-  });
+  return ellieChatQueue.enqueue(task, "ellie-chat", preview);
 }
 
 // ── Telegram queue wrapper ───────────────────────────────────
@@ -186,46 +225,30 @@ export function withQueue(
       ? previewExtractor(ctx)
       : (ctx.message?.text?.substring(0, 50) ?? "(no text)");
 
-    if (busy) {
-      const position = messageQueue.length + 1;
+    if (mainQueue.isBusy) {
+      const position = mainQueue.length + 1;
       await ctx.reply(`I'm working on something — I'll get to this next. (Queue position: ${position})`);
-      messageQueue.push({
-        task: () => handler(ctx),
-        channel: "telegram",
-        preview,
-        enqueuedAt: Date.now(),
+      // Fire-and-forget when queuing — returns immediately after the reply (original behavior)
+      mainQueue.enqueue(() => handler(ctx), "telegram", preview).catch((err) => {
+        logger.error("Queued Telegram task failed", { preview }, err);
       });
       return;
     }
-    busy = true;
-    currentItem = { channel: "telegram", preview, startedAt: Date.now() };
-    try {
-      await withTimeout(() => handler(ctx), "telegram", preview);
-    } finally {
-      await processQueue();
-    }
+    return mainQueue.enqueue(() => handler(ctx), "telegram", preview);
   };
 }
 
 // ── Queue status (for HTTP endpoint) ─────────────────────────
 
 export function getQueueStatus() {
-  const active = currentItem || ellieChatCurrentItem;
+  const mainStatus = mainQueue.getStatus();
+  const ellieChatStatus = ellieChatQueue.getStatus();
+  const active = mainStatus.current || ellieChatStatus.current;
   return {
-    busy: busy || ellieChatQueueBusy,
-    queueLength: messageQueue.length + ellieChatMessageQueue.length,
-    current: active
-      ? {
-          channel: active.channel,
-          preview: active.preview,
-          durationMs: Date.now() - active.startedAt,
-        }
-      : null,
-    queued: [...messageQueue, ...ellieChatMessageQueue].map((item, index) => ({
-      position: index + 1,
-      channel: item.channel,
-      preview: item.preview,
-      waitingMs: Date.now() - item.enqueuedAt,
-    })),
+    busy: mainStatus.busy || ellieChatStatus.busy,
+    queueLength: mainStatus.queueLength + ellieChatStatus.queueLength,
+    current: active,
+    queued: [...mainStatus.queued, ...ellieChatStatus.queued],
+    deadLetters: [...mainQueue.getDeadLetters(), ...ellieChatQueue.getDeadLetters()].slice(-20),
   };
 }

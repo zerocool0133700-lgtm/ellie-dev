@@ -67,6 +67,7 @@ import { cleanupOrphanedJobs, registerJobVines } from "./jobs-ledger.ts";
 import { onBridgeWrite } from "./api/bridge.ts";
 import { setBroadcastToEllieChat } from "./tool-approval.ts";
 import { getSummaryState } from "./ums/consumers/summary.ts";
+import { runHealthCheck } from "./channel-health.ts";
 
 // ============================================================
 // SETUP
@@ -182,6 +183,8 @@ setInterval(async () => {
       console.log(`[ellie-chat approval] Expired: ${action.description.substring(0, 60)}`);
     }
   }
+  // ELLIE-459: Channel health check
+  runHealthCheck({ supabase, getMe: () => bot.api.getMe() }).catch(() => {});
 }, 5 * 60_000);
 
 // Calendar sync (every 5 minutes)

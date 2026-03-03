@@ -55,6 +55,7 @@ import {
 import {
   getQueueStatus,
 } from "./message-queue.ts";
+import { getChannelHealth } from "./channel-health.ts";
 import {
   saveMessage,
   sendWithApprovals,
@@ -1624,6 +1625,8 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
       (result as Record<string, unknown>).openai = {
         status: process.env.OPENAI_API_KEY ? "configured" : "not_configured",
       };
+      // ELLIE-459: Include channel health (cached — no live checks here)
+      (result as Record<string, unknown>).channels = getChannelHealth();
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
