@@ -13,11 +13,12 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { spawn } from "bun";
-import { writeFile, readFile, unlink, mkdir } from "fs/promises";
+import { writeFile, unlink, mkdir } from "fs/promises";
 import { join, dirname } from "path";
 import { ElevenLabsClient } from "elevenlabs";
 import Twilio from "twilio";
 import { log } from "./logger.ts";
+import { transcribeMulaw } from "./tts.ts";
 
 const logger = log.child("voice-call");
 
@@ -103,83 +104,6 @@ async function callClaude(prompt: string): Promise<string> {
   }
 
   return output.trim();
-}
-
-// ============================================================
-// WHISPER TRANSCRIPTION (mulaw buffer → text)
-// ============================================================
-
-async function transcribeMulaw(mulawChunks: Buffer[]): Promise<string> {
-  const combined = Buffer.concat(mulawChunks);
-  if (combined.length < 400) return ""; // too short, skip (~50ms of audio)
-
-  const timestamp = Date.now();
-  const mulawPath = join(TMP_DIR, `call_${timestamp}.raw`);
-  const wavPath = join(TMP_DIR, `call_${timestamp}.wav`);
-
-  try {
-    await writeFile(mulawPath, combined);
-
-    // Convert mulaw 8kHz → WAV 16kHz PCM (what Whisper needs)
-    const ffmpeg = spawn([
-      "ffmpeg", "-f", "mulaw", "-ar", "8000", "-ac", "1",
-      "-i", mulawPath,
-      "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
-      wavPath, "-y"
-    ], { stdout: "pipe", stderr: "pipe" });
-
-    const ffmpegExit = await ffmpeg.exited;
-    if (ffmpegExit !== 0) {
-      const stderr = await new Response(ffmpeg.stderr).text();
-      logger.error("ffmpeg error", { stderr });
-      return "";
-    }
-
-    // Use the existing transcription approach
-    const provider = process.env.VOICE_PROVIDER || "local";
-
-    if (provider === "groq") {
-      const wavBuffer = await readFile(wavPath);
-      const Groq = (await import("groq-sdk")).default;
-      const groq = new Groq();
-      const file = new File([wavBuffer], "call.wav", { type: "audio/wav" });
-      const result = await groq.audio.transcriptions.create({
-        file,
-        model: "whisper-large-v3-turbo",
-      });
-      return result.text.trim();
-    }
-
-    // Local whisper.cpp
-    const whisperBinary = process.env.WHISPER_BINARY || "whisper-cpp";
-    const modelPath = process.env.WHISPER_MODEL_PATH || "";
-    if (!modelPath) {
-      logger.error("WHISPER_MODEL_PATH not set");
-      return "";
-    }
-
-    const txtPath = join(TMP_DIR, `call_${timestamp}.txt`);
-    const whisper = spawn([
-      whisperBinary, "--model", modelPath,
-      "--file", wavPath,
-      "--output-txt", "--output-file", join(TMP_DIR, `call_${timestamp}`),
-      "--no-prints"
-    ], { stdout: "pipe", stderr: "pipe" });
-
-    const whisperExit = await whisper.exited;
-    if (whisperExit !== 0) {
-      const stderr = await new Response(whisper.stderr).text();
-      logger.error("whisper error", { stderr });
-      return "";
-    }
-
-    const text = await readFile(txtPath, "utf-8");
-    await unlink(txtPath).catch(() => {});
-    return text.trim();
-  } finally {
-    await unlink(mulawPath).catch(() => {});
-    await unlink(wavPath).catch(() => {});
-  }
 }
 
 // ============================================================

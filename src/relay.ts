@@ -463,6 +463,10 @@ loadWorkflowTemplates();
 import { preloadModelCosts } from "./orchestrator.ts";
 preloadModelCosts(supabase).catch(err => logger.warn("Model cost preload failed", err));
 
+// ELLIE-229: Probe voice transcription providers at startup
+import { probeVoiceProviders } from "./transcribe.ts";
+probeVoiceProviders().catch(err => logger.warn("Voice provider probe failed", err));
+
 // Initialize SKILL.md watcher for hot-reload (ELLIE-217)
 startSkillWatcher();
 getSkillSnapshot().then(s => {

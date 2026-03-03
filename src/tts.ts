@@ -11,6 +11,7 @@ import { writeFile, readFile, unlink } from "fs/promises";
 import { join } from "path";
 import type { WebSocket } from "ws";
 import { log } from "./logger.ts";
+import { transcribeWav } from "./transcribe.ts";
 
 const logger = log.child("tts");
 
@@ -132,6 +133,7 @@ export async function transcribeMulaw(mulawChunks: Buffer[]): Promise<string> {
   try {
     await writeFile(mulawPath, combined);
 
+    // Convert mulaw 8kHz → WAV 16kHz PCM (required by both Groq and whisper.cpp)
     const ffmpeg = spawn([
       "ffmpeg", "-f", "mulaw", "-ar", "8000", "-ac", "1",
       "-i", mulawPath,
@@ -140,41 +142,13 @@ export async function transcribeMulaw(mulawChunks: Buffer[]): Promise<string> {
     ], { stdout: "pipe", stderr: "pipe" });
 
     if (await ffmpeg.exited !== 0) {
-      logger.error("ffmpeg error", { detail: await new Response(ffmpeg.stderr).text() });
+      logger.error("ffmpeg error (mulaw→wav)", { detail: await new Response(ffmpeg.stderr).text() });
       return "";
     }
 
-    const provider = process.env.VOICE_PROVIDER || "local";
-
-    if (provider === "groq") {
-      const wavBuffer = await readFile(wavPath);
-      const Groq = (await import("groq-sdk")).default;
-      const groq = new Groq();
-      const file = new File([wavBuffer], "call.wav", { type: "audio/wav" });
-      const result = await groq.audio.transcriptions.create({ file, model: "whisper-large-v3-turbo" });
-      return result.text.trim();
-    }
-
-    const whisperBinary = process.env.WHISPER_BINARY || "whisper-cpp";
-    const modelPath = process.env.WHISPER_MODEL_PATH || "";
-    if (!modelPath) { logger.error("WHISPER_MODEL_PATH not set"); return ""; }
-
-    const txtPath = join(TMP_DIR, `call_${timestamp}.txt`);
-    const whisper = spawn([
-      whisperBinary, "--model", modelPath,
-      "--file", wavPath,
-      "--output-txt", "--output-file", join(TMP_DIR, `call_${timestamp}`),
-      "--no-prints"
-    ], { stdout: "pipe", stderr: "pipe" });
-
-    if (await whisper.exited !== 0) {
-      logger.error("whisper error", { detail: await new Response(whisper.stderr).text() });
-      return "";
-    }
-
-    const text = await readFile(txtPath, "utf-8");
-    await unlink(txtPath).catch(() => {});
-    return text.trim();
+    // Use shared fallback chain: Groq → local → ""
+    const wavBuffer = await readFile(wavPath);
+    return await transcribeWav(wavBuffer);
   } finally {
     await unlink(mulawPath).catch(() => {});
     await unlink(wavPath).catch(() => {});
