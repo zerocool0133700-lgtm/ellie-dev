@@ -408,6 +408,21 @@ setInterval(async () => {
   }
 }, 15 * 60_000);
 
+// Job Intelligence — nightly at 3:30 AM CST (ELLIE-456)
+setInterval(async () => {
+  const now = new Date();
+  const cst = new Date(now.toLocaleString("en-US", { timeZone: "America/Chicago" }));
+  if (cst.getHours() === 3 && cst.getMinutes() >= 30 && cst.getMinutes() < 45) {
+    try {
+      const { runNightlyJobIntelligence } = await import("./api/job-intelligence.ts");
+      const result = await runNightlyJobIntelligence();
+      logger.info("[job-intel] Nightly run complete", result);
+    } catch (err: unknown) {
+      logger.error("[job-intel] Nightly run failed", { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+}, 15 * 60_000);
+
 // Note: expireStaleWorkSessions (old Supabase work_sessions table) removed in ELLIE-88.
 // Forest is now the source of truth for work sessions. See ellie-forest/src/work-sessions.ts.
 

@@ -4914,6 +4914,27 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     }
   }
 
+  // Job Intelligence endpoints (ELLIE-456)
+  if (url.pathname === "/api/job-intelligence/run" && req.method === "POST") {
+    (async () => {
+      try {
+        const { jobIntelligenceRunHandler } = await import("./api/job-intelligence.ts");
+        await jobIntelligenceRunHandler(req, res);
+      } catch (err) { logger.error("Job intelligence run error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/job-intelligence/patterns" && req.method === "GET") {
+    (async () => {
+      try {
+        const { jobPatternsHandler } = await import("./api/job-intelligence.ts");
+        await jobPatternsHandler(req, res);
+      } catch (err) { logger.error("Job patterns fetch error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
   // Alert endpoints (ELLIE-317)
   if (url.pathname.startsWith("/api/alerts/") && !supabase) {
     res.writeHead(500, { "Content-Type": "application/json" });

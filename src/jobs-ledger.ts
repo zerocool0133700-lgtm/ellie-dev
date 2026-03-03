@@ -458,6 +458,16 @@ export async function writeJobTouchpoint(opts: WriteJobTouchpointOpts): Promise<
     touchpointType: opts.touchpointType,
     scope_path:     scopePath,
   });
+
+  // ELLIE-456: After a completed touchpoint, check if pattern extraction threshold is met
+  if (opts.touchpointType === "completed") {
+    const entityType = opts.entityType;
+    import("./api/job-intelligence.ts").then(({ checkAndExtractPatterns }) => {
+      checkAndExtractPatterns(entityType).catch(err => {
+        logger.warn("[job-intelligence] Pattern check failed", { err: err.message });
+      });
+    }).catch(() => {});
+  }
 }
 
 /**
