@@ -42,6 +42,7 @@ import {
   setAnthropicClient,
 } from "./claude-cli.ts";
 import { setQueueBroadcast } from "./message-queue.ts";
+import { USER_TIMEZONE } from "./timezone.ts";
 import { setVoicePipelineDeps } from "./voice-pipeline.ts";
 import { ellieChatPendingActions, setSenderDeps } from "./message-sender.ts";
 import { initDelivery } from "./ws-delivery.ts";
@@ -101,6 +102,41 @@ if (!(await acquireLock())) {
 
 export const bot = new Bot(BOT_TOKEN);
 
+// ── ELLIE-458: Stable periodic task runner ───────────────────
+// Gates execution during startup grace period. Tracks consecutive failures
+// and applies exponential backoff; disables the task after 3 failures.
+const _startedAt = Date.now();
+const STARTUP_GRACE_MS = 15_000; // skip first 15s — let deps initialize
+
+function periodicTask(
+  fn: () => Promise<void>,
+  intervalMs: number,
+  label: string,
+): void {
+  let consecutiveFailures = 0;
+  let skipUntil = 0;
+  setInterval(async () => {
+    if (Date.now() - _startedAt < STARTUP_GRACE_MS) return; // startup gate
+    if (Date.now() < skipUntil) return;                      // backoff skip
+    if (consecutiveFailures >= 3) return;                    // permanently disabled
+    try {
+      await fn();
+      consecutiveFailures = 0;
+      skipUntil = 0;
+    } catch (err) {
+      consecutiveFailures++;
+      const backoffMs = Math.min(5_000 * Math.pow(2, consecutiveFailures - 1), 20 * 60_000);
+      skipUntil = Date.now() + backoffMs;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (consecutiveFailures >= 3) {
+        logger.error(`[periodic:${label}] Disabled after 3 consecutive failures`, { error: msg });
+      } else {
+        logger.warn(`[periodic:${label}] Failure ${consecutiveFailures}/3, backoff ${backoffMs}ms`, { error: msg });
+      }
+    }
+  }, intervalMs);
+}
+
 // Start approval expiry cleanup
 startExpiryCleanup();
 
@@ -108,6 +144,7 @@ startExpiryCleanup();
 // ELLIE-232: Now uses expireIdleConversations() which has atomic claim protection
 // to prevent duplicate memory extraction from racing close paths.
 setInterval(async () => {
+  if (Date.now() - _startedAt < STARTUP_GRACE_MS) return; // startup gate
   if (supabase) {
     try {
       await expireIdleConversations(supabase);
@@ -148,18 +185,10 @@ setInterval(async () => {
 }, 5 * 60_000);
 
 // Calendar sync (every 5 minutes)
-setInterval(async () => {
-  try {
-    await syncAllCalendars();
-  } catch (err: unknown) {
-    logger.error("Periodic sync error", { error: err instanceof Error ? err.message : String(err) });
-  }
-}, 5 * 60_000);
+periodicTask(() => syncAllCalendars(), 5 * 60_000, "calendar-sync");
 
 // Stale queue item expiry — every hour (ELLIE-201)
-setInterval(() => {
-  expireStaleItems().catch(err => logger.error("Stale expiry error", err));
-}, 60 * 60_000);
+periodicTask(() => expireStaleItems(), 60 * 60_000, "stale-expiry");
 // Run once on startup (10s delay)
 setTimeout(() => {
   expireStaleItems().catch(err => logger.error("Initial stale expiry error", err));
@@ -168,9 +197,7 @@ setTimeout(() => {
 // Plane sync queue — persistent retry for failed Plane API calls (ELLIE-234)
 startPlaneQueueWorker();
 // Purge completed queue items weekly
-setInterval(() => {
-  purgePlaneQueue().catch(err => logger.error("Plane queue purge error", err));
-}, 24 * 60 * 60_000);
+periodicTask(() => purgePlaneQueue(), 24 * 60 * 60_000, "plane-queue-purge");
 
 // Orchestration tracker — ELLIE-349: heartbeat watchdog + orphan recovery
 // ELLIE-387: Wire proactive notifications to watchdog (deferred — needs setRelayDeps first)
@@ -230,55 +257,33 @@ setTimeout(async () => {
 }, 10_000);
 
 // ELLIE-447: Creature reaper — mark timed-out creatures as failed (every 5 minutes)
-setInterval(async () => {
-  try {
-    const { reapTimedOutCreatures } = await import('../../ellie-forest/src/work-sessions');
-    const reaped = await reapTimedOutCreatures();
-    if (reaped.length > 0) console.log(`[creature-reaper] Reaped ${reaped.length} timed-out creature(s)`);
-  } catch (err: unknown) {
-    logger.error("Creature reaper error", { error: err instanceof Error ? err.message : String(err) });
-  }
-}, 5 * 60_000);
+periodicTask(async () => {
+  const { reapTimedOutCreatures } = await import('../../ellie-forest/src/work-sessions');
+  const reaped = await reapTimedOutCreatures();
+  if (reaped.length > 0) console.log(`[creature-reaper] Reaped ${reaped.length} timed-out creature(s)`);
+}, 5 * 60_000, "creature-reaper");
 
 // Memory maintenance: expire short-term memories (every 15 minutes)
-setInterval(async () => {
-  try {
-    const { expireShortTermMemories } = await import('../../ellie-forest/src/shared-memory');
-    const expired = await expireShortTermMemories();
-    if (expired > 0) console.log(`[memory-maintenance] Expired ${expired} short-term memories`);
-  } catch (err: unknown) {
-    logger.error("Short-term expiry error", { error: err instanceof Error ? err.message : String(err) });
-  }
-}, 15 * 60_000);
+periodicTask(async () => {
+  const { expireShortTermMemories } = await import('../../ellie-forest/src/shared-memory');
+  const expired = await expireShortTermMemories();
+  if (expired > 0) console.log(`[memory-maintenance] Expired ${expired} short-term memories`);
+}, 15 * 60_000, "memory-expiry");
 
 // Memory maintenance: refresh weights (every hour)
-setInterval(async () => {
-  try {
-    const { refreshWeights } = await import('../../ellie-forest/src/shared-memory');
-    const refreshed = await refreshWeights({ limit: 500 });
-    if (refreshed > 0) console.log(`[memory-maintenance] Refreshed weights for ${refreshed} memories`);
-  } catch (err: unknown) {
-    logger.error("Weight refresh error", { error: err instanceof Error ? err.message : String(err) });
-  }
-}, 60 * 60_000);
+periodicTask(async () => {
+  const { refreshWeights } = await import('../../ellie-forest/src/shared-memory');
+  const refreshed = await refreshWeights({ limit: 500 });
+  if (refreshed > 0) console.log(`[memory-maintenance] Refreshed weights for ${refreshed} memories`);
+}, 60 * 60_000, "weight-refresh");
 
 // Summary Bar push — broadcast module summary state to Ellie Chat clients (ELLIE-315)
 // Runs every 30 seconds when clients are connected; skips if no listeners.
-setInterval(async () => {
+periodicTask(async () => {
   if (!supabase) return;
-  // Only compute if someone is listening (check done inside broadcastToEllieChatClients)
-  try {
-    const summary = await getSummaryState(supabase);
-    broadcastToEllieChatClients({
-      type: "summary_update",
-      summary,
-      ts: Date.now(),
-    });
-  } catch (err: unknown) {
-    // Non-critical — don't spam logs
-    logger.debug("Summary push error", { error: err instanceof Error ? err.message : String(err) });
-  }
-}, 30_000);
+  const summary = await getSummaryState(supabase);
+  broadcastToEllieChatClients({ type: "summary_update", summary, ts: Date.now() });
+}, 30_000, "summary-push");
 
 // Comms consumer — DB-backed thread tracking (ELLIE-318)
 if (supabase) {
@@ -349,79 +354,51 @@ if (supabase) {
 }
 
 // Morning briefing — check every 15 minutes, deliver once at ~7:00 AM CST (ELLIE-316)
-setInterval(async () => {
+periodicTask(async () => {
   if (!supabase) return;
-  const now = new Date();
-  const cst = new Date(now.toLocaleString("en-US", { timeZone: "America/Chicago" }));
-  const hour = cst.getHours();
-  const minute = cst.getMinutes();
-  // Deliver between 7:00-7:14 AM CST (will be caught by the 15-min interval)
-  if (hour === 7 && minute < 15) {
-    try {
-      const { runMorningBriefing } = await import("./api/briefing.ts");
-      await runMorningBriefing(supabase, bot);
-    } catch (err: unknown) {
-      logger.error("Morning briefing error", { error: err instanceof Error ? err.message : String(err) });
-    }
+  const cst = new Date(new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE }));
+  if (cst.getHours() === 7 && cst.getMinutes() < 15) {
+    const { runMorningBriefing } = await import("./api/briefing.ts");
+    await runMorningBriefing(supabase, bot);
   }
-}, 15 * 60_000);
+}, 15 * 60_000, "morning-briefing");
 
 // Data integrity audit — weekly, Sunday 11 PM CST (ELLIE-406)
-setInterval(async () => {
+periodicTask(async () => {
   if (!supabase) return;
-  const now = new Date();
-  const cst = new Date(now.toLocaleString("en-US", { timeZone: "America/Chicago" }));
-  // Sunday = 0, run in the same 11 PM window as the channel gardener
+  const cst = new Date(new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE }));
   if (cst.getDay() === 0 && cst.getHours() === 23 && cst.getMinutes() < 15) {
-    try {
-      const { runDataIntegrityAudit } = await import("./api/data-integrity-audit.ts");
-      const result = await runDataIntegrityAudit(supabase, { lookbackDays: 7 });
-      if (!result.clean) {
-        notify(getNotifyCtx(), {
-          event: "incident_raised",
-          text: `⚠️ Weekly data integrity audit found issues:\n${result.summary}`,
-          workItemId: "data-integrity",
-        });
-      } else {
-        logger.info("[audit] Weekly audit passed — all clear.");
-      }
-    } catch (err: unknown) {
-      logger.error("[audit] Weekly data integrity audit failed", { error: err instanceof Error ? err.message : String(err) });
+    const { runDataIntegrityAudit } = await import("./api/data-integrity-audit.ts");
+    const result = await runDataIntegrityAudit(supabase, { lookbackDays: 7 });
+    if (!result.clean) {
+      notify(getNotifyCtx(), { event: "incident_raised", text: `⚠️ Weekly data integrity audit found issues:\n${result.summary}`, workItemId: "data-integrity" });
+    } else {
+      logger.info("[audit] Weekly audit passed — all clear.");
     }
   }
-}, 15 * 60_000);
+}, 15 * 60_000, "data-integrity-audit");
 
 // Channel Gardener — nightly at 3 AM CST (ELLIE-335)
-setInterval(async () => {
+periodicTask(async () => {
   if (!supabase) return;
-  const now = new Date();
-  const cst = new Date(now.toLocaleString("en-US", { timeZone: "America/Chicago" }));
+  const cst = new Date(new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE }));
   if (cst.getHours() === 3 && cst.getMinutes() < 15) {
-    try {
-      const { runNightlyGardener } = await import("./api/channel-gardener.ts");
-      const { anthropic } = getRelayDeps();
-      const result = await runNightlyGardener(supabase, anthropic ?? null);
-      logger.info("[gardener] Nightly run complete", result);
-    } catch (err: unknown) {
-      logger.error("[gardener] Nightly run failed", { error: err instanceof Error ? err.message : String(err) });
-    }
+    const { runNightlyGardener } = await import("./api/channel-gardener.ts");
+    const { anthropic } = getRelayDeps();
+    const result = await runNightlyGardener(supabase, anthropic ?? null);
+    logger.info("[gardener] Nightly run complete", result);
   }
-}, 15 * 60_000);
+}, 15 * 60_000, "channel-gardener");
 
 // Job Intelligence — nightly at 3:30 AM CST (ELLIE-456)
-setInterval(async () => {
-  const now = new Date();
-  const cst = new Date(now.toLocaleString("en-US", { timeZone: "America/Chicago" }));
+periodicTask(async () => {
+  const cst = new Date(new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE }));
   if (cst.getHours() === 3 && cst.getMinutes() >= 30 && cst.getMinutes() < 45) {
-    try {
-      const { runNightlyJobIntelligence } = await import("./api/job-intelligence.ts");
-      const result = await runNightlyJobIntelligence();
-      logger.info("[job-intel] Nightly run complete", result);
-    } catch (err: unknown) {
-      logger.error("[job-intel] Nightly run failed", { error: err instanceof Error ? err.message : String(err) });
-    }
+    const { runNightlyJobIntelligence } = await import("./api/job-intelligence.ts");
+    const result = await runNightlyJobIntelligence();
+    logger.info("[job-intel] Nightly run complete", result);
   }
-}, 15 * 60_000);
+}, 15 * 60_000, "job-intelligence");
 
 // Note: expireStaleWorkSessions (old Supabase work_sessions table) removed in ELLIE-88.
 // Forest is now the source of truth for work sessions. See ellie-forest/src/work-sessions.ts.

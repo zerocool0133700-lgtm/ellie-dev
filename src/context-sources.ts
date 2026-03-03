@@ -13,7 +13,30 @@ import { freshnessTracker } from "./context-freshness.ts";
 
 const logger = log.child("context");
 
-const USER_TIMEZONE = process.env.USER_TIMEZONE || "America/Chicago";
+import { USER_TIMEZONE } from "./timezone.ts";
+
+// ── ELLIE-458: Resilience helpers ────────────────────────────
+
+/** Race a promise against a timeout; resolves to fallback on timeout. */
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>(resolve => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
+/** Extract fulfilled values from Promise.allSettled, logging rejections. */
+function settledValues<T>(
+  results: PromiseSettledResult<T>[],
+  label: string,
+): T[] {
+  return results.map((r, i) => {
+    if (r.status === "rejected") {
+      logger.warn(`${label}[${i}] failed`, { error: r.reason instanceof Error ? r.reason.message : String(r.reason) });
+    }
+    return r.status === "fulfilled" ? r.value : undefined;
+  }).filter((v): v is T => v !== undefined);
+}
 
 // ============================================================
 // PLANE: Open Work Items
@@ -157,21 +180,23 @@ export async function getGoalsAndFacts(
   if (!supabase) return "";
 
   try {
-    const [goalsResult, factsResult] = await Promise.all([
-      supabase
+    const [goalsSettled, factsSettled] = await Promise.allSettled([
+      withTimeout(supabase
         .from("memory")
         .select("content, deadline")
         .eq("type", "goal")
         .order("priority", { ascending: false })
         .order("created_at", { ascending: false })
-        .limit(10),
-      supabase
+        .limit(10), 3000, { data: null, error: new Error("timeout") }),
+      withTimeout(supabase
         .from("memory")
         .select("content")
         .eq("type", "fact")
         .order("created_at", { ascending: false })
-        .limit(15),
+        .limit(15), 3000, { data: null, error: new Error("timeout") }),
     ]);
+    const goalsResult = goalsSettled.status === "fulfilled" ? goalsSettled.value : { data: null, error: null };
+    const factsResult = factsSettled.status === "fulfilled" ? factsSettled.value : { data: null, error: null };
 
     const parts: string[] = [];
 
@@ -414,7 +439,10 @@ async function getCalendarForAccount(account: GoogleAccount): Promise<{ label: s
 export async function getUpcomingCalendarEvents(): Promise<string> {
   if (!googleAccounts.length) return "";
   try {
-    const results = await Promise.all(googleAccounts.map(getCalendarForAccount));
+    const results = settledValues(
+      await Promise.allSettled(googleAccounts.map(a => withTimeout(getCalendarForAccount(a), 3000, { label: a.label, lines: [] }))),
+      "calendar",
+    );
     // Merge all events, tag with account label if multiple accounts
     const multi = googleAccounts.length > 1;
     const allLines: string[] = [];
@@ -475,7 +503,7 @@ async function getGmailSignalForAccount(account: GoogleAccount): Promise<string>
     return (await msgRes.json()) as Record<string, unknown>;
   });
 
-  const messages = (await Promise.all(headerPromises)).filter(Boolean);
+  const messages = settledValues(await Promise.allSettled(headerPromises), "gmail-headers").filter(Boolean);
 
   const lines = messages.map((msg: Record<string, unknown>) => {
     const payload = msg.payload as Record<string, unknown> | undefined;
@@ -497,7 +525,10 @@ async function getGmailSignalForAccount(account: GoogleAccount): Promise<string>
 export async function getGmailSignal(): Promise<string> {
   if (!googleAccounts.length) return "";
   try {
-    const results = await Promise.all(googleAccounts.map(getGmailSignalForAccount));
+    const results = settledValues(
+      await Promise.allSettled(googleAccounts.map(a => withTimeout(getGmailSignalForAccount(a), 3000, ""))),
+      "gmail",
+    );
     const parts = results.filter(Boolean);
     if (!parts.length) return "GMAIL: No unread messages.";
     return "GMAIL:\n" + parts.join("\n") + "\n(Use mcp__google-workspace tools for full email content)";
@@ -597,7 +628,10 @@ async function getGoogleTasksForAccount(account: GoogleAccount): Promise<string>
 export async function getGoogleTasks(): Promise<string> {
   if (!googleAccounts.length) return "";
   try {
-    const results = await Promise.all(googleAccounts.map(getGoogleTasksForAccount));
+    const results = settledValues(
+      await Promise.allSettled(googleAccounts.map(a => withTimeout(getGoogleTasksForAccount(a), 3000, ""))),
+      "tasks",
+    );
     const parts = results.filter(Boolean);
     if (!parts.length) return "";
     return "GOOGLE TASKS (pending):\n" + parts.join("\n");
@@ -654,7 +688,10 @@ async function getGoogleTasksJSONForAccount(account: GoogleAccount): Promise<{ l
 export async function getGoogleTasksJSON(): Promise<{ accounts: { label: string; tasks: GoogleTaskItem[] }[] }> {
   if (!googleAccounts.length) return { accounts: [] };
   try {
-    const accounts = await Promise.all(googleAccounts.map(getGoogleTasksJSONForAccount));
+    const accounts = settledValues(
+      await Promise.allSettled(googleAccounts.map(a => withTimeout(getGoogleTasksJSONForAccount(a), 3000, { label: a.label, tasks: [] }))),
+      "tasks-json",
+    );
     return { accounts };
   } catch (error) {
     logger.error("Failed to fetch Google Tasks JSON", error);
@@ -905,15 +942,23 @@ export async function getAgentStructuredContext(
   }
 
   // Fetch all selected sources in parallel (ELLIE-327: with freshness tracking)
-  const entries = await Promise.all(
+  // ELLIE-458: allSettled + 3s timeout so one slow/failing source never kills context
+  const rawEntries = await Promise.allSettled(
     sourceNames.map(async (name) => {
       const start = Date.now();
-      const content = await SOURCE_REGISTRY[name](supabase);
+      const content = await withTimeout(SOURCE_REGISTRY[name](supabase), 3000, "");
       const latencyMs = Date.now() - start;
       freshnessTracker.recordFetch(name, latencyMs);
       return { name, content };
     })
   );
+  const entries = rawEntries.map((r, i) => {
+    if (r.status === "rejected") {
+      logger.warn(`Context source '${sourceNames[i]}' failed`, { error: r.reason instanceof Error ? r.reason.message : String(r.reason) });
+      return { name: sourceNames[i], content: "" };
+    }
+    return r.value;
+  });
 
   // Apply priority ordering: explicit > strategy > default order
   const priorityList = profile.priority?.length ? profile.priority : preset.priority;
@@ -1241,12 +1286,17 @@ export async function getLiveForestContext(
   userMessage?: string,
 ): Promise<{ incidents: string; awareness: string }> {
   const start = Date.now();
-  const [incidents, contradictions, creatures, personMentions] = await Promise.all([
-    getActiveIncidentContext(),
-    getContradictionContext(),
-    getCreatureStatusContext(),
-    userMessage ? getPersonMentionContext(userMessage) : Promise.resolve(""),
+  // ELLIE-458: allSettled so one failing Forest call doesn't kill all awareness context
+  const [incidentsR, contradictionsR, creaturesR, personMentionsR] = await Promise.allSettled([
+    withTimeout(getActiveIncidentContext(), 3000, ""),
+    withTimeout(getContradictionContext(), 3000, ""),
+    withTimeout(getCreatureStatusContext(), 3000, ""),
+    userMessage ? withTimeout(getPersonMentionContext(userMessage), 3000, "") : Promise.resolve(""),
   ]);
+  const incidents = incidentsR.status === "fulfilled" ? incidentsR.value : "";
+  const contradictions = contradictionsR.status === "fulfilled" ? contradictionsR.value : "";
+  const creatures = creaturesR.status === "fulfilled" ? creaturesR.value : "";
+  const personMentions = personMentionsR.status === "fulfilled" ? personMentionsR.value : "";
 
   // ELLIE-327: Track forest awareness freshness
   const latencyMs = Date.now() - start;
