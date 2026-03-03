@@ -8,6 +8,7 @@
 
 import { log } from "./logger.ts";
 import postgres from "postgres";
+import { writeMemory, createLink } from "../../ellie-forest/src/index";
 
 const logger = log.child("jobs-ledger");
 
@@ -209,6 +210,18 @@ export async function findJobByRunId(runId: string): Promise<Job | null> {
   }
 }
 
+export async function findJobByTreeId(treeId: string): Promise<Job | null> {
+  try {
+    const [job] = await db()`
+      SELECT * FROM jobs WHERE tree_id = ${treeId}
+      ORDER BY created_at DESC LIMIT 1
+    `;
+    return (job as Job) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function getJob(jobId: string): Promise<{
   job: Job;
   events: JobEvent[];
@@ -368,6 +381,158 @@ export async function cleanupOrphanedJobs(): Promise<number> {
   } catch (err: unknown) {
     logger.error("cleanupOrphanedJobs failed", err);
     return 0;
+  }
+}
+
+// ── J Scope Touchpoints — ELLIE-455 ────────────────────────────────────────
+
+export type EntityType = "dev" | "strategy" | "research" | "content" | "finance" | "critic" | "general";
+export type TouchpointType = "started" | "decision" | "blocker" | "completed" | "failed";
+
+export interface WriteJobTouchpointOpts {
+  jobId: string;
+  creatureId?: string | null;
+  entityType: EntityType;
+  touchpointType: TouchpointType;
+  content: string;
+  metadata?: {
+    workItemId?: string | null;
+    duration_ms?: number;
+    cost_usd?: number;
+    tokens?: number;
+  };
+}
+
+/** Map agent_type strings → EntityType (normalises dev-ant → dev, etc.) */
+function resolveEntityType(agentType: string | null | undefined): EntityType {
+  if (!agentType) return "general";
+  const t = agentType.toLowerCase();
+  if (t === "dev" || t === "dev-ant" || t === "ant") return "dev";
+  if (t === "strategy")  return "strategy";
+  if (t === "research")  return "research";
+  if (t === "content")   return "content";
+  if (t === "finance")   return "finance";
+  if (t === "critic")    return "critic";
+  return "general";
+}
+
+/** Map EntityType → J/3/N scope path */
+const ENTITY_SCOPE: Record<EntityType, string> = {
+  dev:      "J/3/1",
+  strategy: "J/3/2",
+  research: "J/3/3",
+  content:  "J/3/4",
+  finance:  "J/3/5",
+  critic:   "J/3/6",
+  general:  "J/3/7",
+};
+
+/**
+ * ELLIE-455: Write a touchpoint memory to the J/3/N scope for the creature.
+ * Non-blocking — caller should fire-and-forget with .catch().
+ */
+export async function writeJobTouchpoint(opts: WriteJobTouchpointOpts): Promise<void> {
+  const scopePath = ENTITY_SCOPE[opts.entityType];
+  const typeLabel = opts.touchpointType.charAt(0).toUpperCase() + opts.touchpointType.slice(1);
+
+  await writeMemory({
+    content: `[${typeLabel}] ${opts.content}`,
+    type: "finding",
+    scope_path: scopePath,
+    confidence: 0.8,
+    tags: ["job-touchpoint", opts.touchpointType, opts.entityType],
+    metadata: {
+      job_id:       opts.jobId,
+      creature_id:  opts.creatureId ?? undefined,
+      touchpoint:   opts.touchpointType,
+      entity_type:  opts.entityType,
+      work_item_id: opts.metadata?.workItemId ?? undefined,
+      duration_ms:  opts.metadata?.duration_ms,
+      cost_usd:     opts.metadata?.cost_usd,
+      tokens:       opts.metadata?.tokens,
+    },
+  });
+
+  logger.info("[job-touchpoint] Written", {
+    job_id:         opts.jobId.slice(0, 8),
+    touchpointType: opts.touchpointType,
+    scope_path:     scopePath,
+  });
+}
+
+/**
+ * ELLIE-455: Convenience wrapper — resolves EntityType from raw agent_type string.
+ */
+export async function writeJobTouchpointForAgent(
+  jobId: string,
+  agentType: string | null | undefined,
+  creatureId: string | null | undefined,
+  touchpointType: TouchpointType,
+  content: string,
+  metadata?: WriteJobTouchpointOpts["metadata"],
+): Promise<void> {
+  return writeJobTouchpoint({
+    jobId,
+    creatureId,
+    entityType: resolveEntityType(agentType),
+    touchpointType,
+    content,
+    metadata,
+  });
+}
+
+/**
+ * ELLIE-455: Register tree-level vines connecting J/3 scopes to entity scopes.
+ * Queries scope tree_ids — skips gracefully if trees aren't provisioned yet.
+ * Run once at relay startup.
+ */
+export async function registerJobVines(): Promise<void> {
+  const sql = db();
+
+  // Look up tree_ids for J/3 (all trails) and J/3/1 (dev trails)
+  const jScopes = await sql<{ path: string; tree_id: string | null }[]>`
+    SELECT path, tree_id FROM knowledge_scopes
+    WHERE path IN ('J/3', 'J/3/1', 'J/3/2', 'J/3/3', 'J/3/4', 'J/3/5', 'J/3/6', 'J/3/7')
+  `.catch(() => []);
+
+  // Look up the entity/species scope tree_ids (E/2 or archetype nodes)
+  const entityScopes = await sql<{ path: string; tree_id: string | null }[]>`
+    SELECT path, tree_id FROM knowledge_scopes
+    WHERE name ILIKE '%archetype%' OR name ILIKE '%species%' OR name ILIKE '%entity%'
+    LIMIT 10
+  `.catch(() => []);
+
+  const j3 = jScopes.find(s => s.path === "J/3");
+  const treeMap = Object.fromEntries(jScopes.map(s => [s.path, s.tree_id]));
+  const entityTreeIds = entityScopes.map(s => s.tree_id).filter(Boolean) as string[];
+
+  if (!j3?.tree_id) {
+    logger.info("[job-vines] J/3 scope has no tree yet — vines deferred until trees are provisioned");
+    return;
+  }
+
+  let registered = 0;
+  for (const targetTreeId of entityTreeIds) {
+    await createLink({
+      source_tree_id: j3.tree_id,
+      target_tree_id: targetTreeId,
+      link_type: "related",
+      confidence: 0.7,
+      description: "Job trails scope linked to entity archetype scope",
+    }).catch(err => {
+      // Unique-constraint violation = already exists, that's fine
+      if (!String(err).includes("unique")) {
+        logger.warn("[job-vines] createLink failed", { err: err.message });
+      }
+    });
+    registered++;
+  }
+
+  logger.info(`[job-vines] ${registered} vine(s) registered`);
+
+  // Log J/3/N tree_ids for debugging
+  for (const [path, treeId] of Object.entries(treeMap)) {
+    if (treeId) logger.info(`[job-vines] ${path} → tree ${treeId.slice(0, 8)}`);
   }
 }
 

@@ -62,7 +62,7 @@ import { startPlaneQueueWorker, purgeCompleted as purgePlaneQueue } from "./plan
 import { startWatchdog, recoverActiveRuns, setWatchdogNotify } from "./orchestration-tracker.ts";
 import { reconcileOnStartup, startReconciler } from "./orchestration-reconciler.ts";
 import { restoreModeState } from "./context-mode.ts";
-import { cleanupOrphanedJobs } from "./jobs-ledger.ts";
+import { cleanupOrphanedJobs, registerJobVines } from "./jobs-ledger.ts";
 import { onBridgeWrite } from "./api/bridge.ts";
 import { setBroadcastToEllieChat } from "./tool-approval.ts";
 import { getSummaryState } from "./ums/consumers/summary.ts";
@@ -183,6 +183,9 @@ recoverActiveRuns()
     startReconciler(supabase);
   })
   .catch(err => logger.error("Orchestration startup error", err));
+
+// ELLIE-455: Register J scope tree-level vines on startup
+registerJobVines().catch(err => logger.warn("[job-vines] Startup registration failed", { err: err.message }));
 
 // ELLIE-395: Restore conversation mode state from disk
 restoreModeState().catch(err => logger.warn("Mode state restore failed (non-fatal)", err));

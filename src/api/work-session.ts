@@ -25,6 +25,7 @@ import {
   getEntity,
 } from '../../../ellie-forest/src/index';
 import { notify, type NotifyContext } from "../notification-policy.ts";
+import { findJobByTreeId, writeJobTouchpointForAgent } from "../jobs-ledger.ts";
 
 /**
  * Resolve agent from Supabase agent_sessions when not explicitly provided.
@@ -301,6 +302,15 @@ export async function logDecision(req: ApiRequest, res: ApiResponse, bot: Bot) {
       telegramMessage: telegramMsg,
       gchatMessage: gchatMsg,
     });
+
+    // ELLIE-455: J scope touchpoint — decision logged
+    findJobByTreeId(tree.id).then(job => {
+      if (!job) return;
+      writeJobTouchpointForAgent(job.job_id, job.agent_type, job.creature_id, "decision",
+        `${agent ?? job.agent_type ?? "agent"} made decision on ${work_item_id}: ${message.slice(0, 400)}`,
+        { workItemId: work_item_id },
+      ).catch(() => {});
+    }).catch(() => {});
 
     return res.json({
       success: true,

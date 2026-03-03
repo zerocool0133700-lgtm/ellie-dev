@@ -21,7 +21,7 @@ import { withRetry, classifyError } from "./dispatch-retry.ts";
 import { enqueue, getQueueDepth } from "./dispatch-queue.ts";
 import { withTrace, getTraceId, generateTraceId } from "./trace.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
-import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost } from "./jobs-ledger.ts";
+import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost, writeJobTouchpointForAgent } from "./jobs-ledger.ts";
 import { startCreature, failCreature, completeCreature } from "../../ellie-forest/src/index";
 
 const logger = log.child("orchestration-dispatch");
@@ -258,6 +258,13 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
         logger.warn("startCreature failed (non-fatal)", { creature_id: sessionIds.creature_id, err: err.message })
       );
     }
+    // ELLIE-455: J scope touchpoint — job started
+    if (jobId) {
+      writeJobTouchpointForAgent(jobId, agentType, sessionIds?.creature_id, "started",
+        `${agentType} started work on ${workItemId}: ${details.name}`,
+        { workItemId },
+      ).catch(err => logger.warn("[touchpoint] started failed", { err: err.message }));
+    }
     // Enter dispatch mode — auto-approves dev tools + extends TTL/timeouts
     enterDispatchMode();
     emitEvent(runId, "progress", agentType, workItemId, { step: "calling_claude" });
@@ -305,6 +312,11 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       if (jobId) {
         await updateJob(jobId, { status: "failed", error_count: 1, current_step: null });
         await appendJobEvent(jobId, "failed", { error: `Claude call failed${retryNote}`, claude_error: claudeResult.error?.message?.slice(0, 500) });
+        // ELLIE-455: J scope touchpoint — Claude call blocker
+        writeJobTouchpointForAgent(jobId, agentType, sessionIds?.creature_id, "blocker",
+          `${agentType} hit blocker on ${workItemId}: Claude call failed${retryNote}`,
+          { workItemId },
+        ).catch(() => {});
       }
       await notify(notifyCtx, {
         event: "error",
@@ -364,6 +376,12 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       // Bug 3: duration_ms belongs in opts (4th param), not details
       await appendJobEvent(jobId, finalStatus, { verified, verification_note: note }, { duration_ms: durationMs });
       if (!verified) logger.warn("Job marked 'responded' — work unverified", { jobId: jobId.slice(0, 8), note });
+      // ELLIE-455: J scope touchpoint — job completed/responded
+      writeJobTouchpointForAgent(jobId, agentType, sessionIds?.creature_id,
+        finalStatus === "completed" ? "completed" : "completed",
+        `${agentType} ${finalStatus} ${workItemId} in ${durationMin}min`,
+        { workItemId, duration_ms: durationMs, cost_usd: costUsd, tokens: tokensIn + tokensOut },
+      ).catch(err => logger.warn("[touchpoint] completed failed", { err: err.message }));
     }
 
     // 10. Notify
@@ -394,6 +412,11 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     if (jobId) {
       await updateJob(jobId, { status: "failed", error_count: 1, current_step: null });
       await appendJobEvent(jobId, "failed", { error: errMsg.slice(0, 500), error_class: errorClass });
+      // ELLIE-455: J scope touchpoint — unexpected failure
+      writeJobTouchpointForAgent(jobId, agentType, sessionIds?.creature_id, "failed",
+        `${agentType} failed on ${workItemId}: ${errMsg.slice(0, 200)}`,
+        { workItemId },
+      ).catch(() => {});
     }
 
     await notify(notifyCtx, {
