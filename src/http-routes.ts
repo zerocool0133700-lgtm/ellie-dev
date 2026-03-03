@@ -5427,6 +5427,28 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // POST /api/obsidian/restart — restart the ellie-obsidian Docker container
+  if (url.pathname === "/api/obsidian/restart" && req.method === "POST") {
+    (async () => {
+      try {
+        const proc = spawn(["docker", "restart", "ellie-obsidian"]);
+        const code = await proc.exited;
+        if (code !== 0) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: `docker restart exited with code ${code}` }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: true }));
+      } catch (err) {
+        logger.error("Obsidian restart error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Failed to restart container" }));
+      }
+    })();
+    return;
+  }
+
   res.writeHead(404);
   res.end("Not found");
 }
