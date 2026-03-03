@@ -160,7 +160,7 @@ export async function bridgeWriteEndpoint(req: ApiRequest, res: ApiResponse) {
   if (!key) return
 
   try {
-    const { content, type, scope_path, confidence, tags, metadata, work_item_id, category, queue_target, queue_priority } = req.body
+    const { content, type, scope_path, confidence, tags, metadata, work_item_id, source_creature_id, category, queue_target, queue_priority } = req.body
 
     if (!content) {
       return res.status(400).json({ error: 'Missing required field: content' })
@@ -194,6 +194,8 @@ export async function bridgeWriteEndpoint(req: ApiRequest, res: ApiResponse) {
       category,
       // ELLIE-255: Auto-attribute to linked entity
       ...(key.entity_id ? { source_entity_id: key.entity_id } : {}),
+      // ELLIE-447: Thread creature attribution when caller provides it
+      ...(source_creature_id ? { source_creature_id } : {}),
     })
 
     console.log(`[bridge:write] ${key.key_prefix} (${key.collaborator}) wrote memory ${memory.id} at ${scope_path}`)

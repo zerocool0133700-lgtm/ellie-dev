@@ -22,6 +22,7 @@ import { enqueue, getQueueDepth } from "./dispatch-queue.ts";
 import { withTrace, getTraceId, generateTraceId } from "./trace.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
 import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost } from "./jobs-ledger.ts";
+import { startCreature, failCreature, completeCreature } from "../../ellie-forest/src/index";
 
 const logger = log.child("orchestration-dispatch");
 
@@ -141,6 +142,9 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     ? setInterval(() => updateJob(jobId, { last_heartbeat: new Date() }), 60_000)
     : null;
 
+  // ELLIE-447: Hoisted so catch block can call failCreature on any failure path
+  let sessionIds: { tree_id: string; branch_id: string; creature_id: string; entity_id: string } | undefined;
+
   try {
     // 1. Fetch ticket details (with retry for transient Plane API failures)
     const retryOpts = { runId, agentType, workItemId };
@@ -188,8 +192,8 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       logger.warn("Work session start failed (non-fatal)", err);
     }
 
-    const sessionIds = sessionResult?.success ? {
-      tree_id: sessionResult.tree_id,
+    sessionIds = sessionResult?.success ? {
+      tree_id: sessionResult.tree_id as string,
       branch_id: (sessionResult.creatures as any)?.[0]?.branch_id,
       creature_id: (sessionResult.creatures as any)?.[0]?.id,
       entity_id: (sessionResult.creatures as any)?.[0]?.entity_id,
@@ -206,6 +210,12 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     );
     if (!dispatchResult.success || !dispatchResult.result) {
       const retryNote = dispatchResult.attempts > 1 ? ` (after ${dispatchResult.attempts} attempts)` : "";
+      // ELLIE-447: Mark creature failed — agent never started
+      if (sessionIds?.creature_id) {
+        failCreature(sessionIds.creature_id, `Agent dispatch failed${retryNote}`).catch(err =>
+          logger.warn("failCreature failed (non-fatal)", { err: err.message })
+        );
+      }
       emitEvent(runId, "failed", agentType, workItemId, { error: `Agent dispatch failed${retryNote}` });
       endRun(runId, "failed");
       if (jobId) {
@@ -242,6 +252,12 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     );
 
     // 6. Call Claude with runId for heartbeat tracking (with retry for transient failures)
+    // ELLIE-447: Transition creature dispatched → working before the agent begins execution
+    if (sessionIds?.creature_id) {
+      startCreature(sessionIds.creature_id).catch(err =>
+        logger.warn("startCreature failed (non-fatal)", { creature_id: sessionIds.creature_id, err: err.message })
+      );
+    }
     // Enter dispatch mode — auto-approves dev tools + extends TTL/timeouts
     enterDispatchMode();
     emitEvent(runId, "progress", agentType, workItemId, { step: "calling_claude" });
@@ -275,6 +291,12 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     }
     if (!claudeResult.success || !claudeResult.result) {
       const retryNote = claudeResult.attempts > 1 ? ` (after ${claudeResult.attempts} attempts)` : "";
+      // ELLIE-447: Mark creature failed — Claude exited with error
+      if (sessionIds?.creature_id) {
+        failCreature(sessionIds.creature_id, `Claude call failed${retryNote}`).catch(err =>
+          logger.warn("failCreature failed (non-fatal)", { err: err.message })
+        );
+      }
       emitEvent(runId, "failed", agentType, workItemId, {
         error: `Claude call failed${retryNote}`,
         claude_error: claudeResult.error?.message?.slice(0, 500),
@@ -315,6 +337,16 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       trace_id: getTraceId(),
     });
     endRun(runId, "completed");
+    // ELLIE-447: Complete creature with meaningful result data (response preview + timing)
+    if (sessionIds?.creature_id) {
+      completeCreature(sessionIds.creature_id, {
+        response_preview: rawResponse.replace(/\[MEMORY:[^\]]*\]/gi, "").trim().slice(0, 1000),
+        duration_ms: durationMs,
+        work_item_id: workItemId,
+      }).catch(err =>
+        logger.warn("completeCreature failed (non-fatal)", { creature_id: sessionIds.creature_id, err: err.message })
+      );
+    }
     // ELLIE-445: Verify dev agents produced file changes before marking completed
     if (jobId) {
       const { verified, note } = await verifyJobWork(agentType, startTime);
@@ -346,6 +378,10 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
   } catch (err: unknown) {
     if (heartbeatInterval) clearInterval(heartbeatInterval);
     const errMsg = err instanceof Error ? err.message : String(err);
+    // ELLIE-447: Mark creature failed on any unexpected error
+    if (sessionIds?.creature_id) {
+      failCreature(sessionIds.creature_id, errMsg.slice(0, 500)).catch(() => {});
+    }
     const { errorClass, reason } = classifyError(err);
     emitEvent(runId, "failed", agentType, workItemId, {
       error: errMsg.slice(0, 500),

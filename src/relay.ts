@@ -226,6 +226,17 @@ setTimeout(async () => {
   }
 }, 10_000);
 
+// ELLIE-447: Creature reaper — mark timed-out creatures as failed (every 5 minutes)
+setInterval(async () => {
+  try {
+    const { reapTimedOutCreatures } = await import('../../ellie-forest/src/work-sessions');
+    const reaped = await reapTimedOutCreatures();
+    if (reaped.length > 0) console.log(`[creature-reaper] Reaped ${reaped.length} timed-out creature(s)`);
+  } catch (err: unknown) {
+    logger.error("Creature reaper error", { error: err instanceof Error ? err.message : String(err) });
+  }
+}, 5 * 60_000);
+
 // Memory maintenance: expire short-term memories (every 15 minutes)
 setInterval(async () => {
   try {
