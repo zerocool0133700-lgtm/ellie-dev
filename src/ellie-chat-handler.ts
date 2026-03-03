@@ -1240,7 +1240,8 @@ export async function runSpecialistAsync(
     }
 
     if (jobId) {
-      updateJob(jobId, { current_step: "calling_claude", model: agentModel || undefined, last_heartbeat: new Date() });
+      // Bug 4: increment completed_steps when context gathering finishes
+      updateJob(jobId, { current_step: "calling_claude", model: agentModel || undefined, last_heartbeat: new Date(), increment_completed_steps: 1 });
       appendJobEvent(jobId, "calling_claude", { agent_type: agentName, model: agentModel });
     }
 
@@ -1280,16 +1281,19 @@ export async function runSpecialistAsync(
       const { verified, note } = await verifyJobWork(agentName, startTime);
       const finalStatus = verified ? "completed" : "responded";
       // ELLIE-446: Populate token + cost accounting
-      const buildMetrics = getLastBuildMetrics();
-      const tokensIn = buildMetrics?.totalTokens ?? 0;
+      // Bug 1: use specBuildMetrics captured before the Claude call, not getLastBuildMetrics()
+      // which is a global that any concurrent request could have overwritten during the run
+      const tokensIn = specBuildMetrics?.totalTokens ?? 0;
       const tokensOut = Math.round(rawResponse.length / 4);
       const costUsd = estimateJobCost(agentModel, tokensIn, tokensOut);
       updateJob(jobId, {
         status: finalStatus, total_duration_ms: durationMs, current_step: null,
         tokens_in: tokensIn, tokens_out: tokensOut, cost_usd: costUsd,
+        increment_completed_steps: 1, // Bug 4: Claude call done
         result: { response_length: rawResponse.length },
       });
-      appendJobEvent(jobId, finalStatus, { duration_ms: durationMs, verified, verification_note: note });
+      // Bug 3: duration_ms belongs in opts (4th param), not details
+      appendJobEvent(jobId, finalStatus, { verified, verification_note: note }, { duration_ms: durationMs });
       if (!verified) {
         console.log(`[jobs] Job ${jobId.slice(0, 8)} marked 'responded' — ${note}`);
       }

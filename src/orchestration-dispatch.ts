@@ -247,12 +247,14 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     emitEvent(runId, "progress", agentType, workItemId, { step: "calling_claude" });
     // ELLIE-440: Update job with model + forest session IDs (already running)
     if (jobId) {
+      // Bug 4: increment completed_steps when context gathering + dispatch finishes
       updateJob(jobId, {
         current_step: "calling_claude",
         model: dispatch.agent.model,
         tree_id: sessionIds?.tree_id as string | undefined,
         creature_id: sessionIds?.creature_id as string | undefined,
         last_heartbeat: new Date(),
+        increment_completed_steps: 1,
       });
       appendJobEvent(jobId, "calling_claude", { agent_type: agentType, model: dispatch.agent.model });
     }
@@ -324,9 +326,11 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       await updateJob(jobId, {
         status: finalStatus, total_duration_ms: durationMs, current_step: null,
         tokens_in: tokensIn, tokens_out: tokensOut, cost_usd: costUsd,
+        increment_completed_steps: 1, // Bug 4: Claude call done
         result: { response_length: rawResponse.length },
       });
-      await appendJobEvent(jobId, finalStatus, { duration_ms: durationMs, verified, verification_note: note });
+      // Bug 3: duration_ms belongs in opts (4th param), not details
+      await appendJobEvent(jobId, finalStatus, { verified, verification_note: note }, { duration_ms: durationMs });
       if (!verified) logger.warn("Job marked 'responded' — work unverified", { jobId: jobId.slice(0, 8), note });
     }
 

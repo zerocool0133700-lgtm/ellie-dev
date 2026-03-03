@@ -82,6 +82,8 @@ export interface UpdateJobOpts {
   status?: JobStatus;
   current_step?: string | null;
   completed_steps?: number;
+  /** Atomically add to completed_steps (SQL: completed_steps + N). Use instead of completed_steps for increments. */
+  increment_completed_steps?: number;
   last_heartbeat?: Date;
   total_duration_ms?: number;
   tokens_in?: number;
@@ -158,6 +160,7 @@ export async function updateJob(jobId: string, update: UpdateJobOpts): Promise<v
     if (update.status           !== undefined) sets.push(sql`status = ${update.status}::job_status`);
     if (update.current_step     !== undefined) sets.push(sql`current_step = ${update.current_step}`);
     if (update.completed_steps  !== undefined) sets.push(sql`completed_steps = ${update.completed_steps}`);
+    if (update.increment_completed_steps !== undefined) sets.push(sql`completed_steps = completed_steps + ${update.increment_completed_steps}`);
     if (update.last_heartbeat   !== undefined) sets.push(sql`last_heartbeat = ${update.last_heartbeat}`);
     if (update.total_duration_ms !== undefined) sets.push(sql`total_duration_ms = ${update.total_duration_ms}`);
     if (update.tokens_in        !== undefined) sets.push(sql`tokens_in = ${update.tokens_in}`);
@@ -322,6 +325,25 @@ export async function getJobMetrics(since?: string): Promise<JobMetrics> {
   }
 }
 
+// ── Token + Cost Estimation ────────────────────────────────────────────────
+
+/** USD per million tokens (input/output) for known models. */
+const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  "claude-haiku-4-5-20251001":   { input: 0.80,  output: 4.0  },
+  "claude-sonnet-4-5-20250929":  { input: 3.0,   output: 15.0 },
+  "claude-sonnet-4-6":           { input: 3.0,   output: 15.0 },
+  "claude-opus-4-6":             { input: 15.0,  output: 75.0 },
+};
+
+/**
+ * Estimate cost in USD from token counts + model name.
+ * Falls back to sonnet pricing when model is unknown.
+ */
+export function estimateJobCost(model: string | null | undefined, tokensIn: number, tokensOut: number): number {
+  const pricing = (model ? MODEL_PRICING[model] : null) ?? MODEL_PRICING["claude-sonnet-4-6"];
+  return (tokensIn * pricing.input + tokensOut * pricing.output) / 1_000_000;
+}
+
 // ── Reliability Helpers ─────────────────────────────────────────────────────
 
 /**
@@ -335,7 +357,7 @@ export async function cleanupOrphanedJobs(): Promise<number> {
       SET status = 'failed'::job_status,
           error_count = error_count + 1,
           updated_at = now()
-      WHERE status = 'running'
+      WHERE status IN ('running', 'queued')
         AND updated_at < now() - interval '10 minutes'
       RETURNING job_id
     `;
