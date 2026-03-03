@@ -106,8 +106,13 @@ export const bot = new Bot(BOT_TOKEN);
 
 // ── periodicTask imported from ./periodic-task.ts (ELLIE-465) ─
 
-// ELLIE-462: Bot restart gate — prevent concurrent restarts
+// ELLIE-462: Bot restart gate — prevent concurrent restarts and rapid flap loops
+// ELLIE-467: Added 5-min cooldown between restarts (_lastBotRestartAt)
+// grammY v1 stop→start on the same Bot instance is safe: long-poll is cancelled
+// and the internal polling loop restarts without creating a new Bot object.
 let _botRestarting = false;
+let _lastBotRestartAt = 0;
+const BOT_RESTART_COOLDOWN_MS = 5 * 60_000;
 
 // Start approval expiry cleanup
 startExpiryCleanup();
@@ -123,7 +128,7 @@ setInterval(async () => {
     } catch (err: unknown) {
       logger.error("Stale conversation cleanup error", { error: err instanceof Error ? err.message : String(err) });
     }
-    expireStaleAgentSessions(supabase).catch(() => {});
+    expireStaleAgentSessions(supabase).catch(err => logger.warn("expireStaleAgentSessions failed", { error: err instanceof Error ? err.message : String(err) }));
   }
   // ELLIE-408: Probe Anthropic recovery while in fallback mode
   if (isFallbackActive() && shouldProbeRecovery() && anthropic) {
@@ -144,7 +149,7 @@ setInterval(async () => {
         event: "incident_resolved",
         telegramMessage: "✓ Claude recovered — Ellie back to normal",
       });
-    }).catch(() => {}); // still down, stay in fallback
+    }).catch(() => {}); // intentionally silent — still down, staying in fallback
   }
   // Expire Ellie Chat pending confirm actions (15-min TTL)
   const now = Date.now();
@@ -158,9 +163,12 @@ setInterval(async () => {
   runHealthCheck({
     getMe: () => bot.api.getMe(),
     onTelegramDown: (count) => {
-      // ELLIE-462: After 2 consecutive "down" results (= ~10 min), restart the bot
-      if (count >= 2 && !_botRestarting) {
+      // ELLIE-462: After 2 consecutive "down" results (≈10 min), restart the bot.
+      // ELLIE-467: Cooldown guards against flap loops — min 5 min between restarts.
+      const cooldownOk = Date.now() - _lastBotRestartAt > BOT_RESTART_COOLDOWN_MS;
+      if (count >= 2 && !_botRestarting && cooldownOk) {
         _botRestarting = true;
+        _lastBotRestartAt = Date.now();
         logger.warn("[health-restart] Telegram down 2+ checks — restarting bot", { count });
         bot.stop()
           .then(() => bot.start())
@@ -176,7 +184,7 @@ setInterval(async () => {
         _botRestarting = false; // reset on recovery
       }
     },
-  }).catch(() => {});
+  }).catch(err => logger.warn("Health check cycle failed", { error: err instanceof Error ? err.message : String(err) }));
 }, 5 * 60_000);
 
 // Calendar sync (every 5 minutes)
@@ -213,7 +221,7 @@ registerJobVines().catch(err => logger.warn("[job-vines] Startup registration fa
 restoreModeState().catch(err => logger.warn("Mode state restore failed (non-fatal)", err));
 
 // ELLIE-374: Validate all archetype files on startup
-import("./prompt-builder.ts").then(({ validateArchetypes }) => validateArchetypes()).catch(() => {});
+import("./prompt-builder.ts").then(({ validateArchetypes }) => validateArchetypes()).catch(err => logger.warn("Archetype validation failed", { error: err instanceof Error ? err.message : String(err) }));
 
 // Bridge write notifications — Telegram + ellie-chat (ELLIE-199)
 onBridgeWrite(({ collaborator, content, memoryId, type, workItemId }) => {

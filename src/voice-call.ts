@@ -207,7 +207,7 @@ async function processAudio(session: CallSession): Promise<void> {
 
     // Format current time with timezone
     const now = new Date();
-    const USER_TIMEZONE = process.env.USER_TIMEZONE || "America/Chicago";
+    const { USER_TIMEZONE } = await import("./timezone.ts");
     const timeStr = now.toLocaleString("en-US", {
       timeZone: USER_TIMEZONE,
       weekday: "long",

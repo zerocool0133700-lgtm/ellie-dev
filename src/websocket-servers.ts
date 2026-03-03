@@ -209,11 +209,13 @@ async function deliverPendingReadouts(ws: WebSocket): Promise<void> {
 /** ELLIE-399/463: Deliver undelivered messages + processing state + conversation history on reconnect. */
 async function deliverCatchUp(ws: WebSocket, userId: string, sinceTs?: number): Promise<void> {
   try {
-    // ELLIE-463: Drain in-memory buffer first — covers the case where Supabase is also down
-    drainMemoryBuffer(userId, ws);
+    // ELLIE-463: Drain in-memory buffer first — covers the case where Supabase is also down.
+    // ELLIE-467: Capture returned IDs so we can skip them in the DB query (dedup).
+    const bufferedIds = drainMemoryBuffer(userId, ws);
 
     // 1. Deliver any undelivered messages (original ELLIE-399 behavior)
-    const undelivered = await getUndeliveredMessages(userId, sinceTs);
+    const undelivered = (await getUndeliveredMessages(userId, sinceTs))
+      .filter(m => !bufferedIds.includes(m.id));
     if (undelivered.length > 0) {
       const deliveredIds: string[] = [];
       for (const msg of undelivered) {

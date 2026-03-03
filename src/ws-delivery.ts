@@ -48,27 +48,33 @@ function pushToMemoryBuffer(userId: string, payload: Record<string, unknown>): v
 /**
  * Send any buffered messages to a reconnecting client.
  * Called from websocket-servers.ts deliverCatchUp on every reconnect.
+ *
+ * Returns the memoryIds of messages that were successfully sent so the
+ * caller can exclude them from the DB catch-up query (ELLIE-467 dedup).
  */
-export function drainMemoryBuffer(userId: string, ws: WebSocket): void {
-  if (!userId) return;
+export function drainMemoryBuffer(userId: string, ws: WebSocket): string[] {
+  if (!userId) return [];
   const buf = _memoryBuffer.get(userId);
-  if (!buf || buf.length === 0) return;
+  if (!buf || buf.length === 0) return [];
 
   const now = Date.now();
   const fresh = buf.filter(m => now - m.bufferedAt < BUFFER_TTL_MS);
   _memoryBuffer.delete(userId);
 
-  if (fresh.length === 0) return;
+  if (fresh.length === 0) return [];
   logger.info(`[buffer] Draining ${fresh.length} buffered message(s) for ${userId}`);
+  const deliveredIds: string[] = [];
   for (const { payload } of fresh) {
     if (ws.readyState !== WebSocket.OPEN) break;
     try {
       ws.send(JSON.stringify({ ...payload, buffered: true }));
+      if (typeof payload.memoryId === "string") deliveredIds.push(payload.memoryId);
     } catch {
       // Client closed again during drain — stop
       break;
     }
   }
+  return deliveredIds;
 }
 
 // ── In-flight processing tracker ─────────────────────────────
@@ -121,7 +127,7 @@ export function deliverResponse(
   }
   // ELLIE-463: Buffer failed sends for immediate reconnect drain
   if (!sent && userId) {
-    pushToMemoryBuffer(userId, payload as unknown as Record<string, unknown>);
+    pushToMemoryBuffer(userId, payload as Record<string, unknown>);
   }
   return sent;
 }

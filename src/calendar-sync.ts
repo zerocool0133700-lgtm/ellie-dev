@@ -42,7 +42,7 @@ export interface CalendarEvent {
   last_synced: string;
 }
 
-const USER_TIMEZONE = "America/Chicago";
+import { USER_TIMEZONE } from "./timezone.ts";
 
 /** Shape for a Google Calendar API event response (based on actual usage) */
 interface GoogleCalendarEvent {

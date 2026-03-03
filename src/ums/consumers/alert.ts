@@ -283,7 +283,8 @@ async function isQuietHours(priority: string): Promise<boolean> {
     if (config.bypass_critical && priority === "critical") return false;
 
     const now = new Date();
-    const cst = new Date(now.toLocaleString("en-US", { timeZone: config.timezone || "America/Chicago" }));
+    const { USER_TIMEZONE } = await import("../../timezone.ts");
+    const cst = new Date(now.toLocaleString("en-US", { timeZone: config.timezone || USER_TIMEZONE }));
     const currentMinutes = cst.getHours() * 60 + cst.getMinutes();
 
     const [startH, startM] = config.start.split(":").map(Number);

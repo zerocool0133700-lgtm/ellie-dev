@@ -21,6 +21,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { UnifiedMessage } from "../types.ts";
 import { subscribe, queryMessages } from "../events.ts";
 import { log } from "../../logger.ts";
+import { getToday, toDateString } from "../../timezone.ts";
 
 const logger = log.child("ums-consumer-analytics");
 
@@ -202,8 +203,8 @@ async function ingestActivity(supabase: SupabaseClient, message: UnifiedMessage)
   }
 
   // Update in-memory stats
-  const today = new Date().toISOString().split("T")[0];
-  const activityDay = new Date(ts).toISOString().split("T")[0];
+  const today = getToday();
+  const activityDay = toDateString(ts);
   if (activityDay === today) {
     stats.todayMinutes += duration;
     stats.todayMessages++;
@@ -294,8 +295,8 @@ function buildTitle(message: UnifiedMessage): string {
 // ── Today's stats refresh ─────────────────────────────────────
 
 async function refreshTodayStats(supabase: SupabaseClient): Promise<void> {
-  const today = new Date().toISOString().split("T")[0];
-  const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+  const today = getToday();
+  const tomorrow = toDateString(Date.now() + 24 * 60 * 60 * 1000);
 
   const [totalResult, categoryResult, countResult] = await Promise.allSettled([
     supabase.from("activity_log")
@@ -339,8 +340,7 @@ async function refreshTodayStats(supabase: SupabaseClient): Promise<void> {
 // ── Daily rollup ──────────────────────────────────────────────
 
 async function rollupYesterdayIfNeeded(supabase: SupabaseClient): Promise<void> {
-  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const dateStr = yesterday.toISOString().split("T")[0];
+  const dateStr = toDateString(Date.now() - 24 * 60 * 60 * 1000);
 
   // Check if already rolled up
   const { data: existing } = await supabase
@@ -359,8 +359,7 @@ async function rollupYesterdayIfNeeded(supabase: SupabaseClient): Promise<void> 
  * Rolls up a single day into the productivity_metrics table.
  */
 export async function rollupDay(supabase: SupabaseClient, dateStr: string): Promise<void> {
-  const nextDay = new Date(new Date(dateStr).getTime() + 24 * 60 * 60 * 1000)
-    .toISOString().split("T")[0];
+  const nextDay = toDateString(new Date(dateStr).getTime() + 24 * 60 * 60 * 1000);
 
   const { data: activities, error } = await supabase
     .from("activity_log")
@@ -583,7 +582,7 @@ function computeContentTypes(messages: UnifiedMessage[], total: number): Content
  * Get summary for a specific date with category breakdown.
  */
 export async function getDailySummary(supabase: SupabaseClient, dateStr?: string): Promise<DaySummary> {
-  const date = dateStr || new Date().toISOString().split("T")[0];
+  const date = dateStr || getToday();
 
   // Try metrics table first (for past days)
   const { data: metrics } = await supabase
@@ -615,8 +614,7 @@ export async function getDailySummary(supabase: SupabaseClient, dateStr?: string
   }
 
   // Live computation for today
-  const nextDay = new Date(new Date(date).getTime() + 24 * 60 * 60 * 1000)
-    .toISOString().split("T")[0];
+  const nextDay = toDateString(new Date(date).getTime() + 24 * 60 * 60 * 1000);
 
   const { data: activities } = await supabase
     .from("activity_log")
@@ -675,7 +673,7 @@ export async function getTimeDistribution(
 ): Promise<TimeDistribution> {
   const now = new Date();
   const since = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
-  const sinceStr = since.toISOString().split("T")[0];
+  const sinceStr = toDateString(since);
 
   const { data: metrics } = await supabase
     .from("productivity_metrics")
@@ -716,7 +714,7 @@ export async function getTimeDistribution(
  * Get weekly patterns from 30-day window of productivity_metrics.
  */
 export async function getPatterns(supabase: SupabaseClient): Promise<WeeklyPattern[]> {
-  const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+  const since = toDateString(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
   const { data: metrics } = await supabase
     .from("productivity_metrics")
@@ -758,9 +756,8 @@ export async function getPatterns(supabase: SupabaseClient): Promise<WeeklyPatte
 export async function getFocusBlocks(
   supabase: SupabaseClient, dateStr?: string,
 ): Promise<FocusBlock[]> {
-  const date = dateStr || new Date().toISOString().split("T")[0];
-  const nextDay = new Date(new Date(date).getTime() + 24 * 60 * 60 * 1000)
-    .toISOString().split("T")[0];
+  const date = dateStr || getToday();
+  const nextDay = toDateString(new Date(date).getTime() + 24 * 60 * 60 * 1000);
 
   const { data: activities } = await supabase
     .from("activity_log")
@@ -843,7 +840,7 @@ function linearRegression(points: number[]): { slope: number; intercept: number 
 export async function getTrends(
   supabase: SupabaseClient, days = 14,
 ): Promise<TrendAnalysis[]> {
-  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+  const since = toDateString(Date.now() - days * 24 * 60 * 60 * 1000);
 
   const { data: metrics } = await supabase
     .from("productivity_metrics")
@@ -893,7 +890,7 @@ export async function getTrends(
 export async function detectAnomalies(
   supabase: SupabaseClient, days = 30,
 ): Promise<AnomalyDay[]> {
-  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+  const since = toDateString(Date.now() - days * 24 * 60 * 60 * 1000);
 
   const { data: metrics } = await supabase
     .from("productivity_metrics")
@@ -1026,7 +1023,7 @@ export async function assessBurnoutRisk(
   const signals: string[] = [];
   let score = 0;
 
-  const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+  const since = toDateString(Date.now() - 14 * 24 * 60 * 60 * 1000);
 
   const { data: metrics } = await supabase
     .from("productivity_metrics")

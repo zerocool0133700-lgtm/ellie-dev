@@ -16,7 +16,7 @@ import { log } from "./logger.ts";
 const logger = log.child("conversation");
 
 const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
-const USER_TIMEZONE = process.env.USER_TIMEZONE || "UTC";
+import { USER_TIMEZONE } from "./timezone.ts";
 
 // How many messages between rolling summary updates
 const SUMMARY_INTERVAL = 8;

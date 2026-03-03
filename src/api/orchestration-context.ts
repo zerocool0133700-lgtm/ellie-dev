@@ -37,7 +37,8 @@ export async function getOrchestrationContext(): Promise<string> {
       sections.push("");
       sections.push("RECENT COMPLETIONS:");
       for (const evt of completions) {
-        const time = new Date(evt.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const { formatTime24 } = await import("../timezone.ts");
+        const time = formatTime24(evt.created_at);
         const workItem = evt.work_item_id ? ` (${evt.work_item_id})` : "";
         const duration = evt.payload?.duration_ms
           ? ` in ${formatElapsed(evt.payload.duration_ms as number)}`

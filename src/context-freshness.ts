@@ -18,7 +18,7 @@ import type { ContextMode } from "./context-mode.ts";
 const logger = log.child("context:freshness");
 const modeLogger = log.child("context:mode");
 
-const USER_TIMEZONE = process.env.USER_TIMEZONE || "America/Chicago";
+import { USER_TIMEZONE } from "./timezone.ts";
 
 // ── Types ────────────────────────────────────────────────────
 

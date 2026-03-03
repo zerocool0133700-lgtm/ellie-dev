@@ -12,6 +12,7 @@ import type { Bot } from "grammy";
 import type { ApiRequest, ApiResponse } from "./types.ts";
 import { sendGoogleChatMessage, isGoogleChatEnabled } from "../google-chat.ts";
 import { log } from "../logger.ts";
+import { USER_TIMEZONE, getToday } from "../timezone.ts";
 
 const logger = log.child("rollup");
 
@@ -98,6 +99,7 @@ async function buildDigestForDate(
   if (!cleanSessions.length && !noiseSessions.length) return null;
 
   // Fetch all updates for ALL sessions (clean + noise) in one query
+  // All dates stored as UTC; display timezone (CST) is applied at the frontend layer.
   const allSessionIds = sessions.map((s: SessionRow) => s.id);
   const { data: updates } = await supabase
     .from("work_session_updates")
@@ -105,9 +107,17 @@ async function buildDigestForDate(
     .in("session_id", allSessionIds)
     .order("created_at", { ascending: true });
 
+  // ELLIE-467: Pre-index updates by session_id to avoid O(n*m) filter inside the session loop
+  const updatesBySession = new Map<string, UpdateRow[]>();
+  for (const u of (updates || []) as UpdateRow[]) {
+    const bucket = updatesBySession.get(u.session_id);
+    if (bucket) bucket.push(u);
+    else updatesBySession.set(u.session_id, [u]);
+  }
+
   // Helper: build an entry from a session row
   const buildEntry = (s: SessionRow): SessionEntry => {
-    const sessionUpdates = ((updates || []) as UpdateRow[]).filter((u: UpdateRow) => u.session_id === s.id);
+    const sessionUpdates = updatesBySession.get(s.id) ?? [];
     const durationMs = new Date(s.completed_at).getTime() - new Date(s.created_at).getTime();
     return {
       workItemId: s.work_item_id,
@@ -176,6 +186,7 @@ function formatDigestText(digest: DailyDigest): string {
     weekday: "long",
     month: "long",
     day: "numeric",
+    timeZone: USER_TIMEZONE,
   });
 
   const lines: string[] = [
@@ -225,7 +236,7 @@ export async function generateRollup(req: ApiRequest, res: ApiResponse, supabase
     const { date, notify = true } = req.body || {};
 
     // Default to today in UTC
-    const rollupDate = (typeof date === "string" ? date : "") || new Date().toISOString().split("T")[0];
+    const rollupDate = (typeof date === "string" ? date : "") || getToday();
 
     // Validate date format
     if (!/^\d{4}-\d{2}-\d{2}$/.test(rollupDate)) {

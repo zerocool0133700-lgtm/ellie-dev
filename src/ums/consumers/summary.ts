@@ -117,7 +117,7 @@ async function getGtdSummary(supabase: SupabaseClient): Promise<ModuleSummary> {
     .from("todos")
     .select("*", { count: "exact", head: true })
     .in("status", ["next", "waiting", "project"])
-    .lte("due_date", new Date().toISOString().split("T")[0])
+    .lte("due_date", (await import("../../timezone.ts")).getToday())
     .not("due_date", "is", null);
 
   const inbox = inboxCount ?? 0;

@@ -14,6 +14,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { UnifiedMessage } from "../types.ts";
 import { subscribe } from "../events.ts";
 import { log } from "../../logger.ts";
+import { USER_TIMEZONE, getToday, formatTime } from "../../timezone.ts";
 
 const logger = log.child("ums-consumer-calendar-intel");
 
@@ -453,7 +454,7 @@ function rebuildInsights(): void {
   }
 
   // Focus block opportunities: gaps >= focusBlockMinHours between meetings today
-  const todayStr = new Date().toISOString().split("T")[0];
+  const todayStr = getToday();
   const todayEvents = (dayBuckets.get(todayStr) || [])
     .filter(e => !e.all_day)
     .sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime());
@@ -463,12 +464,8 @@ function rebuildInsights(): void {
     const gapEnd = new Date(todayEvents[i + 1].start_time).getTime();
     const gapHours = (gapEnd - gapStart) / (1000 * 60 * 60);
     if (gapHours >= prefs.focusBlockMinHours) {
-      const gapStartStr = new Date(gapStart).toLocaleTimeString("en-US", {
-        hour: "numeric", minute: "2-digit", timeZone: "America/Chicago",
-      });
-      const gapEndStr = new Date(gapEnd).toLocaleTimeString("en-US", {
-        hour: "numeric", minute: "2-digit", timeZone: "America/Chicago",
-      });
+      const gapStartStr = formatTime(gapStart);
+      const gapEndStr = formatTime(gapEnd);
       insights.push({
         type: "focus_opportunity",
         severity: "info",
@@ -522,7 +519,7 @@ function needsPrep(title: string, attendeeCount: number): boolean {
 async function runPatternAnalysisIfNeeded(): Promise<void> {
   if (!supabaseRef) return;
 
-  const today = new Date().toISOString().split("T")[0];
+  const today = getToday();
   const currentHour = new Date().getHours();
 
   // Only run at night (2-4 AM CST range)
@@ -543,7 +540,7 @@ async function runPatternAnalysisIfNeeded(): Promise<void> {
 async function runPatternAnalysis(): Promise<void> {
   if (!supabaseRef) return;
 
-  const today = new Date().toISOString().split("T")[0];
+  const today = getToday();
   const windowStart = new Date(Date.now() - prefs.analysisWindowDays * 24 * 60 * 60 * 1000).toISOString();
 
   let events: Array<Record<string, unknown>>;
@@ -708,7 +705,7 @@ async function buildPrepNotes(ev: CalendarIntelRow): Promise<string | null> {
 
   // ── 1. Meeting basics ──
   const startStr = new Date(ev.start_time).toLocaleString("en-US", {
-    weekday: "short", hour: "numeric", minute: "2-digit", timeZone: "America/Chicago",
+    weekday: "short", hour: "numeric", minute: "2-digit", timeZone: USER_TIMEZONE,
   });
   const basics: string[] = [`Type: ${ev.meeting_type.replace(/_/g, " ")}`, `When: ${startStr}`];
   if (ev.location) basics.push(`Where: ${ev.location}`);
@@ -1024,7 +1021,7 @@ export function getConflictingEvents(): CalendarIntelRow[] {
 
 /** Suggest focus blocks — gaps in today's schedule. */
 export function suggestFocusBlocks(): Array<{ start: string; end: string; hours: number }> {
-  const todayStr = new Date().toISOString().split("T")[0];
+  const todayStr = getToday();
   const events = Array.from(intelCache.values())
     .filter(e => e.start_time.startsWith(todayStr) && !e.all_day)
     .sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime());

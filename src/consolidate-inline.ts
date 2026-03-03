@@ -35,7 +35,7 @@ interface ConversationBlock {
   messages: Array<{ role: string; content: string; created_at: string }>;
 }
 
-const USER_TIMEZONE = process.env.USER_TIMEZONE || "UTC";
+import { USER_TIMEZONE } from "./timezone.ts";
 const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
 
 /**

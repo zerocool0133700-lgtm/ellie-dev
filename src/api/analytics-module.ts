@@ -16,6 +16,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ApiRequest, ApiResponse } from "./types.ts";
+import { getToday, toDateString } from "../timezone.ts";
 
 // ── Summary ─────────────────────────────────────────────────
 
@@ -85,8 +86,7 @@ export async function getTimeline(
       query = query.eq("source", source);
     }
     if (date) {
-      const nextDay = new Date(new Date(date).getTime() + 24 * 60 * 60 * 1000)
-        .toISOString().split("T")[0];
+      const nextDay = toDateString(new Date(date).getTime() + 24 * 60 * 60 * 1000);
       query = query.gte("started_at", date).lt("started_at", nextDay);
     }
 
@@ -383,7 +383,7 @@ export async function getMetrics(
 
     if (error && error.code === "PGRST116") {
       // Not found — try live rollup for today
-      const today = new Date().toISOString().split("T")[0];
+      const today = getToday();
       if (date === today) {
         const { getDailySummary } = await import("../ums/consumers/analytics.ts");
         const summary = await getDailySummary(supabase, date);
@@ -542,13 +542,13 @@ function parsePeriod(period: string): { start: string; end: string } {
     const startOfWeek = new Date(jan4.getTime() - (jan4.getDay() - 1) * 86400000 + (week - 1) * 7 * 86400000);
     const endOfWeek = new Date(startOfWeek.getTime() + 7 * 86400000);
     return {
-      start: startOfWeek.toISOString().split("T")[0],
-      end: endOfWeek.toISOString().split("T")[0],
+      start: toDateString(startOfWeek),
+      end: toDateString(endOfWeek),
     };
   }
 
   // Single date: treat as that day
-  return { start: period, end: new Date(new Date(period).getTime() + 86400000).toISOString().split("T")[0] };
+  return { start: period, end: toDateString(new Date(period).getTime() + 86400000) };
 }
 
 async function getMetricsForRange(
