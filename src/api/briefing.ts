@@ -8,11 +8,13 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Bot } from "grammy";
+import { InputFile, type Bot } from "grammy";
+import { textToSpeechOgg, getTTSProviderInfo } from "../tts.ts";
 import type { ApiRequest, ApiResponse } from "./types.ts";
 import { getCalendarInsights, clearInsights } from "../ums/consumers/calendar-intel.ts";
 import { sendGoogleChatMessage, isGoogleChatEnabled } from "../google-chat.ts";
 import { log } from "../logger.ts";
+import { USER_TIMEZONE, getToday, formatTime } from "../timezone.ts";
 
 const logger = log.child("briefing");
 
@@ -62,12 +64,8 @@ async function fetchCalendarEvents(today: string): Promise<BriefingSection> {
     `;
 
     for (const ev of events) {
-      const start = new Date(ev.start_time).toLocaleTimeString("en-US", {
-        hour: "numeric", minute: "2-digit", timeZone: "America/Chicago",
-      });
-      const end = new Date(ev.end_time).toLocaleTimeString("en-US", {
-        hour: "numeric", minute: "2-digit", timeZone: "America/Chicago",
-      });
+      const start = formatTime(ev.start_time);
+      const end = formatTime(ev.end_time);
       let text = `${start}–${end}: ${ev.title}`;
       if (ev.location) text += ` (${ev.location})`;
       const attendeeCount = Array.isArray(ev.attendees) ? ev.attendees.length : 0;
@@ -114,7 +112,7 @@ async function fetchGtdState(supabase: SupabaseClient): Promise<BriefingSection>
     }
 
     // Overdue items
-    const today = new Date().toISOString().split("T")[0];
+    const today = getToday();
     const { data: overdue } = await supabase
       .from("todos")
       .select("content, due_date, priority")
@@ -375,6 +373,7 @@ function formatBriefingMarkdown(sections: BriefingSection[], date: string): stri
     weekday: "long",
     month: "long",
     day: "numeric",
+    timeZone: USER_TIMEZONE,
   });
 
   const lines: string[] = [
@@ -478,7 +477,7 @@ export async function generateBriefingHandler(
 ): Promise<void> {
   try {
     const { date, notify = false } = req.body || {};
-    const briefingDate = (typeof date === "string" ? date : "") || new Date().toISOString().split("T")[0];
+    const briefingDate = (typeof date === "string" ? date : "") || getToday();
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(briefingDate)) {
       res.status(400).json({ error: "Invalid date format. Use YYYY-MM-DD." });
@@ -562,7 +561,7 @@ export async function getLatestBriefing(req: ApiRequest, res: ApiResponse, supab
 export async function getBriefingHistory(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
   try {
     const days = Math.min(Number(req.query?.days) || 7, 30);
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toLocaleDateString("en-CA", { timeZone: USER_TIMEZONE });
 
     const { data, error } = await supabase
       .from("briefings")
@@ -587,7 +586,7 @@ export async function getBriefingHistory(req: ApiRequest, res: ApiResponse, supa
 async function deliverBriefing(briefing: Briefing, supabase: SupabaseClient, bot: Bot): Promise<void> {
   const channels: string[] = [];
 
-  // Telegram: brief summary
+  // Telegram: brief summary (text)
   try {
     const lines = briefing.formatted_text.split("\n");
     const tgText = lines.slice(0, 15).join("\n") + (lines.length > 15 ? "\n\n…full briefing in Google Chat" : "");
@@ -595,6 +594,27 @@ async function deliverBriefing(briefing: Briefing, supabase: SupabaseClient, bot
     channels.push("telegram");
   } catch (err) {
     logger.warn("Telegram briefing delivery failed", err);
+  }
+
+  // Telegram: voice note (ELLIE-444) — TTS the briefing for hands-free listening
+  if (getTTSProviderInfo().current) {
+    try {
+      // Strip markdown/emoji for clean speech
+      const voiceText = briefing.formatted_text
+        .replace(/\*\*/g, "")
+        .replace(/[▸◦🔴📋📅🎯💻📨💬🌲~⚠]/gu, "")
+        .replace(/…/g, "...")
+        .replace(/\n{2,}/g, "\n")
+        .trim()
+        .slice(0, 2000);
+      const audioBuffer = await textToSpeechOgg(voiceText);
+      if (audioBuffer) {
+        await bot.api.sendVoice(TELEGRAM_USER_ID, new InputFile(audioBuffer, "briefing.ogg"));
+        channels.push("voice");
+      }
+    } catch (err) {
+      logger.warn("Telegram voice briefing delivery failed", err);
+    }
   }
 
   // Google Chat: full briefing
@@ -623,7 +643,7 @@ async function deliverBriefing(briefing: Briefing, supabase: SupabaseClient, bot
  * Called by relay.ts cron to auto-generate and deliver the morning briefing.
  */
 export async function runMorningBriefing(supabase: SupabaseClient, bot: Bot): Promise<void> {
-  const today = new Date().toISOString().split("T")[0];
+  const today = getToday();
 
   // Check if already generated today
   const { data: existing } = await supabase

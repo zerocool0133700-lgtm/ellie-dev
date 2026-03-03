@@ -285,6 +285,27 @@ export function handleVoiceConnection(ws: WebSocket): void {
     if (session.conversationHistory.length > 0) {
       console.log("[voice] Call ended with messages — triggering consolidation...");
       _deps.triggerConsolidation("voice");
+
+      // ELLIE-444: Index call transcript in Forest for semantic search
+      const turns = session.conversationHistory.length;
+      const userTopics = session.conversationHistory
+        .filter(m => m.role === "user")
+        .map(m => m.content.slice(0, 120))
+        .join("; ")
+        .slice(0, 600);
+      const summary = `Voice call (${Math.ceil(turns / 2)} exchanges). Topics: ${userTopics}`;
+
+      import("../../ellie-forest/src/index.ts")
+        .then(({ writeMemory }) => writeMemory({
+          content: summary,
+          type: "summary",
+          scope: "global",
+          cognitive_type: "episodic",
+          duration: "short_term",
+          tags: ["voice", "call", "twilio"],
+          source_agent_species: "ant",
+        }))
+        .catch(err => logger.warn("[voice] Failed to write Forest memory", { err: String(err) }));
     }
   });
 

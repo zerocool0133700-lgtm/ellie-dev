@@ -20,7 +20,7 @@ import {
   resetTelegramIdleTimer, resetGchatIdleTimer, resetEllieChatIdleTimer,
 } from "./relay-idle.ts";
 import { transcribe } from "./transcribe.ts";
-import { textToSpeechOgg } from "./tts.ts";
+import { textToSpeechOgg, getTTSProviderInfo } from "./tts.ts";
 import {
   buildPrompt,
   runPostMessageAssessment,
@@ -841,7 +841,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
     const TTS_MAX_CHARS = 1500;
     const { cleanedText, confirmations } = extractApprovalTags(claudeResponse);
 
-    if (confirmations.length === 0 && cleanedText.length <= TTS_MAX_CHARS && ELEVENLABS_API_KEY) {
+    if (confirmations.length === 0 && cleanedText.length <= TTS_MAX_CHARS && getTTSProviderInfo().current) {
       const audioBuffer = await textToSpeechOgg(cleanedText);
       if (audioBuffer) {
         await ctx.replyWithVoice(new InputFile(audioBuffer, "response.ogg"));
