@@ -149,31 +149,37 @@ export async function createJob(opts: CreateJobOpts): Promise<string> {
 
 export async function updateJob(jobId: string, update: UpdateJobOpts): Promise<void> {
   try {
-    const sets: string[] = [];
-    const values: unknown[] = [];
+    // Build a plain object of only the fields that were provided.
+    // postgres.js db(obj) generates a safe parameterised SET clause — no unsafe().
+    const fields: Record<string, unknown> = {};
+    if (update.current_step    !== undefined) fields.current_step    = update.current_step;
+    if (update.completed_steps !== undefined) fields.completed_steps = update.completed_steps;
+    if (update.last_heartbeat  !== undefined) fields.last_heartbeat  = update.last_heartbeat;
+    if (update.total_duration_ms !== undefined) fields.total_duration_ms = update.total_duration_ms;
+    if (update.tokens_in       !== undefined) fields.tokens_in       = update.tokens_in;
+    if (update.tokens_out      !== undefined) fields.tokens_out      = update.tokens_out;
+    if (update.cost_usd        !== undefined) fields.cost_usd        = update.cost_usd;
+    if (update.retry_count     !== undefined) fields.retry_count     = update.retry_count;
+    if (update.error_count     !== undefined) fields.error_count     = update.error_count;
+    if (update.result          !== undefined) fields.result          = JSON.stringify(update.result);
+    if (update.model           !== undefined) fields.model           = update.model;
+    if (update.tree_id         !== undefined) fields.tree_id         = update.tree_id;
+    if (update.creature_id     !== undefined) fields.creature_id     = update.creature_id;
 
-    if (update.status !== undefined) { sets.push(`status = $${sets.length + 1}::job_status`); values.push(update.status); }
-    if (update.current_step !== undefined) { sets.push(`current_step = $${sets.length + 1}`); values.push(update.current_step); }
-    if (update.completed_steps !== undefined) { sets.push(`completed_steps = $${sets.length + 1}`); values.push(update.completed_steps); }
-    if (update.last_heartbeat !== undefined) { sets.push(`last_heartbeat = $${sets.length + 1}`); values.push(update.last_heartbeat); }
-    if (update.total_duration_ms !== undefined) { sets.push(`total_duration_ms = $${sets.length + 1}`); values.push(update.total_duration_ms); }
-    if (update.tokens_in !== undefined) { sets.push(`tokens_in = $${sets.length + 1}`); values.push(update.tokens_in); }
-    if (update.tokens_out !== undefined) { sets.push(`tokens_out = $${sets.length + 1}`); values.push(update.tokens_out); }
-    if (update.cost_usd !== undefined) { sets.push(`cost_usd = $${sets.length + 1}`); values.push(update.cost_usd); }
-    if (update.retry_count !== undefined) { sets.push(`retry_count = $${sets.length + 1}`); values.push(update.retry_count); }
-    if (update.error_count !== undefined) { sets.push(`error_count = $${sets.length + 1}`); values.push(update.error_count); }
-    if (update.result !== undefined) { sets.push(`result = $${sets.length + 1}`); values.push(JSON.stringify(update.result)); }
-    if (update.model !== undefined) { sets.push(`model = $${sets.length + 1}`); values.push(update.model); }
-    if (update.tree_id !== undefined) { sets.push(`tree_id = $${sets.length + 1}`); values.push(update.tree_id); }
-    if (update.creature_id !== undefined) { sets.push(`creature_id = $${sets.length + 1}`); values.push(update.creature_id); }
+    // status requires an explicit cast — handle separately so the SET clause
+    // still uses parameterised values throughout.
+    if (!Object.keys(fields).length && update.status === undefined) return;
 
-    if (!sets.length) return;
-
-    values.push(jobId);
-    await db().unsafe(
-      `UPDATE jobs SET ${sets.join(", ")} WHERE job_id = $${values.length}`,
-      values,
-    );
+    if (update.status !== undefined) {
+      await db()`
+        UPDATE jobs
+        SET ${db(fields).length ? db()`${db(fields)},` : db()``}
+            status = ${update.status}::job_status
+        WHERE job_id = ${jobId}
+      `;
+    } else {
+      await db()`UPDATE jobs SET ${db(fields)} WHERE job_id = ${jobId}`;
+    }
   } catch (err: unknown) {
     logger.error("updateJob failed", { jobId, err });
   }

@@ -21,7 +21,7 @@ import { withRetry, classifyError } from "./dispatch-retry.ts";
 import { enqueue, getQueueDepth } from "./dispatch-queue.ts";
 import { withTrace, getTraceId, generateTraceId } from "./trace.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
-import { createJob, updateJob, appendJobEvent, findJobByRunId } from "./jobs-ledger.ts";
+import { createJob, updateJob, appendJobEvent } from "./jobs-ledger.ts";
 
 const logger = log.child("orchestration-dispatch");
 
@@ -100,15 +100,6 @@ export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispat
     trace_id: traceId,
   });
 
-  // ELLIE-440: Create job record
-  createJob({
-    type: "dispatch",
-    source: opts.channel,
-    work_item_id: opts.workItemId,
-    agent_type: opts.agentType,
-    run_id: runId,
-  }).catch(() => {});
-
   // Run the actual dispatch async within trace context
   const promise = withTrace(
     () => runDispatch(runId, opts).catch((err) => {
@@ -129,6 +120,15 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     telegramUserId: ctx.telegramUserId,
     gchatSpaceName: ctx.gchatSpaceName,
   };
+
+  // ELLIE-440: Create job record here (inside async fn) so jobId is always available
+  const jobId = await createJob({
+    type: "dispatch",
+    source: channel,
+    work_item_id: workItemId,
+    agent_type: agentType,
+    run_id: runId,
+  }).catch(() => null);
 
   try {
     // 1. Fetch ticket details (with retry for transient Plane API failures)
@@ -227,9 +227,8 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     enterDispatchMode();
     emitEvent(runId, "progress", agentType, workItemId, { step: "calling_claude" });
     // ELLIE-440: Mark job running with model + forest session IDs
-    findJobByRunId(runId).then(j => {
-      if (!j) return;
-      updateJob(j.job_id, {
+    if (jobId) {
+      updateJob(jobId, {
         status: "running",
         current_step: "calling_claude",
         model: dispatch.agent.model,
@@ -237,8 +236,8 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
         creature_id: sessionIds?.creature_id as string | undefined,
         last_heartbeat: new Date(),
       });
-      appendJobEvent(j.job_id, "dispatched", { agent_type: agentType, model: dispatch.agent.model });
-    }).catch(() => {});
+      appendJobEvent(jobId, "dispatched", { agent_type: agentType, model: dispatch.agent.model });
+    }
     const startTime = Date.now();
     let claudeResult;
     try {
@@ -292,12 +291,11 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     });
     endRun(runId, "completed");
     // ELLIE-440: Update job to completed with duration
-    findJobByRunId(runId).then(j => {
-      if (!j) return;
-      updateJob(j.job_id, { status: "completed", total_duration_ms: durationMs, current_step: null,
+    if (jobId) {
+      updateJob(jobId, { status: "completed", total_duration_ms: durationMs, current_step: null,
         result: { response_length: rawResponse.length } });
-      appendJobEvent(j.job_id, "completed", { duration_ms: durationMs });
-    }).catch(() => {});
+      appendJobEvent(jobId, "completed", { duration_ms: durationMs });
+    }
 
     // 10. Notify
     const preview = rawResponse.replace(/\[MEMORY:[^\]]*\]/gi, "").trim().slice(0, 300);
@@ -319,11 +317,10 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     });
     endRun(runId, "failed");
     // ELLIE-440: Update job to failed
-    findJobByRunId(runId).then(j => {
-      if (!j) return;
-      updateJob(j.job_id, { status: "failed", error_count: 1, current_step: null });
-      appendJobEvent(j.job_id, "failed", { error: errMsg.slice(0, 500), error_class: errorClass });
-    }).catch(() => {});
+    if (jobId) {
+      updateJob(jobId, { status: "failed", error_count: 1, current_step: null });
+      appendJobEvent(jobId, "failed", { error: errMsg.slice(0, 500), error_class: errorClass });
+    }
 
     await notify(notifyCtx, {
       event: "error",
