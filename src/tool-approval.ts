@@ -130,6 +130,13 @@ const AUTO_APPROVED_TOOLS = new Set([
   // Excalidraw (read)
   "mcp__excalidraw__read_me",
   "mcp__excalidraw__read_checkpoint",
+  // QMD — document search & retrieval (all read-only)
+  "mcp__qmd__search",
+  "mcp__qmd__vector_search",
+  "mcp__qmd__deep_search",
+  "mcp__qmd__get",
+  "mcp__qmd__multi_get",
+  "mcp__qmd__status",
 ]);
 
 // Also auto-approve any tool that's purely a built-in read tool
@@ -343,6 +350,7 @@ function formatToolDescription(toolName: string, input: Record<string, unknown>)
     .replace(/^mcp__excalidraw__/, "Excalidraw: ")
     .replace(/^mcp__brave-search__/, "Search: ")
     .replace(/^mcp__forest-bridge__/, "Forest: ")
+    .replace(/^mcp__qmd__/, "QMD: ")
     .replace(/_/g, " ");
 
   // Build summary from key parameters

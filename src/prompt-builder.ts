@@ -62,7 +62,7 @@ const AGENT_MODE = process.env.AGENT_MODE !== "false";
 // ── User identity ───────────────────────────────────────────
 
 export const USER_NAME = process.env.USER_NAME || "";
-export const USER_TIMEZONE = process.env.USER_TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone;
+export { USER_TIMEZONE } from "./timezone.ts";
 
 // ── Soul context (hot-reloaded on file change — ELLIE-244) ──
 
@@ -577,6 +577,10 @@ export function buildPrompt(
       "  Your persistent knowledge graph. Use forest_read to search past decisions/findings/facts.\n" +
       "  Use forest_write to record important discoveries, decisions, or facts that should persist.\n" +
       "  Scopes: 2/1=ellie-dev, 2/2=ellie-forest, 2/3=ellie-home, 2/4=ellie-os-app\n" +
+      "- QMD (mcp__qmd__deep_search, vector_search, search, get, multi_get, status):\n" +
+      "  Document search across the ellie-river knowledge base (38 markdown files).\n" +
+      "  Use deep_search for best results, vector_search for semantic/meaning queries,\n" +
+      "  search for exact keyword matches. Use get/multi_get to fetch full document content.\n" +
       (isOutlookConfigured()
         ? "- Microsoft Outlook (" + getOutlookEmail() + "):\n" +
           "  Available via HTTP API (use curl from Bash):\n" +
