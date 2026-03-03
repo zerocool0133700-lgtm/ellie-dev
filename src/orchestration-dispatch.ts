@@ -21,7 +21,7 @@ import { withRetry, classifyError } from "./dispatch-retry.ts";
 import { enqueue, getQueueDepth } from "./dispatch-queue.ts";
 import { withTrace, getTraceId, generateTraceId } from "./trace.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
-import { createJob, updateJob, appendJobEvent } from "./jobs-ledger.ts";
+import { createJob, updateJob, appendJobEvent, verifyJobWork } from "./jobs-ledger.ts";
 
 const logger = log.child("orchestration-dispatch");
 
@@ -128,7 +128,13 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     work_item_id: workItemId,
     agent_type: agentType,
     run_id: runId,
-  }).catch(() => null);
+  }).catch((err) => { logger.error("Job creation failed", { channel, agentType, workItemId }, err); return null; });
+
+  // Transition to running immediately — don't wait for context gathering / Plane lookups
+  if (jobId) {
+    await updateJob(jobId, { status: "running", current_step: "gathering_context", last_heartbeat: new Date() });
+    appendJobEvent(jobId, "running", { agent_type: agentType });
+  }
 
   try {
     // 1. Fetch ticket details (with retry for transient Plane API failures)
@@ -142,6 +148,10 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       const retryNote = detailsResult.attempts > 1 ? ` (after ${detailsResult.attempts} attempts)` : "";
       emitEvent(runId, "failed", agentType, workItemId, { error: `Ticket not found in Plane${retryNote}` });
       endRun(runId, "failed");
+      if (jobId) {
+        await updateJob(jobId, { status: "failed", error_count: 1, current_step: null });
+        await appendJobEvent(jobId, "failed", { error: `Ticket not found in Plane${retryNote}` });
+      }
       await notify(notifyCtx, {
         event: "error",
         workItemId,
@@ -193,6 +203,10 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       const retryNote = dispatchResult.attempts > 1 ? ` (after ${dispatchResult.attempts} attempts)` : "";
       emitEvent(runId, "failed", agentType, workItemId, { error: `Agent dispatch failed${retryNote}` });
       endRun(runId, "failed");
+      if (jobId) {
+        await updateJob(jobId, { status: "failed", error_count: 1, current_step: null });
+        await appendJobEvent(jobId, "failed", { error: `Agent dispatch failed${retryNote}` });
+      }
       await notify(notifyCtx, {
         event: "error",
         workItemId,
@@ -226,17 +240,16 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     // Enter dispatch mode — auto-approves dev tools + extends TTL/timeouts
     enterDispatchMode();
     emitEvent(runId, "progress", agentType, workItemId, { step: "calling_claude" });
-    // ELLIE-440: Mark job running with model + forest session IDs
+    // ELLIE-440: Update job with model + forest session IDs (already running)
     if (jobId) {
       updateJob(jobId, {
-        status: "running",
         current_step: "calling_claude",
         model: dispatch.agent.model,
         tree_id: sessionIds?.tree_id as string | undefined,
         creature_id: sessionIds?.creature_id as string | undefined,
         last_heartbeat: new Date(),
       });
-      appendJobEvent(jobId, "dispatched", { agent_type: agentType, model: dispatch.agent.model });
+      appendJobEvent(jobId, "calling_claude", { agent_type: agentType, model: dispatch.agent.model });
     }
     const startTime = Date.now();
     let claudeResult;
@@ -260,6 +273,10 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
         claude_error: claudeResult.error?.message?.slice(0, 500),
       });
       endRun(runId, "failed");
+      if (jobId) {
+        await updateJob(jobId, { status: "failed", error_count: 1, current_step: null });
+        await appendJobEvent(jobId, "failed", { error: `Claude call failed${retryNote}`, claude_error: claudeResult.error?.message?.slice(0, 500) });
+      }
       await notify(notifyCtx, {
         event: "error",
         workItemId,
@@ -290,11 +307,14 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       trace_id: getTraceId(),
     });
     endRun(runId, "completed");
-    // ELLIE-440: Update job to completed with duration
+    // ELLIE-445: Verify dev agents produced file changes before marking completed
     if (jobId) {
-      updateJob(jobId, { status: "completed", total_duration_ms: durationMs, current_step: null,
+      const { verified, note } = await verifyJobWork(agentType, startTime);
+      const finalStatus = verified ? "completed" : "responded";
+      await updateJob(jobId, { status: finalStatus, total_duration_ms: durationMs, current_step: null,
         result: { response_length: rawResponse.length } });
-      appendJobEvent(jobId, "completed", { duration_ms: durationMs });
+      await appendJobEvent(jobId, finalStatus, { duration_ms: durationMs, verified, verification_note: note });
+      if (!verified) logger.warn("Job marked 'responded' — work unverified", { jobId: jobId.slice(0, 8), note });
     }
 
     // 10. Notify
@@ -318,8 +338,8 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     endRun(runId, "failed");
     // ELLIE-440: Update job to failed
     if (jobId) {
-      updateJob(jobId, { status: "failed", error_count: 1, current_step: null });
-      appendJobEvent(jobId, "failed", { error: errMsg.slice(0, 500), error_class: errorClass });
+      await updateJob(jobId, { status: "failed", error_count: 1, current_step: null });
+      await appendJobEvent(jobId, "failed", { error: errMsg.slice(0, 500), error_class: errorClass });
     }
 
     await notify(notifyCtx, {

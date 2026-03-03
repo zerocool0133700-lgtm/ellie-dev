@@ -62,6 +62,7 @@ import { startPlaneQueueWorker, purgeCompleted as purgePlaneQueue } from "./plan
 import { startWatchdog, recoverActiveRuns, setWatchdogNotify } from "./orchestration-tracker.ts";
 import { reconcileOnStartup, startReconciler } from "./orchestration-reconciler.ts";
 import { restoreModeState } from "./context-mode.ts";
+import { cleanupOrphanedJobs } from "./jobs-ledger.ts";
 import { onBridgeWrite } from "./api/bridge.ts";
 import { setBroadcastToEllieChat } from "./tool-approval.ts";
 import { getSummaryState } from "./ums/consumers/summary.ts";
@@ -174,6 +175,8 @@ setInterval(() => {
 // Orchestration tracker — ELLIE-349: heartbeat watchdog + orphan recovery
 // ELLIE-387: Wire proactive notifications to watchdog (deferred — needs setRelayDeps first)
 recoverActiveRuns()
+  .then(() => cleanupOrphanedJobs())
+  .then(count => { if (count > 0) console.log(`[jobs] Cleaned up ${count} orphaned job(s) on startup`); })
   .then(() => reconcileOnStartup(supabase))
   .then(() => {
     startWatchdog();

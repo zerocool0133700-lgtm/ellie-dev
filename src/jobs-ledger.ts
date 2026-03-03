@@ -22,7 +22,7 @@ function db() {
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export type JobType = "dispatch" | "pipeline" | "fan-out" | "critic-loop";
-export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+export type JobStatus = "queued" | "running" | "responded" | "completed" | "failed" | "cancelled";
 
 export interface Job {
   job_id: string;
@@ -149,37 +149,30 @@ export async function createJob(opts: CreateJobOpts): Promise<string> {
 
 export async function updateJob(jobId: string, update: UpdateJobOpts): Promise<void> {
   try {
-    // Build a plain object of only the fields that were provided.
-    // postgres.js db(obj) generates a safe parameterised SET clause — no unsafe().
-    const fields: Record<string, unknown> = {};
-    if (update.current_step    !== undefined) fields.current_step    = update.current_step;
-    if (update.completed_steps !== undefined) fields.completed_steps = update.completed_steps;
-    if (update.last_heartbeat  !== undefined) fields.last_heartbeat  = update.last_heartbeat;
-    if (update.total_duration_ms !== undefined) fields.total_duration_ms = update.total_duration_ms;
-    if (update.tokens_in       !== undefined) fields.tokens_in       = update.tokens_in;
-    if (update.tokens_out      !== undefined) fields.tokens_out      = update.tokens_out;
-    if (update.cost_usd        !== undefined) fields.cost_usd        = update.cost_usd;
-    if (update.retry_count     !== undefined) fields.retry_count     = update.retry_count;
-    if (update.error_count     !== undefined) fields.error_count     = update.error_count;
-    if (update.result          !== undefined) fields.result          = JSON.stringify(update.result);
-    if (update.model           !== undefined) fields.model           = update.model;
-    if (update.tree_id         !== undefined) fields.tree_id         = update.tree_id;
-    if (update.creature_id     !== undefined) fields.creature_id     = update.creature_id;
+    // Build SET clause fragments — one per provided field.
+    // Using explicit sql fragments instead of sql(object) helper to avoid
+    // scanner errors with the dynamic helper approach.
+    const sql = db();
+    const sets: ReturnType<typeof sql>[] = [];
 
-    // status requires an explicit cast — handle separately so the SET clause
-    // still uses parameterised values throughout.
-    if (!Object.keys(fields).length && update.status === undefined) return;
+    if (update.status           !== undefined) sets.push(sql`status = ${update.status}::job_status`);
+    if (update.current_step     !== undefined) sets.push(sql`current_step = ${update.current_step}`);
+    if (update.completed_steps  !== undefined) sets.push(sql`completed_steps = ${update.completed_steps}`);
+    if (update.last_heartbeat   !== undefined) sets.push(sql`last_heartbeat = ${update.last_heartbeat}`);
+    if (update.total_duration_ms !== undefined) sets.push(sql`total_duration_ms = ${update.total_duration_ms}`);
+    if (update.tokens_in        !== undefined) sets.push(sql`tokens_in = ${update.tokens_in}`);
+    if (update.tokens_out       !== undefined) sets.push(sql`tokens_out = ${update.tokens_out}`);
+    if (update.cost_usd         !== undefined) sets.push(sql`cost_usd = ${update.cost_usd}`);
+    if (update.retry_count      !== undefined) sets.push(sql`retry_count = ${update.retry_count}`);
+    if (update.error_count      !== undefined) sets.push(sql`error_count = ${update.error_count}`);
+    if (update.result           !== undefined) sets.push(sql`result = ${JSON.stringify(update.result)}::jsonb`);
+    if (update.model            !== undefined) sets.push(sql`model = ${update.model}`);
+    if (update.tree_id          !== undefined) sets.push(sql`tree_id = ${update.tree_id}`);
+    if (update.creature_id      !== undefined) sets.push(sql`creature_id = ${update.creature_id}`);
 
-    if (update.status !== undefined) {
-      await db()`
-        UPDATE jobs
-        SET ${db(fields).length ? db()`${db(fields)},` : db()``}
-            status = ${update.status}::job_status
-        WHERE job_id = ${jobId}
-      `;
-    } else {
-      await db()`UPDATE jobs SET ${db(fields)} WHERE job_id = ${jobId}`;
-    }
+    if (!sets.length) return;
+
+    await sql`UPDATE jobs SET ${sets.reduce((a, b) => sql`${a}, ${b}`)} WHERE job_id = ${jobId}`;
   } catch (err: unknown) {
     logger.error("updateJob failed", { jobId, err });
   }
@@ -326,5 +319,78 @@ export async function getJobMetrics(since?: string): Promise<JobMetrics> {
       total_tokens_in: 0, total_tokens_out: 0, total_cost_usd: "0",
       by_agent: [], by_type: [],
     };
+  }
+}
+
+// ── Reliability Helpers ─────────────────────────────────────────────────────
+
+/**
+ * ELLIE-445: On relay startup, mark any jobs still in 'running' state that
+ * haven't been updated in 10+ minutes as failed (orphaned by a crashed relay).
+ */
+export async function cleanupOrphanedJobs(): Promise<number> {
+  try {
+    const rows = await db()`
+      UPDATE jobs
+      SET status = 'failed'::job_status,
+          error_count = error_count + 1,
+          updated_at = now()
+      WHERE status = 'running'
+        AND updated_at < now() - interval '10 minutes'
+      RETURNING job_id
+    `;
+    for (const row of rows) {
+      await appendJobEvent(row.job_id, "failed", { error: "Orphaned after relay restart" });
+    }
+    return rows.length;
+  } catch (err: unknown) {
+    logger.error("cleanupOrphanedJobs failed", err);
+    return 0;
+  }
+}
+
+// Dev-related agent names that should have file changes as evidence of work
+const DEV_AGENTS = new Set(["dev", "dev-ant", "ant"]);
+
+/**
+ * ELLIE-445: Check whether a dev agent actually produced file changes.
+ * Looks for uncommitted changes or commits made since `sinceMs` in
+ * both ellie-dev and ellie-home repos.
+ * Returns true (verified) for non-dev agents — only dev work needs git evidence.
+ */
+export async function verifyJobWork(
+  agentType: string,
+  sinceMs: number,
+): Promise<{ verified: boolean; note: string }> {
+  if (!DEV_AGENTS.has(agentType)) {
+    return { verified: true, note: "non-dev agent — no file verification required" };
+  }
+
+  const repos = ["/home/ellie/ellie-dev", "/home/ellie/ellie-home"];
+  const since = new Date(sinceMs).toISOString();
+
+  try {
+    for (const repo of repos) {
+      // Uncommitted changes (staged or unstaged)
+      const statusProc = Bun.spawn(["git", "-C", repo, "status", "--porcelain"], { stdout: "pipe" });
+      const statusOut = await new Response(statusProc.stdout).text();
+      if (statusOut.trim()) {
+        return { verified: true, note: `Uncommitted changes in ${repo.split("/").pop()}` };
+      }
+
+      // Recent commits since dispatch started
+      const logProc = Bun.spawn(
+        ["git", "-C", repo, "log", "--oneline", `--since=${since}`],
+        { stdout: "pipe" },
+      );
+      const logOut = await new Response(logProc.stdout).text();
+      if (logOut.trim()) {
+        return { verified: true, note: `Commits in ${repo.split("/").pop()} since dispatch` };
+      }
+    }
+    return { verified: false, note: "No file changes or commits detected in ellie-dev or ellie-home" };
+  } catch (err: unknown) {
+    logger.warn("verifyJobWork git check failed", err);
+    return { verified: false, note: "Verification check failed" };
   }
 }
