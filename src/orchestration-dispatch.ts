@@ -21,7 +21,7 @@ import { withRetry, classifyError } from "./dispatch-retry.ts";
 import { enqueue, getQueueDepth } from "./dispatch-queue.ts";
 import { withTrace, getTraceId, generateTraceId } from "./trace.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
-import { createJob, updateJob, appendJobEvent, verifyJobWork } from "./jobs-ledger.ts";
+import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost } from "./jobs-ledger.ts";
 
 const logger = log.child("orchestration-dispatch");
 
@@ -135,6 +135,11 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     await updateJob(jobId, { status: "running", current_step: "gathering_context", last_heartbeat: new Date() });
     appendJobEvent(jobId, "running", { agent_type: agentType });
   }
+
+  // ELLIE-446: Periodic heartbeat so orphan cleanup doesn't claim long-running dispatches
+  const heartbeatInterval = jobId
+    ? setInterval(() => updateJob(jobId, { last_heartbeat: new Date() }), 60_000)
+    : null;
 
   try {
     // 1. Fetch ticket details (with retry for transient Plane API failures)
@@ -287,6 +292,7 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     const rawResponse = claudeResult.result;
     const durationMs = Date.now() - startTime;
     const durationMin = Math.round(durationMs / 1000 / 60);
+    if (heartbeatInterval) clearInterval(heartbeatInterval);
 
     // 7. Process memory intents
     await processMemoryIntents(ctx.supabase, rawResponse, agentType, "shared", sessionIds);
@@ -311,8 +317,15 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     if (jobId) {
       const { verified, note } = await verifyJobWork(agentType, startTime);
       const finalStatus = verified ? "completed" : "responded";
-      await updateJob(jobId, { status: finalStatus, total_duration_ms: durationMs, current_step: null,
-        result: { response_length: rawResponse.length } });
+      // ELLIE-446: Populate token + cost accounting
+      const tokensIn = Math.round(prompt.length / 4);
+      const tokensOut = Math.round(rawResponse.length / 4);
+      const costUsd = estimateJobCost(dispatch.agent.model, tokensIn, tokensOut);
+      await updateJob(jobId, {
+        status: finalStatus, total_duration_ms: durationMs, current_step: null,
+        tokens_in: tokensIn, tokens_out: tokensOut, cost_usd: costUsd,
+        result: { response_length: rawResponse.length },
+      });
       await appendJobEvent(jobId, finalStatus, { duration_ms: durationMs, verified, verification_note: note });
       if (!verified) logger.warn("Job marked 'responded' — work unverified", { jobId: jobId.slice(0, 8), note });
     }
@@ -327,6 +340,7 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     });
 
   } catch (err: unknown) {
+    if (heartbeatInterval) clearInterval(heartbeatInterval);
     const errMsg = err instanceof Error ? err.message : String(err);
     const { errorClass, reason } = classifyError(err);
     emitEvent(runId, "failed", agentType, workItemId, {

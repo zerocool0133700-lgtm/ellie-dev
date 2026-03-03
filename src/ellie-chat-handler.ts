@@ -100,7 +100,7 @@ import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hi
 import { logVerificationTrail } from "./data-quality.ts";
 import { getCreatureProfile } from "./creature-profile.ts";
 import { withTrace } from "./trace.ts";
-import { createJob, updateJob, appendJobEvent, verifyJobWork } from "./jobs-ledger.ts";
+import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost } from "./jobs-ledger.ts";
 import {
   isFallbackActive,
   isOutageError,
@@ -1108,13 +1108,18 @@ export async function runSpecialistAsync(
   console.log(`[ellie-chat] Specialist ${agentName} starting async`);
   markProcessing(ecUserId || "anonymous", effectiveText);
 
-  // ELLIE-440: Create job record (hoisted so catch block can update it)
+  // ELLIE-440/446: Create job record (hoisted so catch block can update it)
   const runId = crypto.randomUUID();
+  const agentTools = agentResult.dispatch.agent.tools_enabled;
+  const agentModel = agentResult.dispatch.agent.model;
   const jobId = await createJob({
     type: "dispatch",
     source: "ellie-chat",
     work_item_id: workItemId,
     agent_type: agentName,
+    model: agentModel || undefined,
+    prompt_summary: effectiveText.slice(0, 200),
+    tools_enabled: agentTools?.length ? agentTools : undefined,
     run_id: runId,
   }).catch((err) => { logger.error("Job creation failed", { agent: agentName, workItemId }, err); return null; });
 
@@ -1234,9 +1239,6 @@ export async function runSpecialistAsync(
       );
     }
 
-    const agentTools = agentResult.dispatch.agent.tools_enabled;
-    const agentModel = agentResult.dispatch.agent.model;
-
     if (jobId) {
       updateJob(jobId, { current_step: "calling_claude", model: agentModel || undefined, last_heartbeat: new Date() });
       appendJobEvent(jobId, "calling_claude", { agent_type: agentName, model: agentModel });
@@ -1277,7 +1279,16 @@ export async function runSpecialistAsync(
       // ELLIE-445: Verify dev agents actually produced file changes before marking completed
       const { verified, note } = await verifyJobWork(agentName, startTime);
       const finalStatus = verified ? "completed" : "responded";
-      updateJob(jobId, { status: finalStatus, total_duration_ms: durationMs, current_step: null, result: { response_length: rawResponse.length } });
+      // ELLIE-446: Populate token + cost accounting
+      const buildMetrics = getLastBuildMetrics();
+      const tokensIn = buildMetrics?.totalTokens ?? 0;
+      const tokensOut = Math.round(rawResponse.length / 4);
+      const costUsd = estimateJobCost(agentModel, tokensIn, tokensOut);
+      updateJob(jobId, {
+        status: finalStatus, total_duration_ms: durationMs, current_step: null,
+        tokens_in: tokensIn, tokens_out: tokensOut, cost_usd: costUsd,
+        result: { response_length: rawResponse.length },
+      });
       appendJobEvent(jobId, finalStatus, { duration_ms: durationMs, verified, verification_note: note });
       if (!verified) {
         console.log(`[jobs] Job ${jobId.slice(0, 8)} marked 'responded' — ${note}`);
