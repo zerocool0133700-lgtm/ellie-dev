@@ -446,6 +446,10 @@ initDelivery(supabase);
 setVoicePipelineDeps({ supabase, getActiveAgent, broadcastExtension, getContextDocket, triggerConsolidation });
 setBroadcastToEllieChat(broadcastToEllieChatClients);
 
+// ELLIE-469: Discord channel plugin — only activates if DISCORD_BOT_TOKEN is set
+import { startDiscordGateway } from "./channels/discord/index.ts";
+startDiscordGateway(supabase);
+
 // Initialize classifiers
 if (anthropic && supabase) initClassifier(anthropic, supabase);
 if (anthropic) initEntailmentClassifier(anthropic);
@@ -543,9 +547,12 @@ async function gracefulShutdown(signal: string): Promise<void> {
   shutdownInProgress = true;
   console.log(`[relay] ${signal} received — shutting down gracefully...`);
 
-  // 1. Stop accepting new Telegram messages
+  // 1. Stop accepting new messages
   try { await bot.stop(); } catch {}
   console.log("[relay] Telegram bot stopped");
+  const { stopDiscordGateway } = await import("./channels/discord/index.ts");
+  await stopDiscordGateway().catch(() => {});
+  console.log("[relay] Discord gateway stopped");
 
   // 2. Wait for active queue tasks to finish (ELLIE-460: graceful drain)
   const drained = await drainQueues(20_000); // 20s max wait
