@@ -753,7 +753,6 @@ export function buildPrompt(
         "\n3. Commit with [ELLIE-N] prefix (e.g., [ELLIE-5] Brief description)" +
         "\n4. Build if dashboard code changed: cd /home/ellie/ellie-home && bun run build" +
         "\n5. Restart affected service: sudo systemctl restart ellie-dashboard" +
-        "\n   (for relay code: systemctl --user restart claude-telegram-relay)" +
         "\n6. Verify changes work" +
         "\nDo NOT call /api/work-session/complete — handled externally.",
     priority: 3 });
@@ -878,12 +877,14 @@ export function buildPrompt(
     filteredSections = filteredSections.filter(s => !suppressed.has(s.label));
   }
 
-  // ── Apply token budget (ELLIE-185 + ELLIE-261 + ELLIE-334 + ELLIE-367 budget control) ──
-  // Channel profile budget > creature budget > mode budget > strategy budget
-  const budget = channelProfile?.tokenBudget
-    ? channelProfile.tokenBudget
-    : creatureProfile?.token_budget
-      ? creatureProfile.token_budget
+  // ── Apply token budget (ELLIE-185 + ELLIE-261 + ELLIE-334 + ELLIE-367 + ELLIE-446) ──
+  // Creature budget (agent-specific) > channel profile budget > mode budget > strategy budget.
+  // ELLIE-446: Creature budget must win — a specialist agent's wiring (e.g. dev-ant: 40k)
+  // should not be capped by the conversation mode's channel profile (e.g. general: 24k).
+  const budget = creatureProfile?.token_budget
+    ? creatureProfile.token_budget
+    : channelProfile?.tokenBudget
+      ? channelProfile.tokenBudget
       : contextMode
         ? getModeTokenBudget(contextMode)
         : getStrategyTokenBudget(activeStrategy);

@@ -70,7 +70,6 @@ const HARDCODED_SECTIONS: Record<string, string> = {
     "3. Commit with [ELLIE-N] prefix (e.g., [ELLIE-5] Brief description)\n" +
     "4. Build if dashboard code changed: cd /home/ellie/ellie-home && bun run build\n" +
     "5. Restart affected service: sudo systemctl restart ellie-dashboard\n" +
-    "   (for relay code: systemctl --user restart claude-telegram-relay)\n" +
     "6. Verify changes work\n" +
     "Do NOT call /api/work-session/complete — handled externally.",
 
