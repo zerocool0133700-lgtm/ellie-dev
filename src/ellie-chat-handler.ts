@@ -100,6 +100,7 @@ import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hi
 import { logVerificationTrail } from "./data-quality.ts";
 import { getCreatureProfile } from "./creature-profile.ts";
 import { withTrace } from "./trace.ts";
+import { createJob, updateJob, appendJobEvent } from "./jobs-ledger.ts";
 import {
   isFallbackActive,
   isOutageError,
@@ -1107,6 +1108,14 @@ export async function runSpecialistAsync(
   console.log(`[ellie-chat] Specialist ${agentName} starting async`);
   markProcessing(ecUserId || "anonymous", effectiveText);
 
+  // ELLIE-440: Create job record (hoisted so catch block can update it)
+  const jobId = await createJob({
+    type: "dispatch",
+    source: "ellie-chat",
+    work_item_id: workItemId,
+    agent_type: agentName,
+  }).catch(() => null);
+
   try {
     // Typing heartbeat while specialist works
     const heartbeat = setInterval(() => {
@@ -1219,6 +1228,11 @@ export async function runSpecialistAsync(
     const agentTools = agentResult.dispatch.agent.tools_enabled;
     const agentModel = agentResult.dispatch.agent.model;
 
+    if (jobId) {
+      updateJob(jobId, { status: "running", current_step: "calling_claude", model: agentModel || undefined, last_heartbeat: new Date() });
+      appendJobEvent(jobId, "dispatched", { agent_type: agentName, model: agentModel });
+    }
+
     let rawResponse: string;
     try {
       rawResponse = await callClaude(enrichedPrompt, {
@@ -1250,6 +1264,10 @@ export async function runSpecialistAsync(
 
     const durationMs = Date.now() - startTime;
     console.log(`[ellie-chat] Specialist ${agentName} completed in ${durationMs}ms`);
+    if (jobId) {
+      updateJob(jobId, { status: "completed", total_duration_ms: durationMs, current_step: null, result: { response_length: rawResponse.length } });
+      appendJobEvent(jobId, "completed", { duration_ms: durationMs });
+    }
 
     const response = await processMemoryIntents(supabase, rawResponse, agentName, "shared", agentMemory.sessionIds);
     const { cleanedText: playClean, commands: playCmds } = extractPlaybookCommands(response);
@@ -1309,6 +1327,10 @@ export async function runSpecialistAsync(
   } catch (err) {
     const durationMs = Date.now() - startTime;
     logger.error("Specialist failed", { agent: agentName, durationMs }, err);
+    if (jobId) {
+      updateJob(jobId, { status: "failed", total_duration_ms: durationMs, error_count: 1, current_step: null });
+      appendJobEvent(jobId, "failed", { error: err instanceof Error ? err.message.slice(0, 500) : String(err) });
+    }
     const errorMsg = `Sorry, the ${agentName} specialist ran into an issue. You can try again or rephrase.`;
     const errMemoryId = await saveMessage("assistant", errorMsg, {}, "ellie-chat", ecUserId).catch(() => null);
     deliverResponse(ws, { type: "response", text: errorMsg, agent: agentName, memoryId: errMemoryId, ts: Date.now(), channelId });
