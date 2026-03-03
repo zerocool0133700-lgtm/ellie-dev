@@ -1287,6 +1287,136 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
     return;
   }
 
+  // ── Jobs — ELLIE-438/439 ──────────────────────────────────────────────────
+
+  // POST /api/jobs — create job
+  if (url.pathname === "/api/jobs" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { createJob, appendJobEvent } = await import("./jobs-ledger.ts");
+        const data = JSON.parse(body || "{}");
+        const jobId = await createJob({
+          type: data.type || "dispatch",
+          source: data.source,
+          parent_job_id: data.parent_job_id,
+          work_item_id: data.work_item_id,
+          agent_type: data.agent_type,
+          model: data.model,
+          prompt_summary: data.prompt_summary,
+          tools_enabled: data.tools_enabled,
+          input_data: data.input_data,
+          run_id: data.run_id,
+        });
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ job_id: jobId }));
+      } catch (err: any) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Failed to create job" }));
+      }
+    });
+    return;
+  }
+
+  // GET /api/jobs/metrics — aggregated stats (must be before /:id)
+  if (url.pathname === "/api/jobs/metrics" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getJobMetrics } = await import("./jobs-ledger.ts");
+        const since = url.searchParams.get("since") ?? undefined;
+        const metrics = await getJobMetrics(since);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(metrics));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Failed to get metrics" }));
+      }
+    })();
+    return;
+  }
+
+  // GET /api/jobs — list jobs with filters
+  if (url.pathname === "/api/jobs" && req.method === "GET") {
+    (async () => {
+      try {
+        const { listJobs } = await import("./jobs-ledger.ts");
+        const jobs = await listJobs({
+          status: (url.searchParams.get("status") as any) || undefined,
+          type: (url.searchParams.get("type") as any) || undefined,
+          agent_type: url.searchParams.get("agent") || undefined,
+          work_item_id: url.searchParams.get("work_item_id") || undefined,
+          since: url.searchParams.get("since") || undefined,
+          limit: parseInt(url.searchParams.get("limit") || "50", 10),
+          offset: parseInt(url.searchParams.get("offset") || "0", 10),
+        });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ jobs }));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Failed to list jobs" }));
+      }
+    })();
+    return;
+  }
+
+  // GET /api/jobs/:id — full job detail
+  const jobDetailMatch = url.pathname.match(/^\/api\/jobs\/([0-9a-f-]{36})$/);
+  if (jobDetailMatch && req.method === "GET") {
+    const jobId = jobDetailMatch[1];
+    (async () => {
+      try {
+        const { getJob } = await import("./jobs-ledger.ts");
+        const detail = await getJob(jobId);
+        if (!detail) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Job not found" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(detail));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Failed to get job" }));
+      }
+    })();
+    return;
+  }
+
+  // PATCH /api/jobs/:id — update job progress/status
+  const jobPatchMatch = url.pathname.match(/^\/api\/jobs\/([0-9a-f-]{36})$/);
+  if (jobPatchMatch && req.method === "PATCH") {
+    const jobId = jobPatchMatch[1];
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { updateJob, appendJobEvent } = await import("./jobs-ledger.ts");
+        const data = JSON.parse(body || "{}");
+        await updateJob(jobId, {
+          status: data.status,
+          current_step: data.current_step,
+          completed_steps: data.completed_steps,
+          last_heartbeat: data.heartbeat ? new Date() : undefined,
+          total_duration_ms: data.total_duration_ms,
+          tokens_in: data.tokens_in,
+          tokens_out: data.tokens_out,
+          cost_usd: data.cost_usd,
+          result: data.result,
+        });
+        if (data.event) {
+          await appendJobEvent(jobId, data.event, data.event_details, { step_name: data.current_step });
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (err: any) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Failed to update job" }));
+      }
+    });
+    return;
+  }
+
   // Ground Truth Index — ELLIE-250
   if (url.pathname === "/api/ground-truth" && req.method === "GET") {
     (async () => {
