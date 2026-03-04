@@ -23,6 +23,7 @@ import { enqueue, getQueueDepth } from "./dispatch-queue.ts";
 import { withTrace, getTraceId, generateTraceId } from "./trace.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
 import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost, writeJobTouchpointForAgent } from "./jobs-ledger.ts";
+import { estimateTokens } from "./relay-utils.ts";
 import { startCreature, failCreature, completeCreature, dispatchPushCreature, writeJobCompletionMetric } from "../../ellie-forest/src/index";
 import { postCreatureEvent, postJobEvent } from "./channels/discord/observation.ts";
 
@@ -416,8 +417,8 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       const { verified, note } = await verifyJobWork(agentType, startTime);
       const finalStatus = verified ? "completed" : "responded";
       // ELLIE-446: Populate token + cost accounting
-      const tokensIn = Math.round(prompt.length / 4);
-      const tokensOut = Math.round(rawResponse.length / 4);
+      const tokensIn = estimateTokens(prompt, dispatch.agent.model ?? undefined);
+      const tokensOut = estimateTokens(rawResponse, dispatch.agent.model ?? undefined);
       const costUsd = estimateJobCost(dispatch.agent.model, tokensIn, tokensOut);
       await updateJob(jobId, {
         status: finalStatus, total_duration_ms: durationMs, current_step: null,

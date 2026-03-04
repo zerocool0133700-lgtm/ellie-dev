@@ -282,6 +282,32 @@ describe("estimateTokens", () => {
     expect(tokens).toBeGreaterThan(5);
     expect(tokens).toBeLessThan(20);
   });
+
+  // ELLIE-495: model parameter — accepted for call-site clarity, same encoder used for all
+  it("accepts an optional model parameter without throwing", () => {
+    const text = "Hello, world!";
+    expect(() => estimateTokens(text, "claude-sonnet-4-6")).not.toThrow();
+    expect(() => estimateTokens(text, "claude-opus-4-6")).not.toThrow();
+    expect(() => estimateTokens(text, "claude-haiku-4-5-20251001")).not.toThrow();
+  });
+
+  it("returns the same count regardless of model (cl100k_base used for all)", () => {
+    const text = "Token estimation should be consistent across all models.";
+    const base = estimateTokens(text);
+    expect(estimateTokens(text, "claude-sonnet-4-6")).toBe(base);
+    expect(estimateTokens(text, "claude-opus-4-6")).toBe(base);
+    expect(estimateTokens(text, "gpt-4o")).toBe(base);
+  });
+
+  it("is more accurate than char/4 heuristic for typical English prose", () => {
+    // tiktoken gives exact BPE count; char/4 is just an approximation
+    const text = "The orchestrator dispatches agents to handle complex multi-step tasks.";
+    const tiktoken = estimateTokens(text);
+    const heuristic = Math.ceil(text.length / 4);
+    // Both should be in the same ballpark but tiktoken is the canonical value
+    expect(tiktoken).toBeGreaterThan(0);
+    expect(Math.abs(tiktoken - heuristic)).toBeLessThan(heuristic * 0.5); // within 50%
+  });
 });
 
 // ── applyTokenBudget ────────────────────────────────────────

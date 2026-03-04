@@ -98,11 +98,15 @@ export function formatForestMetrics(m: {
 // ── Token Budget Guard (ELLIE-185) ──────────────────────────
 
 /**
- * Count tokens using a proper tokenizer (ELLIE-245).
+ * Count tokens using a proper tokenizer (ELLIE-245, unified ELLIE-495).
+ *
  * Uses cl100k_base encoding via js-tiktoken (~5% variance from Claude's tokenizer).
- * Falls back to character heuristic if tokenizer fails.
+ * The optional `model` parameter is accepted for call-site clarity and future
+ * differentiation, but all models currently share the same cl100k_base encoder
+ * since js-tiktoken has no Claude-specific encoding.
+ * Falls back to character heuristic (~4 chars/token) if tokenizer fails.
  */
-export function estimateTokens(text: string): number {
+export function estimateTokens(text: string, _model?: string): number {
   try {
     const enc = getEncoder();
     return enc.encode(text).length;

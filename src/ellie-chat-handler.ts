@@ -1305,7 +1305,7 @@ export async function runSpecialistAsync(
       // Bug 1: use specBuildMetrics captured before the Claude call, not getLastBuildMetrics()
       // which is a global that any concurrent request could have overwritten during the run
       const tokensIn = specBuildMetrics?.totalTokens ?? 0;
-      const tokensOut = Math.round(rawResponse.length / 4);
+      const tokensOut = estimateTokens(rawResponse, agentModel ?? undefined);
       const costUsd = estimateJobCost(agentModel, tokensIn, tokensOut);
       updateJob(jobId, {
         status: finalStatus, total_duration_ms: durationMs, current_step: null,
