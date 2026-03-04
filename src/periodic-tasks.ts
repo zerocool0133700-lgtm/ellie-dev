@@ -160,15 +160,58 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     sweepPhoneHistories();
   }, 60 * 60_000, "phone-history-sweep");
 
-  // ELLIE-447/500: Creature reaper — mark timed-out and exhausted-retry creatures as failed (every 5 minutes)
+  // ELLIE-447/499/500: Creature reaper — mark timed-out, exhausted-retry, and preempted creatures as failed (every 5 minutes)
   periodicTask(async () => {
     const { reapTimedOutCreatures, reapExhaustedRetryCreatures } = await import("../../ellie-forest/src/work-sessions");
-    const [reaped, exhausted] = await Promise.all([
+    const { reapPreemptedCreatures, cleanupReapedCreatures } = await import("./creature-preemption.ts");
+
+    const [reaped, exhausted, preempted] = await Promise.all([
       reapTimedOutCreatures(),
       reapExhaustedRetryCreatures(),
+      reapPreemptedCreatures(supabase),
     ]);
+
     if (reaped.length > 0) console.log(`[creature-reaper] Reaped ${reaped.length} timed-out creature(s)`);
     if (exhausted.length > 0) console.log(`[creature-reaper] Reaped ${exhausted.length} exhausted-retry creature(s)`);
+    if (preempted.length > 0) console.log(`[creature-reaper] Preempted ${preempted.length} orphaned creature(s)`);
+
+    // ELLIE-499: Post-reap cleanup — mark work sessions incomplete, roll back Plane tickets
+    const allReaped = [
+      ...reaped.map((r: { creature_id: string }) => ({ ...r, tree_id: "" })),
+      ...exhausted.map((r: { creature_id: string }) => ({ ...r, tree_id: "" })),
+      ...preempted.map((r) => ({ creature_id: r.creature_id, tree_id: r.tree_id, action: r.action })),
+    ];
+
+    // For timeout/exhausted reaped creatures, we need to look up their tree_ids
+    if (reaped.length > 0 || exhausted.length > 0) {
+      const forestSql = (await import("../../ellie-forest/src/db")).default;
+      const ids = [
+        ...reaped.map((r: { creature_id: string }) => r.creature_id),
+        ...exhausted.map((r: { creature_id: string }) => r.creature_id),
+      ];
+      if (ids.length > 0) {
+        const rows = await forestSql<{ id: string; tree_id: string }[]>`
+          SELECT id, tree_id FROM creatures WHERE id = ANY(${ids})
+        `;
+        const treeMap = new Map(rows.map((r) => [r.id, r.tree_id]));
+        for (const item of allReaped) {
+          if (!item.tree_id) {
+            item.tree_id = treeMap.get(item.creature_id) || "";
+          }
+        }
+      }
+    }
+
+    const validReaped = allReaped.filter((r) => r.tree_id);
+    if (validReaped.length > 0) {
+      const cleanup = await cleanupReapedCreatures(validReaped);
+      if (cleanup.sessionsCleanedUp > 0) {
+        console.log(`[creature-reaper] Cleaned up ${cleanup.sessionsCleanedUp} work session(s)`);
+      }
+      if (cleanup.planeRolledBack > 0) {
+        console.log(`[creature-reaper] Rolled back ${cleanup.planeRolledBack} Plane ticket(s)`);
+      }
+    }
   }, 5 * 60_000, "creature-reaper");
 
   // Memory maintenance: expire short-term memories (every 15 minutes)
