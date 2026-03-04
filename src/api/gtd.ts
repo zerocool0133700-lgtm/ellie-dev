@@ -23,7 +23,7 @@ const logger = log.child("gtd-api");
 // ELLIE-290: Context tag validation — tags starting with @ must match this pattern
 const CONTEXT_TAG_PATTERN = /^@[a-z][a-z0-9-]*$/;
 
-function validateTags(tags: unknown[]): string | null {
+export function validateTags(tags: unknown[]): string | null {
   for (const tag of tags) {
     if (typeof tag !== "string") continue;
     if (tag.startsWith("@") && !CONTEXT_TAG_PATTERN.test(tag)) {

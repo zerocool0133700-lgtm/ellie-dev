@@ -64,6 +64,11 @@ async function resolveAgent(
 const TELEGRAM_USER_ID = process.env.TELEGRAM_USER_ID!;
 const GCHAT_SPACE = process.env.GOOGLE_CHAT_SPACE_NAME;
 
+/** Escape Telegram MarkdownV2 special characters. */
+export function escapeMarkdown(text: string): string {
+  return text.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
+}
+
 function getNotifyCtx(bot: Bot): NotifyContext {
   return { bot, telegramUserId: TELEGRAM_USER_ID, gchatSpaceName: GCHAT_SPACE };
 }
@@ -116,7 +121,6 @@ export async function startWorkSession(req: ApiRequest, res: ApiResponse, bot: B
     }
 
     // Notify via policy engine (Telegram + Google Chat per routing rules)
-    const escapeMarkdown = (text: string) => text.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
     const telegramMsg = [
       `🚀 **Work Session Started**`,
       ``,
@@ -209,7 +213,6 @@ export async function updateWorkSession(req: ApiRequest, res: ApiResponse, bot: 
     await forestAddUpdate(tree.id, entity?.id, message, undefined, git_sha || undefined);
 
     // Notify via policy engine (Google Chat only by default — Telegram disabled for updates)
-    const escapeMarkdown = (text: string) => text.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
     const telegramMsg = [
       `📝 **Progress Update**`,
       ``,
@@ -281,7 +284,6 @@ export async function logDecision(req: ApiRequest, res: ApiResponse, bot: Bot) {
     await forestAddDecision(tree.id, entity?.id, message);
 
     // Notify via policy engine (both channels — decisions always go through)
-    const escapeMarkdown = (text: string) => text.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
     const telegramMsg = [
       `⚡ **Decision Point**`,
       ``,
@@ -403,7 +405,6 @@ export async function completeWorkSession(req: ApiRequest, res: ApiResponse, bot
       console.log(`[work-session:complete] Skipping Plane update — session too short (${duration}min)`);
     }
 
-    const escapeMarkdown = (text: string) => text.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
     const telegramMsg = [
       `✅ **Work Session Complete**`,
       ``,
@@ -476,7 +477,6 @@ export async function pauseWorkSession(req: ApiRequest, res: ApiResponse, bot: B
     const paused = await forestPauseSession(tree.id, reason);
 
     // Notify via policy engine
-    const escapeMarkdown = (text: string) => text.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
     const telegramMsg = [
       `\u23F8\uFE0F **Work Session Paused**`,
       ``,
@@ -550,7 +550,6 @@ export async function resumeWorkSession(req: ApiRequest, res: ApiResponse, bot: 
     const resumed = await forestResumeSession(tree.id);
 
     // Notify via policy engine
-    const escapeMarkdown = (text: string) => text.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
     const telegramMsg = [
       `\u25B6\uFE0F **Work Session Resumed**`,
       ``,

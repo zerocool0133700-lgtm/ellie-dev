@@ -532,7 +532,7 @@ export async function getBurnoutRiskEndpoint(
 
 // ── Helpers ─────────────────────────────────────────────────
 
-function parsePeriod(period: string): { start: string; end: string } {
+export function parsePeriod(period: string): { start: string; end: string } {
   // ISO week: 2026-W08
   const weekMatch = period.match(/^(\d{4})-W(\d{2})$/);
   if (weekMatch) {
@@ -564,7 +564,7 @@ async function getMetricsForRange(
   return (data || []) as Array<Record<string, number>>;
 }
 
-function aggregateMetrics(metrics: Array<Record<string, number>>): Record<string, number> {
+export function aggregateMetrics(metrics: Array<Record<string, number>>): Record<string, number> {
   if (metrics.length === 0) {
     return {
       total_min: 0, deep_work_min: 0, meetings_min: 0,

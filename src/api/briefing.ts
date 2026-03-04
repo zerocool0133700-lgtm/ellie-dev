@@ -24,7 +24,7 @@ const BRIDGE_KEY = "bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e74
 
 // ── Types ────────────────────────────────────────────────────
 
-interface BriefingSection {
+export interface BriefingSection {
   key: string;
   title: string;
   icon: string;
@@ -32,7 +32,7 @@ interface BriefingSection {
   items: BriefingItem[];
 }
 
-interface BriefingItem {
+export interface BriefingItem {
   text: string;
   detail?: string;
   urgency?: "high" | "normal" | "low";
@@ -356,7 +356,7 @@ async function fetchCommsState(supabase: SupabaseClient): Promise<BriefingSectio
 
 // ── Generator ────────────────────────────────────────────────
 
-function calculatePriority(sections: BriefingSection[]): number {
+export function calculatePriority(sections: BriefingSection[]): number {
   let score = 0;
   for (const section of sections) {
     for (const item of section.items) {
@@ -368,7 +368,7 @@ function calculatePriority(sections: BriefingSection[]): number {
   return Math.min(score, 100);
 }
 
-function formatBriefingMarkdown(sections: BriefingSection[], date: string): string {
+export function formatBriefingMarkdown(sections: BriefingSection[], date: string): string {
   const dateLabel = new Date(date + "T12:00:00Z").toLocaleDateString("en-US", {
     weekday: "long",
     month: "long",
