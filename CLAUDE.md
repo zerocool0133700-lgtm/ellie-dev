@@ -526,6 +526,19 @@ To add a new skill: create `skills/<name>/SKILL.md` with frontmatter + instructi
 
 ## Project Architecture
 
+### River Vault — Prompt Architecture (ELLIE-532/537)
+
+All agent prompt content (soul, memory-protocol, confirm-protocol, forest-writes, dev/research/strategy-agent-template, playbook-commands, work-commands, planning-mode) lives in the **River Obsidian vault** (`/home/ellie/obsidian-vault/`), synced to Ellie via `src/bridge-river.ts` (QMD endpoint).
+
+- Prompts are fetched at runtime via a stale-while-revalidate cache (`getCachedRiverDoc(key)`)
+- When a River doc is unavailable, the section is **omitted entirely** — no hardcoded fallback (ELLIE-537)
+- Use `_injectRiverDocForTesting(key, content)` in tests to control cache state without hitting QMD
+- Doc keys: `soul`, `memory-protocol`, `confirm-protocol`, `forest-writes`, `dev-agent-template`, `research-agent-template`, `strategy-agent-template`, `playbook-commands`, `work-commands`, `planning-mode`
+
+To edit prompts: open the River vault in Obsidian, edit the relevant `.md` file — changes propagate to the relay automatically.
+
+---
+
 - **Relay:** `src/relay.ts` — Telegram bot + HTTP server + voice calls + Google Chat webhook
 - **Google Chat:** `src/google-chat.ts` — Service account auth, message sending, webhook parsing
 - **Memory:** `src/memory.ts` — Supabase-backed conversation history + semantic search

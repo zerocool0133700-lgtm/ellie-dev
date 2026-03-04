@@ -9,14 +9,25 @@ import {
   validateArchetypes,
   getAgentArchetype,
   USER_NAME,
+  clearRiverDocCache,
+  setRiverDocCacheTtl,
+  _injectRiverDocForTesting,
   type BuildMetrics,
 } from "../src/prompt-builder.ts";
 import { setCreatureProfile, getCreatureProfile } from "../src/creature-profile.ts";
 
-// ── Cleanup watchers after all tests ─────────────────────────
+// ── Cleanup watchers and River cache after all tests ──────────
 
 afterAll(() => {
   stopPersonalityWatchers();
+  clearRiverDocCache();
+  setRiverDocCacheTtl(60_000);
+});
+
+// ── Clear River cache before each test ───────────────────────
+
+beforeEach(() => {
+  clearRiverDocCache();
 });
 
 // ── Planning mode state ──────────────────────────────────────
@@ -80,13 +91,15 @@ describe("buildPrompt — basic structure", () => {
     expect(result).toContain("SOURCE TRUST HIERARCHY");
   });
 
-  it("includes memory protocol", () => {
+  it("includes memory protocol when River doc injected", () => {
+    _injectRiverDocForTesting("memory-protocol", "Use [REMEMBER: key=value] to store facts.");
     const result = buildPrompt("Hello");
     expect(result).toContain("MEMORY MANAGEMENT:");
     expect(result).toContain("[REMEMBER:");
   });
 
-  it("includes confirm protocol", () => {
+  it("includes confirm protocol when River doc injected", () => {
+    _injectRiverDocForTesting("confirm-protocol", "Use [CONFIRM: action] before destructive actions.");
     const result = buildPrompt("Hello");
     expect(result).toContain("ACTION CONFIRMATIONS:");
     expect(result).toContain("[CONFIRM:");
@@ -315,6 +328,7 @@ describe("buildPrompt — personality context", () => {
 
 describe("buildPrompt — session IDs and forest memory writes", () => {
   it("includes forest memory write instructions when sessionIds provided", () => {
+    _injectRiverDocForTesting("forest-writes", "Use [MEMORY: key=value] to store knowledge.");
     const sessionIds = {
       tree_id: "t1",
       branch_id: "b1",
@@ -331,11 +345,13 @@ describe("buildPrompt — session IDs and forest memory writes", () => {
   });
 
   it("omits forest memory writes when no sessionIds", () => {
+    _injectRiverDocForTesting("forest-writes", "Use [MEMORY: key=value] to store knowledge.");
     const result = buildPrompt("Hello");
     expect(result).not.toContain("FOREST MEMORY WRITES");
   });
 
   it("includes no-session notice in memory protocol when no sessionIds", () => {
+    _injectRiverDocForTesting("memory-protocol", "Memory instructions here.");
     const result = buildPrompt("Hello");
     expect(result).toContain("forest writes unavailable");
   });
@@ -345,6 +361,7 @@ describe("buildPrompt — session IDs and forest memory writes", () => {
 
 describe("buildPrompt — dev protocol", () => {
   it("includes dev protocol for non-general agent with active work item", () => {
+    _injectRiverDocForTesting("dev-agent-template", "Use [ELLIE-N] prefix on all commits.");
     const result = buildPrompt(
       "Hello", undefined, undefined, undefined, "telegram",
       { system_prompt: "You are a dev agent.", name: "dev" },
@@ -385,6 +402,7 @@ describe("buildPrompt — planning mode", () => {
   });
 
   it("includes planning mode block when active", () => {
+    _injectRiverDocForTesting("planning-mode", "This is an extended planning session. Think broadly.");
     setPlanningMode(true);
     const result = buildPrompt("Hello");
     expect(result).toContain("PLANNING MODE ACTIVE:");
@@ -581,6 +599,8 @@ describe("getLastBuildMetrics", () => {
   });
 
   it("sections include known labels", () => {
+    _injectRiverDocForTesting("memory-protocol", "Memory instructions.");
+    _injectRiverDocForTesting("confirm-protocol", "Confirm instructions.");
     buildPrompt("Test message");
     const metrics = getLastBuildMetrics()!;
     const labels = metrics.sections.map(s => s.label);
@@ -729,6 +749,8 @@ describe("buildPrompt — integration with real archetype", () => {
   it("builds complete prompt with dev archetype and work item", async () => {
     // Load real archetype
     const archetype = await getAgentArchetype("dev");
+    _injectRiverDocForTesting("dev-agent-template", "Dev agent steps here.");
+    _injectRiverDocForTesting("forest-writes", "Use [MEMORY: key=value] to store knowledge.");
 
     const result = buildPrompt(
       "Fix the bug in relay.ts",
@@ -1004,6 +1026,7 @@ describe("buildPrompt — section ordering", () => {
   });
 
   it("memory protocol appears before context docket", () => {
+    _injectRiverDocForTesting("memory-protocol", "Memory instructions.");
     const result = buildPrompt(
       "Hello", "Some docket data",
     );

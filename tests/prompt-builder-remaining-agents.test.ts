@@ -2,8 +2,8 @@
  * ELLIE-535 — Remaining agents River-backed prompts
  *
  * Tests River-backed protocol sections for research and strategy agents:
- *   - research-protocol section: River template, hardcoded fallback, gating
- *   - strategy-protocol section: River template, hardcoded fallback, gating
+ *   - research-protocol section: River template, absent without River, gating
+ *   - strategy-protocol section: River template, absent without River, gating
  *   - Frontmatter section_priority applies to both protocols
  *   - ELLIE-525 soul gate: soul NOT injected for research/strategy agents
  *   - ELLIE-533/525 cross-check: dev-protocol NOT in research/strategy builds
@@ -80,25 +80,16 @@ describe("buildPrompt — research-protocol (ELLIE-535)", () => {
     expect(result).toContain("RESEARCH AGENT PROTOCOL:");
   });
 
-  test("hardcoded fallback used when River research template cache is empty", () => {
+  test("section absent when River research template cache is empty (ELLIE-537: no fallback)", () => {
     const result = buildPrompt("Research this topic", undefined, undefined, undefined, "telegram", {
       system_prompt: "You are a research agent.",
       name: "research",
     });
-    expect(result).toContain("RESEARCH AGENT PROTOCOL:");
-    expect(result).toContain("Search the Forest for prior context");
+    expect(result).not.toContain("RESEARCH AGENT PROTOCOL:");
   });
 
-  test("hardcoded fallback contains key research steps", () => {
-    const result = buildPrompt("Research topic", undefined, undefined, undefined, "telegram", {
-      name: "research",
-    });
-    expect(result).toContain("RESEARCH AGENT PROTOCOL:");
-    expect(result).toContain("QMD deep_search");
-    expect(result).toContain("[MEMORY:]");
-  });
-
-  test("research-protocol section appears in build metrics", () => {
+  test("research-protocol section appears in build metrics when River injected", () => {
+    _injectRiverDocForTesting("research-agent-template", "River research content");
     buildPrompt("Research topic", undefined, undefined, undefined, "telegram", {
       name: "research",
     });
@@ -131,8 +122,9 @@ describe("buildPrompt — research-protocol (ELLIE-535)", () => {
     expect(metrics.sections.find(s => s.label === "research-protocol")).toBeUndefined();
   });
 
-  test("research agent gets research-protocol without requiring active work item", () => {
-    // Unlike dev-protocol, research-protocol always appears for research agent
+  test("research agent gets research-protocol without requiring active work item (when River injected)", () => {
+    // Unlike dev-protocol, research-protocol always appears for research agent (when River available)
+    _injectRiverDocForTesting("research-agent-template", "River research content");
     buildPrompt("Research topic", undefined, undefined, undefined, "telegram", {
       name: "research",
     });
@@ -140,12 +132,10 @@ describe("buildPrompt — research-protocol (ELLIE-535)", () => {
     expect(metrics.sections.find(s => s.label === "research-protocol")).toBeDefined();
   });
 
-  test("River research template overrides hardcoded — no fallback strings visible", () => {
+  test("River research template content appears in prompt", () => {
     _injectRiverDocForTesting("research-agent-template", "Custom River research instructions");
     const result = buildPrompt("Research", undefined, undefined, undefined, "telegram", { name: "research" });
     expect(result).toContain("Custom River research instructions");
-    // Hardcoded fallback strings should not appear when River template is loaded
-    expect(result).not.toContain("Search the Forest for prior context: forest_read");
   });
 });
 
@@ -162,26 +152,16 @@ describe("buildPrompt — strategy-protocol (ELLIE-535)", () => {
     expect(result).toContain("STRATEGY AGENT PROTOCOL:");
   });
 
-  test("hardcoded fallback used when River strategy template cache is empty", () => {
+  test("section absent when River strategy template cache is empty (ELLIE-537: no fallback)", () => {
     const result = buildPrompt("Plan the roadmap", undefined, undefined, undefined, "telegram", {
       system_prompt: "You are a strategy agent.",
       name: "strategy",
     });
-    expect(result).toContain("STRATEGY AGENT PROTOCOL:");
-    expect(result).toContain("Assess the current state");
+    expect(result).not.toContain("STRATEGY AGENT PROTOCOL:");
   });
 
-  test("hardcoded fallback contains key strategy steps", () => {
-    const result = buildPrompt("Strategy question", undefined, undefined, undefined, "telegram", {
-      name: "strategy",
-    });
-    expect(result).toContain("STRATEGY AGENT PROTOCOL:");
-    expect(result).toContain("trade-offs");
-    expect(result).toContain("[MEMORY:decision:]");
-    expect(result).toContain("Propose but do not implement");
-  });
-
-  test("strategy-protocol section appears in build metrics", () => {
+  test("strategy-protocol section appears in build metrics when River injected", () => {
+    _injectRiverDocForTesting("strategy-agent-template", "River strategy content");
     buildPrompt("Plan something", undefined, undefined, undefined, "telegram", {
       name: "strategy",
     });
@@ -213,7 +193,8 @@ describe("buildPrompt — strategy-protocol (ELLIE-535)", () => {
     expect(metrics.sections.find(s => s.label === "strategy-protocol")).toBeUndefined();
   });
 
-  test("strategy agent gets strategy-protocol without requiring active work item", () => {
+  test("strategy agent gets strategy-protocol without requiring active work item (when River injected)", () => {
+    _injectRiverDocForTesting("strategy-agent-template", "River strategy content");
     buildPrompt("Plan something", undefined, undefined, undefined, "telegram", {
       name: "strategy",
     });
@@ -221,11 +202,10 @@ describe("buildPrompt — strategy-protocol (ELLIE-535)", () => {
     expect(metrics.sections.find(s => s.label === "strategy-protocol")).toBeDefined();
   });
 
-  test("River strategy template overrides hardcoded — no fallback strings visible", () => {
+  test("River strategy template content appears in prompt", () => {
     _injectRiverDocForTesting("strategy-agent-template", "Custom River strategy instructions");
     const result = buildPrompt("Plan", undefined, undefined, undefined, "telegram", { name: "strategy" });
     expect(result).toContain("Custom River strategy instructions");
-    expect(result).not.toContain("Propose but do not implement");
   });
 });
 
@@ -257,6 +237,7 @@ describe("ELLIE-525 soul gate — research/strategy blocked", () => {
 
 describe("protocol isolation — each agent only gets its own protocol", () => {
   test("research agent does NOT get dev-protocol", () => {
+    _injectRiverDocForTesting("research-agent-template", "River research steps");
     buildPrompt(
       "Research topic",
       undefined, undefined, undefined,
@@ -270,6 +251,7 @@ describe("protocol isolation — each agent only gets its own protocol", () => {
   });
 
   test("strategy agent does NOT get dev-protocol", () => {
+    _injectRiverDocForTesting("strategy-agent-template", "River strategy steps");
     buildPrompt(
       "Plan this",
       undefined, undefined, undefined,
@@ -283,6 +265,7 @@ describe("protocol isolation — each agent only gets its own protocol", () => {
   });
 
   test("dev agent does NOT get research-protocol or strategy-protocol", () => {
+    _injectRiverDocForTesting("dev-agent-template", "River dev steps");
     buildPrompt(
       "Fix this",
       undefined, undefined, undefined,
@@ -447,28 +430,24 @@ describe("integration — all River docs injected for research agent", () => {
 
 // ── Output comparison: River vs hardcoded contain protocol label ──────────────
 
-describe("output format consistency — protocol label always present", () => {
-  test("research-protocol output always starts with RESEARCH AGENT PROTOCOL:", () => {
-    // With River
+describe("output format — protocol label present with River, absent without (ELLIE-537)", () => {
+  test("research-protocol header present with River, absent without", () => {
     _injectRiverDocForTesting("research-agent-template", "River research content");
     const withRiver = buildPrompt("Research", undefined, undefined, undefined, "telegram", { name: "research" });
     expect(withRiver).toContain("RESEARCH AGENT PROTOCOL:");
 
     clearRiverDocCache();
-    // Without River (hardcoded fallback)
-    const withFallback = buildPrompt("Research", undefined, undefined, undefined, "telegram", { name: "research" });
-    expect(withFallback).toContain("RESEARCH AGENT PROTOCOL:");
+    const withoutRiver = buildPrompt("Research", undefined, undefined, undefined, "telegram", { name: "research" });
+    expect(withoutRiver).not.toContain("RESEARCH AGENT PROTOCOL:");
   });
 
-  test("strategy-protocol output always starts with STRATEGY AGENT PROTOCOL:", () => {
-    // With River
+  test("strategy-protocol header present with River, absent without", () => {
     _injectRiverDocForTesting("strategy-agent-template", "River strategy content");
     const withRiver = buildPrompt("Plan", undefined, undefined, undefined, "telegram", { name: "strategy" });
     expect(withRiver).toContain("STRATEGY AGENT PROTOCOL:");
 
     clearRiverDocCache();
-    // Without River (hardcoded fallback)
-    const withFallback = buildPrompt("Plan", undefined, undefined, undefined, "telegram", { name: "strategy" });
-    expect(withFallback).toContain("STRATEGY AGENT PROTOCOL:");
+    const withoutRiver = buildPrompt("Plan", undefined, undefined, undefined, "telegram", { name: "strategy" });
+    expect(withoutRiver).not.toContain("STRATEGY AGENT PROTOCOL:");
   });
 });

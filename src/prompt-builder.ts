@@ -828,80 +828,30 @@ export function buildPrompt(
       priority: 2 });
   }
 
-  // Priority 3: Protocols — River-backed with hardcoded fallback (ELLIE-150, ELLIE-532)
+  // Priority 3: Protocols — River-backed, River is source of truth (ELLIE-150, ELLIE-532, ELLIE-537)
+  // Sections are omitted when the River doc is unavailable (no hardcoded fallback).
   // Priority is overridable via section_priority in River doc frontmatter.
   {
     const riverMemory = getCachedRiverDoc("memory-protocol");
-    const memPriority = getRiverDocPriority("memory-protocol", 3);
-    const memoryContent = riverMemory
-      ? `\nMEMORY MANAGEMENT:\n${riverMemory}` +
-        (sessionIds ? "" : "\n\n(No active work session — forest writes unavailable.)")
-      : "\nMEMORY MANAGEMENT:" +
-        "\nTwo memory systems exist — use the right one:" +
-        "\n" +
-        "\n1. CONVERSATION MEMORY ([REMEMBER:] tags) — for personal facts about the user:" +
-        "\n   preferences, decisions, project details, personal info, things the user asked to remember." +
-        "\n   [REMEMBER: fact to store]" +
-        "\n   [GOAL: goal text | DEADLINE: optional date]" +
-        "\n   [DONE: search text for completed goal]" +
-        "\n" +
-        "\n2. FOREST MEMORY ([MEMORY:] tags) — for work products:" +
-        "\n   strategic analysis, code findings, bug discoveries, architectural decisions, hypotheses." +
-        "\n   These compound across sessions and are shared with other agents." +
-        (sessionIds ? "" : "\n   (No active work session — forest writes unavailable.)") +
-        "\n" +
-        "\nUse [REMEMBER:] freely for user context. Use [MEMORY:] for institutional knowledge.";
-    sections.push({ label: "memory-protocol", content: memoryContent, priority: memPriority });
+    if (riverMemory) {
+      const sessionNote = sessionIds ? "" : "\n\n(No active work session — forest writes unavailable.)";
+      sections.push({ label: "memory-protocol", content: `\nMEMORY MANAGEMENT:\n${riverMemory}${sessionNote}`, priority: getRiverDocPriority("memory-protocol", 3) });
+    }
   }
 
   {
     const riverConfirm = getCachedRiverDoc("confirm-protocol");
-    const confirmPriority = getRiverDocPriority("confirm-protocol", 3);
-    const confirmContent = riverConfirm
-      ? `\nACTION CONFIRMATIONS:\n${riverConfirm}`
-      : "\nACTION CONFIRMATIONS:" +
-        "\nUse [CONFIRM: description] for these actions INSTEAD of executing:" +
-        "\n- Sending or replying to emails (send_gmail_message, /api/outlook/send, /api/outlook/reply)" +
-        "\n- Creating or modifying calendar events (create_event, modify_event)" +
-        "\n- Git push, posting to channels, modifying databases" +
-        "\n- Any difficult-to-undo external action" +
-        "\nDo NOT use [CONFIRM:] for:" +
-        "\n- Read-only: searching email, reading messages, checking calendar, listing tasks" +
-        "\n- Document search and retrieval (QMD / mcp__qmd__*): all read-only" +
-        "\n- Google Tasks management: creating/completing/updating tasks (low-stakes, easily reversible)" +
-        "\n- Actions the user explicitly and directly asked you to do in simple terms" +
-        "\nThe user will see Approve/Deny buttons. If approved, you will be resumed with instructions to proceed." +
-        '\nExample: "I\'ll send the report now. [CONFIRM: Send weekly report email to alice@example.com]"' +
-        "\nYou can include multiple [CONFIRM:] tags if multiple actions need approval.";
-    sections.push({ label: "confirm-protocol", content: confirmContent, priority: confirmPriority });
+    if (riverConfirm) {
+      sections.push({ label: "confirm-protocol", content: `\nACTION CONFIRMATIONS:\n${riverConfirm}`, priority: getRiverDocPriority("confirm-protocol", 3) });
+    }
   }
 
   if (sessionIds) {
-    // ELLIE-536: River-backed with hardcoded fallback.
+    // ELLIE-536/537: River-backed, section omitted when unavailable.
     const riverForestWrites = getCachedRiverDoc("forest-writes");
-    const forestWritesPriority = getRiverDocPriority("forest-writes", 3);
-    sections.push({ label: "forest-memory-writes", content:
-      riverForestWrites
-        ? `\nFOREST MEMORY WRITES (IMPORTANT):\n${riverForestWrites}`
-        : "\nFOREST MEMORY WRITES (IMPORTANT):" +
-          "\nYou are working in an active forest session. Record your findings with [MEMORY:] tags." +
-          "\nInclude at least one [MEMORY:] tag when you:" +
-          "\n  - Discover a fact, bug, or root cause" +
-          "\n  - Make an architectural or implementation decision" +
-          "\n  - Form a hypothesis about what's happening" +
-          "\n  - Complete a task or milestone" +
-          "\n" +
-          "\nExamples:" +
-          "\n  [MEMORY: The login endpoint returns 401 when the token is expired]" +
-          "\n  [MEMORY:decision: Using Redis for caching because latency requirements are <10ms]" +
-          "\n  [MEMORY:hypothesis:0.6: The race condition is in the session cleanup goroutine]" +
-          "\n" +
-          "\nFormat: [MEMORY:type:confidence: content] — type and confidence optional." +
-          "\nTypes: finding, decision, hypothesis, fact, pattern. Default: finding" +
-          "\nConfidence: 0.6 (speculative) → 0.9 (verified). Default: 0.7" +
-          "\nThese memories compound — future agents see your findings and build on them." +
-          "\nAlways include [MEMORY:] tags in your response text, never omit them.",
-    priority: forestWritesPriority });
+    if (riverForestWrites) {
+      sections.push({ label: "forest-memory-writes", content: `\nFOREST MEMORY WRITES (IMPORTANT):\n${riverForestWrites}`, priority: getRiverDocPriority("forest-writes", 3) });
+    }
   }
 
   // Priority 3: Full conversation thread (ELLIE-202 — primary context source, ground truth)
@@ -977,118 +927,50 @@ export function buildPrompt(
   if (workItemContext) sections.push({ label: "work-item", content: workItemContext, priority: 3 });
 
   if (workItemContext?.includes("ACTIVE WORK ITEM") && agentConfig?.name === "dev") {
-    // ELLIE-533: River-backed dev agent protocol template with hardcoded fallback.
-    // ELLIE-535: Scoped to dev agent only — research/strategy get their own protocol sections.
+    // ELLIE-533/535/537: River-backed, section omitted when unavailable.
     const riverDevTemplate = getCachedRiverDoc("dev-agent-template");
-    const devProtocolPriority = getRiverDocPriority("dev-agent-template", 3);
-    sections.push({ label: "dev-protocol", content:
-      riverDevTemplate
-        ? `\nDEV AGENT PROTOCOL:\n${riverDevTemplate}`
-        : "\nDEV AGENT PROTOCOL:" +
-          "\n1. Read the ticket and understand requirements" +
-          "\n2. Implement code changes" +
-          "\n3. Commit with [ELLIE-N] prefix (e.g., [ELLIE-5] Brief description)" +
-          "\n4. Build if dashboard code changed: cd /home/ellie/ellie-home && bun run build" +
-          "\n5. Restart affected service: sudo systemctl restart ellie-dashboard" +
-          "\n6. Verify changes work" +
-          "\nDo NOT call /api/work-session/complete — handled externally.",
-    priority: devProtocolPriority });
+    if (riverDevTemplate) {
+      sections.push({ label: "dev-protocol", content: `\nDEV AGENT PROTOCOL:\n${riverDevTemplate}`, priority: getRiverDocPriority("dev-agent-template", 3) });
+    }
   }
 
-  // ELLIE-535: Research agent protocol — River-backed with hardcoded fallback.
+  // ELLIE-535/537: Research agent protocol — River-backed, section omitted when unavailable.
   if (agentConfig?.name === "research") {
     const riverResearchTemplate = getCachedRiverDoc("research-agent-template");
-    const researchProtocolPriority = getRiverDocPriority("research-agent-template", 3);
-    sections.push({ label: "research-protocol", content:
-      riverResearchTemplate
-        ? `\nRESEARCH AGENT PROTOCOL:\n${riverResearchTemplate}`
-        : "\nRESEARCH AGENT PROTOCOL:" +
-          "\n1. Read the briefing and understand what needs to be researched" +
-          "\n2. Search the Forest for prior context: forest_read with relevant keywords" +
-          "\n3. Use QMD deep_search to find relevant River docs on the topic" +
-          "\n4. Use web search and available tools to gather current information" +
-          "\n5. Synthesize findings into a clear, structured report" +
-          "\n6. Write key discoveries to Forest with [MEMORY:] tags" +
-          "\nFocus on evidence quality — cite sources, flag uncertainty, distinguish facts from interpretation.",
-      priority: researchProtocolPriority });
+    if (riverResearchTemplate) {
+      sections.push({ label: "research-protocol", content: `\nRESEARCH AGENT PROTOCOL:\n${riverResearchTemplate}`, priority: getRiverDocPriority("research-agent-template", 3) });
+    }
   }
 
-  // ELLIE-535: Strategy agent protocol — River-backed with hardcoded fallback.
+  // ELLIE-535/537: Strategy agent protocol — River-backed, section omitted when unavailable.
   if (agentConfig?.name === "strategy") {
     const riverStrategyTemplate = getCachedRiverDoc("strategy-agent-template");
-    const strategyProtocolPriority = getRiverDocPriority("strategy-agent-template", 3);
-    sections.push({ label: "strategy-protocol", content:
-      riverStrategyTemplate
-        ? `\nSTRATEGY AGENT PROTOCOL:\n${riverStrategyTemplate}`
-        : "\nSTRATEGY AGENT PROTOCOL:" +
-          "\n1. Read the problem statement and understand the strategic question" +
-          "\n2. Search the Forest for prior decisions and relevant context" +
-          "\n3. Assess the current state, constraints, and objectives" +
-          "\n4. Consider multiple strategic options with trade-offs for each" +
-          "\n5. Recommend a direction with clear reasoning and success criteria" +
-          "\n6. Write key decisions and recommendations to Forest with [MEMORY:decision:]" +
-          "\nPropose but do not implement — the strategy agent plans, other agents execute.",
-      priority: strategyProtocolPriority });
+    if (riverStrategyTemplate) {
+      sections.push({ label: "strategy-protocol", content: `\nSTRATEGY AGENT PROTOCOL:\n${riverStrategyTemplate}`, priority: getRiverDocPriority("strategy-agent-template", 3) });
+    }
   }
 
   if (isPlaneConfigured()) {
     if (isGeneralAgent) {
-      // ELLIE-536: River-backed with hardcoded fallback.
+      // ELLIE-536/537: River-backed, section omitted when unavailable.
       const riverPlaybook = getCachedRiverDoc("playbook-commands");
-      const playbookPriority = getRiverDocPriority("playbook-commands", 3);
-      sections.push({ label: "playbook-commands", content:
-        riverPlaybook
-          ? `\nELLIE:: PLAYBOOK COMMANDS:\n${riverPlaybook}`
-          : "\nELLIE:: PLAYBOOK COMMANDS:" +
-            "\nYou can emit these tags to trigger infrastructure actions. Tags are stripped" +
-            "\nbefore your message reaches the user." +
-            "\n" +
-            "\n  ELLIE:: send ELLIE-144 to dev" +
-            "\n    Dispatches the dev agent to work on a ticket. You'll be notified when done." +
-            "\n    Use when: Dave asks to implement, fix, or build something on a specific ticket." +
-            "\n" +
-            "\n  ELLIE:: close ELLIE-144 \"summary of what was accomplished\"" +
-            "\n    Closes a ticket: updates Plane to Done, deploys if needed." +
-            "\n    Use when: Work is verified complete on a ticket." +
-            "\n" +
-            "\n  ELLIE:: create ticket \"Title\" \"Description of work\"" +
-            "\n    Creates a new ticket in Plane. Returns the identifier." +
-            "\n    Use when: New work should be tracked." +
-            "\n" +
-            "\nRules:" +
-            "\n- Place tags at the END of your response, after your conversational text" +
-            "\n- You can include multiple tags in one response" +
-            "\n- Dev dispatch is async — you'll get a notification when done" +
-            "\n- Only use these when the user's request clearly warrants it",
-      priority: playbookPriority });
+      if (riverPlaybook) {
+        sections.push({ label: "playbook-commands", content: `\nELLIE:: PLAYBOOK COMMANDS:\n${riverPlaybook}`, priority: getRiverDocPriority("playbook-commands", 3) });
+      }
     }
-    // ELLIE-536: River-backed with hardcoded fallback.
+    // ELLIE-536/537: River-backed, section omitted when unavailable.
     const riverWorkCommands = getCachedRiverDoc("work-commands");
-    const workCommandsPriority = getRiverDocPriority("work-commands", 3);
-    sections.push({ label: "work-commands", content:
-      riverWorkCommands
-        ? `\nWORK ITEM COMMANDS:\n${riverWorkCommands}`
-        : "\nWORK ITEM COMMANDS:" +
-          "\nYou can manage Plane work items via MCP tools (workspace: evelife, project: ELLIE)." +
-          "\n- List open issues: mcp__plane__list_states, then query issues" +
-          "\n- Create new issues when asked" +
-          "\n- Use [ELLIE-N] prefix in commit messages when working on a tracked item",
-    priority: workCommandsPriority });
+    if (riverWorkCommands) {
+      sections.push({ label: "work-commands", content: `\nWORK ITEM COMMANDS:\n${riverWorkCommands}`, priority: getRiverDocPriority("work-commands", 3) });
+    }
   }
 
-  // Planning mode context
+  // Planning mode context — ELLIE-536/537: River-backed, section omitted when unavailable.
   if (planningMode) {
-    // ELLIE-536: River-backed with hardcoded fallback.
     const riverPlanningMode = getCachedRiverDoc("planning-mode");
-    const planningModePriority = getRiverDocPriority("planning-mode", 3);
-    sections.push({ label: "planning-mode", content:
-      riverPlanningMode
-        ? `\nPLANNING MODE ACTIVE:\n${riverPlanningMode}`
-        : "\nPLANNING MODE ACTIVE:" +
-          "\nYou are in an extended planning session. The user is working through requirements," +
-          "\narchitecture, or design decisions. Maintain continuity and context across messages." +
-          "\nDo not suggest ending the session — the user will deactivate planning mode when done.",
-    priority: planningModePriority });
+    if (riverPlanningMode) {
+      sections.push({ label: "planning-mode", content: `\nPLANNING MODE ACTIVE:\n${riverPlanningMode}`, priority: getRiverDocPriority("planning-mode", 3) });
+    }
   }
 
   // ── ELLIE-261: Apply strategy mode section filtering + budget ──

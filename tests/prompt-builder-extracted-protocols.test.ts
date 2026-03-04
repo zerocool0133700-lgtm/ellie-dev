@@ -1,5 +1,6 @@
 /**
  * ELLIE-536 — Extract remaining hardcoded protocols to River vault
+ * ELLIE-537 — Remove hardcoded fallbacks; River is source of truth
  *
  * Tests the River-backed versions of the four protocols extracted in ELLIE-536:
  *   - forest-writes   → forest-memory-writes section (gated on sessionIds)
@@ -7,7 +8,7 @@
  *   - work-commands   → work-commands section (all agents + Plane configured)
  *   - planning-mode   → planning-mode section (gated on planningMode)
  *
- * Each covers: key registration, River content returned, hardcoded fallback,
+ * Each covers: key registration, River content returned, section absent when cache empty,
  * gating condition, section_priority from frontmatter, and BuildMetrics tracking.
  * No module mocking — uses _injectRiverDocForTesting() to control cache state.
  */
@@ -128,17 +129,9 @@ describe("forest-memory-writes — River-backed (ELLIE-536)", () => {
     expect(result).not.toContain("Using Redis for caching");
   });
 
-  test("hardcoded fallback used when cache empty and sessionIds provided", () => {
+  test("section absent when River cache empty (ELLIE-537: no hardcoded fallback)", () => {
     const result = buildWithSession();
-    expect(result).toContain("FOREST MEMORY WRITES (IMPORTANT):");
-    expect(result).toContain("[MEMORY:");
-    expect(result).toContain("active forest session");
-  });
-
-  test("hardcoded fallback contains format documentation", () => {
-    const result = buildWithSession();
-    expect(result).toContain("Types: finding, decision, hypothesis, fact, pattern");
-    expect(result).toContain("Confidence: 0.6");
+    expect(result).not.toContain("FOREST MEMORY WRITES (IMPORTANT):");
   });
 
   test("section omitted when no sessionIds (gating preserved)", () => {
@@ -147,7 +140,7 @@ describe("forest-memory-writes — River-backed (ELLIE-536)", () => {
     expect(result).not.toContain("FOREST MEMORY WRITES");
   });
 
-  test("section omitted when no sessionIds and cache empty (hardcoded fallback also gated)", () => {
+  test("section absent when no sessionIds regardless of cache state", () => {
     const result = buildGeneral();
     expect(result).not.toContain("FOREST MEMORY WRITES");
   });
@@ -206,17 +199,9 @@ describe("playbook-commands — River-backed (ELLIE-536)", () => {
     expect(result).not.toContain("ELLIE-144");
   });
 
-  test("hardcoded fallback used when cache empty", () => {
+  test("section absent when River cache empty (ELLIE-537: no hardcoded fallback)", () => {
     const result = buildGeneral();
-    expect(result).toContain("ELLIE:: PLAYBOOK COMMANDS:");
-    expect(result).toContain("ELLIE:: send ELLIE-144 to dev");
-  });
-
-  test("hardcoded fallback contains all three command examples", () => {
-    const result = buildGeneral();
-    expect(result).toContain("ELLIE:: send ELLIE-144 to dev");
-    expect(result).toContain("ELLIE:: close ELLIE-144");
-    expect(result).toContain("ELLIE:: create ticket");
+    expect(result).not.toContain("ELLIE:: PLAYBOOK COMMANDS:");
   });
 
   test("section omitted for downstream agents (general agent only)", () => {
@@ -278,15 +263,9 @@ describe("work-commands — River-backed (ELLIE-536)", () => {
     expect(result).not.toContain("mcp__plane__list_states");
   });
 
-  test("hardcoded fallback used when cache empty", () => {
+  test("section absent when River cache empty (ELLIE-537: no hardcoded fallback)", () => {
     const result = buildGeneral();
-    expect(result).toContain("WORK ITEM COMMANDS:");
-    expect(result).toContain("mcp__plane__list_states");
-  });
-
-  test("hardcoded fallback contains ELLIE-N prefix instruction", () => {
-    const result = buildGeneral();
-    expect(result).toContain("[ELLIE-N] prefix");
+    expect(result).not.toContain("WORK ITEM COMMANDS:");
   });
 
   test("section appears for downstream agents too (not gated by agent type)", () => {
@@ -344,18 +323,10 @@ describe("planning-mode — River-backed (ELLIE-536)", () => {
     expect(result).not.toContain("extended planning session");
   });
 
-  test("hardcoded fallback used when cache empty and planningMode active", () => {
+  test("section absent when River cache empty even if planningMode active (ELLIE-537: no hardcoded fallback)", () => {
     setPlanningMode(true);
     const result = buildGeneral();
-    expect(result).toContain("PLANNING MODE ACTIVE:");
-    expect(result).toContain("extended planning session");
-  });
-
-  test("hardcoded fallback contains continuity instruction", () => {
-    setPlanningMode(true);
-    const result = buildGeneral();
-    expect(result).toContain("Maintain continuity and context across messages");
-    expect(result).toContain("deactivate planning mode when done");
+    expect(result).not.toContain("PLANNING MODE ACTIVE:");
   });
 
   test("section omitted when planningMode is false (gating preserved)", () => {
@@ -433,13 +404,13 @@ describe("Integration — all four ELLIE-536 River keys", () => {
     expect(result).toContain("PLANNING MODE ACTIVE:");
   });
 
-  test("hardcoded fallbacks provide all four section headers when cache empty", () => {
+  test("all four sections absent when cache empty (ELLIE-537: no hardcoded fallbacks)", () => {
     setPlanningMode(true);
     const result = buildWithSession();
-    expect(result).toContain("FOREST MEMORY WRITES (IMPORTANT):");
-    expect(result).toContain("ELLIE:: PLAYBOOK COMMANDS:");
-    expect(result).toContain("WORK ITEM COMMANDS:");
-    expect(result).toContain("PLANNING MODE ACTIVE:");
+    expect(result).not.toContain("FOREST MEMORY WRITES (IMPORTANT):");
+    expect(result).not.toContain("ELLIE:: PLAYBOOK COMMANDS:");
+    expect(result).not.toContain("WORK ITEM COMMANDS:");
+    expect(result).not.toContain("PLANNING MODE ACTIVE:");
   });
 
   test("global cacheHits accumulates when same keys are looked up across builds", () => {
