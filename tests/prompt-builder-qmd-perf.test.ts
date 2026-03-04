@@ -216,13 +216,15 @@ describe("refreshRiverDocs — lastRefresh populated", () => {
     expect(lastRefresh!.failed).toBeGreaterThanOrEqual(0);
   });
 
-  test("lastRefresh.loaded + lastRefresh.failed <= registered doc count (4)", async () => {
+  test("lastRefresh.loaded + lastRefresh.failed <= registered doc count (6)", async () => {
     await refreshRiverDocs();
     const { lastRefresh } = getRiverDocMetrics();
-    // If QMD is unavailable, each doc may fail individually (all 4 fail) or import may fail (0 recorded)
+    // If QMD is unavailable, each doc may fail individually (all 6 fail) or import may fail (0 recorded)
+    // RIVER_DOC_PATHS now has 6 entries (soul, memory-protocol, confirm-protocol,
+    // dev-agent-template, research-agent-template, strategy-agent-template)
     const total = lastRefresh!.loaded + lastRefresh!.failed;
     expect(total).toBeGreaterThanOrEqual(0);
-    expect(total).toBeLessThanOrEqual(4);
+    expect(total).toBeLessThanOrEqual(6);
   });
 
   test("lastRefresh.docs has entries for registered keys", async () => {

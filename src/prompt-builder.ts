@@ -224,6 +224,9 @@ const RIVER_DOC_PATHS: Record<string, string> = {
   "memory-protocol": "prompts/protocols/memory-management.md",
   "confirm-protocol": "prompts/protocols/action-confirmations.md",
   "dev-agent-template": "templates/dev-agent-base.md",
+  // ELLIE-535: remaining specialist agents
+  "research-agent-template": "templates/research-agent-base.md",
+  "strategy-agent-template": "templates/strategy-agent-base.md",
 };
 
 /**
@@ -963,8 +966,9 @@ export function buildPrompt(
   // Priority 3: Work item + dispatch protocols
   if (workItemContext) sections.push({ label: "work-item", content: workItemContext, priority: 3 });
 
-  if (workItemContext?.includes("ACTIVE WORK ITEM") && !isGeneralAgent) {
+  if (workItemContext?.includes("ACTIVE WORK ITEM") && agentConfig?.name === "dev") {
     // ELLIE-533: River-backed dev agent protocol template with hardcoded fallback.
+    // ELLIE-535: Scoped to dev agent only — research/strategy get their own protocol sections.
     const riverDevTemplate = getCachedRiverDoc("dev-agent-template");
     const devProtocolPriority = getRiverDocPriority("dev-agent-template", 3);
     sections.push({ label: "dev-protocol", content:
@@ -979,6 +983,42 @@ export function buildPrompt(
           "\n6. Verify changes work" +
           "\nDo NOT call /api/work-session/complete — handled externally.",
     priority: devProtocolPriority });
+  }
+
+  // ELLIE-535: Research agent protocol — River-backed with hardcoded fallback.
+  if (agentConfig?.name === "research") {
+    const riverResearchTemplate = getCachedRiverDoc("research-agent-template");
+    const researchProtocolPriority = getRiverDocPriority("research-agent-template", 3);
+    sections.push({ label: "research-protocol", content:
+      riverResearchTemplate
+        ? `\nRESEARCH AGENT PROTOCOL:\n${riverResearchTemplate}`
+        : "\nRESEARCH AGENT PROTOCOL:" +
+          "\n1. Read the briefing and understand what needs to be researched" +
+          "\n2. Search the Forest for prior context: forest_read with relevant keywords" +
+          "\n3. Use QMD deep_search to find relevant River docs on the topic" +
+          "\n4. Use web search and available tools to gather current information" +
+          "\n5. Synthesize findings into a clear, structured report" +
+          "\n6. Write key discoveries to Forest with [MEMORY:] tags" +
+          "\nFocus on evidence quality — cite sources, flag uncertainty, distinguish facts from interpretation.",
+      priority: researchProtocolPriority });
+  }
+
+  // ELLIE-535: Strategy agent protocol — River-backed with hardcoded fallback.
+  if (agentConfig?.name === "strategy") {
+    const riverStrategyTemplate = getCachedRiverDoc("strategy-agent-template");
+    const strategyProtocolPriority = getRiverDocPriority("strategy-agent-template", 3);
+    sections.push({ label: "strategy-protocol", content:
+      riverStrategyTemplate
+        ? `\nSTRATEGY AGENT PROTOCOL:\n${riverStrategyTemplate}`
+        : "\nSTRATEGY AGENT PROTOCOL:" +
+          "\n1. Read the problem statement and understand the strategic question" +
+          "\n2. Search the Forest for prior decisions and relevant context" +
+          "\n3. Assess the current state, constraints, and objectives" +
+          "\n4. Consider multiple strategic options with trade-offs for each" +
+          "\n5. Recommend a direction with clear reasoning and success criteria" +
+          "\n6. Write key decisions and recommendations to Forest with [MEMORY:decision:]" +
+          "\nPropose but do not implement — the strategy agent plans, other agents execute.",
+      priority: strategyProtocolPriority });
   }
 
   if (isPlaneConfigured()) {
