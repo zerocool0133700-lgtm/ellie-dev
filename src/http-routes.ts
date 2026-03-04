@@ -61,6 +61,7 @@ import {
 import { getChannelHealth } from "./channel-health.ts";
 import { getTaskStatus } from "./periodic-task.ts";
 import { getFireForgetMetrics } from "./resilient-task.ts";
+import { getReconcileStatus } from "./elasticsearch/reconcile.ts";
 import {
   saveMessage,
   sendWithApprovals,
@@ -1096,6 +1097,8 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         periodicTasks: getTaskStatus(),
         // ELLIE-479: Fire-and-forget resilience metrics
         fireAndForget: getFireForgetMetrics(),
+        // ELLIE-496: ES reconciliation status
+        esReconciliation: getReconcileStatus(),
       }));
     }).catch(() => {
       res.writeHead(200, { "Content-Type": "application/json" });

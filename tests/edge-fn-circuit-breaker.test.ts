@@ -326,12 +326,12 @@ describe("shared edgeFn breaker — cross-function failure accumulation", () => 
 describe("checkMemoryConflict — edge fn circuit breaker", () => {
   beforeEach(() => { breakers.edgeFn.reset(); });
 
-  test("returns null when search edge fn returns error", async () => {
+  test("returns available:false when search edge fn returns error", async () => {
     const supabase: any = {
       functions: { invoke: mock(async () => ({ data: null, error: { message: "search down" } })) },
     };
     const result = await checkMemoryConflict(supabase, "test content", "fact");
-    expect(result).toBeNull();
+    expect(result.available).toBe(false);
     expect(breakers.edgeFn.getState().failures).toBe(1);
   });
 
@@ -343,11 +343,14 @@ describe("checkMemoryConflict — edge fn circuit breaker", () => {
       functions: { invoke: mock(async () => ({ data: searchData, error: null })) },
     };
     const result = await checkMemoryConflict(supabase, "test fact similar", "fact");
-    expect(result).not.toBeNull();
-    expect(result!.similarity).toBe(0.92);
+    expect(result.available).toBe(true);
+    if (result.available) {
+      expect(result.match).not.toBeNull();
+      expect(result.match!.similarity).toBe(0.92);
+    }
   });
 
-  test("returns null when breaker is open (no invoke call)", async () => {
+  test("returns available:false when breaker is open (no invoke call)", async () => {
     // Open the breaker
     const failSupabase: any = {
       functions: { invoke: mock(async () => ({ data: null, error: { message: "down" } })) },
@@ -363,19 +366,20 @@ describe("checkMemoryConflict — edge fn circuit breaker", () => {
       functions: { invoke: mock(async () => { invokeCalled++; return { data: null, error: null }; }) },
     };
     const result = await checkMemoryConflict(supabase, "test", "fact");
-    expect(result).toBeNull();
+    expect(result.available).toBe(false);
     expect(invokeCalled).toBe(0); // breaker blocked the call
   });
 
-  test("returns null when search returns empty array", async () => {
+  test("returns available:true match:null when search returns empty array", async () => {
     const supabase: any = {
       functions: { invoke: mock(async () => ({ data: [], error: null })) },
     };
     const result = await checkMemoryConflict(supabase, "test", "fact");
-    expect(result).toBeNull();
+    expect(result.available).toBe(true);
+    if (result.available) expect(result.match).toBeNull();
   });
 
-  test("returns null when type doesn't match any result", async () => {
+  test("returns available:true match:null when type doesn't match any result", async () => {
     const searchData = [
       { id: "mem-1", content: "test", type: "goal", source_agent: "general", visibility: "shared", metadata: {}, similarity: 0.9 },
     ];
@@ -383,7 +387,8 @@ describe("checkMemoryConflict — edge fn circuit breaker", () => {
       functions: { invoke: mock(async () => ({ data: searchData, error: null })) },
     };
     const result = await checkMemoryConflict(supabase, "test", "fact"); // type=fact but data has goal
-    expect(result).toBeNull();
+    expect(result.available).toBe(true);
+    if (result.available) expect(result.match).toBeNull();
   });
 });
 

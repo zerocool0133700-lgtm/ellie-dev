@@ -5,16 +5,22 @@
  * processMemoryIntents dedup integration, merge metadata tracking,
  * visibility promotion, content upgrade logic.
  */
-import { describe, test, expect, mock, beforeEach } from "bun:test";
+import { describe, test, expect, mock, beforeEach, afterAll } from "bun:test";
 import {
   resolveMemoryConflict,
   checkMemoryConflict,
   insertMemoryWithDedup,
   processMemoryIntents,
+  clearPendingMemoryQueue,
   DEDUP_SIMILARITY_THRESHOLD,
   type SimilarMemory,
   type ConflictResult,
 } from "../src/memory.ts";
+import { breakers } from "../src/resilience.ts";
+
+// Reset circuit breaker + pending queue before/after every test to guard against cross-file contamination
+beforeEach(() => { breakers.edgeFn.reset(); clearPendingMemoryQueue(); });
+afterAll(() => { breakers.edgeFn.reset(); clearPendingMemoryQueue(); });
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -198,16 +204,17 @@ describe("resolveMemoryConflict", () => {
 // ══════════════════════════════════════════════════════════════════
 
 describe("checkMemoryConflict", () => {
-  test("returns null when no similar memories found", async () => {
+  test("returns available:true match:null when no similar memories found", async () => {
     const supabase = createMockSupabaseForDedup({ searchResults: [] });
     const result = await checkMemoryConflict(supabase, "Brand new fact", "fact");
-    expect(result).toBeNull();
+    expect(result.available).toBe(true);
+    if (result.available) expect(result.match).toBeNull();
   });
 
-  test("returns null when search Edge Function errors", async () => {
+  test("returns available:false when search Edge Function errors", async () => {
     const supabase = createMockSupabaseForDedup({ searchError: "Edge function unavailable" });
     const result = await checkMemoryConflict(supabase, "Some fact", "fact");
-    expect(result).toBeNull();
+    expect(result.available).toBe(false);
   });
 
   test("returns best match of same type", async () => {
@@ -218,9 +225,12 @@ describe("checkMemoryConflict", () => {
       ],
     });
     const result = await checkMemoryConflict(supabase, "Similar fact here", "fact");
-    expect(result).not.toBeNull();
-    expect(result!.id).toBe("mem-1");
-    expect(result!.similarity).toBe(0.92);
+    expect(result.available).toBe(true);
+    if (result.available) {
+      expect(result.match).not.toBeNull();
+      expect(result.match!.id).toBe("mem-1");
+      expect(result.match!.similarity).toBe(0.92);
+    }
   });
 
   test("filters by type — ignores goals when looking for facts", async () => {
@@ -230,7 +240,8 @@ describe("checkMemoryConflict", () => {
       ],
     });
     const result = await checkMemoryConflict(supabase, "Similar content", "fact");
-    expect(result).toBeNull();
+    expect(result.available).toBe(true);
+    if (result.available) expect(result.match).toBeNull();
   });
 
   test("calls search Edge Function with correct parameters", async () => {

@@ -58,6 +58,14 @@ export interface ConflictResult {
   reason: string;
 }
 
+/**
+ * ELLIE-481: Distinguishes "no conflict" from "search unavailable".
+ * Callers must not treat unavailability as "no conflict" — they should queue instead.
+ */
+export type ConflictCheckResult =
+  | { available: true; match: SimilarMemory | null }
+  | { available: false };
+
 /** Shape of a row returned by the search Edge Function for messages. */
 interface SearchMessageResult {
   role: string;
@@ -106,14 +114,16 @@ interface MessageRow {
  * Uses the search Edge Function to generate an embedding and find
  * similar memories via the match_memory RPC.
  *
- * Returns the best match above the similarity threshold, or null.
+ * ELLIE-481: Returns ConflictCheckResult instead of SimilarMemory | null.
+ * When search is unavailable (circuit breaker open or Edge Function error),
+ * returns { available: false } so callers can queue instead of silently inserting.
  */
 export async function checkMemoryConflict(
   supabase: SupabaseClient,
   content: string,
   type: string,
   threshold: number = DEDUP_SIMILARITY_THRESHOLD,
-): Promise<SimilarMemory | null> {
+): Promise<ConflictCheckResult> {
   // ELLIE-484: circuit breaker — throw on error so failures are recorded
   const invoked = await breakers.edgeFn.call(
     async () => {
@@ -126,22 +136,30 @@ export async function checkMemoryConflict(
     null,
   );
 
-  if (!invoked || !invoked.data?.length) return null;
+  if (!invoked) {
+    logger.warn("Memory dedup search unavailable — circuit breaker blocked or Edge Function errored");
+    return { available: false };
+  }
+
+  if (!invoked.data?.length) return { available: true, match: null };
   const data = invoked.data;
 
   // Filter to same type and find best match
   const sameType = data.filter((m: SearchMemoryResult) => m.type === type);
-  if (sameType.length === 0) return null;
+  if (sameType.length === 0) return { available: true, match: null };
 
   const best = sameType[0];
   return {
-    id: best.id,
-    content: best.content,
-    type: best.type,
-    source_agent: best.source_agent || "general",
-    visibility: best.visibility || "shared",
-    metadata: best.metadata || {},
-    similarity: best.similarity,
+    available: true,
+    match: {
+      id: best.id,
+      content: best.content,
+      type: best.type,
+      source_agent: best.source_agent || "general",
+      visibility: best.visibility || "shared",
+      metadata: best.metadata || {},
+      similarity: best.similarity,
+    },
   };
 }
 
@@ -240,9 +258,24 @@ export interface MemoryInsertParams {
   metadata?: Record<string, unknown>;
 }
 
+// ── ELLIE-481: Pending queue for inserts skipped due to unavailable search ───
+
+/** In-memory queue for memory inserts that couldn't be dedup-checked (search unavailable). */
+const _pendingMemoryQueue: MemoryInsertParams[] = [];
+
+/** Returns a snapshot of the pending queue (safe copy). */
+export function getPendingMemoryQueue(): MemoryInsertParams[] {
+  return [..._pendingMemoryQueue];
+}
+
+/** Clears the pending queue (e.g. on shutdown or after flush). */
+export function clearPendingMemoryQueue(): void {
+  _pendingMemoryQueue.length = 0;
+}
+
 interface MemoryInsertResult {
   id: string | null;
-  action: "inserted" | "merged" | "flagged" | "error";
+  action: "inserted" | "merged" | "flagged" | "error" | "queued";
   resolution?: ConflictResult;
 }
 
@@ -265,9 +298,21 @@ export async function insertMemoryWithDedup(
   params: MemoryInsertParams,
 ): Promise<MemoryInsertResult> {
   // 1. Check for conflict
-  const existing = await checkMemoryConflict(
+  const checkResult = await checkMemoryConflict(
     supabase, params.content, params.type,
   );
+
+  // ELLIE-481: Search unavailable — queue for later rather than blindly inserting
+  if (!checkResult.available) {
+    _pendingMemoryQueue.push(params);
+    logger.warn("Memory dedup search unavailable — queued insert for later flush", {
+      content: params.content.substring(0, 60),
+      queueLength: _pendingMemoryQueue.length,
+    });
+    return { id: null, action: "queued" };
+  }
+
+  const existing = checkResult.match;
 
   // No conflict — standard insert
   if (!existing) {
@@ -443,6 +488,67 @@ async function doFlag(
   );
 
   return { id: existing.id, action: "flagged", resolution };
+}
+
+// ── ELLIE-481: Search availability + pending queue flush ──────────────────────
+
+/**
+ * Returns true when the Edge Function circuit breaker is not open.
+ * Use this to gate features that require semantic search.
+ */
+export function isSearchAvailable(): boolean {
+  return breakers.edgeFn.getState().state !== "open";
+}
+
+/**
+ * Returns current search availability and the number of pending inserts
+ * waiting for search to come back.
+ */
+export function getMemorySearchHealth(): { searchAvailable: boolean; pendingQueueLength: number } {
+  return {
+    searchAvailable: isSearchAvailable(),
+    pendingQueueLength: _pendingMemoryQueue.length,
+  };
+}
+
+/**
+ * Probe search availability then drain the pending queue.
+ * Call this from the periodic housekeeping task after an outage clears.
+ * Returns how many were flushed and how many remain.
+ */
+export async function flushPendingMemoryInserts(
+  supabase: SupabaseClient,
+): Promise<{ flushed: number; remaining: number }> {
+  if (_pendingMemoryQueue.length === 0) return { flushed: 0, remaining: 0 };
+
+  // Probe: attempt a search with the first item's content to confirm availability
+  const probe = await checkMemoryConflict(
+    supabase, _pendingMemoryQueue[0].content, _pendingMemoryQueue[0].type,
+  );
+  if (!probe.available) return { flushed: 0, remaining: _pendingMemoryQueue.length };
+
+  // Snapshot and clear — re-add failures or items that get re-queued
+  const snapshot = _pendingMemoryQueue.splice(0);
+  let flushed = 0;
+
+  for (let i = 0; i < snapshot.length; i++) {
+    const params = snapshot[i];
+    try {
+      const result = await insertMemoryWithDedup(supabase, params);
+      if (result.action === "queued") {
+        // Search went down mid-flush. params was re-pushed by insertMemoryWithDedup.
+        // Put the rest of the snapshot back so nothing is lost.
+        _pendingMemoryQueue.push(...snapshot.slice(i + 1));
+        break;
+      }
+      flushed++;
+    } catch (err) {
+      logger.error("Failed to flush pending memory insert", { content: params.content.substring(0, 60) }, err);
+      _pendingMemoryQueue.push(params);
+    }
+  }
+
+  return { flushed, remaining: _pendingMemoryQueue.length };
 }
 
 /**

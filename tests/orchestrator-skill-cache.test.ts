@@ -25,7 +25,7 @@ mock.module("../src/agent-router.ts", () => ({
 mock.module("../src/memory.ts", () => ({
   processMemoryIntents: mockProcessMemoryIntents,
   insertMemoryWithDedup: mock(() => Promise.resolve({ id: "mock-id", action: "inserted" })),
-  checkMemoryConflict: mock(() => Promise.resolve(null)),
+  checkMemoryConflict: mock(() => Promise.resolve({ available: true, match: null })),
   resolveMemoryConflict: mock(() => ({ resolution: "keep_both", existingMemory: null, reason: "mock" })),
   DEDUP_SIMILARITY_THRESHOLD: 0.85,
 }));

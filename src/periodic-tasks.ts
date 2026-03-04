@@ -254,6 +254,49 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     }
   }, 15 * 60_000, "job-intelligence");
 
+  // ELLIE-496: ES reconciliation — detect and backfill Supabase/Forest → ES gaps (every 30 minutes)
+  periodicTask(async () => {
+    const { runReconciliation } = await import("./elasticsearch/reconcile.ts");
+    const { notify } = await import("./notification-policy.ts");
+    const { getNotifyCtx } = await import("./relay-state.ts");
+
+    // Build Forest SQL connection (same pattern as sync-listener)
+    let forestSql = null;
+    try {
+      const postgres = (await import("postgres")).default;
+      const pgConfig = process.env.DATABASE_URL
+        ? process.env.DATABASE_URL
+        : {
+            host: process.env.DB_HOST || "/var/run/postgresql",
+            database: process.env.DB_NAME || "ellie-forest",
+            username: process.env.DB_USER || "ellie",
+            password: process.env.DB_PASS,
+            port: process.env.DB_PORT ? Number(process.env.DB_PORT) : undefined,
+          };
+      forestSql = postgres(pgConfig as string, { max: 1, idle_timeout: 30, connect_timeout: 10 });
+    } catch {
+      logger.warn("[es-reconcile] Could not connect to Forest DB — skipping forest indices");
+    }
+
+    try {
+      await runReconciliation({
+        supabase: supabase as import("./elasticsearch/reconcile.ts").SupabaseClientLike | null,
+        forestSql,
+        onAlert: (message) => {
+          notify(getNotifyCtx(), {
+            event: "incident_raised",
+            workItemId: "es-reconciliation",
+            telegramMessage: `⚠️ ${message}`,
+          });
+        },
+      });
+    } finally {
+      if (forestSql) {
+        try { await forestSql.end({ timeout: 5 }); } catch { /* ignore */ }
+      }
+    }
+  }, 30 * 60_000, "es-reconciliation");
+
   console.log("[periodic-tasks] All background tasks registered");
 }
 
