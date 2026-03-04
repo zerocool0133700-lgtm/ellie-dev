@@ -93,7 +93,7 @@ This document audits the two Miro architecture diagrams against the actual imple
 | `route-message` edge fn | Implemented | `supabase/functions/route-message/index.ts` (181 lines) | Evaluates routing rules by priority: keyword/regex matching, channel matching, session continuity. |
 | `agent-dispatch` edge fn | Implemented | `supabase/functions/agent-dispatch/index.ts` (136 lines) | Creates/resumes agent session, returns agent config. |
 | `agent-sync` edge fn | Implemented | `supabase/functions/agent-sync/index.ts` (188 lines) | Logs response, updates session, detects handoffs, creates new sessions on handoff. |
-| 7 Specialized Agents | Implemented (DB rows) | `db/migrations/20260216133351_agent_framework.sql` | All 7 seeded: general, dev, research, content, finance, strategy, critic. Database records, not separate code files. |
+| 7 Specialized Agents | Implemented (DB rows) | `migrations/supabase/20260216133351_agent_framework.sql` | All 7 seeded: general, dev, research, content, finance, strategy, critic. Database records, not separate code files. |
 | Agent Configuration | Implemented | `agents` table: system_prompt, model, tools_enabled, capabilities | Dispatch returns all four fields. Model override is commented out in relay. |
 | Post-Response Sync | Implemented | `agent-sync` edge fn + `agent-router.ts` `syncResponse()` | Logging, session updates, handoff detection + re-routing. Fire-and-forget calls. |
 
@@ -117,7 +117,7 @@ This document audits the two Miro architecture diagrams against the actual imple
 
 1. ~~**Recent Messages not wired**~~ — **FIXED.** `getRecentMessages()` now called in parallel with other context sources in all 3 handlers (Telegram text, voice, Google Chat). Added as `recentMessages` parameter to `buildPrompt()`, injected as `RECENT CONVERSATION:` section.
 
-2. ~~**Critic agent unreachable**~~ — **FIXED.** Added routing rule `critic_keywords` at priority 9 with keywords: review, critique, feedback, evaluate, assess, audit, "check my", "what do you think", "pros and cons". Migration: `db/migrations/20260218_critic_routing.sql`.
+2. ~~**Critic agent unreachable**~~ — **FIXED.** Added routing rule `critic_keywords` at priority 9 with keywords: review, critique, feedback, evaluate, assess, audit, "check my", "what do you think", "pros and cons". Migration: `seeds/supabase/20260218_critic_routing.sql`.
 
 3. ~~**Approval buttons are Telegram-only**~~ — **FIXED.** Google Chat responses with `[CONFIRM:]` tags now render as Cards v2 with Approve/Deny buttons. Card click events (`CARD_CLICKED`) are handled in the webhook to resume Claude with the user's decision.
 

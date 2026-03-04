@@ -534,7 +534,7 @@ To add a new skill: create `skills/<name>/SKILL.md` with frontmatter + instructi
 - **Work Sessions:** `src/api/work-session.ts` — session lifecycle management (notifies Telegram + Google Chat)
 - **Plane:** `src/plane.ts` — work item state sync
 - **Voice:** Local Whisper transcription + ElevenLabs TTS streaming
-- **Database:** Supabase (messages, memory, logs, work_sessions, agents)
+- **Database:** Supabase (cloud) + Forest/Postgres (local). Migrations in `migrations/{supabase,forest}/`, seeds in `seeds/{supabase,forest}/`
 - **Service:** systemd user service `claude-telegram-relay`
 
 ### Testing
@@ -547,6 +547,36 @@ bun test tests/memory.test.ts                     # Run a specific test
 ```
 
 Before closing a hardening ticket, run `bun test` to verify no regressions.
+
+### SQL Migrations & Seeds
+
+SQL files are organized by target database. Two databases exist:
+- **Supabase** (cloud) — messages, conversations, memory, agents, work_sessions, todos, etc.
+- **Forest** (local Postgres, `ellie-forest`) — trees, branches, entities, creatures, commits, knowledge_scopes, etc.
+
+```
+migrations/
+  supabase/    # Schema migrations targeting Supabase (cloud Postgres)
+  forest/      # Schema migrations targeting Forest (local Postgres)
+seeds/
+  supabase/    # Bootstrap/seed data for Supabase
+  forest/      # Bootstrap/seed data for Forest
+db/
+  schema.sql   # Cumulative Supabase baseline (run to bootstrap a fresh project)
+```
+
+**Naming convention:** `YYYYMMDD_description.sql` — the directory indicates target DB.
+
+**How to apply:**
+- Supabase migrations: via Supabase MCP `execute_sql` or paste in SQL Editor
+- Forest migrations: `psql -U ellie -d ellie-forest -f migrations/forest/<file>.sql`
+- No automated migration runner exists — all applied manually
+
+**Rules:**
+- Never put SQL files outside `migrations/` or `seeds/`
+- Schema changes (CREATE, ALTER, DROP) go in `migrations/<db>/`
+- Repeatable data inserts (seed agents, scopes, channels) go in `seeds/<db>/`
+- One-time data backfills that accompany a schema change stay in `migrations/`
 
 ### Key Commands
 ```bash

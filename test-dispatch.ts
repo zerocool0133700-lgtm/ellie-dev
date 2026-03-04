@@ -60,6 +60,6 @@ console.log("\n   State IDs are resolved via Plane API — no hardcoded UUIDs.\n
 console.log("=== Test Complete ===\n");
 console.log("📖 CLAUDE.md is ready at: ~/EveLife/CLAUDE.md");
 console.log("🔧 Work session API code ready in: src/work-session.ts");
-console.log("📊 Database schema ready: db/migrations/005_work_sessions.sql");
+console.log("📊 Database schema ready: migrations/supabase/005_work_sessions.sql");
 console.log("\n✅ Dispatch protocol is wired up!");
 console.log("   Just need your Plane API key to complete the integration.\n");

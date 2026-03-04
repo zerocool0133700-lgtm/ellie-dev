@@ -19,7 +19,7 @@ Adds Microsoft Outlook/Hotmail email access via Microsoft Graph API alongside ex
 | `src/relay.ts` | Imports, init, buildPrompt tool docs, CONFIRM rules, HTTP endpoints |
 | `tests/outlook.test.ts` | 19 unit tests for the Outlook module |
 | `.env.example` | Microsoft env var template |
-| `db/migrations/20260219_skills_registry.sql` | Updated skill: `email_management` |
+| `migrations/supabase/20260219_skills_registry.sql` | Updated skill: `email_management` |
 
 ## Environment Variables
 
