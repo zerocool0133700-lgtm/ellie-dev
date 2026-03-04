@@ -213,6 +213,13 @@ async function deliverCatchUp(ws: WebSocket, userId: string, sinceTs?: number): 
     // ELLIE-467: Capture returned IDs so we can skip them in the DB query (dedup).
     const bufferedIds = drainMemoryBuffer(userId, ws);
 
+    // ELLIE-485: Mark buffer-delivered messages as sent in DB.
+    // Without this, their delivery_status stays "failed" and they re-appear
+    // on the *next* reconnect — causing duplicate delivery.
+    if (bufferedIds.length > 0) {
+      await markDelivered(bufferedIds);
+    }
+
     // 1. Deliver any undelivered messages (original ELLIE-399 behavior)
     const undelivered = (await getUndeliveredMessages(userId, sinceTs))
       .filter(m => !bufferedIds.includes(m.id));
