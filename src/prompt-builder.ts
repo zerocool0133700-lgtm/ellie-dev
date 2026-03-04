@@ -42,6 +42,51 @@ export interface BuildMetrics {
   budget: number;
   mode?: string;
   creature?: string;
+  /** ELLIE-534: River doc cache hits/misses during this buildPrompt call. */
+  riverCacheHits: number;
+  riverCacheMisses: number;
+}
+
+// ── ELLIE-534: River doc performance metrics ─────────────────
+
+export interface RiverDocFetchResult {
+  durationMs: number;
+  status: "loaded" | "failed";
+  errorMessage?: string;
+}
+
+export interface RiverDocMetrics {
+  /** Timing data from the most recent _refreshRiverDocs() call, or null if none yet. */
+  lastRefresh: {
+    startedAt: number;
+    durationMs: number;
+    loaded: number;
+    failed: number;
+    docs: Record<string, RiverDocFetchResult>;
+  } | null;
+  /** Cumulative cache access counts since last reset. */
+  cacheHits: number;
+  cacheMisses: number;
+  /** Stale content returned (TTL expired) — background refresh was triggered. */
+  staleHits: number;
+}
+
+let _riverDocMetrics: RiverDocMetrics = {
+  lastRefresh: null,
+  cacheHits: 0,
+  cacheMisses: 0,
+  staleHits: 0,
+};
+
+/** Get River doc cache and refresh performance metrics (ELLIE-534). */
+export function getRiverDocMetrics(): RiverDocMetrics {
+  return { ..._riverDocMetrics, lastRefresh: _riverDocMetrics.lastRefresh ? { ..._riverDocMetrics.lastRefresh, docs: { ..._riverDocMetrics.lastRefresh.docs } } : null };
+}
+
+/** Reset River doc metrics and release any in-flight lock — for unit tests only. */
+export function _resetRiverMetricsForTesting(): void {
+  _riverDocMetrics = { lastRefresh: null, cacheHits: 0, cacheMisses: 0, staleHits: 0 };
+  _riverRefreshInFlight = false;
 }
 
 let _lastBuildMetrics: BuildMetrics | null = null;
@@ -144,17 +189,160 @@ export function stopPersonalityWatchers(): void {
   personalityWatchers.length = 0;
 }
 
-/** Force-clear all personality caches (soul, profile, archetype, psy, phase, health). */
+/** Force-clear all personality caches (soul, profile, archetype, psy, phase, health, River docs). */
 export function clearPersonalityCache(): void {
   _archetypeLastLoaded = 0;
   _psyLastLoaded = 0;
   _phaseLastLoaded = 0;
   _healthLastLoaded = 0;
-  logger.info("All personality caches invalidated");
+  _riverDocs.clear();
+  logger.info("All personality + River doc caches invalidated");
 }
 
 // Start watchers immediately
 watchPersonalityFiles();
+
+// ── River-backed protocol docs (ELLIE-150, ELLIE-532) ───────
+// Pre-loaded at startup, stale-while-revalidate on configurable TTL.
+// buildPrompt reads synchronously; falls back to hardcoded strings if QMD unavailable.
+// ELLIE-532: Added soul, configurable TTL, frontmatter priority, and test helpers.
+
+interface RiverDocEntry {
+  content: string;
+  loadedAt: number;
+  frontmatter?: Record<string, unknown>;
+}
+
+const _riverDocs = new Map<string, RiverDocEntry>();
+/** Default TTL — overridable via setRiverDocCacheTtl(). */
+let _riverDocCacheTtlMs = 60_000;
+let _riverRefreshInFlight = false;
+
+/** Maps prompt section keys to River vault paths. */
+const RIVER_DOC_PATHS: Record<string, string> = {
+  "soul": "soul/soul.md",
+  "memory-protocol": "prompts/protocols/memory-management.md",
+  "confirm-protocol": "prompts/protocols/action-confirmations.md",
+  "dev-agent-template": "templates/dev-agent-base.md",
+};
+
+/**
+ * Synchronous read from River doc cache.
+ * Returns cached body content or null on miss.
+ * Triggers background refresh when TTL has expired (stale-while-revalidate).
+ * ELLIE-534: Increments cacheHits / cacheMisses / staleHits metrics.
+ */
+export function getCachedRiverDoc(key: string): string | null {
+  const entry = _riverDocs.get(key);
+  if (!entry) {
+    _riverDocMetrics.cacheMisses++;
+    return null;
+  }
+  // Use >= so TTL=0 always triggers a stale-while-revalidate (no grace period)
+  if (Date.now() - entry.loadedAt >= _riverDocCacheTtlMs && !_riverRefreshInFlight) {
+    _riverDocMetrics.staleHits++;
+    _refreshRiverDocs().catch(() => {});
+  } else {
+    _riverDocMetrics.cacheHits++;
+  }
+  return entry.content;
+}
+
+/**
+ * Return the section_priority from a River doc's frontmatter, or defaultPriority if absent.
+ * Frontmatter key checked: "section_priority".
+ */
+function getRiverDocPriority(key: string, defaultPriority: number): number {
+  const entry = _riverDocs.get(key);
+  const p = entry?.frontmatter?.["section_priority"];
+  if (typeof p === "number" && p >= 1 && p <= 9) return p;
+  return defaultPriority;
+}
+
+/** Refresh all registered River docs from QMD. Non-fatal. ELLIE-534: tracks per-doc timing. */
+async function _refreshRiverDocs(): Promise<void> {
+  if (_riverRefreshInFlight) return;
+  _riverRefreshInFlight = true;
+  const refreshStart = Date.now();
+  const docResults: Record<string, RiverDocFetchResult> = {};
+  let loaded = 0;
+  let failed = 0;
+  try {
+    const { getRiverDoc, parseFrontmatter } = await import("./api/bridge-river.ts");
+    await Promise.allSettled(
+      Object.entries(RIVER_DOC_PATHS).map(async ([key, path]) => {
+        const docStart = Date.now();
+        try {
+          const raw = await getRiverDoc(path);
+          const durationMs = Date.now() - docStart;
+          if (raw) {
+            const { frontmatter, body } = parseFrontmatter(raw);
+            _riverDocs.set(key, { content: body || raw, loadedAt: Date.now(), frontmatter });
+            logger.debug(`River doc loaded: ${key}`);
+            docResults[key] = { durationMs, status: "loaded" };
+            loaded++;
+          } else {
+            docResults[key] = { durationMs, status: "failed", errorMessage: "empty response" };
+            failed++;
+          }
+        } catch (err) {
+          docResults[key] = {
+            durationMs: Date.now() - docStart,
+            status: "failed",
+            errorMessage: err instanceof Error ? err.message : String(err),
+          };
+          failed++;
+        }
+      }),
+    );
+    logger.info(`River docs refreshed: ${loaded}/${Object.keys(RIVER_DOC_PATHS).length}`);
+  } catch {
+    // QMD unavailable — buildPrompt uses hardcoded fallbacks
+  } finally {
+    _riverRefreshInFlight = false;
+    _riverDocMetrics.lastRefresh = {
+      startedAt: refreshStart,
+      durationMs: Date.now() - refreshStart,
+      loaded,
+      failed,
+      docs: docResults,
+    };
+  }
+}
+
+// Initial load (non-blocking — first requests use fallbacks until cache warms)
+_refreshRiverDocs().catch(() => {});
+
+/** Set the River doc cache TTL. Use in tests to control expiry behaviour. */
+export function setRiverDocCacheTtl(ms: number): void {
+  _riverDocCacheTtlMs = ms;
+}
+
+/** Force-clear River doc cache. */
+export function clearRiverDocCache(): void {
+  _riverDocs.clear();
+  logger.info("River doc cache cleared");
+}
+
+/**
+ * Trigger a River doc refresh explicitly.
+ * Returns when all registered docs have been fetched (or failed non-fatally).
+ */
+export async function refreshRiverDocs(): Promise<void> {
+  return _refreshRiverDocs();
+}
+
+/**
+ * Inject a River doc directly into the cache — for unit tests only.
+ * Avoids needing to mock bridge-river.ts or run QMD in tests.
+ */
+export function _injectRiverDocForTesting(
+  key: string,
+  content: string,
+  frontmatter?: Record<string, unknown>,
+): void {
+  _riverDocs.set(key, { content, loadedAt: Date.now(), frontmatter });
+}
 
 // ── Personality context loaders (60s TTL each) ──────────────
 
@@ -522,6 +710,10 @@ export function buildPrompt(
 ): string {
   const channelLabel = channel === "google-chat" ? "Google Chat" : channel === "ellie-chat" ? "Ellie Chat (dashboard)" : "Telegram";
 
+  // ELLIE-534: Snapshot River cache counters at build start to compute per-build delta
+  const _riverHitsAtStart = _riverDocMetrics.cacheHits;
+  const _riverMissesAtStart = _riverDocMetrics.cacheMisses;
+
   // ── Assemble prompt as prioritized sections (ELLIE-185) ──
   // Priority: 1 = never trim, 2 = essential, 3 = important, 4-6 = context, 7-9 = trim first
   const sections: PromptSection[] = [];
@@ -536,7 +728,12 @@ export function buildPrompt(
 
   // Priority 2: Soul + personality (small, defines who Ellie is)
   // ELLIE-525: Soul only for primary Ellie — saves ~2,500 tokens per downstream agent call.
-  if (soulContext && isGeneralAgent) sections.push({ label: "soul", content: `# Ellie Soul\n${soulContext}\n---\n`, priority: 2 });
+  // ELLIE-532: Prefer River soul doc when cached; fall back to config/soul.md.
+  if (isGeneralAgent) {
+    const riverSoul = getCachedRiverDoc("soul");
+    const effectiveSoul = riverSoul || soulContext;
+    if (effectiveSoul) sections.push({ label: "soul", content: `# Ellie Soul\n${effectiveSoul}\n---\n`, priority: 2 });
+  }
   if (archetypeContext) sections.push({ label: "archetype", content: `# Behavioral Archetype\n${archetypeContext}\n---\n`, priority: 2 });
   if (psyContext) sections.push({ label: "psy", content: `# Psychological Profile\n${psyContext}\n---\n`, priority: 2 });
   if (phaseContext) sections.push({ label: "phase", content: `# Relationship Phase\n${phaseContext}\n---\n`, priority: 2 });
@@ -623,41 +820,53 @@ export function buildPrompt(
       priority: 2 });
   }
 
-  // Priority 3: Protocols (static text, important but can be trimmed in extreme cases)
-  sections.push({ label: "memory-protocol", content:
-    "\nMEMORY MANAGEMENT:" +
-      "\nTwo memory systems exist — use the right one:" +
-      "\n" +
-      "\n1. CONVERSATION MEMORY ([REMEMBER:] tags) — for personal facts about the user:" +
-      "\n   preferences, decisions, project details, personal info, things the user asked to remember." +
-      "\n   [REMEMBER: fact to store]" +
-      "\n   [GOAL: goal text | DEADLINE: optional date]" +
-      "\n   [DONE: search text for completed goal]" +
-      "\n" +
-      "\n2. FOREST MEMORY ([MEMORY:] tags) — for work products:" +
-      "\n   strategic analysis, code findings, bug discoveries, architectural decisions, hypotheses." +
-      "\n   These compound across sessions and are shared with other agents." +
-      (sessionIds ? "" : "\n   (No active work session — forest writes unavailable.)") +
-      "\n" +
-      "\nUse [REMEMBER:] freely for user context. Use [MEMORY:] for institutional knowledge.",
-  priority: 3 });
+  // Priority 3: Protocols — River-backed with hardcoded fallback (ELLIE-150, ELLIE-532)
+  // Priority is overridable via section_priority in River doc frontmatter.
+  {
+    const riverMemory = getCachedRiverDoc("memory-protocol");
+    const memPriority = getRiverDocPriority("memory-protocol", 3);
+    const memoryContent = riverMemory
+      ? `\nMEMORY MANAGEMENT:\n${riverMemory}` +
+        (sessionIds ? "" : "\n\n(No active work session — forest writes unavailable.)")
+      : "\nMEMORY MANAGEMENT:" +
+        "\nTwo memory systems exist — use the right one:" +
+        "\n" +
+        "\n1. CONVERSATION MEMORY ([REMEMBER:] tags) — for personal facts about the user:" +
+        "\n   preferences, decisions, project details, personal info, things the user asked to remember." +
+        "\n   [REMEMBER: fact to store]" +
+        "\n   [GOAL: goal text | DEADLINE: optional date]" +
+        "\n   [DONE: search text for completed goal]" +
+        "\n" +
+        "\n2. FOREST MEMORY ([MEMORY:] tags) — for work products:" +
+        "\n   strategic analysis, code findings, bug discoveries, architectural decisions, hypotheses." +
+        "\n   These compound across sessions and are shared with other agents." +
+        (sessionIds ? "" : "\n   (No active work session — forest writes unavailable.)") +
+        "\n" +
+        "\nUse [REMEMBER:] freely for user context. Use [MEMORY:] for institutional knowledge.";
+    sections.push({ label: "memory-protocol", content: memoryContent, priority: memPriority });
+  }
 
-  sections.push({ label: "confirm-protocol", content:
-    "\nACTION CONFIRMATIONS:" +
-      "\nUse [CONFIRM: description] for these actions INSTEAD of executing:" +
-      "\n- Sending or replying to emails (send_gmail_message, /api/outlook/send, /api/outlook/reply)" +
-      "\n- Creating or modifying calendar events (create_event, modify_event)" +
-      "\n- Git push, posting to channels, modifying databases" +
-      "\n- Any difficult-to-undo external action" +
-      "\nDo NOT use [CONFIRM:] for:" +
-      "\n- Read-only: searching email, reading messages, checking calendar, listing tasks" +
-      "\n- Document search and retrieval (QMD / mcp__qmd__*): all read-only" +
-      "\n- Google Tasks management: creating/completing/updating tasks (low-stakes, easily reversible)" +
-      "\n- Actions the user explicitly and directly asked you to do in simple terms" +
-      "\nThe user will see Approve/Deny buttons. If approved, you will be resumed with instructions to proceed." +
-      '\nExample: "I\'ll send the report now. [CONFIRM: Send weekly report email to alice@example.com]"' +
-      "\nYou can include multiple [CONFIRM:] tags if multiple actions need approval.",
-  priority: 3 });
+  {
+    const riverConfirm = getCachedRiverDoc("confirm-protocol");
+    const confirmPriority = getRiverDocPriority("confirm-protocol", 3);
+    const confirmContent = riverConfirm
+      ? `\nACTION CONFIRMATIONS:\n${riverConfirm}`
+      : "\nACTION CONFIRMATIONS:" +
+        "\nUse [CONFIRM: description] for these actions INSTEAD of executing:" +
+        "\n- Sending or replying to emails (send_gmail_message, /api/outlook/send, /api/outlook/reply)" +
+        "\n- Creating or modifying calendar events (create_event, modify_event)" +
+        "\n- Git push, posting to channels, modifying databases" +
+        "\n- Any difficult-to-undo external action" +
+        "\nDo NOT use [CONFIRM:] for:" +
+        "\n- Read-only: searching email, reading messages, checking calendar, listing tasks" +
+        "\n- Document search and retrieval (QMD / mcp__qmd__*): all read-only" +
+        "\n- Google Tasks management: creating/completing/updating tasks (low-stakes, easily reversible)" +
+        "\n- Actions the user explicitly and directly asked you to do in simple terms" +
+        "\nThe user will see Approve/Deny buttons. If approved, you will be resumed with instructions to proceed." +
+        '\nExample: "I\'ll send the report now. [CONFIRM: Send weekly report email to alice@example.com]"' +
+        "\nYou can include multiple [CONFIRM:] tags if multiple actions need approval.";
+    sections.push({ label: "confirm-protocol", content: confirmContent, priority: confirmPriority });
+  }
 
   if (sessionIds) {
     sections.push({ label: "forest-memory-writes", content:
@@ -755,16 +964,21 @@ export function buildPrompt(
   if (workItemContext) sections.push({ label: "work-item", content: workItemContext, priority: 3 });
 
   if (workItemContext?.includes("ACTIVE WORK ITEM") && !isGeneralAgent) {
+    // ELLIE-533: River-backed dev agent protocol template with hardcoded fallback.
+    const riverDevTemplate = getCachedRiverDoc("dev-agent-template");
+    const devProtocolPriority = getRiverDocPriority("dev-agent-template", 3);
     sections.push({ label: "dev-protocol", content:
-      "\nDEV AGENT PROTOCOL:" +
-        "\n1. Read the ticket and understand requirements" +
-        "\n2. Implement code changes" +
-        "\n3. Commit with [ELLIE-N] prefix (e.g., [ELLIE-5] Brief description)" +
-        "\n4. Build if dashboard code changed: cd /home/ellie/ellie-home && bun run build" +
-        "\n5. Restart affected service: sudo systemctl restart ellie-dashboard" +
-        "\n6. Verify changes work" +
-        "\nDo NOT call /api/work-session/complete — handled externally.",
-    priority: 3 });
+      riverDevTemplate
+        ? `\nDEV AGENT PROTOCOL:\n${riverDevTemplate}`
+        : "\nDEV AGENT PROTOCOL:" +
+          "\n1. Read the ticket and understand requirements" +
+          "\n2. Implement code changes" +
+          "\n3. Commit with [ELLIE-N] prefix (e.g., [ELLIE-5] Brief description)" +
+          "\n4. Build if dashboard code changed: cd /home/ellie/ellie-home && bun run build" +
+          "\n5. Restart affected service: sudo systemctl restart ellie-dashboard" +
+          "\n6. Verify changes work" +
+          "\nDo NOT call /api/work-session/complete — handled externally.",
+    priority: devProtocolPriority });
   }
 
   if (isPlaneConfigured()) {
@@ -912,6 +1126,9 @@ export function buildPrompt(
     budget,
     mode: contextMode,
     creature: agentConfig?.name,
+    // ELLIE-534: River cache performance for this build
+    riverCacheHits: _riverDocMetrics.cacheHits - _riverHitsAtStart,
+    riverCacheMisses: _riverDocMetrics.cacheMisses - _riverMissesAtStart,
   };
 
   return applyTokenBudget(filteredSections, budget);
