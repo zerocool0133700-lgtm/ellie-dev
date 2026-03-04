@@ -188,6 +188,13 @@ export const breakers = {
     resetTimeoutMs: 30_000,
     callTimeoutMs: 10_000,
   }),
+  // ELLIE-484: Supabase edge functions (route-message, agent-dispatch, agent-sync, search)
+  edgeFn: new CircuitBreaker({
+    name: "edge-fn",
+    failureThreshold: 3,
+    resetTimeoutMs: 30_000,
+    callTimeoutMs: 5_000,
+  }),
 };
 
 /** Get status of all breakers (for health endpoint). */

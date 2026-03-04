@@ -10,6 +10,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { classifyIntent, type ExecutionMode } from "./intent-classifier.ts";
 import { log } from "./logger.ts";
 import { RELAY_EPOCH } from "./relay-epoch.ts";
+import { breakers } from "./resilience.ts";
 
 const logger = log.child("agent-router");
 
@@ -69,24 +70,23 @@ export async function routeMessage(
 ): Promise<RouteResult | null> {
   if (!supabase) return null;
 
-  try {
-    const { data, error } = await supabase.functions.invoke("route-message", {
-      body: { message, channel, user_id: userId },
-    });
+  // ELLIE-484: circuit breaker — throw on error so failures are recorded
+  const invoked = await breakers.edgeFn.call(
+    async () => {
+      const r = await supabase!.functions.invoke("route-message", { body: { message, channel, user_id: userId } });
+      if (r.error) throw r.error;
+      return r;
+    },
+    null,
+  );
 
-    if (error || !data?.agent_name) {
-      logger.error("Route error", error || "no agent_name");
-      return null;
-    }
-
-    console.log(
-      `[agent-router] Routed to "${data.agent_name}" via ${data.rule_name}`,
-    );
-    return data as RouteResult;
-  } catch (err) {
-    logger.error("Route unavailable", err);
+  if (!invoked || !invoked.data?.agent_name) {
+    logger.error("Route error", "no agent_name or breaker open");
     return null;
   }
+
+  console.log(`[agent-router] Routed to "${invoked.data.agent_name}" via ${invoked.data.rule_name}`);
+  return invoked.data as RouteResult;
 }
 
 /**
@@ -231,31 +231,27 @@ export async function dispatchAgent(
 ): Promise<DispatchResult | null> {
   if (!supabase) return null;
 
-  try {
-    const { data, error } = await supabase.functions.invoke("agent-dispatch", {
-      body: {
-        agent_name: agentName,
-        user_id: userId,
-        channel,
-        message,
-        work_item_id: workItemId,
-        skill_name: skillName,
-      },
-    });
+  // ELLIE-484: circuit breaker — throw on error so failures are recorded; falls back to localDispatch
+  const invoked = await breakers.edgeFn.call(
+    async () => {
+      const r = await supabase!.functions.invoke("agent-dispatch", {
+        body: { agent_name: agentName, user_id: userId, channel, message, work_item_id: workItemId, skill_name: skillName },
+      });
+      if (r.error) throw r.error;
+      return r;
+    },
+    null,
+  );
 
-    if (error || !data?.session_id) {
-      logger.warn("Edge dispatch failed, trying local fallback", error || "no session_id");
-      return localDispatch(supabase, agentName, userId, channel, message, workItemId, skillName);
-    }
-
-    console.log(
-      `[agent-router] ${data.is_new ? "New" : "Resumed"} session ${data.session_id.slice(0, 8)} for ${agentName}`,
-    );
-    return data as DispatchResult;
-  } catch (err) {
-    logger.warn("Edge dispatch unavailable, trying local fallback", err);
+  if (!invoked || !invoked.data?.session_id) {
+    logger.warn("Edge dispatch failed, trying local fallback", "no session_id or breaker open");
     return localDispatch(supabase, agentName, userId, channel, message, workItemId, skillName);
   }
+
+  console.log(
+    `[agent-router] ${invoked.data.is_new ? "New" : "Resumed"} session ${invoked.data.session_id.slice(0, 8)} for ${agentName}`,
+  );
+  return invoked.data as DispatchResult;
 }
 
 /**
@@ -340,25 +336,24 @@ export async function syncResponse(
 ): Promise<SyncResult | null> {
   if (!supabase) return null;
 
-  try {
-    const { data, error } = await supabase.functions.invoke("agent-sync", {
-      body: {
-        session_id: sessionId,
-        assistant_message: assistantMessage,
-        ...options,
-      },
-    });
+  // ELLIE-484: circuit breaker — throw on error so failures are recorded; falls back to localSync
+  const invoked = await breakers.edgeFn.call(
+    async () => {
+      const r = await supabase!.functions.invoke("agent-sync", {
+        body: { session_id: sessionId, assistant_message: assistantMessage, ...options },
+      });
+      if (r.error) throw r.error;
+      return r;
+    },
+    null,
+  );
 
-    if (error) {
-      logger.warn("Edge sync failed, trying local fallback", error);
-      return localSync(supabase, sessionId, assistantMessage, options);
-    }
-
-    return data as SyncResult;
-  } catch (err) {
-    logger.warn("Edge sync unavailable, trying local fallback", err);
+  if (!invoked) {
+    logger.warn("Edge sync failed, trying local fallback", "breaker open");
     return localSync(supabase, sessionId, assistantMessage, options);
   }
+
+  return invoked.data as SyncResult;
 }
 
 /**

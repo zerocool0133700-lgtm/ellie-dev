@@ -22,6 +22,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { indexMemory, classifyDomain } from "./elasticsearch.ts";
 import { resilientTask } from "./resilient-task.ts";
 import { log } from "./logger.ts";
+import { breakers } from "./resilience.ts";
 
 const logger = log.child("memory");
 
@@ -113,37 +114,35 @@ export async function checkMemoryConflict(
   type: string,
   threshold: number = DEDUP_SIMILARITY_THRESHOLD,
 ): Promise<SimilarMemory | null> {
-  try {
-    const { data, error } = await supabase.functions.invoke("search", {
-      body: {
-        query: content,
-        table: "memory",
-        match_count: 3,
-        match_threshold: threshold,
-      },
-    });
+  // ELLIE-484: circuit breaker — throw on error so failures are recorded
+  const invoked = await breakers.edgeFn.call(
+    async () => {
+      const r = await supabase.functions.invoke("search", {
+        body: { query: content, table: "memory", match_count: 3, match_threshold: threshold },
+      });
+      if (r.error) throw r.error;
+      return r;
+    },
+    null,
+  );
 
-    if (error || !data?.length) return null;
+  if (!invoked || !invoked.data?.length) return null;
+  const data = invoked.data;
 
-    // Filter to same type and find best match
-    const sameType = data.filter((m: SearchMemoryResult) => m.type === type);
-    if (sameType.length === 0) return null;
+  // Filter to same type and find best match
+  const sameType = data.filter((m: SearchMemoryResult) => m.type === type);
+  if (sameType.length === 0) return null;
 
-    const best = sameType[0];
-    return {
-      id: best.id,
-      content: best.content,
-      type: best.type,
-      source_agent: best.source_agent || "general",
-      visibility: best.visibility || "shared",
-      metadata: best.metadata || {},
-      similarity: best.similarity,
-    };
-  } catch (err) {
-    // Search Edge Function unavailable — skip dedup, allow insert
-    logger.warn("Conflict check unavailable", err);
-    return null;
-  }
+  const best = sameType[0];
+  return {
+    id: best.id,
+    content: best.content,
+    type: best.type,
+    source_agent: best.source_agent || "general",
+    visibility: best.visibility || "shared",
+    metadata: best.metadata || {},
+    similarity: best.similarity,
+  };
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -685,9 +684,18 @@ export async function getRelevantContext(
       query, match_count: matchCount, match_threshold: 0.75, table: "messages",
     };
     if (sourceAgent) body.source_agent = sourceAgent;
-    const { data, error } = await supabase.functions.invoke("search", { body });
+    // ELLIE-484: circuit breaker — throw on error so failures are recorded
+    const invoked = await breakers.edgeFn.call(
+      async () => {
+        const r = await supabase.functions.invoke("search", { body });
+        if (r.error) throw r.error;
+        return r;
+      },
+      null,
+    );
 
-    if (error || !data?.length) return "";
+    if (!invoked || !invoked.data?.length) return "";
+    const data = invoked.data;
 
     // Filter out results older than 14 days and scope to current channel
     const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
