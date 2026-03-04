@@ -389,52 +389,59 @@ describe("BuildMetrics — river cache tracking for research/strategy", () => {
     _injectRiverDocForTesting("memory-protocol", "Memory");
     _injectRiverDocForTesting("confirm-protocol", "Confirm");
     _injectRiverDocForTesting("research-agent-template", "Research");
+    // ELLIE-536: all agents look up work-commands when Plane is configured (via .env)
+    _injectRiverDocForTesting("work-commands", "Work commands");
     buildPrompt("Research topic", undefined, undefined, undefined, "telegram", { name: "research" });
     const metrics = getLastBuildMetrics()!;
     // Soul is NOT looked up for research (ELLIE-525), so no soul miss
-    // memory, confirm, research all hit
+    // memory, confirm, research, work-commands all hit
     expect(metrics.riverCacheMisses).toBe(0);
   });
 });
 
-// ── refreshRiverDocs — 6 registered docs now ─────────────────────────────────
+// ── refreshRiverDocs — 10 registered docs now ────────────────────────────────
 
-describe("refreshRiverDocs — 6 registered docs (ELLIE-535)", () => {
-  test("resolves without throwing with 6 registered docs", async () => {
+describe("refreshRiverDocs — 10 registered docs (ELLIE-536)", () => {
+  test("resolves without throwing with 10 registered docs", async () => {
     await expect(refreshRiverDocs()).resolves.toBeUndefined();
   });
 
-  test("lastRefresh.loaded + lastRefresh.failed <= 6 after refresh", async () => {
+  test("lastRefresh.loaded + lastRefresh.failed <= 10 after refresh", async () => {
     await refreshRiverDocs();
     const { lastRefresh } = getRiverDocMetrics();
+    // RIVER_DOC_PATHS now has 10 entries (6 from ELLIE-535 + 4 from ELLIE-536)
     const total = lastRefresh!.loaded + lastRefresh!.failed;
     expect(total).toBeGreaterThanOrEqual(0);
-    expect(total).toBeLessThanOrEqual(6);
+    expect(total).toBeLessThanOrEqual(10);
   });
 });
 
-// ── All-River integration — all 6 docs injected ───────────────────────────────
+// ── All-River integration — all docs injected ─────────────────────────────────
 
 describe("integration — all River docs injected for research agent", () => {
   test("research build with all River docs: 0 cache misses", () => {
     _injectRiverDocForTesting("memory-protocol", "Memory proto");
     _injectRiverDocForTesting("confirm-protocol", "Confirm proto");
     _injectRiverDocForTesting("research-agent-template", "Research proto");
+    // ELLIE-536: work-commands is also looked up for all agents when Plane is configured
+    _injectRiverDocForTesting("work-commands", "Work commands proto");
     // soul NOT injected — research agent doesn't look it up (ELLIE-525)
     buildPrompt("Research topic", undefined, undefined, undefined, "telegram", { name: "research" });
     const metrics = getLastBuildMetrics()!;
     expect(metrics.riverCacheMisses).toBe(0);
-    expect(metrics.riverCacheHits).toBeGreaterThanOrEqual(3);
+    expect(metrics.riverCacheHits).toBeGreaterThanOrEqual(4);
   });
 
   test("strategy build with all River docs: 0 cache misses", () => {
     _injectRiverDocForTesting("memory-protocol", "Memory proto");
     _injectRiverDocForTesting("confirm-protocol", "Confirm proto");
     _injectRiverDocForTesting("strategy-agent-template", "Strategy proto");
+    // ELLIE-536: work-commands is also looked up for all agents when Plane is configured
+    _injectRiverDocForTesting("work-commands", "Work commands proto");
     buildPrompt("Plan this", undefined, undefined, undefined, "telegram", { name: "strategy" });
     const metrics = getLastBuildMetrics()!;
     expect(metrics.riverCacheMisses).toBe(0);
-    expect(metrics.riverCacheHits).toBeGreaterThanOrEqual(3);
+    expect(metrics.riverCacheHits).toBeGreaterThanOrEqual(4);
   });
 });
 

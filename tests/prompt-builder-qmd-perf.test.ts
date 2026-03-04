@@ -216,15 +216,16 @@ describe("refreshRiverDocs — lastRefresh populated", () => {
     expect(lastRefresh!.failed).toBeGreaterThanOrEqual(0);
   });
 
-  test("lastRefresh.loaded + lastRefresh.failed <= registered doc count (6)", async () => {
+  test("lastRefresh.loaded + lastRefresh.failed <= registered doc count (10)", async () => {
     await refreshRiverDocs();
     const { lastRefresh } = getRiverDocMetrics();
-    // If QMD is unavailable, each doc may fail individually (all 6 fail) or import may fail (0 recorded)
-    // RIVER_DOC_PATHS now has 6 entries (soul, memory-protocol, confirm-protocol,
-    // dev-agent-template, research-agent-template, strategy-agent-template)
+    // If QMD is unavailable, each doc may fail individually (all 10 fail) or import may fail (0 recorded)
+    // RIVER_DOC_PATHS now has 10 entries: soul, memory-protocol, confirm-protocol,
+    // dev-agent-template, research-agent-template, strategy-agent-template,
+    // forest-writes, playbook-commands, work-commands, planning-mode
     const total = lastRefresh!.loaded + lastRefresh!.failed;
     expect(total).toBeGreaterThanOrEqual(0);
-    expect(total).toBeLessThanOrEqual(6);
+    expect(total).toBeLessThanOrEqual(10);
   });
 
   test("lastRefresh.docs has entries for registered keys", async () => {
@@ -304,6 +305,9 @@ describe("BuildMetrics — riverCacheHits and riverCacheMisses", () => {
     _injectRiverDocForTesting("soul", "Soul");
     _injectRiverDocForTesting("memory-protocol", "Memory protocol");
     _injectRiverDocForTesting("confirm-protocol", "Confirm protocol");
+    // ELLIE-536: general agent also looks up these two when Plane is configured (via .env)
+    _injectRiverDocForTesting("playbook-commands", "Playbook");
+    _injectRiverDocForTesting("work-commands", "Work commands");
     buildPrompt("Hello");
     const metrics = getLastBuildMetrics()!;
     expect(metrics.riverCacheMisses).toBe(0);

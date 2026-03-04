@@ -227,6 +227,11 @@ const RIVER_DOC_PATHS: Record<string, string> = {
   // ELLIE-535: remaining specialist agents
   "research-agent-template": "templates/research-agent-base.md",
   "strategy-agent-template": "templates/strategy-agent-base.md",
+  // ELLIE-536: remaining hardcoded protocols
+  "forest-writes": "prompts/protocols/forest-writes.md",
+  "playbook-commands": "prompts/protocols/playbook-commands.md",
+  "work-commands": "prompts/protocols/work-commands.md",
+  "planning-mode": "prompts/protocols/planning-mode.md",
 };
 
 /**
@@ -872,26 +877,31 @@ export function buildPrompt(
   }
 
   if (sessionIds) {
+    // ELLIE-536: River-backed with hardcoded fallback.
+    const riverForestWrites = getCachedRiverDoc("forest-writes");
+    const forestWritesPriority = getRiverDocPriority("forest-writes", 3);
     sections.push({ label: "forest-memory-writes", content:
-      "\nFOREST MEMORY WRITES (IMPORTANT):" +
-      "\nYou are working in an active forest session. Record your findings with [MEMORY:] tags." +
-      "\nInclude at least one [MEMORY:] tag when you:" +
-      "\n  - Discover a fact, bug, or root cause" +
-      "\n  - Make an architectural or implementation decision" +
-      "\n  - Form a hypothesis about what's happening" +
-      "\n  - Complete a task or milestone" +
-      "\n" +
-      "\nExamples:" +
-      "\n  [MEMORY: The login endpoint returns 401 when the token is expired]" +
-      "\n  [MEMORY:decision: Using Redis for caching because latency requirements are <10ms]" +
-      "\n  [MEMORY:hypothesis:0.6: The race condition is in the session cleanup goroutine]" +
-      "\n" +
-      "\nFormat: [MEMORY:type:confidence: content] — type and confidence optional." +
-      "\nTypes: finding, decision, hypothesis, fact, pattern. Default: finding" +
-      "\nConfidence: 0.6 (speculative) → 0.9 (verified). Default: 0.7" +
-      "\nThese memories compound — future agents see your findings and build on them." +
-      "\nAlways include [MEMORY:] tags in your response text, never omit them.",
-    priority: 3 });
+      riverForestWrites
+        ? `\nFOREST MEMORY WRITES (IMPORTANT):\n${riverForestWrites}`
+        : "\nFOREST MEMORY WRITES (IMPORTANT):" +
+          "\nYou are working in an active forest session. Record your findings with [MEMORY:] tags." +
+          "\nInclude at least one [MEMORY:] tag when you:" +
+          "\n  - Discover a fact, bug, or root cause" +
+          "\n  - Make an architectural or implementation decision" +
+          "\n  - Form a hypothesis about what's happening" +
+          "\n  - Complete a task or milestone" +
+          "\n" +
+          "\nExamples:" +
+          "\n  [MEMORY: The login endpoint returns 401 when the token is expired]" +
+          "\n  [MEMORY:decision: Using Redis for caching because latency requirements are <10ms]" +
+          "\n  [MEMORY:hypothesis:0.6: The race condition is in the session cleanup goroutine]" +
+          "\n" +
+          "\nFormat: [MEMORY:type:confidence: content] — type and confidence optional." +
+          "\nTypes: finding, decision, hypothesis, fact, pattern. Default: finding" +
+          "\nConfidence: 0.6 (speculative) → 0.9 (verified). Default: 0.7" +
+          "\nThese memories compound — future agents see your findings and build on them." +
+          "\nAlways include [MEMORY:] tags in your response text, never omit them.",
+    priority: forestWritesPriority });
   }
 
   // Priority 3: Full conversation thread (ELLIE-202 — primary context source, ground truth)
@@ -1023,47 +1033,62 @@ export function buildPrompt(
 
   if (isPlaneConfigured()) {
     if (isGeneralAgent) {
+      // ELLIE-536: River-backed with hardcoded fallback.
+      const riverPlaybook = getCachedRiverDoc("playbook-commands");
+      const playbookPriority = getRiverDocPriority("playbook-commands", 3);
       sections.push({ label: "playbook-commands", content:
-        "\nELLIE:: PLAYBOOK COMMANDS:" +
-          "\nYou can emit these tags to trigger infrastructure actions. Tags are stripped" +
-          "\nbefore your message reaches the user." +
-          "\n" +
-          "\n  ELLIE:: send ELLIE-144 to dev" +
-          "\n    Dispatches the dev agent to work on a ticket. You'll be notified when done." +
-          "\n    Use when: Dave asks to implement, fix, or build something on a specific ticket." +
-          "\n" +
-          "\n  ELLIE:: close ELLIE-144 \"summary of what was accomplished\"" +
-          "\n    Closes a ticket: updates Plane to Done, deploys if needed." +
-          "\n    Use when: Work is verified complete on a ticket." +
-          "\n" +
-          "\n  ELLIE:: create ticket \"Title\" \"Description of work\"" +
-          "\n    Creates a new ticket in Plane. Returns the identifier." +
-          "\n    Use when: New work should be tracked." +
-          "\n" +
-          "\nRules:" +
-          "\n- Place tags at the END of your response, after your conversational text" +
-          "\n- You can include multiple tags in one response" +
-          "\n- Dev dispatch is async — you'll get a notification when done" +
-          "\n- Only use these when the user's request clearly warrants it",
-      priority: 3 });
+        riverPlaybook
+          ? `\nELLIE:: PLAYBOOK COMMANDS:\n${riverPlaybook}`
+          : "\nELLIE:: PLAYBOOK COMMANDS:" +
+            "\nYou can emit these tags to trigger infrastructure actions. Tags are stripped" +
+            "\nbefore your message reaches the user." +
+            "\n" +
+            "\n  ELLIE:: send ELLIE-144 to dev" +
+            "\n    Dispatches the dev agent to work on a ticket. You'll be notified when done." +
+            "\n    Use when: Dave asks to implement, fix, or build something on a specific ticket." +
+            "\n" +
+            "\n  ELLIE:: close ELLIE-144 \"summary of what was accomplished\"" +
+            "\n    Closes a ticket: updates Plane to Done, deploys if needed." +
+            "\n    Use when: Work is verified complete on a ticket." +
+            "\n" +
+            "\n  ELLIE:: create ticket \"Title\" \"Description of work\"" +
+            "\n    Creates a new ticket in Plane. Returns the identifier." +
+            "\n    Use when: New work should be tracked." +
+            "\n" +
+            "\nRules:" +
+            "\n- Place tags at the END of your response, after your conversational text" +
+            "\n- You can include multiple tags in one response" +
+            "\n- Dev dispatch is async — you'll get a notification when done" +
+            "\n- Only use these when the user's request clearly warrants it",
+      priority: playbookPriority });
     }
+    // ELLIE-536: River-backed with hardcoded fallback.
+    const riverWorkCommands = getCachedRiverDoc("work-commands");
+    const workCommandsPriority = getRiverDocPriority("work-commands", 3);
     sections.push({ label: "work-commands", content:
-      "\nWORK ITEM COMMANDS:" +
-        "\nYou can manage Plane work items via MCP tools (workspace: evelife, project: ELLIE)." +
-        "\n- List open issues: mcp__plane__list_states, then query issues" +
-        "\n- Create new issues when asked" +
-        "\n- Use [ELLIE-N] prefix in commit messages when working on a tracked item",
-    priority: 3 });
+      riverWorkCommands
+        ? `\nWORK ITEM COMMANDS:\n${riverWorkCommands}`
+        : "\nWORK ITEM COMMANDS:" +
+          "\nYou can manage Plane work items via MCP tools (workspace: evelife, project: ELLIE)." +
+          "\n- List open issues: mcp__plane__list_states, then query issues" +
+          "\n- Create new issues when asked" +
+          "\n- Use [ELLIE-N] prefix in commit messages when working on a tracked item",
+    priority: workCommandsPriority });
   }
 
   // Planning mode context
   if (planningMode) {
+    // ELLIE-536: River-backed with hardcoded fallback.
+    const riverPlanningMode = getCachedRiverDoc("planning-mode");
+    const planningModePriority = getRiverDocPriority("planning-mode", 3);
     sections.push({ label: "planning-mode", content:
-      "\nPLANNING MODE ACTIVE:" +
-      "\nYou are in an extended planning session. The user is working through requirements," +
-      "\narchitecture, or design decisions. Maintain continuity and context across messages." +
-      "\nDo not suggest ending the session — the user will deactivate planning mode when done.",
-    priority: 3 });
+      riverPlanningMode
+        ? `\nPLANNING MODE ACTIVE:\n${riverPlanningMode}`
+        : "\nPLANNING MODE ACTIVE:" +
+          "\nYou are in an extended planning session. The user is working through requirements," +
+          "\narchitecture, or design decisions. Maintain continuity and context across messages." +
+          "\nDo not suggest ending the session — the user will deactivate planning mode when done.",
+    priority: planningModePriority });
   }
 
   // ── ELLIE-261: Apply strategy mode section filtering + budget ──
