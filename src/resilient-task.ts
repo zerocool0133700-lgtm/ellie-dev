@@ -43,6 +43,11 @@ interface FailureRecord {
 
 const _metrics = new Map<string, FailureRecord>();
 
+/** Reset all metrics — for unit tests only. */
+export function _resetMetricsForTesting(): void {
+  _metrics.clear();
+}
+
 /** Get metrics for all tracked fire-and-forget operations — for /health endpoint */
 export function getFireForgetMetrics(): {
   summary: { totalFailures: number; totalRetries: number; totalSuccesses: number };
