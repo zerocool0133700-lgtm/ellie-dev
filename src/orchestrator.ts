@@ -27,6 +27,8 @@ import { emitEvent } from "./orchestration-ledger.ts";
 import { startRun, endRun } from "./orchestration-tracker.ts";
 import { saveCheckpoint, deleteCheckpoint, setActiveCheckpoint, removeActiveCheckpoint, type PipelineCheckpoint, type FailureAction } from "./pipeline-state.ts";
 import { withRetry } from "./dispatch-retry.ts";
+import { updateWorkItemOnFailure } from "./plane.ts";
+import { completeWorkSession as forestCompleteSession } from "../../ellie-forest/src/index";
 
 const logger = log.child("orchestrator");
 
@@ -120,6 +122,10 @@ export interface OrchestratorOptions {
   onStepFailure?: (step: PipelineStep, stepIndex: number, error: Error) => Promise<FailureAction>;
   /** ELLIE-394: Resume from a checkpoint — skips already-completed steps. */
   resumeCheckpoint?: PipelineCheckpoint;
+  /** Plane work item ID (e.g. "ELLIE-473") — if set, ticket is rolled back to Todo on failure. */
+  workItemId?: string;
+  /** Forest work session tree ID — if set, session is completed with failure summary on pipeline error. */
+  forestSessionId?: string;
 }
 
 export class PipelineStepError extends Error {
@@ -272,15 +278,23 @@ export async function executeOrchestrated(
 
     return result;
   } catch (err) {
-    await completeExecutionPlan(
-      options.supabase, planId, artifacts, "failed",
-      err instanceof Error ? err.message : String(err),
-    );
+    const errMsg = err instanceof Error ? err.message : String(err);
+
+    await completeExecutionPlan(options.supabase, planId, artifacts, "failed", errMsg);
     endRun(orchestrationRunId, "failed");
     emitEvent(orchestrationRunId, "failed", effectiveSteps[0]?.agent_name, null, {
       mode,
-      error: err instanceof Error ? err.message : String(err),
+      error: errMsg,
     });
+
+    // Roll back Plane ticket and close Forest session so they don't get stuck "In Progress"
+    if (options.workItemId) {
+      await updateWorkItemOnFailure(options.workItemId, errMsg).catch(() => {});
+    }
+    if (options.forestSessionId) {
+      await forestCompleteSession(options.forestSessionId, `Pipeline failed: ${errMsg}`).catch(() => {});
+    }
+
     throw err;
   }
 }

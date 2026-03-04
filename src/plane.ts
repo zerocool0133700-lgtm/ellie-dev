@@ -245,6 +245,37 @@ export async function updateWorkItemOnSessionComplete(
   }
 }
 
+/**
+ * High-level: update a Plane work item when a pipeline/session fails mid-execution.
+ * - Moves ticket back to "unstarted" (Todo)
+ * - Adds a comment with the failure reason
+ *
+ * Fails silently so it never masks the original error.
+ */
+export async function updateWorkItemOnFailure(workItemId: string, errorMessage: string) {
+  if (!isPlaneConfigured()) return;
+  if (isInTimeoutRecovery()) return;
+
+  const resolved = await resolveWorkItemId(workItemId);
+  if (!resolved) {
+    logger.warn("Could not resolve work item for failure cleanup", { workItemId });
+    return;
+  }
+
+  const { projectId, issueId } = resolved;
+
+  // Move back to "unstarted" (Todo)
+  const unstarted = await getStateIdByGroup(projectId, "unstarted");
+  if (unstarted) {
+    await updateIssueState(projectId, issueId, unstarted).catch(() => {});
+    console.log(`[plane] ${workItemId} → Todo (pipeline failure)`);
+  }
+
+  // Add failure comment
+  const comment = `<p>⚠️ Pipeline failed — ticket moved back to Todo</p><p><code>${errorMessage.slice(0, 500)}</code></p>`;
+  await addIssueComment(projectId, issueId, comment).catch(() => {});
+}
+
 // ============================================================
 // WORK ITEM QUERIES
 // ============================================================
