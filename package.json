@@ -24,7 +24,8 @@
     "audit:data-integrity": "bun run scripts/run-data-integrity-audit.ts",
     "migrate": "bun run scripts/migrate.ts",
     "migrate:status": "bun run scripts/migrate.ts status",
-    "migrate:validate": "bun run scripts/migrate.ts validate"
+    "migrate:validate": "bun run scripts/migrate.ts validate",
+    "benchmark": "bun run scripts/benchmark-sprint.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.74.0",
