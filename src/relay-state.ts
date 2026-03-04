@@ -65,6 +65,35 @@ export const wsAppUserMap = new WeakMap<WebSocket, WsAppUser>();
 // Per-user phone mode history (ELLIE-197) — keyed by user id or anonymous_id
 export const ellieChatPhoneHistories = new Map<string, Array<{ role: string; content: string }>>();
 
+// ELLIE-489: TTL tracker for phone histories — updated when a history is
+// created or accessed. Entries unused for 24h are removed by sweepPhoneHistories().
+const _phoneHistoryLastUsed = new Map<string, number>();
+
+/** Mark a phone history key as recently used. Call on history create or access. */
+export function touchPhoneHistory(key: string): void {
+  _phoneHistoryLastUsed.set(key, Date.now());
+}
+
+/**
+ * Remove phone histories that haven't been used within the TTL window.
+ * Called periodically by the relay's housekeeping task (ELLIE-489).
+ */
+export function sweepPhoneHistories(ttlMs: number = 24 * 60 * 60_000): number {
+  const cutoff = Date.now() - ttlMs;
+  let removed = 0;
+  for (const [key, lastUsed] of _phoneHistoryLastUsed) {
+    if (lastUsed < cutoff) {
+      ellieChatPhoneHistories.delete(key);
+      _phoneHistoryLastUsed.delete(key);
+      removed++;
+    }
+  }
+  if (removed > 0) {
+    console.log(`[relay-state] Swept ${removed} stale phone history entries (TTL: ${ttlMs / 3_600_000}h)`);
+  }
+  return removed;
+}
+
 // ── Broadcast helpers ──────────────────────────────────────
 
 /** Fire-and-forget broadcast to all connected extension clients. */

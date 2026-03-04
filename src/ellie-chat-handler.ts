@@ -16,7 +16,7 @@ import {
 import {
   getActiveAgent, setActiveAgent,
   wsAppUserMap, ellieChatPhoneHistories, ellieChatClients,
-  broadcastExtension, getRelayDeps, getNotifyCtx,
+  broadcastExtension, getRelayDeps, getNotifyCtx, touchPhoneHistory,
 } from "./relay-state.ts";
 import { resolveEntityName } from "./agent-entity-map.ts";
 import { resetEllieChatIdleTimer, resetTelegramIdleTimer, resetGchatIdleTimer } from "./relay-idle.ts";
@@ -389,6 +389,7 @@ async function _handleEllieChatMessage(
           }
           const verifyHistKey = ecUserId || 'anonymous';
           if (!ellieChatPhoneHistories.has(verifyHistKey)) ellieChatPhoneHistories.set(verifyHistKey, []);
+          touchPhoneHistory(verifyHistKey);
           const verifyHist = ellieChatPhoneHistories.get(verifyHistKey)!;
           verifyHist.push({ role: "user", content: text });
           verifyHist.push({ role: "assistant", content: `Perfect, ${appUser.name || 'friend'}! Your account is verified. I'll remember our conversations from now on.` });
@@ -419,6 +420,7 @@ async function _handleEllieChatMessage(
       // Per-user phone history (ELLIE-197)
       const phoneHistKey = ecUserId || 'anonymous';
       if (!ellieChatPhoneHistories.has(phoneHistKey)) ellieChatPhoneHistories.set(phoneHistKey, []);
+      touchPhoneHistory(phoneHistKey);
       const phoneHistory = ellieChatPhoneHistories.get(phoneHistKey)!;
       phoneHistory.push({ role: "user", content: text });
 

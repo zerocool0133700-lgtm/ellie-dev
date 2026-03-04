@@ -56,6 +56,7 @@ import {
   getQueueStatus,
 } from "./message-queue.ts";
 import { getChannelHealth } from "./channel-health.ts";
+import { getTaskStatus } from "./periodic-task.ts";
 import {
   saveMessage,
   sendWithApprovals,
@@ -1086,6 +1087,8 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         rateLimits: getRateLimitStatus(),
         // ELLIE-460: Live dependency health (Supabase, Telegram, Forest)
         dependencies: getChannelHealth(),
+        // ELLIE-492: Periodic task status
+        periodicTasks: getTaskStatus(),
       }));
     }).catch(() => {
       res.writeHead(200, { "Content-Type": "application/json" });

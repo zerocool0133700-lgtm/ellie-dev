@@ -1,0 +1,324 @@
+/**
+ * Periodic task definitions — ELLIE-492
+ *
+ * All background periodic tasks in one place. Each task is registered
+ * with the unified task runner (periodic-task.ts) which handles backoff,
+ * jitter, re-entrancy, recovery, and graceful shutdown.
+ *
+ * relay.ts calls initPeriodicTasks() once after dependency wiring.
+ */
+
+import type { Bot } from "grammy";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type Anthropic from "@anthropic-ai/sdk";
+import { log } from "./logger.ts";
+import { periodicTask, _startedAt, STARTUP_GRACE_MS } from "./periodic-task.ts";
+
+const logger = log.child("tasks");
+
+export interface PeriodicTaskDeps {
+  supabase: SupabaseClient | null;
+  bot: Bot;
+  anthropic: Anthropic | null;
+  /** Bot restart state — relay owns the mutable flags, tasks just call through */
+  botRestart: {
+    isRestarting: () => boolean;
+    setRestarting: (v: boolean) => void;
+    lastRestartAt: () => number;
+    setLastRestartAt: (t: number) => void;
+  };
+}
+
+export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
+  const { supabase, bot, anthropic, botRestart } = deps;
+
+  // ── 5-minute cycle: conversation expiry + recovery probe + action cleanup + health ──
+
+  periodicTask(async () => {
+    if (supabase) {
+      const { expireIdleConversations } = await import("./conversations.ts");
+      await expireIdleConversations(supabase);
+
+      const { expireStaleAgentSessions } = await import("./periodic-tasks-helpers.ts");
+      await expireStaleAgentSessions(supabase);
+    }
+  }, 5 * 60_000, "conversation-expiry");
+
+  periodicTask(async () => {
+    if (!anthropic) return;
+    const { isFallbackActive, shouldProbeRecovery, markRecoveryProbeAttempted, recordAnthropicSuccess } = await import("./llm-provider.ts");
+    if (!isFallbackActive() || !shouldProbeRecovery()) return;
+    markRecoveryProbeAttempted();
+    try {
+      await anthropic.messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 1,
+        messages: [{ role: "user", content: "ok" }],
+      });
+      recordAnthropicSuccess();
+      const { broadcastToEllieChatClients } = await import("./relay-state.ts");
+      broadcastToEllieChatClients({
+        type: "response",
+        text: "\u2713 Claude is back \u2014 resuming normal operation.",
+        agent: "system",
+        ts: Date.now(),
+      });
+      const { notify } = await import("./notification-policy.ts");
+      const { getNotifyCtx } = await import("./relay-state.ts");
+      notify(getNotifyCtx(), {
+        event: "incident_resolved",
+        telegramMessage: "\u2713 Claude recovered \u2014 Ellie back to normal",
+      });
+    } catch {
+      // intentionally silent — still down, staying in fallback
+    }
+  }, 5 * 60_000, "recovery-probe");
+
+  periodicTask(async () => {
+    const { ellieChatPendingActions } = await import("./message-sender.ts");
+    const now = Date.now();
+    for (const [id, action] of ellieChatPendingActions) {
+      if (now - action.createdAt > 15 * 60_000) {
+        ellieChatPendingActions.delete(id);
+        console.log(`[ellie-chat approval] Expired: ${action.description.substring(0, 60)}`);
+      }
+    }
+  }, 5 * 60_000, "action-expiry");
+
+  // ELLIE-459/465/462: Channel health check + active Telegram restart
+  const BOT_RESTART_COOLDOWN_MS = 5 * 60_000;
+  periodicTask(async () => {
+    const { runHealthCheck } = await import("./channel-health.ts");
+    await runHealthCheck({
+      getMe: () => bot.api.getMe(),
+      onTelegramDown: (count) => {
+        const cooldownOk = Date.now() - botRestart.lastRestartAt() > BOT_RESTART_COOLDOWN_MS;
+        if (count >= 2 && !botRestart.isRestarting() && cooldownOk) {
+          botRestart.setRestarting(true);
+          botRestart.setLastRestartAt(Date.now());
+          logger.warn("[health-restart] Telegram down 2+ checks \u2014 restarting bot", { count });
+          bot.stop()
+            .then(() => bot.start())
+            .then(() => {
+              logger.info("[health-restart] Bot restarted successfully");
+              botRestart.setRestarting(false);
+            })
+            .catch(err => {
+              logger.error("[health-restart] Bot restart failed", { error: err instanceof Error ? err.message : String(err) });
+              botRestart.setRestarting(false);
+            });
+        } else if (count === 0) {
+          botRestart.setRestarting(false);
+        }
+      },
+    });
+  }, 5 * 60_000, "channel-health");
+
+  // Calendar sync (every 5 minutes)
+  periodicTask(async () => {
+    const { syncAllCalendars } = await import("./calendar-sync.ts");
+    await syncAllCalendars();
+  }, 5 * 60_000, "calendar-sync");
+
+  // Stale queue item expiry — every hour (ELLIE-201)
+  periodicTask(async () => {
+    const { expireStaleItems } = await import("./api/agent-queue.ts");
+    await expireStaleItems();
+  }, 60 * 60_000, "stale-expiry");
+
+  // Plane sync queue purge — weekly (ELLIE-234)
+  periodicTask(async () => {
+    const { purgeCompleted } = await import("./plane-queue.ts");
+    await purgeCompleted();
+  }, 24 * 60 * 60_000, "plane-queue-purge");
+
+  // Phone history TTL sweep — hourly (ELLIE-489)
+  // Removes ellieChatPhoneHistories entries unused for >24h to prevent memory leak.
+  periodicTask(async () => {
+    const { sweepPhoneHistories } = await import("./relay-state.ts");
+    sweepPhoneHistories();
+  }, 60 * 60_000, "phone-history-sweep");
+
+  // ELLIE-447: Creature reaper — mark timed-out creatures as failed (every 5 minutes)
+  periodicTask(async () => {
+    const { reapTimedOutCreatures } = await import("../../ellie-forest/src/work-sessions");
+    const reaped = await reapTimedOutCreatures();
+    if (reaped.length > 0) console.log(`[creature-reaper] Reaped ${reaped.length} timed-out creature(s)`);
+  }, 5 * 60_000, "creature-reaper");
+
+  // Memory maintenance: expire short-term memories (every 15 minutes)
+  periodicTask(async () => {
+    const { expireShortTermMemories } = await import("../../ellie-forest/src/shared-memory");
+    const expired = await expireShortTermMemories();
+    if (expired > 0) console.log(`[memory-maintenance] Expired ${expired} short-term memories`);
+  }, 15 * 60_000, "memory-expiry");
+
+  // Memory maintenance: refresh weights (every hour)
+  periodicTask(async () => {
+    const { refreshWeights } = await import("../../ellie-forest/src/shared-memory");
+    const refreshed = await refreshWeights({ limit: 500 });
+    if (refreshed > 0) console.log(`[memory-maintenance] Refreshed weights for ${refreshed} memories`);
+  }, 60 * 60_000, "weight-refresh");
+
+  // ELLIE-457: Oak Catalog — daily QMD scan → R/1 manifest (every 24 hours)
+  periodicTask(async () => {
+    const { syncOakCatalog } = await import("./api/bridge-river.ts");
+    await syncOakCatalog();
+  }, 24 * 60 * 60_000, "oak-catalog-sync");
+
+  // Summary Bar push — broadcast module summary state to Ellie Chat clients (ELLIE-315)
+  periodicTask(async () => {
+    if (!supabase) return;
+    const { getSummaryState } = await import("./ums/consumers/summary.ts");
+    const { broadcastToEllieChatClients } = await import("./relay-state.ts");
+    const summary = await getSummaryState(supabase);
+    broadcastToEllieChatClients({ type: "summary_update", summary, ts: Date.now() });
+  }, 30_000, "summary-push");
+
+  // Morning briefing — check every 15 minutes, deliver once at ~7:00 AM CST (ELLIE-316)
+  periodicTask(async () => {
+    if (!supabase) return;
+    const { USER_TIMEZONE } = await import("./timezone.ts");
+    const cst = new Date(new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE }));
+    if (cst.getHours() === 7 && cst.getMinutes() < 15) {
+      const { runMorningBriefing } = await import("./api/briefing.ts");
+      await runMorningBriefing(supabase, bot);
+    }
+  }, 15 * 60_000, "morning-briefing");
+
+  // Data integrity audit — weekly, Sunday 11 PM CST (ELLIE-406)
+  periodicTask(async () => {
+    if (!supabase) return;
+    const { USER_TIMEZONE } = await import("./timezone.ts");
+    const cst = new Date(new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE }));
+    if (cst.getDay() === 0 && cst.getHours() === 23 && cst.getMinutes() < 15) {
+      const { runDataIntegrityAudit } = await import("./api/data-integrity-audit.ts");
+      const result = await runDataIntegrityAudit(supabase, { lookbackDays: 7 });
+      if (!result.clean) {
+        const { notify } = await import("./notification-policy.ts");
+        const { getNotifyCtx } = await import("./relay-state.ts");
+        notify(getNotifyCtx(), { event: "incident_raised", text: `\u26a0\ufe0f Weekly data integrity audit found issues:\n${result.summary}`, workItemId: "data-integrity" });
+      } else {
+        logger.info("[audit] Weekly audit passed \u2014 all clear.");
+      }
+    }
+  }, 15 * 60_000, "data-integrity-audit");
+
+  // Channel Gardener — nightly at 3 AM CST (ELLIE-335)
+  periodicTask(async () => {
+    if (!supabase) return;
+    const { USER_TIMEZONE } = await import("./timezone.ts");
+    const cst = new Date(new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE }));
+    if (cst.getHours() === 3 && cst.getMinutes() < 15) {
+      const { runNightlyGardener } = await import("./api/channel-gardener.ts");
+      const { getRelayDeps } = await import("./relay-state.ts");
+      const { anthropic: a } = getRelayDeps();
+      const result = await runNightlyGardener(supabase, a ?? null);
+      logger.info("[gardener] Nightly run complete", result);
+    }
+  }, 15 * 60_000, "channel-gardener");
+
+  // Job Intelligence — nightly at 3:30 AM CST (ELLIE-456)
+  periodicTask(async () => {
+    const { USER_TIMEZONE } = await import("./timezone.ts");
+    const cst = new Date(new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE }));
+    if (cst.getHours() === 3 && cst.getMinutes() >= 30 && cst.getMinutes() < 45) {
+      const { runNightlyJobIntelligence } = await import("./api/job-intelligence.ts");
+      const result = await runNightlyJobIntelligence();
+      logger.info("[job-intel] Nightly run complete", result);
+    }
+  }, 15 * 60_000, "job-intelligence");
+
+  console.log("[periodic-tasks] All background tasks registered");
+}
+
+/**
+ * Run one-time startup tasks — things that fire once after a delay.
+ * Separated from periodic tasks so relay.ts stays clean.
+ */
+export function runStartupTasks(deps: PeriodicTaskDeps): void {
+  const { supabase } = deps;
+
+  // Initial calendar sync (10s delay)
+  setTimeout(async () => {
+    try {
+      const { syncAllCalendars } = await import("./calendar-sync.ts");
+      await syncAllCalendars();
+      console.log("[calendar-sync] Initial sync complete");
+    } catch (err: unknown) {
+      logger.error("Initial sync error", { error: err instanceof Error ? err.message : String(err) });
+    }
+  }, 10_000);
+
+  // Initial stale queue expiry (10s delay)
+  setTimeout(async () => {
+    try {
+      const { expireStaleItems } = await import("./api/agent-queue.ts");
+      await expireStaleItems();
+    } catch (err) {
+      logger.error("Initial stale expiry error", err);
+    }
+  }, 10_000);
+
+  // UMS consumers — only if supabase is available
+  if (supabase) {
+    initUmsConsumers(supabase, deps.bot);
+  }
+}
+
+async function initUmsConsumers(supabase: SupabaseClient, bot: Bot): Promise<void> {
+  // Comms consumer (ELLIE-318)
+  try {
+    const { initCommsConsumer } = await import("./ums/consumers/comms.ts");
+    initCommsConsumer(supabase);
+    console.log("[comms] Comms consumer initialized with DB-backed threads");
+  } catch (err) {
+    logger.error("Comms consumer init failed", err);
+  }
+
+  // Calendar Intel consumer (ELLIE-319)
+  try {
+    const { initCalendarIntelConsumer } = await import("./ums/consumers/calendar-intel.ts");
+    initCalendarIntelConsumer(supabase);
+    console.log("[calendar-intel] Calendar Intel consumer initialized with DB-backed intel");
+  } catch (err) {
+    logger.error("Calendar Intel consumer init failed", err);
+  }
+
+  // Relationship consumer (ELLIE-320)
+  try {
+    const { initRelationshipConsumer } = await import("./ums/consumers/relationship.ts");
+    initRelationshipConsumer(supabase);
+    console.log("[relationship] Relationship consumer initialized with DB-backed profiles");
+  } catch (err) {
+    logger.error("Relationship consumer init failed", err);
+  }
+
+  // Alert consumer (ELLIE-317)
+  try {
+    const { initAlertConsumer } = await import("./ums/consumers/alert.ts");
+    const { ALLOWED_USER_ID } = await import("./relay-config.ts");
+    const { isGoogleChatEnabled, sendGoogleChatMessage } = await import("./google-chat.ts");
+    const GOOGLE_CHAT_SPACE = process.env.GOOGLE_CHAT_SPACE_NAME || "";
+
+    initAlertConsumer(supabase, async (text: string, priority: string) => {
+      const channels: string[] = [];
+      if (priority === "critical" || priority === "high") {
+        try {
+          await bot.api.sendMessage(ALLOWED_USER_ID, text);
+          channels.push("telegram");
+        } catch (err) { logger.warn("Alert telegram send failed", err); }
+      }
+      if (GOOGLE_CHAT_SPACE && isGoogleChatEnabled()) {
+        try {
+          await sendGoogleChatMessage(GOOGLE_CHAT_SPACE, text);
+          channels.push("google-chat");
+        } catch (err) { logger.warn("Alert gchat send failed", err); }
+      }
+      return channels;
+    });
+    console.log("[alert] Alert consumer initialized with DB-backed rules");
+  } catch (err) {
+    logger.error("Alert consumer init failed", err);
+  }
+}

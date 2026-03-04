@@ -3,6 +3,7 @@
  *
  * Orchestrates startup: creates clients, wires dependencies, starts servers.
  * Route handlers, WebSocket logic, and Telegram handlers live in separate modules.
+ * Periodic background tasks live in periodic-tasks.ts (ELLIE-492).
  *
  * Run: bun run src/relay.ts
  */
@@ -26,9 +27,6 @@ import {
   getActiveAgent, broadcastExtension, broadcastToEllieChatClients,
   setRelayDeps, getNotifyCtx,
 } from "./relay-state.ts";
-import {
-  isFallbackActive, shouldProbeRecovery, markRecoveryProbeAttempted, recordAnthropicSuccess,
-} from "./llm-provider.ts";
 import { triggerConsolidation } from "./relay-idle.ts";
 import { handleHttpRequest } from "./http-routes.ts";
 import { registerTelegramHandlers } from "./telegram-handlers.ts";
@@ -42,33 +40,27 @@ import {
   setAnthropicClient,
 } from "./claude-cli.ts";
 import { setQueueBroadcast, drainQueues } from "./message-queue.ts";
-import { USER_TIMEZONE } from "./timezone.ts";
 import { setVoicePipelineDeps } from "./voice-pipeline.ts";
-import { ellieChatPendingActions, setSenderDeps } from "./message-sender.ts";
+import { setSenderDeps } from "./message-sender.ts";
 import { initDelivery } from "./ws-delivery.ts";
 import { initForestSync } from "./elasticsearch/context.ts";
 import { initGoogleChat, sendGoogleChatMessage, isGoogleChatEnabled } from "./google-chat.ts";
-const GOOGLE_CHAT_SPACE = process.env.GOOGLE_CHAT_SPACE_NAME || "";
 import { startNudgeChecker } from "./delivery.ts";
 import { initClassifier, warmTreeRoutingRules } from "./intent-classifier.ts";
 import { initEntailmentClassifier } from "./entailment-classifier.ts";
 import { startSkillWatcher, getSkillSnapshot } from "./skills/index.ts";
-import { syncAllCalendars } from "./calendar-sync.ts";
 import { initOutlook, getOutlookEmail } from "./outlook.ts";
 import { startExpiryCleanup } from "./approval.ts";
 import { notify } from "./notification-policy.ts";
-import { expireIdleConversations } from "./conversations.ts";
-import { expireStaleItems } from "./api/agent-queue.ts";
-import { startPlaneQueueWorker, purgeCompleted as purgePlaneQueue, stopPlaneQueueWorker } from "./plane-queue.ts";
+import { startPlaneQueueWorker, stopPlaneQueueWorker } from "./plane-queue.ts";
 import { startWatchdog, recoverActiveRuns, setWatchdogNotify, stopWatchdog } from "./orchestration-tracker.ts";
 import { reconcileOnStartup, startReconciler, stopReconciler } from "./orchestration-reconciler.ts";
 import { restoreModeState } from "./context-mode.ts";
 import { cleanupOrphanedJobs, registerJobVines } from "./jobs-ledger.ts";
 import { onBridgeWrite } from "./api/bridge.ts";
 import { setBroadcastToEllieChat } from "./tool-approval.ts";
-import { getSummaryState } from "./ums/consumers/summary.ts";
-import { runHealthCheck } from "./channel-health.ts";
-import { periodicTask, stopAllPeriodicTasks, _startedAt, STARTUP_GRACE_MS } from "./periodic-task.ts";
+import { stopAllTasks } from "./periodic-task.ts";
+import { initPeriodicTasks, runStartupTasks } from "./periodic-tasks.ts";
 
 // ============================================================
 // SETUP
@@ -104,104 +96,16 @@ if (!(await acquireLock())) {
 
 export const bot = new Bot(BOT_TOKEN);
 
-// ── periodicTask imported from ./periodic-task.ts (ELLIE-465) ─
-
 // ELLIE-462: Bot restart gate — prevent concurrent restarts and rapid flap loops
-// ELLIE-467: Added 5-min cooldown between restarts (_lastBotRestartAt)
-// grammY v1 stop→start on the same Bot instance is safe: long-poll is cancelled
-// and the internal polling loop restarts without creating a new Bot object.
+// ELLIE-467: Added 5-min cooldown between restarts
 let _botRestarting = false;
 let _lastBotRestartAt = 0;
-const BOT_RESTART_COOLDOWN_MS = 5 * 60_000;
 
 // Start approval expiry cleanup
 startExpiryCleanup();
 
-// Periodic idle conversation expiry (every 5 minutes)
-// ELLIE-232: Now uses expireIdleConversations() which has atomic claim protection
-// to prevent duplicate memory extraction from racing close paths.
-// ELLIE-487: Handle tracked so it can be cleared on shutdown.
-const _housekeepingInterval = setInterval(async () => {
-  if (Date.now() - _startedAt < STARTUP_GRACE_MS) return; // startup gate
-  if (supabase) {
-    try {
-      await expireIdleConversations(supabase);
-    } catch (err: unknown) {
-      logger.error("Stale conversation cleanup error", { error: err instanceof Error ? err.message : String(err) });
-    }
-    expireStaleAgentSessions(supabase).catch(err => logger.warn("expireStaleAgentSessions failed", { error: err instanceof Error ? err.message : String(err) }));
-  }
-  // ELLIE-408: Probe Anthropic recovery while in fallback mode
-  if (isFallbackActive() && shouldProbeRecovery() && anthropic) {
-    markRecoveryProbeAttempted();
-    anthropic.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1,
-      messages: [{ role: "user", content: "ok" }],
-    }).then(() => {
-      recordAnthropicSuccess();
-      broadcastToEllieChatClients({
-        type: "response",
-        text: "✓ Claude is back — resuming normal operation.",
-        agent: "system",
-        ts: Date.now(),
-      });
-      notify(getNotifyCtx(), {
-        event: "incident_resolved",
-        telegramMessage: "✓ Claude recovered — Ellie back to normal",
-      });
-    }).catch(() => {}); // intentionally silent — still down, staying in fallback
-  }
-  // Expire Ellie Chat pending confirm actions (15-min TTL)
-  const now = Date.now();
-  for (const [id, action] of ellieChatPendingActions) {
-    if (now - action.createdAt > 15 * 60_000) {
-      ellieChatPendingActions.delete(id);
-      console.log(`[ellie-chat approval] Expired: ${action.description.substring(0, 60)}`);
-    }
-  }
-  // ELLIE-459/465/462: Channel health check + active Telegram restart
-  runHealthCheck({
-    getMe: () => bot.api.getMe(),
-    onTelegramDown: (count) => {
-      // ELLIE-462: After 2 consecutive "down" results (≈10 min), restart the bot.
-      // ELLIE-467: Cooldown guards against flap loops — min 5 min between restarts.
-      const cooldownOk = Date.now() - _lastBotRestartAt > BOT_RESTART_COOLDOWN_MS;
-      if (count >= 2 && !_botRestarting && cooldownOk) {
-        _botRestarting = true;
-        _lastBotRestartAt = Date.now();
-        logger.warn("[health-restart] Telegram down 2+ checks — restarting bot", { count });
-        bot.stop()
-          .then(() => bot.start())
-          .then(() => {
-            logger.info("[health-restart] Bot restarted successfully");
-            _botRestarting = false;
-          })
-          .catch(err => {
-            logger.error("[health-restart] Bot restart failed", { error: err instanceof Error ? err.message : String(err) });
-            _botRestarting = false;
-          });
-      } else if (count === 0) {
-        _botRestarting = false; // reset on recovery
-      }
-    },
-  }).catch(err => logger.warn("Health check cycle failed", { error: err instanceof Error ? err.message : String(err) }));
-}, 5 * 60_000);
-
-// Calendar sync (every 5 minutes)
-periodicTask(() => syncAllCalendars(), 5 * 60_000, "calendar-sync");
-
-// Stale queue item expiry — every hour (ELLIE-201)
-periodicTask(() => expireStaleItems(), 60 * 60_000, "stale-expiry");
-// Run once on startup (10s delay)
-setTimeout(() => {
-  expireStaleItems().catch(err => logger.error("Initial stale expiry error", err));
-}, 10_000);
-
 // Plane sync queue — persistent retry for failed Plane API calls (ELLIE-234)
 startPlaneQueueWorker();
-// Purge completed queue items weekly
-periodicTask(() => purgePlaneQueue(), 24 * 60 * 60_000, "plane-queue-purge");
 
 // Orchestration tracker — ELLIE-349: heartbeat watchdog + orphan recovery
 // ELLIE-387: Wire proactive notifications to watchdog (deferred — needs setRelayDeps first)
@@ -234,11 +138,11 @@ onBridgeWrite(({ collaborator, content, memoryId, type, workItemId }) => {
   notify(getNotifyCtx(), {
     event: "dispatch_confirm",
     workItemId: memoryId,
-    telegramMessage: `📋 *${collaborator}* ${label}${ticket}: ${preview}`,
+    telegramMessage: `\ud83d\udccb *${collaborator}* ${label}${ticket}: ${preview}`,
     gchatMessage: `${collaborator} ${label}${ticket}: ${preview}`,
   }).catch(err => logger.error("Bridge notify failed", err));
 
-  // Push to ellie-chat clients (lazy ref — ellieChatClients defined later in file)
+  // Push to ellie-chat clients
   broadcastToEllieChatClients({
     type: "finding",
     collaborator,
@@ -249,188 +153,6 @@ onBridgeWrite(({ collaborator, content, memoryId, type, workItemId }) => {
     ts: Date.now(),
   });
 });
-
-// Initial calendar sync (10s after startup)
-setTimeout(async () => {
-  try {
-    await syncAllCalendars();
-    console.log("[calendar-sync] Initial sync complete");
-  } catch (err: unknown) {
-    logger.error("Initial sync error", { error: err instanceof Error ? err.message : String(err) });
-  }
-}, 10_000);
-
-// ELLIE-447: Creature reaper — mark timed-out creatures as failed (every 5 minutes)
-periodicTask(async () => {
-  const { reapTimedOutCreatures } = await import('../../ellie-forest/src/work-sessions');
-  const reaped = await reapTimedOutCreatures();
-  if (reaped.length > 0) console.log(`[creature-reaper] Reaped ${reaped.length} timed-out creature(s)`);
-}, 5 * 60_000, "creature-reaper");
-
-// Memory maintenance: expire short-term memories (every 15 minutes)
-periodicTask(async () => {
-  const { expireShortTermMemories } = await import('../../ellie-forest/src/shared-memory');
-  const expired = await expireShortTermMemories();
-  if (expired > 0) console.log(`[memory-maintenance] Expired ${expired} short-term memories`);
-}, 15 * 60_000, "memory-expiry");
-
-// Memory maintenance: refresh weights (every hour)
-periodicTask(async () => {
-  const { refreshWeights } = await import('../../ellie-forest/src/shared-memory');
-  const refreshed = await refreshWeights({ limit: 500 });
-  if (refreshed > 0) console.log(`[memory-maintenance] Refreshed weights for ${refreshed} memories`);
-}, 60 * 60_000, "weight-refresh");
-
-// ELLIE-457: Oak Catalog — daily QMD scan → R/1 manifest (every 24 hours)
-periodicTask(async () => {
-  const { syncOakCatalog } = await import('./api/bridge-river.ts');
-  await syncOakCatalog();
-}, 24 * 60 * 60_000, "oak-catalog-sync");
-
-// Summary Bar push — broadcast module summary state to Ellie Chat clients (ELLIE-315)
-// Runs every 30 seconds when clients are connected; skips if no listeners.
-periodicTask(async () => {
-  if (!supabase) return;
-  const summary = await getSummaryState(supabase);
-  broadcastToEllieChatClients({ type: "summary_update", summary, ts: Date.now() });
-}, 30_000, "summary-push");
-
-// Comms consumer — DB-backed thread tracking (ELLIE-318)
-if (supabase) {
-  (async () => {
-    try {
-      const { initCommsConsumer } = await import("./ums/consumers/comms.ts");
-      initCommsConsumer(supabase);
-      console.log("[comms] Comms consumer initialized with DB-backed threads");
-    } catch (err) {
-      logger.error("Comms consumer init failed", err);
-    }
-  })();
-}
-
-// Calendar Intel consumer — DB-backed event intel, conflict detection, prep tracking (ELLIE-319)
-if (supabase) {
-  (async () => {
-    try {
-      const { initCalendarIntelConsumer } = await import("./ums/consumers/calendar-intel.ts");
-      initCalendarIntelConsumer(supabase);
-      console.log("[calendar-intel] Calendar Intel consumer initialized with DB-backed intel");
-    } catch (err) {
-      logger.error("Calendar Intel consumer init failed", err);
-    }
-  })();
-}
-
-// Relationship consumer — DB-backed contact profiles, health scoring, follow-up detection (ELLIE-320)
-if (supabase) {
-  (async () => {
-    try {
-      const { initRelationshipConsumer } = await import("./ums/consumers/relationship.ts");
-      initRelationshipConsumer(supabase);
-      console.log("[relationship] Relationship consumer initialized with DB-backed profiles");
-    } catch (err) {
-      logger.error("Relationship consumer init failed", err);
-    }
-  })();
-}
-
-// Alert consumer — DB-backed rules, severity routing, dedup (ELLIE-317)
-if (supabase) {
-  (async () => {
-    try {
-      const { initAlertConsumer } = await import("./ums/consumers/alert.ts");
-      initAlertConsumer(supabase, async (text: string, priority: string) => {
-        const channels: string[] = [];
-        // Critical + High: Telegram + Google Chat; Normal: Google Chat only
-        if (priority === "critical" || priority === "high") {
-          try {
-            await bot.api.sendMessage(ALLOWED_USER_ID, text);
-            channels.push("telegram");
-          } catch (err) { logger.warn("Alert telegram send failed", err); }
-        }
-        if (GOOGLE_CHAT_SPACE && isGoogleChatEnabled()) {
-          try {
-            await sendGoogleChatMessage(GOOGLE_CHAT_SPACE, text);
-            channels.push("google-chat");
-          } catch (err) { logger.warn("Alert gchat send failed", err); }
-        }
-        return channels;
-      });
-      console.log("[alert] Alert consumer initialized with DB-backed rules");
-    } catch (err) {
-      logger.error("Alert consumer init failed", err);
-    }
-  })();
-}
-
-// Morning briefing — check every 15 minutes, deliver once at ~7:00 AM CST (ELLIE-316)
-periodicTask(async () => {
-  if (!supabase) return;
-  const cst = new Date(new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE }));
-  if (cst.getHours() === 7 && cst.getMinutes() < 15) {
-    const { runMorningBriefing } = await import("./api/briefing.ts");
-    await runMorningBriefing(supabase, bot);
-  }
-}, 15 * 60_000, "morning-briefing");
-
-// Data integrity audit — weekly, Sunday 11 PM CST (ELLIE-406)
-periodicTask(async () => {
-  if (!supabase) return;
-  const cst = new Date(new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE }));
-  if (cst.getDay() === 0 && cst.getHours() === 23 && cst.getMinutes() < 15) {
-    const { runDataIntegrityAudit } = await import("./api/data-integrity-audit.ts");
-    const result = await runDataIntegrityAudit(supabase, { lookbackDays: 7 });
-    if (!result.clean) {
-      notify(getNotifyCtx(), { event: "incident_raised", text: `⚠️ Weekly data integrity audit found issues:\n${result.summary}`, workItemId: "data-integrity" });
-    } else {
-      logger.info("[audit] Weekly audit passed — all clear.");
-    }
-  }
-}, 15 * 60_000, "data-integrity-audit");
-
-// Channel Gardener — nightly at 3 AM CST (ELLIE-335)
-periodicTask(async () => {
-  if (!supabase) return;
-  const cst = new Date(new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE }));
-  if (cst.getHours() === 3 && cst.getMinutes() < 15) {
-    const { runNightlyGardener } = await import("./api/channel-gardener.ts");
-    const { anthropic } = getRelayDeps();
-    const result = await runNightlyGardener(supabase, anthropic ?? null);
-    logger.info("[gardener] Nightly run complete", result);
-  }
-}, 15 * 60_000, "channel-gardener");
-
-// Job Intelligence — nightly at 3:30 AM CST (ELLIE-456)
-periodicTask(async () => {
-  const cst = new Date(new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE }));
-  if (cst.getHours() === 3 && cst.getMinutes() >= 30 && cst.getMinutes() < 45) {
-    const { runNightlyJobIntelligence } = await import("./api/job-intelligence.ts");
-    const result = await runNightlyJobIntelligence();
-    logger.info("[job-intel] Nightly run complete", result);
-  }
-}, 15 * 60_000, "job-intelligence");
-
-// Note: expireStaleWorkSessions (old Supabase work_sessions table) removed in ELLIE-88.
-// Forest is now the source of truth for work sessions. See ellie-forest/src/work-sessions.ts.
-
-/** Expire agent sessions that have been active for > 2 hours without activity */
-async function expireStaleAgentSessions(sb: SupabaseClient): Promise<void> {
-  const cutoff = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
-  const { data, error } = await sb
-    .from("agent_sessions")
-    .update({ state: "completed", completed_at: new Date().toISOString() })
-    .eq("state", "active")
-    .lt("last_activity", cutoff)
-    .select("id");
-
-  if (error) {
-    logger.error("agent_sessions expire error", error);
-    return;
-  }
-  if (data && data.length > 0) {
-    console.log(`[session-cleanup] Expired ${data.length} stale agent session(s)`);
-  }
-}
 
 // ============================================================
 // CLIENTS + DEPENDENCY WIRING
@@ -452,6 +174,27 @@ setSenderDeps({ supabase, getActiveAgent });
 initDelivery(supabase);
 setVoicePipelineDeps({ supabase, getActiveAgent, broadcastExtension, getContextDocket, triggerConsolidation });
 setBroadcastToEllieChat(broadcastToEllieChatClients);
+
+// ── ELLIE-492: Unified periodic task runner ──────────────────
+// All background periodic tasks registered in one place.
+// Must run after dependency wiring so supabase/anthropic/bot are available.
+initPeriodicTasks({
+  supabase,
+  bot,
+  anthropic,
+  botRestart: {
+    isRestarting: () => _botRestarting,
+    setRestarting: (v) => { _botRestarting = v; },
+    lastRestartAt: () => _lastBotRestartAt,
+    setLastRestartAt: (t) => { _lastBotRestartAt = t; },
+  },
+});
+runStartupTasks({ supabase, bot, anthropic, botRestart: {
+  isRestarting: () => _botRestarting,
+  setRestarting: (v) => { _botRestarting = v; },
+  lastRestartAt: () => _lastBotRestartAt,
+  setLastRestartAt: (t) => { _lastBotRestartAt = t; },
+}});
 
 // ELLIE-469: Discord channel plugin — only activates if DISCORD_BOT_TOKEN is set
 import { startDiscordGateway } from "./channels/discord/index.ts";
@@ -498,7 +241,7 @@ const outlookEnabled = await initOutlook();
 
 // Start delivery nudge checker — sends reminder if response wasn't acknowledged
 startNudgeChecker(async (channel, count) => {
-  const nudgeText = `Hey Dave — I sent you a response${count > 1 ? ` (${count} messages)` : ""} a few minutes ago. Did it come through?`;
+  const nudgeText = `Hey Dave \u2014 I sent you a response${count > 1 ? ` (${count} messages)` : ""} a few minutes ago. Did it come through?`;
   console.log(`[delivery] Nudging on ${channel} (${count} pending responses)`);
   try {
     if (channel === "google-chat" && gchatEnabled) {
@@ -556,7 +299,7 @@ let shutdownInProgress = false;
 async function gracefulShutdown(signal: string): Promise<void> {
   if (shutdownInProgress) return;
   shutdownInProgress = true;
-  console.log(`[relay] ${signal} received — shutting down gracefully...`);
+  console.log(`[relay] ${signal} received \u2014 shutting down gracefully...`);
 
   // 1. Stop accepting new messages
   try { await bot.stop(); } catch {}
@@ -565,10 +308,8 @@ async function gracefulShutdown(signal: string): Promise<void> {
   await stopDiscordGateway().catch(() => {});
   console.log("[relay] Discord gateway stopped");
 
-  // 2. Stop all background tasks (ELLIE-487)
-  // Prevents periodic tasks from firing during teardown and corrupting state.
-  stopAllPeriodicTasks();
-  clearInterval(_housekeepingInterval);
+  // 2. Stop all background tasks (ELLIE-487/492)
+  stopAllTasks();
   stopWatchdog();
   stopReconciler();
   stopPlaneQueueWorker();
@@ -579,7 +320,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
   if (drained) {
     console.log("[relay] Queues drained cleanly");
   } else {
-    console.log("[relay] Queue drain timed out — proceeding anyway");
+    console.log("[relay] Queue drain timed out \u2014 proceeding anyway");
   }
 
   // 4. Close HTTP server + file watchers
@@ -625,7 +366,7 @@ process.on("uncaughtException", (err: Error, origin: string) => {
 process.on("unhandledRejection", (reason: unknown) => {
   const msg = reason instanceof Error ? reason.message : String(reason);
   const stack = reason instanceof Error ? reason.stack : undefined;
-  logger.error("[UNHANDLED REJECTION] Non-fatal — logged and continuing", {
+  logger.error("[UNHANDLED REJECTION] Non-fatal \u2014 logged and continuing", {
     reason: msg,
     stack,
     memory_mb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
