@@ -10,7 +10,7 @@
 
 import { log } from "./logger.ts";
 import { emitEvent } from "./orchestration-ledger.ts";
-import { startRun, endRun, getActiveRunForWorkItem } from "./orchestration-tracker.ts";
+import { startRun, endRun, getActiveRunForWorkItem, getActiveRunCount } from "./orchestration-tracker.ts";
 import { fetchWorkItemDetails } from "./plane.ts";
 import { dispatchAgent, syncResponse } from "./agent-router.ts";
 import { processMemoryIntents } from "./memory.ts";
@@ -45,6 +45,9 @@ export interface TrackedDispatchResult {
  * Execute a tracked dispatch. Returns runId immediately;
  * the actual agent work runs in the background.
  */
+// Max concurrent dispatches — prevents OOM from too many Claude CLI processes
+const MAX_CONCURRENT_DISPATCHES = 3;
+
 export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispatchResult {
   // ELLIE-376: Dispatch locking — prevent duplicate dispatches to same ticket
   // ELLIE-396: Queue instead of rejecting when agent is busy
@@ -82,6 +85,45 @@ export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispat
       event: "dispatch_confirm",
       workItemId: opts.workItemId,
       telegramMessage: `${opts.workItemId} queued for ${opts.agentType} (position ${position}) — waiting for current ${existingRun.agentType} run to finish`,
+    }).catch(() => {});
+
+    return { runId: queueId, promise: Promise.resolve() };
+  }
+
+  // Concurrency cap — queue if too many agents running (prevents OOM)
+  const activeCount = getActiveRunCount();
+  if (activeCount >= MAX_CONCURRENT_DISPATCHES) {
+    const queueId = crypto.randomUUID();
+    const notifyCtx: NotifyContext = {
+      bot: opts.playbookCtx.bot,
+      telegramUserId: opts.playbookCtx.telegramUserId,
+      gchatSpaceName: opts.playbookCtx.gchatSpaceName,
+    };
+
+    const { position } = enqueue({
+      id: queueId,
+      agentType: opts.agentType,
+      workItemId: opts.workItemId,
+      channel: opts.channel,
+      message: opts.message,
+      enqueuedAt: Date.now(),
+      notifyCtx,
+      execute: () => {
+        executeTrackedDispatch(opts);
+      },
+    });
+
+    logger.info("Dispatch queued — concurrency limit reached", {
+      workItemId: opts.workItemId,
+      activeCount,
+      maxConcurrent: MAX_CONCURRENT_DISPATCHES,
+      queuePosition: position,
+    });
+
+    notify(notifyCtx, {
+      event: "dispatch_confirm",
+      workItemId: opts.workItemId,
+      telegramMessage: `${opts.workItemId} queued for ${opts.agentType} (position ${position}) — ${activeCount}/${MAX_CONCURRENT_DISPATCHES} dispatches running`,
     }).catch(() => {});
 
     return { runId: queueId, promise: Promise.resolve() };

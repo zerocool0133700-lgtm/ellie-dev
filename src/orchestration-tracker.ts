@@ -135,6 +135,15 @@ export function getActiveRunStates(): RunState[] {
   return Array.from(activeRuns.values());
 }
 
+/** Count of currently running dispatches (not stale/completed). */
+export function getActiveRunCount(): number {
+  let count = 0;
+  for (const run of activeRuns.values()) {
+    if (run.status === "running") count++;
+  }
+  return count;
+}
+
 /** Get a single run's state. */
 export function getRunState(runId: string): RunState | null {
   return activeRuns.get(runId) || null;
