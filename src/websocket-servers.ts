@@ -500,6 +500,17 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
     clearTimeout(authTimer);
     ellieChatClients.delete(ws);
     abortAndRemove(ws); // ELLIE-461
+    // ELLIE-489: Clean up phone history on error the same way close does
+    const errUser = wsAppUserMap.get(ws);
+    const errUserId = errUser?.id || errUser?.anonymous_id;
+    if (errUserId) {
+      let hasOtherConn = false;
+      for (const client of ellieChatClients) {
+        const cu = wsAppUserMap.get(client);
+        if ((cu?.id || cu?.anonymous_id) === errUserId) { hasOtherConn = true; break; }
+      }
+      if (!hasOtherConn) ellieChatPhoneHistories.delete(errUserId);
+    }
   });
 });
 
