@@ -3802,6 +3802,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         const {
           bridgeRiverSearchEndpoint, bridgeRiverCatalogEndpoint,
           bridgeRiverDocEndpoint, bridgeRiverLinkEndpoint,
+          bridgeRiverWriteEndpoint,
         } = await import("./api/bridge-river.ts");
 
         const queryParams: Record<string, string> = {};
@@ -3866,6 +3867,10 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           case "river/link":
             if (!isPost) { res.writeHead(405); res.end(); return; }
             await bridgeRiverLinkEndpoint(mockReq, mockRes);
+            break;
+          case "river/write":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await bridgeRiverWriteEndpoint(mockReq, mockRes);
             break;
           default:
             res.writeHead(404, { "Content-Type": "application/json" });
