@@ -20,6 +20,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { indexMemory, classifyDomain } from "./elasticsearch.ts";
+import { resilientTask } from "./resilient-task.ts";
 import { log } from "./logger.ts";
 
 const logger = log.child("memory");
@@ -322,14 +323,15 @@ async function doInsert(
     return { id: null, action: "error", resolution };
   }
 
-  indexMemory({
+  // ELLIE-479: resilient fire-and-forget
+  resilientTask("indexMemory", "critical", () => indexMemory({
     id: data.id,
     content: params.content,
     type: params.type,
     domain: classifyDomain(params.content),
     created_at: new Date().toISOString(),
     ...(params.conversation_id ? { conversation_id: params.conversation_id } : {}),
-  }).catch(() => {});
+  }));
 
   return { id: data.id, action: "inserted", resolution };
 }

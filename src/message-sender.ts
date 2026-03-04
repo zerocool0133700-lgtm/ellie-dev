@@ -11,6 +11,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { WebSocket } from "ws";
 import { log } from "./logger.ts";
 import { indexMessage } from "./elasticsearch.ts";
+import { resilientTask } from "./resilient-task.ts";
 
 const logger = log.child("message-sender");
 import { getOrCreateConversation, attachMessage, maybeGenerateSummary } from "./conversations.ts";
@@ -65,19 +66,18 @@ export async function saveMessage(
 
     const { data } = await _supabase.from("messages").insert(row).select("id").single();
 
-    // Index to ES (fire-and-forget)
+    // Index to ES + conversation tracking (ELLIE-479: resilient fire-and-forget)
     if (data?.id) {
-      indexMessage({
+      resilientTask("indexMessage", "critical", () => indexMessage({
         id: data.id,
         content, role, channel,
         created_at: new Date().toISOString(),
         source_agent: _getActiveAgent(channel),
-      }).catch(() => {});
+      }));
 
-      // Update conversation stats + maybe generate rolling summary (fire-and-forget)
       if (conversationId) {
-        attachMessage(_supabase, data.id, conversationId).catch(() => {});
-        maybeGenerateSummary(_supabase, conversationId).catch(() => {});
+        resilientTask("attachMessage", "critical", () => attachMessage(_supabase, data.id, conversationId!));
+        resilientTask("maybeGenerateSummary", "best-effort", () => maybeGenerateSummary(_supabase, conversationId!));
       }
     }
 

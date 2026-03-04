@@ -17,6 +17,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type Anthropic from "@anthropic-ai/sdk";
 import { dispatchAgent, syncResponse, type DispatchResult } from "./agent-router.ts";
+import { resilientTask } from "./resilient-task.ts";
 import { processMemoryIntents } from "./memory.ts";
 import { extractApprovalTags } from "./approval.ts";
 import type { ExecutionMode } from "./intent-classifier.ts";
@@ -841,10 +842,10 @@ async function executeStep(
     session_id: dispatch.session_id,
   };
 
-  // 8. Sync step response (fire-and-forget)
-  syncResponse(options.supabase, dispatch.session_id, rawOutput, {
+  // 8. Sync step response (ELLIE-479: resilient fire-and-forget)
+  resilientTask("syncResponse", "critical", () => syncResponse(options.supabase, dispatch.session_id, rawOutput, {
     duration_ms: duration,
-  }).catch(() => {});
+  }));
 
   return { stepResult, dispatch };
 }

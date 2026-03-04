@@ -99,6 +99,7 @@ import { freshnessTracker, autoRefreshStaleSources } from "./context-freshness.t
 import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hierarchy.ts";
 import { logVerificationTrail } from "./data-quality.ts";
 import { withTrace } from "./trace.ts";
+import { resilientTask } from "./resilient-task.ts";
 
 const logger = log.child("telegram");
 
@@ -297,9 +298,9 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
     getLiveForestContext(effectiveText),
   ]);
   const recentMessages = conversationContext.text;
-  // Auto-acknowledge queue items on new session (fire-and-forget)
+  // Auto-acknowledge queue items on new session (ELLIE-479: resilient)
   if (agentResult?.dispatch.is_new && queueContext) {
-    acknowledgeQueueItems(activeAgent).catch(() => {});
+    resilientTask("acknowledgeQueueItems", "critical", () => acknowledgeQueueItems(activeAgent));
   }
 
   // ELLIE-327: Track section-level freshness for non-registry sources
@@ -408,19 +409,19 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
       const { cleanedText: playbookClean, commands: playbookCommands } = extractPlaybookCommands(pipelineResponse);
       const cleanedPipelineResponse = await sendWithApprovals(ctx, playbookClean, session.sessionId, agentName);
       await saveMessage("assistant", cleanedPipelineResponse, undefined, "telegram", userId);
-      runPostMessageAssessment(text, cleanedPipelineResponse, anthropic).catch(err => logger.error("Post-message assessment failed", err));
+      resilientTask("runPostMessageAssessment", "best-effort", () => runPostMessageAssessment(text, cleanedPipelineResponse, anthropic));
       broadcastExtension({ type: "pipeline_complete", channel: "telegram", mode: execMode, steps: result.stepResults.length, duration_ms: result.artifacts.total_duration_ms, cost_usd: result.artifacts.total_cost_usd });
 
       if (result.finalDispatch) {
-        syncResponse(supabase, result.finalDispatch.session_id, cleanedPipelineResponse, {
+        resilientTask("syncResponse", "critical", () => syncResponse(supabase, result.finalDispatch!.session_id, cleanedPipelineResponse, {
           duration_ms: result.artifacts.total_duration_ms,
-        }).catch(() => {});
+        }));
       }
 
       // Fire playbook commands async (ELLIE:: tags)
       if (playbookCommands.length > 0) {
         const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "telegram", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-        executePlaybookCommands(playbookCommands, pbCtx).catch(err => logger.error("Playbook command execution failed", err));
+        resilientTask("executePlaybookCommands", "best-effort", () => executePlaybookCommands(playbookCommands, pbCtx));
       }
 
       console.log(
@@ -565,7 +566,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   const cleanedResponse = await sendWithApprovals(ctx, playbookCleanedResponse, session.sessionId, agentResult?.dispatch.agent.name);
 
   await saveMessage("assistant", cleanedResponse, undefined, "telegram", userId);
-  runPostMessageAssessment(text, cleanedResponse, anthropic).catch(err => logger.error("Post-message assessment failed", err));
+  resilientTask("runPostMessageAssessment", "best-effort", () => runPostMessageAssessment(text, cleanedResponse, anthropic));
   broadcastExtension({ type: "message_out", channel: "telegram", agent: agentResult?.dispatch.agent.name || "general", preview: cleanedResponse.substring(0, 200) });
 
   // Sync response to agent session (fire-and-forget)
@@ -667,7 +668,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
     ]);
     const recentMessages = voiceConvoContext.text;
     if (agentResult?.dispatch.is_new && voiceQueueContext) {
-      acknowledgeQueueItems(voiceActiveAgent).catch(() => {});
+      resilientTask("acknowledgeQueueItems", "critical", () => acknowledgeQueueItems(voiceActiveAgent));
     }
 
     // ELLIE-327: Track section-level freshness for non-registry sources
@@ -730,12 +731,12 @@ bot.on("message:voice", withQueue(async (ctx) => {
         const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, voiceAgentName, "shared", agentMemory.sessionIds);
         const cleaned = await sendWithApprovals(ctx, pipelineResponse, session.sessionId, voiceAgentName);
         await saveMessage("assistant", cleaned, undefined, "telegram", voiceUserId);
-        runPostMessageAssessment(transcription, cleaned, anthropic).catch(err => logger.error("Post-message assessment failed", err));
+        resilientTask("runPostMessageAssessment", "best-effort", () => runPostMessageAssessment(transcription, cleaned, anthropic));
 
         if (result.finalDispatch) {
-          syncResponse(supabase, result.finalDispatch.session_id, cleaned, {
+          resilientTask("syncResponse", "critical", () => syncResponse(supabase, result.finalDispatch!.session_id, cleaned, {
             duration_ms: result.artifacts.total_duration_ms,
-          }).catch(() => {});
+          }));
         }
 
         console.log(
@@ -847,12 +848,12 @@ bot.on("message:voice", withQueue(async (ctx) => {
         await ctx.replyWithVoice(new InputFile(audioBuffer, "response.ogg"));
         await sendResponse(ctx, cleanedText);
         await saveMessage("assistant", cleanedText, undefined, "telegram", voiceUserId);
-        runPostMessageAssessment(transcription, cleanedText, anthropic).catch(err => logger.error("Post-message assessment failed", err));
+        resilientTask("runPostMessageAssessment", "best-effort", () => runPostMessageAssessment(transcription, cleanedText, anthropic));
 
         if (agentResult) {
-          syncResponse(supabase, agentResult.dispatch.session_id, cleanedText, {
+          resilientTask("syncResponse", "critical", () => syncResponse(supabase, agentResult!.dispatch.session_id, cleanedText, {
             duration_ms: durationMs,
-          }).catch(() => {});
+          }));
         }
 
         resetTelegramIdleTimer();
@@ -864,12 +865,12 @@ bot.on("message:voice", withQueue(async (ctx) => {
     const cleanedResponse = await sendWithApprovals(ctx, claudeResponse, session.sessionId, agentResult?.dispatch.agent.name);
 
     await saveMessage("assistant", cleanedResponse, undefined, "telegram", voiceUserId);
-    runPostMessageAssessment(transcription, cleanedResponse, anthropic).catch(err => logger.error("Post-message assessment failed", err));
+    resilientTask("runPostMessageAssessment", "best-effort", () => runPostMessageAssessment(transcription, cleanedResponse, anthropic));
 
     if (agentResult) {
-      syncResponse(supabase, agentResult.dispatch.session_id, cleanedResponse, {
+      resilientTask("syncResponse", "critical", () => syncResponse(supabase, agentResult!.dispatch.session_id, cleanedResponse, {
         duration_ms: durationMs,
-      }).catch(() => {});
+      }));
     }
 
     resetTelegramIdleTimer();

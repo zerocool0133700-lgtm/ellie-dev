@@ -11,6 +11,7 @@
 import { spawn } from "bun";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { indexConversation, indexMemory, classifyDomain } from "./elasticsearch.ts";
+import { resilientTask } from "./resilient-task.ts";
 import { log } from "./logger.ts";
 
 const logger = log.child("conversation");
@@ -437,15 +438,15 @@ ${transcript}`;
         .update({ summary: parsed.summary })
         .eq("id", conversationId);
 
-      // Index conversation to Elasticsearch
-      indexConversation({
+      // ELLIE-479: resilient ES indexing
+      resilientTask("indexConversation", "critical", () => indexConversation({
         id: conversationId,
         summary: parsed.summary,
         channel: convo.channel,
         started_at: convo.started_at,
         ended_at: convo.last_message_at || convo.started_at,
         message_count: messages.length,
-      }).catch(() => {});
+      }));
     }
 
     // Insert extracted memories
@@ -470,17 +471,17 @@ ${transcript}`;
         console.log(`  [${mem.type}] ${mem.content}`);
       }
 
-      // Index memories to Elasticsearch
+      // ELLIE-479: resilient ES indexing
       if (insertedMemories) {
         for (const mem of insertedMemories) {
-          indexMemory({
+          resilientTask("indexMemory", "critical", () => indexMemory({
             id: mem.id,
             content: mem.content,
             type: mem.type,
             domain: classifyDomain(mem.content),
             created_at: new Date().toISOString(),
             conversation_id: conversationId,
-          }).catch(() => {});
+          }));
         }
       }
     }
@@ -497,14 +498,14 @@ ${transcript}`;
       }).select("id").single();
 
       if (summaryData?.id) {
-        indexMemory({
+        resilientTask("indexMemory", "critical", () => indexMemory({
           id: summaryData.id,
           content: parsed.summary,
           type: "summary",
           domain: classifyDomain(parsed.summary),
           created_at: new Date().toISOString(),
           conversation_id: conversationId,
-        }).catch(() => {});
+        }));
       }
     }
 

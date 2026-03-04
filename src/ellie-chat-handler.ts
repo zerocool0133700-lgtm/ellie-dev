@@ -104,6 +104,7 @@ import { getCreatureProfile } from "./creature-profile.ts";
 import { withTrace } from "./trace.ts";
 import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost } from "./jobs-ledger.ts";
 import { checkContextPressure, shouldNotify, getCompactionNotice, checkpointSessionToForest } from "./api/session-compaction.ts";
+import { resilientTask } from "./resilient-task.ts";
 import {
   isFallbackActive,
   isOutageError,
@@ -199,15 +200,15 @@ async function _handleEllieChatMessage(
         .single()
         .then(({ data }) => {
           if (data?.content) {
-            detectAndCaptureCorrection(text, data.content, anthropic, "ellie-chat", convId)
-              .catch(err => logger.warn("Correction detection failed", err));
+            resilientTask("detectAndCaptureCorrection", "best-effort", () =>
+              detectAndCaptureCorrection(text, data.content, anthropic, "ellie-chat", convId));
           }
         })
         .catch(() => {});
 
       // Calendar-conversation linking — detect event mentions
-      detectAndLinkCalendarEvents(text, supabase, convId)
-        .catch(err => logger.warn("Calendar linking failed", err));
+      resilientTask("detectAndLinkCalendarEvents", "best-effort", () =>
+        detectAndLinkCalendarEvents(text, supabase, convId));
     }
   }
 
@@ -674,7 +675,8 @@ async function _handleEllieChatMessage(
       broadcastExtension({ type: "message_out", channel: "ellie-chat", agent: "general", preview: ack });
 
       // Fire-and-forget: specialist runs outside the queue
-      runSpecialistAsync(ws, supabase, effectiveText, text, agentResult, imagePath, ellieChatWorkItem, channelId, channelProfile, abortSignal).catch(err => {
+      // ELLIE-479: No abort signal — specialist work survives WS close since it's already acked
+      runSpecialistAsync(ws, supabase, effectiveText, text, agentResult, imagePath, ellieChatWorkItem, channelId, channelProfile).catch(err => {
         logger.error("Specialist async error", err);
       });
 
@@ -726,7 +728,7 @@ async function _handleEllieChatMessage(
     ]);
     const recentMessages = ecConvoContext.text;
     if (agentResult?.dispatch.is_new && ecQueueContext) {
-      acknowledgeQueueItems(ellieChatActiveAgent).catch(() => {});
+      resilientTask("acknowledgeQueueItems", "critical", () => acknowledgeQueueItems(ellieChatActiveAgent));
     }
 
     // ELLIE-327: Track section-level freshness for non-registry sources
@@ -872,19 +874,19 @@ async function _handleEllieChatMessage(
         }
 
         if (result.finalDispatch) {
-          syncResponse(supabase, result.finalDispatch.session_id, cleanedText, {
+          resilientTask("syncResponse", "critical", () => syncResponse(supabase, result.finalDispatch!.session_id, cleanedText, {
             duration_ms: result.artifacts.total_duration_ms,
-          }).catch(() => {});
+          }));
         }
 
         // Fire playbook commands async (ELLIE:: tags)
         if (ellieChatOrcPlaybookCmds.length > 0) {
           const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "ellie-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-          executePlaybookCommands(ellieChatOrcPlaybookCmds, pbCtx).catch(err => logger.error("Playbook execution failed", err));
+          resilientTask("executePlaybookCommands", "best-effort", () => executePlaybookCommands(ellieChatOrcPlaybookCmds, pbCtx));
         }
 
         // Post-message psy assessment (ELLIE-330)
-        runPostMessageAssessment(effectiveText, cleanedText, anthropic).catch(err => logger.error("Post-message assessment failed", err));
+        resilientTask("runPostMessageAssessment", "best-effort", () => runPostMessageAssessment(effectiveText, cleanedText, anthropic));
       } catch (err) {
         logger.error("Multi-step failed", err);
         const errMsg = err instanceof PipelineStepError && err.partialOutput
@@ -1086,19 +1088,19 @@ async function _handleEllieChatMessage(
     clearProcessing(ecUserId || "anonymous");
 
     if (agentResult) {
-      syncResponse(supabase, agentResult.dispatch.session_id, cleanedText, {
+      resilientTask("syncResponse", "critical", () => syncResponse(supabase, agentResult!.dispatch.session_id, cleanedText, {
         duration_ms: durationMs,
-      }).catch(() => {});
+      }));
     }
 
     // Fire playbook commands async (ELLIE:: tags)
     if (ecPlaybookCmds.length > 0) {
       const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "ellie-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-      executePlaybookCommands(ecPlaybookCmds, pbCtx).catch(err => logger.error("Playbook execution failed", err));
+      resilientTask("executePlaybookCommands", "best-effort", () => executePlaybookCommands(ecPlaybookCmds, pbCtx));
     }
 
     // Post-message psy assessment (ELLIE-330)
-    runPostMessageAssessment(effectiveText, cleanedText, anthropic).catch(err => logger.error("Post-message assessment failed", err));
+    resilientTask("runPostMessageAssessment", "best-effort", () => runPostMessageAssessment(effectiveText, cleanedText, anthropic));
 
     // Cleanup temp image file
     if (imagePath) unlink(imagePath).catch(() => {});
@@ -1109,7 +1111,10 @@ async function _handleEllieChatMessage(
 
 // getSpecialistAck is imported from relay-utils.ts
 
-/** Run a specialist agent asynchronously (outside the ellie-chat queue). */
+/**
+ * Run a specialist agent asynchronously (outside the ellie-chat queue).
+ * ELLIE-479: No abort signal — specialist work survives WS close since it's already acked.
+ */
 export async function runSpecialistAsync(
   ws: WebSocket,
   supabase: SupabaseClient | null,
@@ -1120,7 +1125,6 @@ export async function runSpecialistAsync(
   workItemId: string | undefined,
   channelId?: string,
   channelProfile?: import("./api/mode-profile.ts").ChannelContextProfile | null,
-  abortSignal?: AbortSignal,
 ): Promise<void> {
   const { bot, anthropic } = getRelayDeps();
   const agentName = agentResult.dispatch.agent.name;
@@ -1193,7 +1197,7 @@ export async function runSpecialistAsync(
     ]);
     const recentMessages = specConvoContext.text;
     if (agentResult.dispatch.is_new && specQueueContext) {
-      acknowledgeQueueItems(ellieChatActiveAgent).catch(() => {});
+      resilientTask("acknowledgeQueueItems", "critical", () => acknowledgeQueueItems(ellieChatActiveAgent));
     }
 
     // Work item context
@@ -1279,7 +1283,7 @@ export async function runSpecialistAsync(
         allowedTools: agentTools?.length ? agentTools : undefined,
         model: agentModel || undefined,
         timeoutMs: 600_000, // 10 min — specialists may do multi-step tool use
-        abortSignal,         // ELLIE-461: cancel if WS closes mid-dispatch
+        // ELLIE-479: No abort signal — specialist work survives WS close
       });
       recordAnthropicSuccess();
     } catch (err) {
@@ -1331,7 +1335,7 @@ export async function runSpecialistAsync(
     if (contextPressure && specConvoId && shouldNotify(specConvoId, contextPressure.level)) {
       rawResponse += getCompactionNotice(contextPressure);
       if (contextPressure.level === "critical" && specBuildMetrics) {
-        checkpointSessionToForest({
+        resilientTask("checkpointSessionToForest", "best-effort", () => checkpointSessionToForest({
           conversationId: specConvoId,
           agentName,
           mode: specBuildMetrics.mode ?? specContextMode,
@@ -1339,7 +1343,7 @@ export async function runSpecialistAsync(
           pressure: contextPressure,
           sections: specBuildMetrics.sections,
           lastUserMessage: effectiveText,
-        }).catch(err => logger.warn("[compaction] Checkpoint failed", { error: err instanceof Error ? err.message : String(err) }));
+        }));
       }
     }
 
@@ -1384,18 +1388,18 @@ export async function runSpecialistAsync(
     clearProcessing(ecUserId || "anonymous");
     exitDispatchMode();
 
-    syncResponse(supabase, agentResult.dispatch.session_id, cleanedText, {
+    resilientTask("syncResponse", "critical", () => syncResponse(supabase, agentResult.dispatch.session_id, cleanedText, {
       duration_ms: durationMs,
-    }).catch(() => {});
+    }));
 
     // Fire playbook commands async (ELLIE:: tags)
     if (playCmds.length > 0) {
       const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "ellie-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-      executePlaybookCommands(playCmds, pbCtx).catch(err => logger.error("Playbook execution failed", err));
+      resilientTask("executePlaybookCommands", "best-effort", () => executePlaybookCommands(playCmds, pbCtx));
     }
 
     // Post-message psy assessment (ELLIE-330)
-    runPostMessageAssessment(effectiveText, cleanedText, anthropic).catch(err => logger.error("Post-message assessment failed", err));
+    resilientTask("runPostMessageAssessment", "best-effort", () => runPostMessageAssessment(effectiveText, cleanedText, anthropic));
 
     // Cleanup temp image file
     if (imagePath) unlink(imagePath).catch(() => {});
