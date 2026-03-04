@@ -45,6 +45,11 @@ export interface CheckpointOpts {
 
 const _notified = new Set<string>();
 
+/** Reset notification state — for unit tests only. */
+export function _resetNotifiedForTesting(): void {
+  _notified.clear();
+}
+
 /**
  * Returns true if Dave should be notified for this conversation + pressure level.
  * Each conversation is notified at most once per level per relay lifetime.

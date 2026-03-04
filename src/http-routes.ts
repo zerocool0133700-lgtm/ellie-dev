@@ -61,6 +61,7 @@ import {
 import { getChannelHealth } from "./channel-health.ts";
 import { getTaskStatus } from "./periodic-task.ts";
 import { getFireForgetMetrics } from "./resilient-task.ts";
+import { checkContextPressure, shouldNotify, getCompactionNotice, checkpointSessionToForest } from "./api/session-compaction.ts";
 import { getReconcileStatus } from "./elasticsearch/reconcile.ts";
 import {
   saveMessage,
@@ -685,12 +686,30 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
             const gchatAgentModel = gchatAgentResult?.dispatch.agent.model;
 
             const gchatStart = Date.now();
-            const rawResponse = await callClaude(enrichedPrompt, {
+            let rawResponse = await callClaude(enrichedPrompt, {
               resume: true,
               allowedTools: gchatAgentTools?.length ? gchatAgentTools : undefined,
               model: gchatAgentModel || undefined,
             });
             const gchatDuration = Date.now() - gchatStart;
+
+            // ELLIE-528: Context pressure monitoring — Google Chat path
+            const gchatContextPressure = gchatBuildMetrics ? checkContextPressure(gchatBuildMetrics) : null;
+            if (gchatContextPressure && gchatConvoId && shouldNotify(gchatConvoId, gchatContextPressure.level)) {
+              rawResponse += getCompactionNotice(gchatContextPressure);
+              if (gchatContextPressure.level === "critical" && gchatBuildMetrics) {
+                resilientTask("checkpointSessionToForest", "best-effort", () => checkpointSessionToForest({
+                  conversationId: gchatConvoId,
+                  agentName: gchatAgentResult?.dispatch.agent.name || "general",
+                  mode: gchatBuildMetrics.mode ?? gchatContextMode,
+                  workItemId: gchatWorkItem,
+                  pressure: gchatContextPressure,
+                  sections: gchatBuildMetrics.sections,
+                  lastUserMessage: effectiveGchatText,
+                }));
+              }
+            }
+
             const response = await processMemoryIntents(supabase, rawResponse, gchatAgentResult?.dispatch.agent.name || "general", "shared", agentMemory.sessionIds);
             const { cleanedText: gchatPlaybookClean, commands: gchatPlaybookCmds } = extractPlaybookCommands(response);
 

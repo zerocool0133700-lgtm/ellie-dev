@@ -100,6 +100,7 @@ import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hi
 import { logVerificationTrail } from "./data-quality.ts";
 import { withTrace } from "./trace.ts";
 import { resilientTask } from "./resilient-task.ts";
+import { checkContextPressure, shouldNotify, getCompactionNotice, checkpointSessionToForest } from "./api/session-compaction.ts";
 
 const logger = log.child("telegram");
 
@@ -520,12 +521,29 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   const agentModel = agentResult?.dispatch.agent.model;
 
   const startTime = Date.now();
-  const rawResponse = await callClaudeWithTyping(ctx, enrichedPrompt, {
+  let rawResponse = await callClaudeWithTyping(ctx, enrichedPrompt, {
     resume: true,
     allowedTools: agentTools?.length ? agentTools : undefined,
     model: agentModel || undefined,
   });
   const durationMs = Date.now() - startTime;
+
+  // ELLIE-528: Context pressure monitoring — Telegram text path
+  const tgContextPressure = buildMetrics ? checkContextPressure(buildMetrics) : null;
+  if (tgContextPressure && activeConvoId && shouldNotify(activeConvoId, tgContextPressure.level)) {
+    rawResponse += getCompactionNotice(tgContextPressure);
+    if (tgContextPressure.level === "critical" && buildMetrics) {
+      resilientTask("checkpointSessionToForest", "best-effort", () => checkpointSessionToForest({
+        conversationId: activeConvoId,
+        agentName: agentResult?.dispatch.agent.name || "general",
+        mode: buildMetrics.mode ?? contextMode,
+        workItemId: detectedWorkItem,
+        pressure: tgContextPressure,
+        sections: buildMetrics.sections,
+        lastUserMessage: effectiveText,
+      }));
+    }
+  }
 
   // Late-resolve sessionIds if not available at context-build time
   let effectiveSessionIds = agentMemory.sessionIds;
@@ -830,12 +848,30 @@ bot.on("message:voice", withQueue(async (ctx) => {
     const agentModel = agentResult?.dispatch.agent.model;
 
     const startTime = Date.now();
-    const rawResponse = await callClaudeWithTyping(ctx, enrichedPrompt, {
+    let rawResponse = await callClaudeWithTyping(ctx, enrichedPrompt, {
       resume: true,
       allowedTools: agentTools?.length ? agentTools : undefined,
       model: agentModel || undefined,
     });
     const durationMs = Date.now() - startTime;
+
+    // ELLIE-528: Context pressure monitoring — Telegram voice path
+    const tgVoiceContextPressure = voiceBuildMetrics ? checkContextPressure(voiceBuildMetrics) : null;
+    if (tgVoiceContextPressure && voiceConvoId && shouldNotify(voiceConvoId, tgVoiceContextPressure.level)) {
+      rawResponse += getCompactionNotice(tgVoiceContextPressure);
+      if (tgVoiceContextPressure.level === "critical" && voiceBuildMetrics) {
+        resilientTask("checkpointSessionToForest", "best-effort", () => checkpointSessionToForest({
+          conversationId: voiceConvoId,
+          agentName: agentResult?.dispatch.agent.name || "general",
+          mode: voiceBuildMetrics.mode ?? voiceContextMode,
+          workItemId: voiceWorkItem,
+          pressure: tgVoiceContextPressure,
+          sections: voiceBuildMetrics.sections,
+          lastUserMessage: effectiveTranscription,
+        }));
+      }
+    }
+
     const claudeResponse = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general", "shared", agentMemory.sessionIds);
 
     // Try voice response for short replies without approval buttons

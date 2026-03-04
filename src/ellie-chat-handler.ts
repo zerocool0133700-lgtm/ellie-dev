@@ -1053,6 +1053,23 @@ async function _handleEllieChatMessage(
       console.log(`[ellie-chat] No sessionIds and no agent to late-resolve (agent=${agentResult?.dispatch.agent.name})`);
     }
 
+    // ELLIE-528: Context pressure monitoring — general agent path
+    const ecContextPressure = ecBuildMetrics ? checkContextPressure(ecBuildMetrics) : null;
+    if (ecContextPressure && ecConvoId && shouldNotify(ecConvoId, ecContextPressure.level)) {
+      rawResponse += getCompactionNotice(ecContextPressure);
+      if (ecContextPressure.level === "critical" && ecBuildMetrics) {
+        resilientTask("checkpointSessionToForest", "best-effort", () => checkpointSessionToForest({
+          conversationId: ecConvoId,
+          agentName: ellieChatActiveAgent || "general",
+          mode: ecBuildMetrics.mode ?? contextMode,
+          workItemId: ellieChatWorkItem,
+          pressure: ecContextPressure,
+          sections: ecBuildMetrics.sections,
+          lastUserMessage: effectiveText,
+        }));
+      }
+    }
+
     const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general", "shared", effectiveSessionIds);
     const { cleanedText: ecPlaybookClean, commands: ecPlaybookCmds } = extractPlaybookCommands(response);
     const ecAgent = agentResult?.dispatch.agent.name || "general";
