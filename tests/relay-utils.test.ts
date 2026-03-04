@@ -4,6 +4,9 @@ import {
   getSpecialistAck,
   formatForestMetrics,
   mapHealthToMemoryCategory,
+  estimateTokens,
+  applyTokenBudget,
+  type PromptSection,
 } from "../src/relay-utils.ts";
 
 // ── trimSearchContext ──────────────────────────────────────────
@@ -251,5 +254,83 @@ describe("mapHealthToMemoryCategory", () => {
     expect(mapHealthToMemoryCategory("unknown")).toBe("general");
     expect(mapHealthToMemoryCategory("")).toBe("general");
     expect(mapHealthToMemoryCategory("nonsense")).toBe("general");
+  });
+});
+
+// ── estimateTokens ──────────────────────────────────────────
+
+describe("estimateTokens", () => {
+  it("returns a positive number for non-empty text", () => {
+    const tokens = estimateTokens("Hello, world!");
+    expect(tokens).toBeGreaterThan(0);
+  });
+
+  it("returns 0 for empty string", () => {
+    expect(estimateTokens("")).toBe(0);
+  });
+
+  it("returns more tokens for longer text", () => {
+    const short = estimateTokens("Hello");
+    const long = estimateTokens("Hello, this is a much longer piece of text with many more words");
+    expect(long).toBeGreaterThan(short);
+  });
+
+  it("roughly approximates ~4 chars per token for English", () => {
+    const text = "The quick brown fox jumps over the lazy dog";
+    const tokens = estimateTokens(text);
+    // Should be somewhere around 10 tokens (44 chars / 4)
+    expect(tokens).toBeGreaterThan(5);
+    expect(tokens).toBeLessThan(20);
+  });
+});
+
+// ── applyTokenBudget ────────────────────────────────────────
+
+describe("applyTokenBudget", () => {
+  it("returns all sections when under budget", () => {
+    const sections: PromptSection[] = [
+      { label: "system", content: "You are helpful.", priority: 1 },
+      { label: "context", content: "Some context here.", priority: 3 },
+    ];
+    const result = applyTokenBudget(sections, 150_000);
+    expect(result).toContain("You are helpful.");
+    expect(result).toContain("Some context here.");
+  });
+
+  it("preserves priority-1 sections when trimming", () => {
+    const critical = "Critical content that must remain.";
+    const filler = "X ".repeat(50_000); // very large low-priority section
+    const sections: PromptSection[] = [
+      { label: "system", content: critical, priority: 1 },
+      { label: "filler", content: filler, priority: 9 },
+    ];
+    const result = applyTokenBudget(sections, 100);
+    expect(result).toContain(critical);
+  });
+
+  it("trims higher priority numbers first", () => {
+    const sections: PromptSection[] = [
+      { label: "system", content: "System prompt", priority: 1 },
+      { label: "important", content: "Important context " + "X".repeat(200), priority: 2 },
+      { label: "nice-to-have", content: "Nice to have " + "Y".repeat(200), priority: 5 },
+      { label: "least", content: "Least important " + "Z".repeat(200), priority: 9 },
+    ];
+    // Set a budget that can only fit system + important
+    const result = applyTokenBudget(sections, 200);
+    expect(result).toContain("System prompt");
+    // Priority 9 should be trimmed before priority 2
+  });
+
+  it("handles single section under budget", () => {
+    const sections: PromptSection[] = [
+      { label: "only", content: "Just this.", priority: 1 },
+    ];
+    const result = applyTokenBudget(sections, 150_000);
+    expect(result).toBe("Just this.");
+  });
+
+  it("handles empty sections array", () => {
+    const result = applyTokenBudget([], 150_000);
+    expect(result).toBe("");
   });
 });
