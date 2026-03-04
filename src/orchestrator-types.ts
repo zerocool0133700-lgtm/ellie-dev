@@ -106,6 +106,11 @@ export interface OrchestratorOptions {
   workItemId?: string;
   /** Forest work session tree ID — if set, session is completed with failure summary on pipeline error. */
   forestSessionId?: string;
+  /**
+   * ELLIE-522: Max retries for fan-out synthesis LLM call.
+   * Defaults to 2. Set to 0 to disable retry.
+   */
+  synthesisMaxRetries?: number;
 }
 
 // ────────────────────────────────────────────────────────────────

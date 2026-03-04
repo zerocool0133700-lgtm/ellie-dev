@@ -8,6 +8,7 @@
 import { log } from "./logger.ts";
 import { executeStep, callLightSkill } from "./step-runner.ts";
 import { calculateStepCost } from "./orchestrator-costs.ts";
+import { withRetry } from "./dispatch-retry.ts";
 import {
   type PipelineStep,
   type OrchestratorOptions,
@@ -84,20 +85,38 @@ export async function executeFanOut(
     `Synthesize these into a single, coherent response for the user. ` +
     `Don't mention the specialists or parallel execution. Just provide the combined answer naturally.`;
 
+  // ELLIE-522: Wrap synthesis in retry logic — rate limits should not fail the entire fan-out
   const synthesisStart = Date.now();
-  let synthesisText: string;
 
-  if (options.anthropicClient) {
-    const result = await callLightSkill(synthesisPrompt, options);
-    synthesisText = result.text;
-    artifacts.total_input_tokens += result.input_tokens;
-    artifacts.total_output_tokens += result.output_tokens;
-    const cost = await calculateStepCost(options.supabase, "claude-haiku-4-5-20251001", result.input_tokens, result.output_tokens);
-    artifacts.total_cost_usd += cost;
-  } else {
-    synthesisText = await options.callClaudeFn(synthesisPrompt, { resume: false });
+  const synthesisRetryResult = await withRetry(
+    async () => {
+      if (options.anthropicClient) {
+        const result = await callLightSkill(synthesisPrompt, options);
+        const cost = await calculateStepCost(
+          options.supabase, "claude-haiku-4-5-20251001",
+          result.input_tokens, result.output_tokens,
+        );
+        return { text: result.text, input_tokens: result.input_tokens, output_tokens: result.output_tokens, cost };
+      } else {
+        const text = await options.callClaudeFn(synthesisPrompt, { resume: false });
+        return { text, input_tokens: 0, output_tokens: 0, cost: 0 };
+      }
+    },
+    { maxRetries: options.synthesisMaxRetries ?? 2, agentType: "synthesis" },
+  );
+
+  if (!synthesisRetryResult.success || !synthesisRetryResult.result) {
+    logger.error("Fan-out synthesis failed after all retries", {
+      attempts: synthesisRetryResult.attempts,
+      error: synthesisRetryResult.error?.message,
+    });
+    throw new PipelineStepError(0, steps[0], "claude_error", null);
   }
 
+  const synthesisText = synthesisRetryResult.result.text;
+  artifacts.total_input_tokens += synthesisRetryResult.result.input_tokens;
+  artifacts.total_output_tokens += synthesisRetryResult.result.output_tokens;
+  artifacts.total_cost_usd += synthesisRetryResult.result.cost;
   artifacts.total_duration_ms += Date.now() - synthesisStart;
 
   if (options.onHeartbeat) options.onHeartbeat();
