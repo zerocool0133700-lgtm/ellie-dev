@@ -55,7 +55,8 @@ export function getTelegramConsecutiveDown(): number {
 // ── Individual checks ─────────────────────────────────────────
 
 // ELLIE-465: Use Supabase REST root endpoint instead of querying a business table
-async function checkSupabase(): Promise<ChannelHealthResult> {
+// ELLIE-491: Exported so recovery probe can reuse without duplicating logic
+export async function checkSupabase(): Promise<ChannelHealthResult> {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_ANON_KEY;
   if (!url || !key) {
@@ -95,7 +96,8 @@ const BRIDGE_URL = "http://localhost:3001/api/bridge/read";
 // ELLIE-465: Key from env — hardcoded value is a fallback for backward compat only
 const BRIDGE_KEY = process.env.BRIDGE_KEY ?? "bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e740f6577a";
 
-async function checkForest(): Promise<ChannelHealthResult> {
+// ELLIE-491: Exported so recovery probe can reuse
+export async function checkForest(): Promise<ChannelHealthResult> {
   const start = Date.now();
   try {
     const resp = await fetch(BRIDGE_URL, {
@@ -109,6 +111,28 @@ async function checkForest(): Promise<ChannelHealthResult> {
       return { status: "degraded", latencyMs, checkedAt: Date.now(), error: `HTTP ${resp.status}` };
     }
     return { status: latencyMs > 4000 ? "degraded" : "ok", latencyMs, checkedAt: Date.now() };
+  } catch (err) {
+    return { status: "down", latencyMs: Date.now() - start, checkedAt: Date.now(), error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// ELLIE-491: ES is optional — returns "unknown" when not configured
+export async function checkElasticsearch(): Promise<ChannelHealthResult> {
+  const url = process.env.ELASTICSEARCH_URL;
+  if (!url || process.env.ELASTICSEARCH_ENABLED === "false") {
+    return { status: "unknown", checkedAt: Date.now(), error: "not configured" };
+  }
+  const start = Date.now();
+  try {
+    const resp = await fetch(`${url}/_cluster/health`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    const latencyMs = Date.now() - start;
+    if (!resp.ok) return { status: "degraded", latencyMs, checkedAt: Date.now(), error: `HTTP ${resp.status}` };
+    const data = await resp.json() as { status?: string };
+    if (data.status === "red") return { status: "down", latencyMs, checkedAt: Date.now(), error: "cluster status: red" };
+    if (data.status === "yellow") return { status: "degraded", latencyMs, checkedAt: Date.now() };
+    return { status: "ok", latencyMs, checkedAt: Date.now() };
   } catch (err) {
     return { status: "down", latencyMs: Date.now() - start, checkedAt: Date.now(), error: err instanceof Error ? err.message : String(err) };
   }

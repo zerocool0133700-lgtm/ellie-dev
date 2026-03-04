@@ -44,34 +44,55 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     }
   }, 5 * 60_000, "conversation-expiry");
 
+  // ELLIE-491: Full-stack recovery probe — checks all critical deps, not just Anthropic
   periodicTask(async () => {
     if (!anthropic) return;
     const { isFallbackActive, shouldProbeRecovery, markRecoveryProbeAttempted, recordAnthropicSuccess } = await import("./llm-provider.ts");
     if (!isFallbackActive() || !shouldProbeRecovery()) return;
     markRecoveryProbeAttempted();
-    try {
-      await anthropic.messages.create({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 1,
-        messages: [{ role: "user", content: "ok" }],
-      });
-      recordAnthropicSuccess();
-      const { broadcastToEllieChatClients } = await import("./relay-state.ts");
-      broadcastToEllieChatClients({
-        type: "response",
-        text: "\u2713 Claude is back \u2014 resuming normal operation.",
-        agent: "system",
-        ts: Date.now(),
-      });
-      const { notify } = await import("./notification-policy.ts");
-      const { getNotifyCtx } = await import("./relay-state.ts");
-      notify(getNotifyCtx(), {
-        event: "incident_resolved",
-        telegramMessage: "\u2713 Claude recovered \u2014 Ellie back to normal",
-      });
-    } catch {
-      // intentionally silent — still down, staying in fallback
+
+    const { checkSupabase, checkForest, checkElasticsearch } = await import("./channel-health.ts");
+
+    // Probe all deps in parallel
+    const [anthropicResult, supabaseResult, forestResult, esResult] = await Promise.allSettled([
+      anthropic.messages.create({ model: "claude-haiku-4-5-20251001", max_tokens: 1, messages: [{ role: "user", content: "ok" }] }),
+      checkSupabase(),
+      checkForest(),
+      checkElasticsearch(),
+    ]);
+
+    const anthropicOk = anthropicResult.status === "fulfilled";
+    const supabaseOk = supabaseResult.status === "fulfilled" && supabaseResult.value.status !== "down";
+    const forestOk = forestResult.status === "fulfilled" && forestResult.value.status !== "down";
+    // ES is optional — "unknown" (not configured) counts as ok
+    const esStatus = esResult.status === "fulfilled" ? esResult.value.status : "down";
+    const esOk = esStatus !== "down";
+
+    if (!anthropicOk) return; // still down, stay in fallback
+
+    if (!supabaseOk || !forestOk) {
+      // Anthropic recovered but critical deps still unhealthy — log, stay in fallback
+      const failures = ([!supabaseOk && "supabase", !forestOk && "forest"] as (string | false)[]).filter(Boolean);
+      logger.warn("[recovery-probe] Anthropic up but critical deps still down — staying in fallback", { failures });
+      return;
     }
+
+    // All critical deps healthy — declare recovery
+    recordAnthropicSuccess();
+    const esDegraded = !esOk ? " (ES search degraded)" : "";
+    const { broadcastToEllieChatClients, getNotifyCtx } = await import("./relay-state.ts");
+    broadcastToEllieChatClients({
+      type: "response",
+      text: `\u2713 Claude is back \u2014 resuming normal operation.${esDegraded}`,
+      agent: "system",
+      ts: Date.now(),
+    });
+    const { notify } = await import("./notification-policy.ts");
+    notify(getNotifyCtx(), {
+      event: "incident_resolved",
+      telegramMessage: `\u2713 Claude recovered \u2014 Ellie back to normal${esDegraded}`,
+    });
+    if (!esOk) logger.warn("[recovery-probe] Recovered with ES degraded");
   }, 5 * 60_000, "recovery-probe");
 
   periodicTask(async () => {
