@@ -114,6 +114,59 @@ import {
   callOpenAiFallback,
 } from "./llm-provider.ts";
 
+// ── Pipeline helpers (shared between normal path and runSpecialistAsync) ──────
+
+/** Resolve context mode from channel profile (priority) or regex detection. */
+function resolveContextMode(
+  convoKey: string,
+  effectiveText: string,
+  channelProfile: import("./api/mode-profile.ts").ChannelContextProfile | null | undefined,
+): { contextMode: import("./context-mode.ts").ContextMode; modeChanged: boolean } {
+  if (channelProfile) {
+    return { contextMode: channelProfile.contextMode, modeChanged: false };
+  }
+  const detection = processMessageMode(convoKey, effectiveText);
+  return { contextMode: detection.mode, modeChanged: detection.changed };
+}
+
+/** Build a shouldFetch predicate respecting creature + mode section priorities. */
+function buildShouldFetch(
+  contextMode: import("./context-mode.ts").ContextMode,
+  activeAgent: string,
+): (label: string) => boolean {
+  const modePriorities = getModeSectionPriorities(contextMode);
+  const creatureProfile = getCreatureProfile(activeAgent);
+  return (label: string): boolean => {
+    const creaturePrio = creatureProfile?.section_priorities?.[label];
+    if (creaturePrio !== undefined) return creaturePrio < 7;
+    return (modePriorities[label] ?? 0) < 7;
+  };
+}
+
+/** Fetch all 9 context sources in parallel. Shared between normal and specialist paths. */
+async function gatherContextSources(
+  supabase: SupabaseClient | null,
+  convoId: string | undefined,
+  effectiveText: string,
+  activeAgent: string,
+  agentDispatch: { is_new: boolean; agent: { model?: string | null } } | null,
+  workItemId: string | undefined,
+  shouldFetch: (label: string) => boolean,
+) {
+  const [convoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext, liveForest] = await Promise.all([
+    convoId && supabase ? getConversationMessages(supabase, convoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
+    shouldFetch("context-docket") ? getContextDocket() : Promise.resolve(""),
+    getRelevantContext(supabase, effectiveText, "ellie-chat", activeAgent, convoId),
+    searchElastic(effectiveText, { limit: 5, recencyBoost: true, channel: "ellie-chat", sourceAgent: activeAgent, excludeConversationId: convoId }),
+    shouldFetch("structured-context") ? getAgentStructuredContext(supabase, activeAgent) : Promise.resolve(""),
+    getForestContext(effectiveText),
+    getAgentMemoryContext(activeAgent, workItemId, getMaxMemoriesForModel(agentDispatch?.agent.model)),
+    shouldFetch("queue") && agentDispatch?.is_new ? getQueueContext(activeAgent) : Promise.resolve(""),
+    getLiveForestContext(effectiveText),
+  ]);
+  return { convoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext, liveForest };
+}
+
 export async function handleEllieChatMessage(
   ws: WebSocket,
   text: string,
@@ -689,43 +742,21 @@ async function _handleEllieChatMessage(
 
     // ── ELLIE-325/334: Mode detection — channel profile overrides regex detection ──
     const ecConvoKey = ecConvoId || "ellie-chat-default";
-    let contextMode: import("./context-mode.ts").ContextMode;
-    let modeChanged = false;
+    const { contextMode, modeChanged } = resolveContextMode(ecConvoKey, effectiveText, channelProfile);
     if (channelProfile) {
-      // Channel IS the mode — skip regex detection
-      contextMode = channelProfile.contextMode;
       console.log(`[context:mode] mode=${contextMode} channel=ellie-chat source=channel-profile`);
-    } else {
-      // Fallback: regex-based mode detection
-      const detection = processMessageMode(ecConvoKey, effectiveText);
-      contextMode = detection.mode;
-      modeChanged = detection.changed;
-      if (modeChanged) {
-        console.log(`[context:mode] mode=${contextMode} channel=ellie-chat source=detection`);
-      }
+    } else if (modeChanged) {
+      console.log(`[context:mode] mode=${contextMode} channel=ellie-chat source=detection`);
     }
 
     // Mode-aware fetch gating — skip sources that would be suppressed (priority >= 7)
     // ELLIE-367: creature priorities take precedence over mode priorities
-    const modePriorities = getModeSectionPriorities(contextMode);
-    const ecCreatureProfile = getCreatureProfile(ellieChatActiveAgent);
-    const shouldFetch = (label: string) => {
-      const creaturePrio = ecCreatureProfile?.section_priorities?.[label];
-      if (creaturePrio !== undefined) return creaturePrio < 7;
-      return (modePriorities[label] ?? 0) < 7;
-    };
+    const shouldFetch = buildShouldFetch(contextMode, ellieChatActiveAgent);
+    const ecCreatureProfile = getCreatureProfile(ellieChatActiveAgent); // needed for skill snapshot
 
-    const [ecConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, ecQueueContext, liveForest] = await Promise.all([
-      ecConvoId && supabase ? getConversationMessages(supabase, ecConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
-      shouldFetch("context-docket") ? getContextDocket() : Promise.resolve(""),
-      getRelevantContext(supabase, effectiveText, "ellie-chat", ellieChatActiveAgent, ecConvoId),
-      searchElastic(effectiveText, { limit: 5, recencyBoost: true, channel: "ellie-chat", sourceAgent: ellieChatActiveAgent, excludeConversationId: ecConvoId }),
-      shouldFetch("structured-context") ? getAgentStructuredContext(supabase, ellieChatActiveAgent) : Promise.resolve(""),
-      getForestContext(effectiveText),
-      getAgentMemoryContext(ellieChatActiveAgent, ellieChatWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model)),
-      shouldFetch("queue") && agentResult?.dispatch.is_new ? getQueueContext(ellieChatActiveAgent) : Promise.resolve(""),
-      getLiveForestContext(effectiveText),
-    ]);
+    const { convoContext: ecConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext: ecQueueContext, liveForest } = await gatherContextSources(
+      supabase, ecConvoId, effectiveText, ellieChatActiveAgent, agentResult?.dispatch ?? null, ellieChatWorkItem, shouldFetch,
+    );
     const recentMessages = ecConvoContext.text;
     if (agentResult?.dispatch.is_new && ecQueueContext) {
       resilientTask("acknowledgeQueueItems", "critical", () => acknowledgeQueueItems(ellieChatActiveAgent));
@@ -1174,27 +1205,15 @@ export async function runSpecialistAsync(
 
     // ── ELLIE-325/334: Use channel profile or conversation mode ──
     const specConvoKey = specConvoId || "ellie-chat-default";
-    const specContextMode = channelProfile?.contextMode || processMessageMode(specConvoKey, effectiveText).mode;
+    const { contextMode: specContextMode } = resolveContextMode(specConvoKey, effectiveText, channelProfile);
     // Mode-aware fetch gating — skip sources that would be suppressed (priority >= 7)
     // ELLIE-367: creature priorities take precedence over mode priorities
-    const specModePriorities = getModeSectionPriorities(specContextMode);
-    const specCreatureProfile = getCreatureProfile(ellieChatActiveAgent);
-    const shouldFetch = (label: string) => {
-      const creaturePrio = specCreatureProfile?.section_priorities?.[label];
-      if (creaturePrio !== undefined) return creaturePrio < 7;
-      return (specModePriorities[label] ?? 0) < 7;
-    };
-    const [specConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, specQueueContext, liveForest] = await Promise.all([
-      specConvoId && supabase ? getConversationMessages(supabase, specConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
-      shouldFetch("context-docket") ? getContextDocket() : Promise.resolve(""),
-      getRelevantContext(supabase, effectiveText, "ellie-chat", ellieChatActiveAgent, specConvoId),
-      searchElastic(effectiveText, { limit: 5, recencyBoost: true, channel: "ellie-chat", sourceAgent: ellieChatActiveAgent, excludeConversationId: specConvoId }),
-      shouldFetch("structured-context") ? getAgentStructuredContext(supabase, ellieChatActiveAgent) : Promise.resolve(""),
-      getForestContext(effectiveText),
-      getAgentMemoryContext(ellieChatActiveAgent, workItemId, getMaxMemoriesForModel(agentResult.dispatch.agent.model)),
-      shouldFetch("queue") && agentResult.dispatch.is_new ? getQueueContext(ellieChatActiveAgent) : Promise.resolve(""),
-      getLiveForestContext(effectiveText),
-    ]);
+    const shouldFetch = buildShouldFetch(specContextMode, ellieChatActiveAgent);
+    const specCreatureProfile = getCreatureProfile(ellieChatActiveAgent); // needed for skill snapshot
+
+    const { convoContext: specConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext: specQueueContext, liveForest } = await gatherContextSources(
+      supabase, specConvoId, effectiveText, ellieChatActiveAgent, agentResult.dispatch, workItemId, shouldFetch,
+    );
     const recentMessages = specConvoContext.text;
     if (agentResult.dispatch.is_new && specQueueContext) {
       resilientTask("acknowledgeQueueItems", "critical", () => acknowledgeQueueItems(ellieChatActiveAgent));
