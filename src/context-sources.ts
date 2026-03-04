@@ -572,10 +572,20 @@ export async function getOutlookSignal(): Promise<string> {
   if (!isOutlookConfigured()) return "";
 
   try {
-    const [unreadCount, recentMessages] = await Promise.all([
+    const [unreadResult, messagesResult] = await Promise.allSettled([
       outlookGetUnreadCount(),
       outlookListUnread(5),
     ]);
+
+    if (unreadResult.status === "rejected") {
+      logger.warn("Outlook unread count failed", { error: unreadResult.reason instanceof Error ? unreadResult.reason.message : String(unreadResult.reason) });
+      return "";
+    }
+    const unreadCount = unreadResult.value;
+    const recentMessages = messagesResult.status === "fulfilled" ? messagesResult.value : [];
+    if (messagesResult.status === "rejected") {
+      logger.warn("Outlook message list failed", { error: messagesResult.reason instanceof Error ? messagesResult.reason.message : String(messagesResult.reason) });
+    }
 
     if (unreadCount === 0) return "OUTLOOK: No unread messages.";
 
@@ -1357,12 +1367,14 @@ export async function getRiverContextForAgent(
     const roleQuery = RIVER_QUERIES_BY_AGENT[agentType] ?? 'system architecture documentation';
 
     // Run both queries in parallel; role-based + work-item-specific
-    const [roleResults, itemResults] = await Promise.all([
+    const [roleSettled, itemSettled] = await Promise.allSettled([
       searchRiver(roleQuery, 3),
       workItemDescription
         ? searchRiver(workItemDescription.slice(0, 120), 3)
         : Promise.resolve([]),
     ]);
+    const roleResults = roleSettled.status === "fulfilled" ? roleSettled.value : [];
+    const itemResults = itemSettled.status === "fulfilled" ? itemSettled.value : [];
 
     // Merge, dedupe by docid, take top 4
     const seen = new Set<string>();
