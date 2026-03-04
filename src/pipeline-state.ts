@@ -1,18 +1,23 @@
 /**
- * Pipeline State Persistence — ELLIE-394
+ * Pipeline State Persistence — ELLIE-394 + ELLIE-519
  *
  * Saves intermediate pipeline results after each step so that
  * a partially-failed pipeline can be resumed from the last
- * successful step. State is persisted to disk via config-cache.
+ * successful step.
+ *
+ * ELLIE-519: DB primary (Supabase), disk fallback on DB error.
+ * All errors are logged — no silent failures.
  *
  * Pipeline state lifecycle:
  *   1. Created when pipeline starts
  *   2. Updated after each successful step
  *   3. Deleted on pipeline completion or explicit abandon
- *   4. Loaded on resume attempt
+ *   4. Loaded on resume attempt (checks DB first, then disk)
  */
 
-import { writeToDisk, readFromDisk } from "./config-cache.ts";
+import { writeFile, readFile, mkdir, unlink } from "fs/promises";
+import { join } from "path";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { log } from "./logger.ts";
 import type { PipelineStep, StepResult, ArtifactStore } from "./orchestrator.ts";
 
@@ -49,48 +54,192 @@ export interface PipelineCheckpoint {
 
 export type FailureAction = "retry" | "skip" | "abort";
 
-// ── Disk Key ────────────────────────────────────────────────
+// ── Supabase Client ─────────────────────────────────────────
 
-function cacheKey(pipelineId: string): string {
-  return `pipeline-${pipelineId}`;
+let _supabase: SupabaseClient | null = null;
+
+/** Initialize the checkpoint store with a Supabase client. Call once at startup. */
+export function initCheckpointStore(client: SupabaseClient | null): void {
+  _supabase = client;
 }
 
-// ── Save / Load / Delete ────────────────────────────────────
+/** Get the current Supabase client (for testing). */
+export function _getSupabaseClient(): SupabaseClient | null {
+  return _supabase;
+}
 
-/** Save pipeline checkpoint to disk (fire-and-forget). */
-export function saveCheckpoint(checkpoint: PipelineCheckpoint): void {
+// ── Disk Paths ──────────────────────────────────────────────
+
+const CACHE_DIR = join(process.cwd(), ".cache");
+
+function diskPath(pipelineId: string): string {
+  return join(CACHE_DIR, `pipeline-${pipelineId}.json`);
+}
+
+async function ensureCacheDir(): Promise<void> {
+  try {
+    await mkdir(CACHE_DIR, { recursive: true });
+  } catch {}
+}
+
+// ── DB Table ────────────────────────────────────────────────
+
+const TABLE = "pipeline_checkpoints";
+
+// ── Save ────────────────────────────────────────────────────
+
+/**
+ * Save pipeline checkpoint — DB primary, disk fallback.
+ * Errors are always logged. Never throws (checkpoint failure shouldn't kill the pipeline).
+ */
+export async function saveCheckpoint(checkpoint: PipelineCheckpoint): Promise<void> {
   checkpoint.updatedAt = Date.now();
-  writeToDisk(cacheKey(checkpoint.pipelineId), checkpoint);
-  logger.info("Checkpoint saved", {
+
+  const logCtx = {
     pipelineId: checkpoint.pipelineId.slice(0, 8),
     nextStep: checkpoint.nextStepIndex,
     completedSteps: checkpoint.completedSteps.length,
     totalSteps: checkpoint.steps.length,
-  });
-}
+  };
 
-/** Load a pipeline checkpoint from disk. Returns null if not found. */
-export async function loadCheckpoint(pipelineId: string): Promise<PipelineCheckpoint | null> {
-  const data = await readFromDisk<PipelineCheckpoint>(cacheKey(pipelineId));
-  if (!data) return null;
+  // DB primary
+  if (_supabase) {
+    try {
+      const { error } = await _supabase
+        .from(TABLE)
+        .upsert({
+          pipeline_id: checkpoint.pipelineId,
+          checkpoint_data: checkpoint,
+          updated_at: new Date().toISOString(),
+        });
 
-  // Validate checkpoint isn't stale (>1 hour old)
-  const ageMs = Date.now() - (data.updatedAt || 0);
-  if (ageMs > 3_600_000) {
-    logger.warn("Checkpoint too old, discarding", {
-      pipelineId: pipelineId.slice(0, 8),
-      ageMin: Math.round(ageMs / 60_000),
-    });
-    return null;
+      if (error) throw error;
+
+      logger.info("Checkpoint saved to DB", logCtx);
+      return;
+    } catch (err) {
+      logger.warn("DB checkpoint save failed, falling back to disk", {
+        ...logCtx,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
-  return data;
+  // Disk fallback
+  try {
+    await ensureCacheDir();
+    await writeFile(diskPath(checkpoint.pipelineId), JSON.stringify(checkpoint), "utf-8");
+    logger.info("Checkpoint saved to disk (fallback)", logCtx);
+  } catch (diskErr) {
+    logger.error("Checkpoint save failed — both DB and disk", {
+      ...logCtx,
+      error: diskErr instanceof Error ? diskErr.message : String(diskErr),
+    });
+  }
 }
 
-/** Delete a pipeline checkpoint (on completion or abandon). */
-export function deleteCheckpoint(pipelineId: string): void {
-  // Write empty data to effectively clear it
-  writeToDisk(cacheKey(pipelineId), null);
+// ── Load ────────────────────────────────────────────────────
+
+/** Max checkpoint age before it's considered stale. */
+const MAX_CHECKPOINT_AGE_MS = 3_600_000; // 1 hour
+
+/**
+ * Load a pipeline checkpoint — checks DB first, then disk.
+ * Returns null if not found or stale.
+ */
+export async function loadCheckpoint(pipelineId: string): Promise<PipelineCheckpoint | null> {
+  // DB first
+  if (_supabase) {
+    try {
+      const { data, error } = await _supabase
+        .from(TABLE)
+        .select("checkpoint_data")
+        .eq("pipeline_id", pipelineId)
+        .single();
+
+      if (!error && data?.checkpoint_data) {
+        const cp = data.checkpoint_data as PipelineCheckpoint;
+        const ageMs = Date.now() - (cp.updatedAt || 0);
+
+        if (ageMs > MAX_CHECKPOINT_AGE_MS) {
+          logger.warn("DB checkpoint too old, discarding", {
+            pipelineId: pipelineId.slice(0, 8),
+            ageMin: Math.round(ageMs / 60_000),
+          });
+          // Clean up stale row
+          await _supabase.from(TABLE).delete().eq("pipeline_id", pipelineId).catch(() => {});
+          return null;
+        }
+
+        logger.info("Checkpoint loaded from DB", { pipelineId: pipelineId.slice(0, 8) });
+        return cp;
+      }
+    } catch (err) {
+      logger.warn("DB checkpoint load failed, trying disk", {
+        pipelineId: pipelineId.slice(0, 8),
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Disk fallback
+  try {
+    const raw = await readFile(diskPath(pipelineId), "utf-8");
+    const data = JSON.parse(raw) as PipelineCheckpoint;
+
+    if (!data) return null;
+
+    const ageMs = Date.now() - (data.updatedAt || 0);
+    if (ageMs > MAX_CHECKPOINT_AGE_MS) {
+      logger.warn("Disk checkpoint too old, discarding", {
+        pipelineId: pipelineId.slice(0, 8),
+        ageMin: Math.round(ageMs / 60_000),
+      });
+      return null;
+    }
+
+    logger.info("Checkpoint loaded from disk (fallback)", { pipelineId: pipelineId.slice(0, 8) });
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+// ── Delete ──────────────────────────────────────────────────
+
+/**
+ * Delete a pipeline checkpoint from both DB and disk.
+ * Best-effort — errors are logged but don't propagate.
+ */
+export async function deleteCheckpoint(pipelineId: string): Promise<void> {
+  // DB
+  if (_supabase) {
+    try {
+      const { error } = await _supabase
+        .from(TABLE)
+        .delete()
+        .eq("pipeline_id", pipelineId);
+
+      if (error) {
+        logger.warn("DB checkpoint delete failed", {
+          pipelineId: pipelineId.slice(0, 8),
+          error: error.message,
+        });
+      }
+    } catch (err) {
+      logger.warn("DB checkpoint delete error", {
+        pipelineId: pipelineId.slice(0, 8),
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Disk
+  try {
+    await unlink(diskPath(pipelineId));
+  } catch {
+    // File might not exist — that's fine
+  }
 }
 
 // ── In-Memory Registry ──────────────────────────────────────
@@ -113,6 +262,11 @@ export function removeActiveCheckpoint(pipelineId: string): void {
 /** Get all active pipeline checkpoints. */
 export function getAllActiveCheckpoints(): PipelineCheckpoint[] {
   return Array.from(activeCheckpoints.values());
+}
+
+/** Clear all active checkpoints (test-only). */
+export function _clearActiveCheckpoints(): void {
+  activeCheckpoints.clear();
 }
 
 // ── Resumability Check ──────────────────────────────────────
