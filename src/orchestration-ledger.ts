@@ -13,15 +13,58 @@ import { log } from "./logger.ts";
 
 const logger = log.child("orchestration-ledger");
 
-// Lazy-load Forest DB
-let _sql: ReturnType<typeof import("postgres").default> | null = null;
+// ── Lazy Forest DB with timeout + failure backoff (ELLIE-486) ──
 
-async function getSql() {
-  if (!_sql) {
-    const mod = await import("../../ellie-forest/src/db");
-    _sql = mod.default;
+const CONNECT_TIMEOUT_MS = 5_000;
+const FAILURE_BACKOFF_MS = 30_000; // don't retry for 30s after a failed import
+
+let _sql: ReturnType<typeof import("postgres").default> | null = null;
+let _sqlFailedAt = 0; // 0 = never failed
+
+async function getSql(): Promise<ReturnType<typeof import("postgres").default>> {
+  if (_sql) return _sql;
+
+  // Cache failure state — don't hammer the import every call during an outage
+  if (_sqlFailedAt > 0 && Date.now() - _sqlFailedAt < FAILURE_BACKOFF_MS) {
+    throw new Error(`Forest DB unavailable (retry in ${Math.round((FAILURE_BACKOFF_MS - (Date.now() - _sqlFailedAt)) / 1000)}s)`);
   }
-  return _sql;
+
+  try {
+    const mod = await Promise.race([
+      import("../../ellie-forest/src/db"),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`Forest DB import timed out after ${CONNECT_TIMEOUT_MS / 1000}s`)),
+          CONNECT_TIMEOUT_MS,
+        )
+      ),
+    ]);
+    _sql = mod.default;
+    _sqlFailedAt = 0; // clear any prior failure
+    return _sql;
+  } catch (err) {
+    _sqlFailedAt = Date.now();
+    logger.error("Forest DB import failed — entering backoff", {
+      error: err instanceof Error ? err.message : String(err),
+      backoffMs: FAILURE_BACKOFF_MS,
+    });
+    throw err;
+  }
+}
+
+/**
+ * Run a DB operation with a hard timeout (ELLIE-486).
+ * Prevents query hangs from blocking callers indefinitely.
+ */
+const QUERY_TIMEOUT_MS = 8_000;
+
+async function withDbTimeout<T>(op: () => Promise<T>, label: string): Promise<T> {
+  return Promise.race([
+    op(),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Forest DB query timed out: ${label}`)), QUERY_TIMEOUT_MS)
+    ),
+  ]);
 }
 
 // ── Types ──────────────────────────────────────────────────
@@ -67,17 +110,20 @@ export function emitEvent(
 ): void {
   getSql()
     .then((sql) =>
-      sql`
-        INSERT INTO orchestration_events (run_id, event_type, agent_type, work_item_id, payload)
-        VALUES (${runId}, ${eventType}, ${agentType || null}, ${workItemId || null}, ${JSON.stringify(payload || {})})
-      `
+      withDbTimeout(
+        () => sql`
+          INSERT INTO orchestration_events (run_id, event_type, agent_type, work_item_id, payload)
+          VALUES (${runId}, ${eventType}, ${agentType || null}, ${workItemId || null}, ${JSON.stringify(payload || {})})
+        `,
+        `emitEvent:${eventType}`,
+      )
     )
     .then(() => {
       if (eventType !== "heartbeat") {
         logger.info(`Event: ${eventType}`, { runId: runId.slice(0, 8), agentType, workItemId });
       }
     })
-    .catch((err) => logger.error(`Failed to emit ${eventType}`, { runId: runId.slice(0, 8), error: err.message }));
+    .catch((err) => logger.error(`Failed to emit ${eventType}`, { runId: runId.slice(0, 8), error: err instanceof Error ? err.message : String(err) }));
 }
 
 // ── Queries ────────────────────────────────────────────────
@@ -85,46 +131,55 @@ export function emitEvent(
 /** Get all events for a specific run, ordered chronologically. */
 export async function getRunEvents(runId: string): Promise<OrchestrationEvent[]> {
   const sql = await getSql();
-  const rows = await sql`
-    SELECT id, run_id, event_type, agent_type, work_item_id, payload, created_at
-    FROM orchestration_events
-    WHERE run_id = ${runId}
-    ORDER BY created_at ASC
-  `;
+  const rows = await withDbTimeout(
+    () => sql`
+      SELECT id, run_id, event_type, agent_type, work_item_id, payload, created_at
+      FROM orchestration_events
+      WHERE run_id = ${runId}
+      ORDER BY created_at ASC
+    `,
+    "getRunEvents",
+  );
   return rows as unknown as OrchestrationEvent[];
 }
 
 /** Get recent events across all runs. */
 export async function getRecentEvents(limit = 50): Promise<OrchestrationEvent[]> {
   const sql = await getSql();
-  const rows = await sql`
-    SELECT id, run_id, event_type, agent_type, work_item_id, payload, created_at
-    FROM orchestration_events
-    WHERE event_type != 'heartbeat'
-    ORDER BY created_at DESC
-    LIMIT ${limit}
-  `;
+  const rows = await withDbTimeout(
+    () => sql`
+      SELECT id, run_id, event_type, agent_type, work_item_id, payload, created_at
+      FROM orchestration_events
+      WHERE event_type != 'heartbeat'
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `,
+    "getRecentEvents",
+  );
   return rows as unknown as OrchestrationEvent[];
 }
 
 /** Get run_ids that have been dispatched but not yet terminated. */
 export async function getUnterminated(): Promise<Array<{ run_id: string; agent_type: string | null; work_item_id: string | null; dispatched_at: string }>> {
   const sql = await getSql();
-  const rows = await sql`
-    SELECT DISTINCT ON (e.run_id)
-      e.run_id,
-      e.agent_type,
-      e.work_item_id,
-      e.created_at AS dispatched_at
-    FROM orchestration_events e
-    WHERE e.event_type = 'dispatched'
-      AND NOT EXISTS (
-        SELECT 1 FROM orchestration_events t
-        WHERE t.run_id = e.run_id
-          AND t.event_type IN ('completed', 'failed', 'cancelled', 'timeout')
-      )
-    ORDER BY e.run_id, e.created_at ASC
-  `;
+  const rows = await withDbTimeout(
+    () => sql`
+      SELECT DISTINCT ON (e.run_id)
+        e.run_id,
+        e.agent_type,
+        e.work_item_id,
+        e.created_at AS dispatched_at
+      FROM orchestration_events e
+      WHERE e.event_type = 'dispatched'
+        AND NOT EXISTS (
+          SELECT 1 FROM orchestration_events t
+          WHERE t.run_id = e.run_id
+            AND t.event_type IN ('completed', 'failed', 'cancelled', 'timeout')
+        )
+      ORDER BY e.run_id, e.created_at ASC
+    `,
+    "getUnterminated",
+  );
   return rows as unknown as Array<{ run_id: string; agent_type: string | null; work_item_id: string | null; dispatched_at: string }>;
 }
 
