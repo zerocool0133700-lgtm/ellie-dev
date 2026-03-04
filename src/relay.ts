@@ -39,7 +39,7 @@ import {
   setNotifyCtx,
   setAnthropicClient,
 } from "./claude-cli.ts";
-import { setQueueBroadcast, drainQueues } from "./message-queue.ts";
+import { setQueueBroadcast, drainQueues, loadPersistedDeadLetters } from "./message-queue.ts";
 import { setVoicePipelineDeps } from "./voice-pipeline.ts";
 import { setSenderDeps } from "./message-sender.ts";
 import { initDelivery } from "./ws-delivery.ts";
@@ -100,6 +100,9 @@ export const bot = new Bot(BOT_TOKEN);
 // ELLIE-467: Added 5-min cooldown between restarts
 let _botRestarting = false;
 let _lastBotRestartAt = 0;
+
+// ELLIE-490: Restore dead letters that survived previous process restart
+loadPersistedDeadLetters().catch(err => logger.warn("DLQ restore failed (non-fatal)", err));
 
 // Start approval expiry cleanup
 startExpiryCleanup();

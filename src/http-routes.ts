@@ -54,9 +54,13 @@ import {
 } from "./claude-cli.ts";
 import {
   getQueueStatus,
+  listDeadLetters,
+  clearAllDeadLetters,
+  clearDeadLetterById,
 } from "./message-queue.ts";
 import { getChannelHealth } from "./channel-health.ts";
 import { getTaskStatus } from "./periodic-task.ts";
+import { getFireForgetMetrics } from "./resilient-task.ts";
 import {
   saveMessage,
   sendWithApprovals,
@@ -150,6 +154,7 @@ import { handleGatewayRoute } from "./api/gateway-intake.ts";
 import { handleGtdRoute } from "./api/gtd.ts";
 import { getSummaryState } from "./ums/consumers/summary.ts";
 import { log } from "./logger.ts";
+import { resilientTask } from "./resilient-task.ts";
 import { detectAndCaptureCorrection } from "./correction-detector.ts";
 import { detectAndLinkCalendarEvents } from "./calendar-linker.ts";
 import { freshnessTracker, autoRefreshStaleSources, detectConflicts } from "./context-freshness.ts";
@@ -363,15 +368,15 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               .single()
               .then(({ data }) => {
                 if (data?.content) {
-                  detectAndCaptureCorrection(parsed.text, data.content, anthropic, "google-chat", gchatConvIdForHooks)
-                    .catch(err => logger.warn("gchat correction detection failed", err));
+                  resilientTask("detectAndCaptureCorrection", "best-effort", () =>
+                    detectAndCaptureCorrection(parsed.text, data.content, anthropic, "google-chat", gchatConvIdForHooks));
                 }
               })
               .catch(() => {});
 
             // Calendar-conversation linking — detect event mentions
-            detectAndLinkCalendarEvents(parsed.text, supabase, gchatConvIdForHooks)
-              .catch(err => logger.warn("gchat calendar linking failed", err));
+            resilientTask("detectAndLinkCalendarEvents", "best-effort", () =>
+              detectAndLinkCalendarEvents(parsed.text, supabase, gchatConvIdForHooks));
           }
         }
 
@@ -511,7 +516,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
             ]);
             const recentMessages = gchatConvoContext.text;
             if (gchatAgentResult?.dispatch.is_new && gchatQueueContext) {
-              acknowledgeQueueItems(gchatActiveAgent).catch(() => {});
+              resilientTask("acknowledgeQueueItems", "critical", () => acknowledgeQueueItems(gchatActiveAgent));
             }
 
             // ELLIE-327: Track section-level freshness for non-registry sources
@@ -601,9 +606,9 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               resetGchatIdleTimer();
 
               if (result.finalDispatch) {
-                syncResponse(supabase, result.finalDispatch.session_id, gchatClean, {
+                resilientTask("syncResponse", "critical", () => syncResponse(supabase, result.finalDispatch!.session_id, gchatClean, {
                   duration_ms: result.artifacts.total_duration_ms,
-                }).catch(() => {});
+                }));
               }
 
               console.log(`[gchat] ${gchatExecMode}: ${result.stepResults.length} steps in ${result.artifacts.total_duration_ms}ms, $${result.artifacts.total_cost_usd.toFixed(4)}`);
@@ -620,11 +625,11 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
               // Fire playbook commands async (ELLIE:: tags)
               if (gchatOrcPlaybookCmds.length > 0) {
                 const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "google-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-                executePlaybookCommands(gchatOrcPlaybookCmds, pbCtx).catch(err => logger.error("Playbook execution failed", err));
+                resilientTask("executePlaybookCommands", "best-effort", () => executePlaybookCommands(gchatOrcPlaybookCmds, pbCtx));
               }
 
               // Psy assessment (ELLIE-333: was missing for Google Chat)
-              runPostMessageAssessment(effectiveGchatText, gchatClean, anthropic).catch(err => logger.error("Post-message assessment failed (gchat multi-step)", err));
+              resilientTask("runPostMessageAssessment", "best-effort", () => runPostMessageAssessment(effectiveGchatText, gchatClean, anthropic));
               return;
             }
 
@@ -689,9 +694,9 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
             const { cleanedText: gchatPlaybookClean, commands: gchatPlaybookCmds } = extractPlaybookCommands(response);
 
             if (gchatAgentResult) {
-              syncResponse(supabase, gchatAgentResult.dispatch.session_id, gchatPlaybookClean, {
+              resilientTask("syncResponse", "critical", () => syncResponse(supabase, gchatAgentResult!.dispatch.session_id, gchatPlaybookClean, {
                 duration_ms: gchatDuration,
-              }).catch(() => {});
+              }));
             }
 
             const { cleanedText: gchatClean } = extractApprovalTags(gchatPlaybookClean);
@@ -721,11 +726,11 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
             // Fire playbook commands async (ELLIE:: tags)
             if (gchatPlaybookCmds.length > 0) {
               const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "google-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
-              executePlaybookCommands(gchatPlaybookCmds, pbCtx).catch(err => logger.error("Playbook execution failed", err));
+              resilientTask("executePlaybookCommands", "best-effort", () => executePlaybookCommands(gchatPlaybookCmds, pbCtx));
             }
 
             // Psy assessment (ELLIE-333: was missing for Google Chat)
-            runPostMessageAssessment(effectiveGchatText, gchatClean, anthropic).catch(err => logger.error("Post-message assessment failed (gchat single-agent)", err));
+            resilientTask("runPostMessageAssessment", "best-effort", () => runPostMessageAssessment(effectiveGchatText, gchatClean, anthropic));
           } catch (err) {
             logger.error("Async processing error", err);
             const errMsg = err instanceof PipelineStepError && err.partialOutput
@@ -949,7 +954,7 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
             ]);
             const recentMessages = alexaConvoContext.text;
             if (agentResult?.dispatch.is_new && alexaQueueContext) {
-              acknowledgeQueueItems(alexaActiveAgent).catch(() => {});
+              resilientTask("acknowledgeQueueItems", "critical", () => acknowledgeQueueItems(alexaActiveAgent));
             }
             const enrichedPrompt = buildPrompt(
               effectiveQuery, contextDocket, relevantContext, elasticContext, "alexa",
@@ -1089,6 +1094,8 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
         dependencies: getChannelHealth(),
         // ELLIE-492: Periodic task status
         periodicTasks: getTaskStatus(),
+        // ELLIE-479: Fire-and-forget resilience metrics
+        fireAndForget: getFireForgetMetrics(),
       }));
     }).catch(() => {
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -1102,6 +1109,31 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(getQueueStatus()));
     return;
+  }
+
+  // Dead-letter queue — inspect and clear (ELLIE-490)
+  if (url.pathname === "/api/dead-letters") {
+    if (req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ deadLetters: listDeadLetters() }));
+      return;
+    }
+    if (req.method === "DELETE") {
+      await clearAllDeadLetters();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ cleared: true }));
+      return;
+    }
+  }
+
+  if (url.pathname.startsWith("/api/dead-letters/") && req.method === "DELETE") {
+    const id = url.pathname.slice("/api/dead-letters/".length);
+    if (id) {
+      const found = await clearDeadLetterById(id);
+      res.writeHead(found ? 200 : 404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ cleared: found }));
+      return;
+    }
   }
 
   // Context Freshness Dashboard — source freshness snapshot (ELLIE-329)
