@@ -21,7 +21,10 @@
     "prove:memory": "bun run scripts/prove-shared-memory.ts",
     "test": "bun test",
     "lint": "eslint src/",
-    "audit:data-integrity": "bun run scripts/run-data-integrity-audit.ts"
+    "audit:data-integrity": "bun run scripts/run-data-integrity-audit.ts",
+    "migrate": "bun run scripts/migrate.ts",
+    "migrate:status": "bun run scripts/migrate.ts status",
+    "migrate:validate": "bun run scripts/migrate.ts validate"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.74.0",

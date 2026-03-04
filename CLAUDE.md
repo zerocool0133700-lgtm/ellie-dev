@@ -568,9 +568,23 @@ db/
 **Naming convention:** `YYYYMMDD_description.sql` — the directory indicates target DB.
 
 **How to apply:**
-- Supabase migrations: via Supabase MCP `execute_sql` or paste in SQL Editor
-- Forest migrations: `psql -U ellie -d ellie-forest -f migrations/forest/<file>.sql`
-- No automated migration runner exists — all applied manually
+- Automated: `bun run migrate` applies pending migrations to both databases
+- Supabase requires `DATABASE_URL` env var (direct Postgres connection string)
+- Forest uses local Unix socket by default (no config needed)
+- Manual fallback: Supabase MCP `execute_sql` or SQL Editor; Forest via `psql`
+
+**Migration runner commands:**
+```bash
+bun run migrate                       # Apply pending migrations to both DBs
+bun run migrate --db forest           # Apply to Forest only
+bun run migrate --db supabase         # Apply to Supabase only
+bun run migrate --dry-run             # Preview without applying
+bun run migrate:status                # Show applied vs pending vs modified
+bun run migrate:validate              # Seed validation + code-vs-DB drift check
+```
+
+The runner uses a `_migration_ledger` table in each database to track applied files
+with SHA-256 checksums. Modified files (checksum mismatch) are flagged but not re-applied.
 
 **Rules:**
 - Never put SQL files outside `migrations/` or `seeds/`
@@ -585,6 +599,9 @@ journalctl --user -u claude-telegram-relay       # View logs
 bun run start                                     # Run manually
 bun run test:telegram                             # Test Telegram
 bun run test:supabase                             # Test database
+bun run migrate                                   # Apply pending SQL migrations
+bun run migrate:status                            # Check migration status
+bun run migrate:validate                          # Validate seeds + detect drift
 ```
 
 ---
