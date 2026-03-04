@@ -28,7 +28,7 @@ import { startRun, endRun } from "./orchestration-tracker.ts";
 import { saveCheckpoint, deleteCheckpoint, setActiveCheckpoint, removeActiveCheckpoint, type PipelineCheckpoint, type FailureAction } from "./pipeline-state.ts";
 import { withRetry } from "./dispatch-retry.ts";
 import { updateWorkItemOnFailure } from "./plane.ts";
-import { completeWorkSession as forestCompleteSession } from "../../ellie-forest/src/index";
+import { completeWorkSession as forestCompleteSession, getAgent } from "../../ellie-forest/src/index";
 
 const logger = log.child("orchestrator");
 
@@ -140,6 +140,13 @@ export class PipelineStepError extends Error {
   }
 }
 
+export class PipelineValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PipelineValidationError";
+  }
+}
+
 // ────────────────────────────────────────────────────────────────
 // Constants
 // ────────────────────────────────────────────────────────────────
@@ -236,6 +243,14 @@ export async function executeOrchestrated(
   };
 
   try {
+    // Pre-validate: all agent names in the pipeline must exist before execution starts
+    for (const step of effectiveSteps) {
+      const agent = await getAgent(step.agent_name);
+      if (!agent) {
+        throw new PipelineValidationError(`Agent "${step.agent_name}" in pipeline does not exist`);
+      }
+    }
+
     let result: ExecutionResult;
 
     switch (mode) {
