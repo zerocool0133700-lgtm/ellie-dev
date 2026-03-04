@@ -15,6 +15,7 @@ import { notify, type NotifyContext } from "./notification-policy.ts";
 import { log } from "./logger.ts";
 import { emitEvent } from "./orchestration-ledger.ts";
 import { heartbeat as trackerHeartbeat, setRunPid } from "./orchestration-tracker.ts";
+import { markJobTimedOutByRunId } from "./jobs-ledger.ts";
 
 const logger = log.child("claude-cli");
 
@@ -285,6 +286,9 @@ export async function callClaude(
         setTimeoutRecoveryLock(60_000);
         if (options?.runId) {
           emitEvent(options.runId, "timeout", null, null, { timeout_ms: TIMEOUT_MS, force_killed: forceKilled });
+          // ELLIE-527: Mark job as timed_out so metrics distinguish timeouts from completions
+          const timeoutDurationMs = Date.now() - dispatchStart;
+          markJobTimedOutByRunId(options.runId, timeoutDurationMs).catch(() => {});
         }
 
         const timeoutSec = TIMEOUT_MS / 1000;

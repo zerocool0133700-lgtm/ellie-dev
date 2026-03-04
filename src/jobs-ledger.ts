@@ -23,7 +23,7 @@ function db() {
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export type JobType = "dispatch" | "pipeline" | "fan-out" | "critic-loop";
-export type JobStatus = "queued" | "running" | "responded" | "completed" | "failed" | "cancelled";
+export type JobStatus = "queued" | "running" | "responded" | "completed" | "failed" | "cancelled" | "timed_out";
 
 export interface Job {
   job_id: string;
@@ -113,6 +113,8 @@ export interface JobMetrics {
   total: number;
   completed: number;
   failed: number;
+  /** ELLIE-527: Jobs that hit a timeout limit — distinct from generic failures. */
+  timed_out: number;
   running: number;
   success_rate: number;
   avg_duration_ms: number | null;
@@ -278,6 +280,7 @@ export async function getJobMetrics(since?: string): Promise<JobMetrics> {
         COUNT(*)::int                                                  AS total,
         COUNT(*) FILTER (WHERE status = 'completed')::int             AS completed,
         COUNT(*) FILTER (WHERE status = 'failed')::int                AS failed,
+        COUNT(*) FILTER (WHERE status = 'timed_out')::int             AS timed_out,
         COUNT(*) FILTER (WHERE status = 'running')::int               AS running,
         ROUND(
           100.0 * COUNT(*) FILTER (WHERE status = 'completed') /
@@ -318,6 +321,7 @@ export async function getJobMetrics(since?: string): Promise<JobMetrics> {
       total: totals.total ?? 0,
       completed: totals.completed ?? 0,
       failed: totals.failed ?? 0,
+      timed_out: totals.timed_out ?? 0,
       running: totals.running ?? 0,
       success_rate: Number(totals.success_rate ?? 0),
       avg_duration_ms: totals.avg_duration_ms ? Number(totals.avg_duration_ms) : null,
@@ -330,7 +334,7 @@ export async function getJobMetrics(since?: string): Promise<JobMetrics> {
   } catch (err: unknown) {
     logger.error("getJobMetrics failed", err);
     return {
-      total: 0, completed: 0, failed: 0, running: 0,
+      total: 0, completed: 0, failed: 0, timed_out: 0, running: 0,
       success_rate: 0, avg_duration_ms: null,
       total_tokens_in: 0, total_tokens_out: 0, total_cost_usd: "0",
       by_agent: [], by_type: [],
@@ -381,6 +385,23 @@ export async function cleanupOrphanedJobs(): Promise<number> {
   } catch (err: unknown) {
     logger.error("cleanupOrphanedJobs failed", err);
     return 0;
+  }
+}
+
+/**
+ * ELLIE-527: Mark a job as `timed_out` using its run_id.
+ * Called by claude-cli.ts when the subprocess hits the hard timeout.
+ * Idempotent — silently no-ops if no job is found for the run.
+ */
+export async function markJobTimedOutByRunId(runId: string, durationMs: number): Promise<void> {
+  try {
+    const job = await findJobByRunId(runId);
+    if (!job) return;
+    await updateJob(job.job_id, { status: "timed_out", total_duration_ms: durationMs });
+    await appendJobEvent(job.job_id, "timed_out", { run_id: runId, duration_ms: durationMs });
+  } catch (err: unknown) {
+    // Non-fatal — metrics miss is better than a crash
+    logger.warn("markJobTimedOutByRunId failed (non-fatal)", { runId, err });
   }
 }
 

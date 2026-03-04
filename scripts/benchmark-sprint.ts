@@ -23,6 +23,8 @@ export interface CreatureMetrics {
   completed: number;
   active: number;
   failed: number;
+  /** ELLIE-527: Creatures that hit a timeout — distinct from generic failures. */
+  timedOut: number;
   orphaned: number;
   schemaVersion: string | null;
   speciesDistribution: Record<string, number>;
@@ -57,6 +59,8 @@ export interface RegressionFlags {
   circuitBreakersOpen: boolean;
   esUnhealthy: boolean;
   testFailures: boolean;
+  /** ELLIE-527: True when any creatures have timed out. */
+  timedOutCreatures: boolean;
   flags: string[];
 }
 
@@ -92,12 +96,13 @@ export async function collectCreatureMetrics(): Promise<CreatureMetrics> {
   const sql = (await import("../../ellie-forest/src/db")).default;
 
   try {
-    const [counts] = await sql<[{ total: string; completed: string; active: string; failed: string }]>`
+    const [counts] = await sql<[{ total: string; completed: string; active: string; failed: string; timed_out: string }]>`
       SELECT
         COUNT(*)::text AS total,
         COUNT(*) FILTER (WHERE state = 'completed')::text AS completed,
         COUNT(*) FILTER (WHERE state IN ('dispatched', 'working'))::text AS active,
-        COUNT(*) FILTER (WHERE state IN ('failed', 'preempted'))::text AS failed
+        COUNT(*) FILTER (WHERE state IN ('failed', 'preempted'))::text AS failed,
+        COUNT(*) FILTER (WHERE state::text = 'timed_out')::text AS timed_out
       FROM creatures
     `;
 
@@ -141,6 +146,7 @@ export async function collectCreatureMetrics(): Promise<CreatureMetrics> {
       completed: parseInt(counts.completed),
       active: parseInt(counts.active),
       failed: parseInt(counts.failed),
+      timedOut: parseInt(counts.timed_out ?? "0") || 0,
       orphaned: parseInt(orphanCount.count),
       schemaVersion: schemaRows[0]?.version ?? null,
       speciesDistribution: distribution,
@@ -148,7 +154,7 @@ export async function collectCreatureMetrics(): Promise<CreatureMetrics> {
   } catch (err) {
     console.error("[benchmark] Forest DB query failed:", (err as Error).message);
     return {
-      total: -1, completed: -1, active: -1, failed: -1, orphaned: -1,
+      total: -1, completed: -1, active: -1, failed: -1, timedOut: -1, orphaned: -1,
       schemaVersion: null, speciesDistribution: {},
     };
   }
@@ -381,6 +387,10 @@ export function computeRegressions(
   if (testFailures) flags.push(`${system.testSuite.failed} test(s) failing`);
 
   if (creatures.orphaned > 0) flags.push(`${creatures.orphaned} orphaned creature(s)`);
+  // ELLIE-527: Flag timed-out creatures as a distinct health signal
+  if (creatures.timedOut > 0) flags.push(`${creatures.timedOut} creature(s) timed out`);
+
+  const timedOutCreatures = creatures.timedOut > 0;
 
   return {
     orphanedWorkSessions: orphanedWs,
@@ -388,6 +398,7 @@ export function computeRegressions(
     circuitBreakersOpen: breakersOpen,
     esUnhealthy,
     testFailures,
+    timedOutCreatures,
     flags,
   };
 }
@@ -419,7 +430,7 @@ export async function collectSnapshot(sections?: string[]): Promise<BenchmarkSna
 }
 
 function emptyCreature(): CreatureMetrics {
-  return { total: -1, completed: -1, active: -1, failed: -1, orphaned: -1, schemaVersion: null, speciesDistribution: {} };
+  return { total: -1, completed: -1, active: -1, failed: -1, timedOut: -1, orphaned: -1, schemaVersion: null, speciesDistribution: {} };
 }
 function emptyDataFlow(): DataFlowMetrics {
   return {
@@ -478,6 +489,7 @@ export function computeDelta(current: BenchmarkSnapshot, previous: BenchmarkSnap
       total: delta(current.creatures.total, previous.creatures.total),
       completed: delta(current.creatures.completed, previous.creatures.completed),
       active: delta(current.creatures.active, previous.creatures.active),
+      timedOut: delta(current.creatures.timedOut, previous.creatures.timedOut),
       orphaned: delta(current.creatures.orphaned, previous.creatures.orphaned),
     },
     dataFlow: {
@@ -533,6 +545,7 @@ export function formatSnapshot(snapshot: BenchmarkSnapshot, previous: BenchmarkS
     lines.push(`   - Total creatures: ${c.total}${d ? ` (${d.creatures.total})` : ""}`);
     lines.push(`   - Completed: ${c.completed}${d ? ` (${d.creatures.completed})` : ""}`);
     lines.push(`   - Active: ${c.active}${d ? ` (${d.creatures.active})` : ""}`);
+    lines.push(`   - Timed out: ${c.timedOut >= 0 ? c.timedOut : "N/A"}${d ? ` (${d.creatures.timedOut})` : ""}`);
     lines.push(`   - Orphaned: ${c.orphaned} ${c.orphaned === 0 ? "(target met)" : "(TARGET MISSED)"}`);
     if (c.schemaVersion) lines.push(`   - Schema: ${c.schemaVersion}`);
     if (Object.keys(c.speciesDistribution).length > 0) {
