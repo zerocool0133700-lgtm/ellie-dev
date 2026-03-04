@@ -114,6 +114,15 @@ export async function executeOrchestrated(
     throw new Error(`Orchestrator received empty steps array for mode "${mode}"`);
   }
 
+  // ELLIE-520: Validate ALL agents BEFORE any state changes (tracker, events, plan creation).
+  // If any agent doesn't exist, fail immediately — no orphaned plans, no Plane ticket movement.
+  for (const step of effectiveSteps) {
+    const agent = await getAgent(step.agent_name);
+    if (!agent) {
+      throw new PipelineValidationError(`Agent "${step.agent_name}" in pipeline does not exist`);
+    }
+  }
+
   // ELLIE-390: Register with tracker so watchdog monitors this run
   startRun(orchestrationRunId, effectiveSteps[0]?.agent_name || "orchestrator", undefined, undefined, {
     channel: options.channel,
@@ -144,14 +153,6 @@ export async function executeOrchestrated(
   };
 
   try {
-    // Pre-validate: all agent names in the pipeline must exist before execution starts
-    for (const step of effectiveSteps) {
-      const agent = await getAgent(step.agent_name);
-      if (!agent) {
-        throw new PipelineValidationError(`Agent "${step.agent_name}" in pipeline does not exist`);
-      }
-    }
-
     let result: ExecutionResult;
 
     switch (mode) {
