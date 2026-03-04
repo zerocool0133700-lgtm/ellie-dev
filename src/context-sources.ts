@@ -1067,7 +1067,7 @@ export function getMaxMemoriesForModel(model?: string | null): number {
   return 20; // opus and other large models
 }
 
-import { AGENT_ENTITY_MAP } from './agent-entity-map.ts';
+import { resolveEntityName } from './agent-entity-map.ts';
 
 export interface AgentSessionContext {
   /** Formatted memory text for prompt injection */
@@ -1102,7 +1102,7 @@ export async function getAgentMemoryContext(
     } = await import('../../ellie-forest/src/index');
 
     // Resolve entity
-    const entityName = AGENT_ENTITY_MAP[agentName] ?? agentName;
+    const entityName = resolveEntityName(agentName);
     const entity = await getEntity(entityName);
     if (!entity) return empty;
 
