@@ -18,6 +18,8 @@ import {
   PipelineStepError,
   MAX_PREVIOUS_OUTPUT_CHARS,
   MAX_INSTRUCTION_CHARS,
+  STEP_TIMEOUT_LIGHT_MS,
+  STEP_TIMEOUT_HEAVY_MS,
 } from "./orchestrator-types.ts";
 import { calculateStepCost } from "./orchestrator-costs.ts";
 
@@ -219,6 +221,26 @@ export async function callLightSkill(
 }
 
 // ────────────────────────────────────────────────────────────────
+// Step Timeout Helper
+// ────────────────────────────────────────────────────────────────
+
+/** ELLIE-521: Race a promise against a timeout that throws the given error. */
+async function withStepTimeout<T>(promise: Promise<T>, timeoutMs: number, error: Error): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(error), timeoutMs);
+  });
+  try {
+    const result = await Promise.race([promise, timeoutPromise]);
+    clearTimeout(timer);
+    return result;
+  } catch (err) {
+    clearTimeout(timer);
+    throw err;
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
 // Execute Step
 // ────────────────────────────────────────────────────────────────
 
@@ -257,28 +279,39 @@ export async function executeStep(
     options, dispatch, stepRole,
   );
 
-  // 4. Execute
+  // 4. Execute (ELLIE-521: per-step timeout)
+  const stepTimeoutMs = options.stepTimeoutMs ?? (isLight ? STEP_TIMEOUT_LIGHT_MS : STEP_TIMEOUT_HEAVY_MS);
+  const timeoutError = new PipelineStepError(stepIndex, step, "timeout", previousOutput);
+
   const startTime = Date.now();
   let rawOutput: string;
   let inputTokens = 0;
   let outputTokens = 0;
 
   if (isLight) {
-    const result = await callLightSkill(stepPrompt, options, {
-      systemPrompt: dispatch.agent.system_prompt || undefined,
-    });
+    const result = await withStepTimeout(
+      callLightSkill(stepPrompt, options, {
+        systemPrompt: dispatch.agent.system_prompt || undefined,
+      }),
+      stepTimeoutMs,
+      timeoutError,
+    );
     rawOutput = result.text;
     inputTokens = result.input_tokens;
     outputTokens = result.output_tokens;
   } else {
-    rawOutput = await options.callClaudeFn(stepPrompt, {
-      resume: false,
-      allowedTools: dispatch.agent.tools_enabled?.length
-        ? dispatch.agent.tools_enabled
-        : undefined,
-      model: dispatch.agent.model || undefined,
-      runId: options.runId,
-    });
+    rawOutput = await withStepTimeout(
+      options.callClaudeFn(stepPrompt, {
+        resume: false,
+        allowedTools: dispatch.agent.tools_enabled?.length
+          ? dispatch.agent.tools_enabled
+          : undefined,
+        model: dispatch.agent.model || undefined,
+        runId: options.runId,
+      }),
+      stepTimeoutMs,
+      timeoutError,
+    );
     // Token estimation via proper tokenizer (ELLIE-245)
     inputTokens = estimateTokens(stepPrompt);
     outputTokens = estimateTokens(rawOutput);

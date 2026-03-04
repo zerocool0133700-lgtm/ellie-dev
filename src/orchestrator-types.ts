@@ -33,6 +33,8 @@ export interface StepResult {
   cost_usd: number;
   execution_type: "light" | "heavy";
   session_id: string;
+  /** ELLIE-521: Set to true when this step was interrupted by a per-step timeout. */
+  timed_out?: boolean;
 }
 
 export interface ArtifactStore {
@@ -94,6 +96,12 @@ export interface OrchestratorOptions {
   onStepFailure?: (step: PipelineStep, stepIndex: number, error: Error) => Promise<FailureAction>;
   /** ELLIE-394: Resume from a checkpoint — skips already-completed steps. */
   resumeCheckpoint?: PipelineCheckpoint;
+  /**
+   * ELLIE-521: Per-step execution timeout in ms.
+   * Defaults to STEP_TIMEOUT_LIGHT_MS (30s) for light skills, STEP_TIMEOUT_HEAVY_MS (60s) for heavy.
+   * Override to set a uniform timeout for all steps (useful in tests).
+   */
+  stepTimeoutMs?: number;
   /** Plane work item ID (e.g. "ELLIE-473") — if set, ticket is rolled back to Todo on failure. */
   workItemId?: string;
   /** Forest work session tree ID — if set, session is completed with failure summary on pipeline error. */
@@ -129,6 +137,10 @@ export class PipelineValidationError extends Error {
 
 export const MAX_PIPELINE_DEPTH = 5;
 export const MAX_PIPELINE_TIMEOUT_MS = 120_000; // 2 minutes total
+/** ELLIE-521: Per-step timeout for light skills (30 seconds). */
+export const STEP_TIMEOUT_LIGHT_MS = 30_000;
+/** ELLIE-521: Per-step timeout for heavy skills (60 seconds). */
+export const STEP_TIMEOUT_HEAVY_MS = 60_000;
 export const MAX_PREVIOUS_OUTPUT_CHARS = 8_000;
 export const MAX_INSTRUCTION_CHARS = 500;
 export const MAX_CRITIC_ROUNDS = 3;

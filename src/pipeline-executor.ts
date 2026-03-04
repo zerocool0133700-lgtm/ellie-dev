@@ -140,10 +140,13 @@ export async function executePipeline(
       } else if (action === "skip") {
         // ELLIE-394: Skip this step — carry forward previous output
         logger.warn("Step failure — skipping", { step: i, agent: step.agent_name });
+        const isTimeout = stepError instanceof PipelineStepError && stepError.errorType === "timeout";
         emitEvent(options.runId || pipelineId, "progress", step.agent_name, null, {
           step: i,
           action: "skipped",
           error: checkpoint.failureError?.slice(0, 200),
+          // ELLIE-521: surface timeout metadata so callers can distinguish from other failures
+          ...(isTimeout ? { timed_out: true } : {}),
         });
         continue;
       } else {

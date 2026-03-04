@@ -64,6 +64,8 @@ export {
   COST_WARN_THRESHOLD,
   MAX_COST_PER_EXECUTION,
   FALLBACK_MODEL_COSTS,
+  STEP_TIMEOUT_LIGHT_MS,
+  STEP_TIMEOUT_HEAVY_MS,
 } from "./orchestrator-types.ts";
 
 export {
