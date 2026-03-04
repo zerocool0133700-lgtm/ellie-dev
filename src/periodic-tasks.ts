@@ -160,11 +160,15 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     sweepPhoneHistories();
   }, 60 * 60_000, "phone-history-sweep");
 
-  // ELLIE-447: Creature reaper — mark timed-out creatures as failed (every 5 minutes)
+  // ELLIE-447/500: Creature reaper — mark timed-out and exhausted-retry creatures as failed (every 5 minutes)
   periodicTask(async () => {
-    const { reapTimedOutCreatures } = await import("../../ellie-forest/src/work-sessions");
-    const reaped = await reapTimedOutCreatures();
+    const { reapTimedOutCreatures, reapExhaustedRetryCreatures } = await import("../../ellie-forest/src/work-sessions");
+    const [reaped, exhausted] = await Promise.all([
+      reapTimedOutCreatures(),
+      reapExhaustedRetryCreatures(),
+    ]);
     if (reaped.length > 0) console.log(`[creature-reaper] Reaped ${reaped.length} timed-out creature(s)`);
+    if (exhausted.length > 0) console.log(`[creature-reaper] Reaped ${exhausted.length} exhausted-retry creature(s)`);
   }, 5 * 60_000, "creature-reaper");
 
   // Memory maintenance: expire short-term memories (every 15 minutes)
