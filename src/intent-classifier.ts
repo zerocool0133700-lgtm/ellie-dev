@@ -88,6 +88,7 @@ const SLASH_COMMANDS: Record<string, string> = {
   "/finance": "finance",
   "/strategy": "strategy",
   "/critic": "critic",
+  "/ops": "ops",
   "/general": "general",
 };
 
