@@ -95,7 +95,7 @@ import {
 } from "./api/agent-queue.ts";
 import { detectAndCaptureCorrection } from "./correction-detector.ts";
 import { detectAndLinkCalendarEvents } from "./calendar-linker.ts";
-import { processMessageMode, isContextRefresh, getModeSectionPriorities, detectMode } from "./context-mode.ts";
+import { isContextRefresh, detectMode } from "./context-mode.ts";
 import { freshnessTracker, autoRefreshStaleSources } from "./context-freshness.ts";
 import { refreshSource } from "./context-sources.ts";
 import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hierarchy.ts";
@@ -113,59 +113,11 @@ import {
   consumeFallbackJustActivated,
   callOpenAiFallback,
 } from "./llm-provider.ts";
-
-// ── Pipeline helpers (shared between normal path and runSpecialistAsync) ──────
-
-/** Resolve context mode from channel profile (priority) or regex detection. */
-function resolveContextMode(
-  convoKey: string,
-  effectiveText: string,
-  channelProfile: import("./api/mode-profile.ts").ChannelContextProfile | null | undefined,
-): { contextMode: import("./context-mode.ts").ContextMode; modeChanged: boolean } {
-  if (channelProfile) {
-    return { contextMode: channelProfile.contextMode, modeChanged: false };
-  }
-  const detection = processMessageMode(convoKey, effectiveText);
-  return { contextMode: detection.mode, modeChanged: detection.changed };
-}
-
-/** Build a shouldFetch predicate respecting creature + mode section priorities. */
-function buildShouldFetch(
-  contextMode: import("./context-mode.ts").ContextMode,
-  activeAgent: string,
-): (label: string) => boolean {
-  const modePriorities = getModeSectionPriorities(contextMode);
-  const creatureProfile = getCreatureProfile(activeAgent);
-  return (label: string): boolean => {
-    const creaturePrio = creatureProfile?.section_priorities?.[label];
-    if (creaturePrio !== undefined) return creaturePrio < 7;
-    return (modePriorities[label] ?? 0) < 7;
-  };
-}
-
-/** Fetch all 9 context sources in parallel. Shared between normal and specialist paths. */
-async function gatherContextSources(
-  supabase: SupabaseClient | null,
-  convoId: string | undefined,
-  effectiveText: string,
-  activeAgent: string,
-  agentDispatch: { is_new: boolean; agent: { model?: string | null } } | null,
-  workItemId: string | undefined,
-  shouldFetch: (label: string) => boolean,
-) {
-  const [convoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext, liveForest] = await Promise.all([
-    convoId && supabase ? getConversationMessages(supabase, convoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
-    shouldFetch("context-docket") ? getContextDocket() : Promise.resolve(""),
-    getRelevantContext(supabase, effectiveText, "ellie-chat", activeAgent, convoId),
-    searchElastic(effectiveText, { limit: 5, recencyBoost: true, channel: "ellie-chat", sourceAgent: activeAgent, excludeConversationId: convoId }),
-    shouldFetch("structured-context") ? getAgentStructuredContext(supabase, activeAgent) : Promise.resolve(""),
-    getForestContext(effectiveText),
-    getAgentMemoryContext(activeAgent, workItemId, getMaxMemoriesForModel(agentDispatch?.agent.model)),
-    shouldFetch("queue") && agentDispatch?.is_new ? getQueueContext(activeAgent) : Promise.resolve(""),
-    getLiveForestContext(effectiveText),
-  ]);
-  return { convoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext, liveForest };
-}
+import {
+  _resolveContextMode as resolveContextMode,
+  _buildShouldFetch as buildShouldFetch,
+  _gatherContextSources as gatherContextSources,
+} from "./ellie-chat-pipeline.ts";
 
 export async function handleEllieChatMessage(
   ws: WebSocket,
