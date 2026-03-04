@@ -3,7 +3,7 @@ import {
   resolveMemoryConflict,
   type SimilarMemory,
   DEDUP_SIMILARITY_THRESHOLD,
-} from "./memory.ts";
+} from "../src/memory.ts";
 
 function makeSimilarMemory(overrides: Partial<SimilarMemory> = {}): SimilarMemory {
   return {

@@ -4,7 +4,7 @@ import {
   getSpecialistAck,
   formatForestMetrics,
   mapHealthToMemoryCategory,
-} from "./relay-utils.ts";
+} from "../src/relay-utils.ts";
 
 // ── trimSearchContext ──────────────────────────────────────────
 

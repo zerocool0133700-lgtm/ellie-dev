@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { extractPlaybookCommands } from "./playbook.ts";
+import { extractPlaybookCommands } from "../src/playbook.ts";
 
 describe("extractPlaybookCommands", () => {
   // ── send ──────────────────────────────────────────────────

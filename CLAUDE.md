@@ -537,6 +537,17 @@ To add a new skill: create `skills/<name>/SKILL.md` with frontmatter + instructi
 - **Database:** Supabase (messages, memory, logs, work_sessions, agents)
 - **Service:** systemd user service `claude-telegram-relay`
 
+### Testing
+
+All tests live in `tests/` — this is the single canonical test directory. Never add test files to `src/`.
+
+```bash
+bun test                                          # Run all tests
+bun test tests/memory.test.ts                     # Run a specific test
+```
+
+Before closing a hardening ticket, run `bun test` to verify no regressions.
+
 ### Key Commands
 ```bash
 systemctl --user restart claude-telegram-relay   # Restart relay

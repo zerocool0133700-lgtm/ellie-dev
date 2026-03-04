@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { parseSlashCommand, classifyIntent } from "./intent-classifier.ts";
+import { parseSlashCommand, classifyIntent } from "../src/intent-classifier.ts";
 
 // ── parseSlashCommand ─────────────────────────────────────────
 
