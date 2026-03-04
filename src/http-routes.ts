@@ -172,7 +172,7 @@ import { getQueueStatus } from "./dispatch-queue.ts";
 
 const logger = log.child("http");
 
-export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): void {
+export async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const { bot, anthropic, supabase } = getRelayDeps();
 
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
