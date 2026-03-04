@@ -15,7 +15,7 @@ const logger = log.child("plane-queue");
 // Lazy-load Forest DB to avoid circular deps at import time
 let _sql: ReturnType<typeof import("postgres").default> | null = null;
 
-async function getSql() {
+export async function getSql() {
   if (!_sql) {
     const mod = await import("../../ellie-forest/src/db");
     _sql = mod.default;
@@ -180,8 +180,25 @@ export async function processQueue(): Promise<{ processed: number; failed: numbe
           logger.info("State change applied", { workItemId: item.work_item_id, stateGroup: item.state_group });
         }
       } else if (item.action === "add_comment" && item.comment_html) {
-        const result = await addIssueComment(projectId, issueId, item.comment_html);
-        if (result === null) throw new Error("addIssueComment returned null (circuit breaker or API error)");
+        // ELLIE-483: Idempotency check — if session_id present, verify
+        // the comment doesn't already exist on the issue before posting.
+        if (item.session_id) {
+          const { sessionCommentExists } = await import("./plane.ts");
+          const alreadyExists = await sessionCommentExists(projectId, issueId, item.session_id);
+          if (alreadyExists) {
+            logger.info("Comment already exists — idempotent skip", {
+              workItemId: item.work_item_id,
+              sessionId: item.session_id,
+            });
+            // Fall through to success path
+          } else {
+            const result = await addIssueComment(projectId, issueId, item.comment_html);
+            if (result === null) throw new Error("addIssueComment returned null (circuit breaker or API error)");
+          }
+        } else {
+          const result = await addIssueComment(projectId, issueId, item.comment_html);
+          if (result === null) throw new Error("addIssueComment returned null (circuit breaker or API error)");
+        }
       }
 
       // Success — mark completed

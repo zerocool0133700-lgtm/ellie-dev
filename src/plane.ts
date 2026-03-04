@@ -148,10 +148,161 @@ export async function addIssueComment(projectId: string, issueId: string, commen
   });
 }
 
+// ============================================================
+// ATOMIC OPERATIONS (ELLIE-483)
+// ============================================================
+// State change + comment are executed sequentially as a logical
+// transaction. If the comment fails after the state change, the
+// state is rolled back. Idempotency checks prevent duplicate
+// comments on retry.
+
+/** List comments on a Plane issue (for idempotency checks) */
+async function listIssueComments(projectId: string, issueId: string): Promise<Array<{ comment_html: string }>> {
+  try {
+    const data = await planeRequest(`/projects/${projectId}/issues/${issueId}/comments/`);
+    return data.results || data || [];
+  } catch {
+    return [];
+  }
+}
+
+/** Check if a comment containing a session ID already exists on an issue */
+export async function sessionCommentExists(projectId: string, issueId: string, sessionId: string): Promise<boolean> {
+  const comments = await listIssueComments(projectId, issueId);
+  return comments.some((c: { comment_html: string }) => c.comment_html?.includes(sessionId));
+}
+
+/** Get an issue's current state UUID (for rollback tracking) */
+async function getIssueCurrentStateId(projectId: string, issueId: string): Promise<string | null> {
+  try {
+    const data = await planeRequest(`/projects/${projectId}/issues/${issueId}/`);
+    return (data?.state as string) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+interface AtomicResult {
+  stateApplied: boolean;
+  commentApplied: boolean;
+  rolledBack: boolean;
+  queued: boolean;
+}
+
+/**
+ * Execute a state change + comment as a logical transaction (ELLIE-483).
+ *
+ * 1. Save current state for rollback
+ * 2. Apply state change
+ * 3. Apply comment (with idempotency check if sessionId present)
+ * 4. On comment failure → rollback state, queue both for retry
+ * 5. On state failure → queue both for retry (no rollback needed)
+ */
+async function atomicStateAndComment(opts: {
+  projectId: string;
+  issueId: string;
+  workItemId: string;
+  targetStateGroup: string;
+  commentHtml: string;
+  sessionId?: string;
+  label: string;
+}): Promise<AtomicResult> {
+  const { projectId, issueId, workItemId, targetStateGroup, commentHtml, sessionId, label } = opts;
+  const result: AtomicResult = { stateApplied: false, commentApplied: false, rolledBack: false, queued: false };
+
+  // 1. Resolve target state ID
+  const targetStateId = await getStateIdByGroup(projectId, targetStateGroup);
+  if (!targetStateId) {
+    logger.error("Could not resolve target state — queueing", { workItemId, targetStateGroup, label });
+    await enqueuePlaneStateChange({ workItemId, stateGroup: targetStateGroup, projectId, issueId, sessionId });
+    await enqueuePlaneComment({ workItemId, commentHtml, projectId, issueId, sessionId });
+    result.queued = true;
+    return result;
+  }
+
+  // 2. Save current state for rollback
+  const previousStateId = await getIssueCurrentStateId(projectId, issueId);
+
+  // 3. Apply state change
+  try {
+    const stateResult = await updateIssueState(projectId, issueId, targetStateId);
+    if (stateResult === null) throw new Error("State update returned null (circuit breaker open)");
+    result.stateApplied = true;
+    console.log(`[plane] ${workItemId} → ${targetStateGroup} (${label})`);
+  } catch (stateErr) {
+    const msg = stateErr instanceof Error ? stateErr.message : String(stateErr);
+    logger.warn("State change failed — queueing both operations", {
+      workItemId, targetStateGroup, label, error: msg,
+    });
+    await enqueuePlaneStateChange({ workItemId, stateGroup: targetStateGroup, projectId, issueId, sessionId });
+    await enqueuePlaneComment({ workItemId, commentHtml, projectId, issueId, sessionId });
+    result.queued = true;
+    return result;
+  }
+
+  // 4. Idempotency check — skip if comment with this session already exists
+  if (sessionId) {
+    try {
+      const exists = await sessionCommentExists(projectId, issueId, sessionId);
+      if (exists) {
+        logger.info("Comment already exists — idempotent skip", { workItemId, sessionId, label });
+        result.commentApplied = true;
+        return result;
+      }
+    } catch {
+      // Can't verify — proceed with adding (risk duplicate over losing comment)
+    }
+  }
+
+  // 5. Apply comment
+  try {
+    const commentResult = await addIssueComment(projectId, issueId, commentHtml);
+    if (commentResult === null) throw new Error("Comment returned null (circuit breaker open)");
+    result.commentApplied = true;
+    console.log(`[plane] Added ${label} comment to ${workItemId}`);
+  } catch (commentErr) {
+    const msg = commentErr instanceof Error ? commentErr.message : String(commentErr);
+
+    // 6. Rollback state change — restore previous state
+    if (previousStateId && result.stateApplied) {
+      try {
+        await updateIssueState(projectId, issueId, previousStateId);
+        result.rolledBack = true;
+        logger.info("Rolled back state after comment failure", {
+          workItemId, previousStateId, label,
+        });
+      } catch (rollbackErr) {
+        const rbMsg = rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr);
+        logger.error("PARTIAL STATE — rollback also failed", {
+          workItemId, label,
+          stateApplied: targetStateGroup,
+          commentFailed: msg,
+          rollbackFailed: rbMsg,
+          previousState: previousStateId,
+        });
+      }
+    }
+
+    // 7. Queue for retry
+    if (result.rolledBack) {
+      // Both operations need retrying (state was rolled back)
+      await enqueuePlaneStateChange({ workItemId, stateGroup: targetStateGroup, projectId, issueId, sessionId });
+      await enqueuePlaneComment({ workItemId, commentHtml, projectId, issueId, sessionId });
+    } else {
+      // State stuck applied — only queue the missing comment
+      await enqueuePlaneComment({ workItemId, commentHtml, projectId, issueId, sessionId });
+    }
+    result.queued = true;
+  }
+
+  return result;
+}
+
 /**
  * High-level: update a Plane work item when a work session starts.
  * - Sets state to "In Progress"
  * - Adds a comment with the session ID
+ * - Atomic: rolls back state if comment fails (ELLIE-483)
  *
  * Fails silently (logs warning) if Plane is not configured or the item can't be found.
  */
@@ -174,43 +325,22 @@ export async function updateWorkItemOnSessionStart(workItemId: string, sessionId
     return;
   }
 
-  const { projectId, issueId } = resolved;
-  const comment = `<p>Work session started — <code>${sessionId}</code></p>`;
-
-  // Fetch state ID (shared prerequisite), then fire state + comment in parallel.
-  // Each failure is caught independently so a comment failure never masks a
-  // successful state change and vice versa (ELLIE-477).
-  const inProgressStateId = await getStateIdByGroup(projectId, "started");
-  const [stateOutcome, commentOutcome] = await Promise.allSettled([
-    inProgressStateId
-      ? updateIssueState(projectId, issueId, inProgressStateId)
-      : Promise.resolve(null),
-    addIssueComment(projectId, issueId, comment),
-  ]);
-
-  if (inProgressStateId) {
-    const stateFailed = stateOutcome.status === "rejected" || (stateOutcome.status === "fulfilled" && stateOutcome.value === null);
-    if (stateFailed) {
-      logger.warn("State update failed — queueing for retry", { workItemId });
-      await enqueuePlaneStateChange({ workItemId, stateGroup: "started", projectId, issueId, sessionId });
-    } else {
-      console.log(`[plane] ${workItemId} → In Progress`);
-    }
-  }
-
-  const commentFailed = commentOutcome.status === "rejected" || (commentOutcome.status === "fulfilled" && commentOutcome.value === null);
-  if (commentFailed) {
-    logger.warn("Comment failed — queueing for retry", { workItemId });
-    await enqueuePlaneComment({ workItemId, commentHtml: comment, projectId, issueId, sessionId });
-  } else {
-    console.log(`[plane] Added session comment to ${workItemId}`);
-  }
+  await atomicStateAndComment({
+    projectId: resolved.projectId as string,
+    issueId: resolved.issueId as string,
+    workItemId,
+    targetStateGroup: "started",
+    commentHtml: `<p>Work session started — <code>${sessionId}</code></p>`,
+    sessionId,
+    label: "session start",
+  });
 }
 
 /**
  * High-level: update a Plane work item when a work session completes.
- * - Sets state to "Done" (or "Cancelled" if failed)
+ * - Sets state to "Done" (or stays "In Progress" if blocked/paused)
  * - Adds a comment with the session summary
+ * - Atomic: rolls back state if comment fails (ELLIE-483)
  *
  * Fails silently (logs warning) if Plane is not configured or the item can't be found.
  */
@@ -230,8 +360,8 @@ export async function updateWorkItemOnSessionComplete(
   }
 
   const stateGroup = status === "completed" ? "completed" : "started";
-  const label = status === "completed" ? "completed" : status;
-  const comment = `<p>Work session ${label}</p><p>${summary}</p>`;
+  const statusLabel = status === "completed" ? "completed" : status;
+  const comment = `<p>Work session ${statusLabel}</p><p>${summary}</p>`;
 
   const resolved = await resolveWorkItemId(workItemId);
   if (!resolved) {
@@ -241,40 +371,21 @@ export async function updateWorkItemOnSessionComplete(
     return;
   }
 
-  const { projectId, issueId } = resolved;
-
-  // Fetch state ID (shared prerequisite), then fire state + comment in parallel (ELLIE-477).
-  const stateId = await getStateIdByGroup(projectId, stateGroup);
-  const [stateOutcome, commentOutcome] = await Promise.allSettled([
-    stateId
-      ? updateIssueState(projectId, issueId, stateId)
-      : Promise.resolve(null),
-    addIssueComment(projectId, issueId, comment),
-  ]);
-
-  if (stateId) {
-    const stateFailed = stateOutcome.status === "rejected" || (stateOutcome.status === "fulfilled" && stateOutcome.value === null);
-    if (stateFailed) {
-      logger.warn("State update failed — queueing for retry", { workItemId });
-      await enqueuePlaneStateChange({ workItemId, stateGroup, projectId, issueId });
-    } else {
-      console.log(`[plane] ${workItemId} → ${status === "completed" ? "Done" : "In Progress (blocked/paused)"}`);
-    }
-  }
-
-  const commentFailed = commentOutcome.status === "rejected" || (commentOutcome.status === "fulfilled" && commentOutcome.value === null);
-  if (commentFailed) {
-    logger.warn("Comment failed — queueing for retry", { workItemId });
-    await enqueuePlaneComment({ workItemId, commentHtml: comment, projectId, issueId });
-  } else {
-    console.log(`[plane] Added completion comment to ${workItemId}`);
-  }
+  await atomicStateAndComment({
+    projectId: resolved.projectId as string,
+    issueId: resolved.issueId as string,
+    workItemId,
+    targetStateGroup: stateGroup,
+    commentHtml: comment,
+    label: `session ${statusLabel}`,
+  });
 }
 
 /**
  * High-level: update a Plane work item when a pipeline/session fails mid-execution.
  * - Moves ticket back to "unstarted" (Todo)
  * - Adds a comment with the failure reason
+ * - Atomic: rolls back state if comment fails (ELLIE-483)
  *
  * Fails silently so it never masks the original error.
  */
@@ -288,16 +399,95 @@ export async function updateWorkItemOnFailure(workItemId: string, errorMessage: 
     return;
   }
 
-  const { projectId, issueId } = resolved;
-  const comment = `<p>⚠️ Pipeline failed — ticket moved back to Todo</p><p><code>${errorMessage.slice(0, 500)}</code></p>`;
+  await atomicStateAndComment({
+    projectId: resolved.projectId as string,
+    issueId: resolved.issueId as string,
+    workItemId,
+    targetStateGroup: "unstarted",
+    commentHtml: `<p>Pipeline failed — ticket moved back to Todo</p><p><code>${errorMessage.slice(0, 500)}</code></p>`,
+    label: "pipeline failure",
+  });
+}
 
-  // Move back to "unstarted" (Todo) + add failure comment in parallel (ELLIE-477).
-  const unstarted = await getStateIdByGroup(projectId, "unstarted");
-  await Promise.allSettled([
-    unstarted ? updateIssueState(projectId, issueId, unstarted) : Promise.resolve(null),
-    addIssueComment(projectId, issueId, comment),
-  ]);
-  if (unstarted) console.log(`[plane] ${workItemId} → Todo (pipeline failure)`);
+// ============================================================
+// STARTUP RECONCILIATION (ELLIE-483)
+// ============================================================
+
+/**
+ * Detect and recover from partial Plane update states on startup.
+ *
+ * Checks the plane_sync_queue for pending items that may indicate
+ * a partial update (state applied but comment missing, or vice versa).
+ * Logs detailed context for manual investigation and ensures queued
+ * items will be processed by the queue worker.
+ */
+export async function reconcilePlaneState(): Promise<{ pending: number; orphaned: number }> {
+  if (!isPlaneConfigured()) return { pending: 0, orphaned: 0 };
+
+  let pending = 0;
+  let orphaned = 0;
+
+  try {
+    const { getSql } = await import("./plane-queue.ts");
+    const sql = await getSql();
+
+    // Find all non-completed queue items grouped by work_item_id
+    const items = await sql<Array<{ work_item_id: string; action: string; status: string; session_id: string | null; created_at: Date }>>`
+      SELECT work_item_id, action, status, session_id, created_at
+      FROM plane_sync_queue
+      WHERE status IN ('pending', 'processing', 'failed')
+      ORDER BY work_item_id, created_at ASC
+    `;
+
+    if (items.length === 0) return { pending: 0, orphaned: 0 };
+
+    pending = items.length;
+
+    // Group by work item to detect partial states
+    const byWorkItem = new Map<string, typeof items>();
+    for (const item of items) {
+      const existing = byWorkItem.get(item.work_item_id) || [];
+      existing.push(item);
+      byWorkItem.set(item.work_item_id, existing);
+    }
+
+    for (const [workItemId, workItems] of byWorkItem) {
+      const hasState = workItems.some(i => i.action === "state_change");
+      const hasComment = workItems.some(i => i.action === "add_comment");
+      const hasFailed = workItems.some(i => i.status === "failed");
+
+      if (hasState !== hasComment) {
+        // Only one of the pair is queued — the other may have been applied
+        // while this one failed. This is a partial state.
+        orphaned++;
+        logger.warn("Partial Plane state detected on startup", {
+          workItemId,
+          stateQueued: hasState,
+          commentQueued: hasComment,
+          hasFailed,
+          items: workItems.map(i => ({ action: i.action, status: i.status, age: `${Math.round((Date.now() - i.created_at.getTime()) / 60000)}min` })),
+        });
+      }
+
+      if (hasFailed) {
+        // Reset failed items to pending so the queue worker retries them
+        await sql`
+          UPDATE plane_sync_queue
+          SET status = 'pending', next_retry_at = NOW()
+          WHERE work_item_id = ${workItemId} AND status = 'failed'
+        `;
+        logger.info("Reset failed queue items for retry", { workItemId });
+      }
+    }
+
+    if (orphaned > 0 || pending > 0) {
+      logger.info("Plane reconciliation complete", { pending, orphaned });
+    }
+  } catch (err) {
+    logger.error("Plane reconciliation failed", err);
+  }
+
+  return { pending, orphaned };
 }
 
 // ============================================================

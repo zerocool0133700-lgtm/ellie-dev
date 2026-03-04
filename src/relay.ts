@@ -53,6 +53,7 @@ import { initOutlook, getOutlookEmail } from "./outlook.ts";
 import { startExpiryCleanup } from "./approval.ts";
 import { notify } from "./notification-policy.ts";
 import { startPlaneQueueWorker, stopPlaneQueueWorker } from "./plane-queue.ts";
+import { reconcilePlaneState } from "./plane.ts";
 import { startWatchdog, recoverActiveRuns, setWatchdogNotify, stopWatchdog } from "./orchestration-tracker.ts";
 import { reconcileOnStartup, startReconciler, stopReconciler } from "./orchestration-reconciler.ts";
 import { restoreModeState } from "./context-mode.ts";
@@ -109,6 +110,8 @@ startExpiryCleanup();
 
 // Plane sync queue — persistent retry for failed Plane API calls (ELLIE-234)
 startPlaneQueueWorker();
+// ELLIE-483: Detect partial Plane states from prior crashes
+reconcilePlaneState().catch(err => logger.warn("Plane reconciliation failed (non-fatal)", err));
 
 // Orchestration tracker — ELLIE-349: heartbeat watchdog + orphan recovery
 // ELLIE-387: Wire proactive notifications to watchdog (deferred — needs setRelayDeps first)
