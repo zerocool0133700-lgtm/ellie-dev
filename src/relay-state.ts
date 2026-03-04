@@ -11,6 +11,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import { WebSocket } from "ws";
 import { ALLOWED_USER_ID, GCHAT_SPACE_NOTIFY } from "./relay-config.ts";
 import type { NotifyContext } from "./notification-policy.ts";
+import { getSlackSendFn } from "./channels/slack/index.ts";
 
 // ── Dependency injection ───────────────────────────────────
 
@@ -93,5 +94,7 @@ export function broadcastToEllieChatClients(event: Record<string, unknown>): voi
 
 export function getNotifyCtx(): NotifyContext {
   const { bot } = getRelayDeps();
-  return { bot, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY };
+  // ELLIE-443: Include Slack send function if SLACK_BOT_TOKEN + SLACK_NOTIFICATION_CHANNEL are set
+  const slackSend = getSlackSendFn() ?? undefined;
+  return { bot, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, slackSend };
 }

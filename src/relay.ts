@@ -456,6 +456,10 @@ setBroadcastToEllieChat(broadcastToEllieChatClients);
 import { startDiscordGateway } from "./channels/discord/index.ts";
 startDiscordGateway(supabase);
 
+// ELLIE-443: Slack channel plugin — only activates if SLACK_BOT_TOKEN + SLACK_SIGNING_SECRET are set
+import { startSlackChannel } from "./channels/slack/index.ts";
+startSlackChannel();
+
 // Initialize classifiers
 if (anthropic && supabase) initClassifier(anthropic, supabase);
 if (anthropic) initEntailmentClassifier(anthropic);

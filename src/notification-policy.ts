@@ -22,7 +22,7 @@ const logger = log.child("notify");
 // TYPES
 // ============================================================
 
-export type NotificationChannel = "telegram" | "google-chat";
+export type NotificationChannel = "telegram" | "google-chat" | "slack";
 export type NotificationPriority = "critical" | "high" | "normal" | "low";
 
 export type NotificationEvent =
@@ -64,6 +64,7 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: true, minIntervalSec: 0 },
       "google-chat": { enabled: true, minIntervalSec: 0 },
+      slack: { enabled: true, minIntervalSec: 0 },
     },
   },
   session_update: {
@@ -71,6 +72,7 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: false, minIntervalSec: 0 }, // too noisy for phone
       "google-chat": { enabled: true, minIntervalSec: 60 },
+      slack: { enabled: true, minIntervalSec: 60 },
     },
   },
   session_decision: {
@@ -78,6 +80,7 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: true, minIntervalSec: 0 }, // decisions always go through
       "google-chat": { enabled: true, minIntervalSec: 0 },
+      slack: { enabled: true, minIntervalSec: 0 },
     },
   },
   session_complete: {
@@ -85,6 +88,7 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: true, minIntervalSec: 0 },
       "google-chat": { enabled: true, minIntervalSec: 0 },
+      slack: { enabled: true, minIntervalSec: 0 },
     },
   },
   session_pause: {
@@ -92,6 +96,7 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: true, minIntervalSec: 0 },
       "google-chat": { enabled: true, minIntervalSec: 0 },
+      slack: { enabled: true, minIntervalSec: 0 },
     },
   },
   session_resume: {
@@ -99,6 +104,7 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: true, minIntervalSec: 0 },
       "google-chat": { enabled: true, minIntervalSec: 0 },
+      slack: { enabled: true, minIntervalSec: 0 },
     },
   },
   incident_raised: {
@@ -106,6 +112,7 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: true, minIntervalSec: 0 }, // always alert on incidents
       "google-chat": { enabled: true, minIntervalSec: 0 },
+      slack: { enabled: true, minIntervalSec: 0 },
     },
   },
   incident_update: {
@@ -113,6 +120,7 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: false, minIntervalSec: 0 }, // silent on intermediate updates
       "google-chat": { enabled: true, minIntervalSec: 30 },
+      slack: { enabled: true, minIntervalSec: 30 },
     },
   },
   incident_resolved: {
@@ -120,6 +128,7 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: true, minIntervalSec: 0 }, // always alert on resolution
       "google-chat": { enabled: true, minIntervalSec: 0 },
+      slack: { enabled: true, minIntervalSec: 0 },
     },
   },
   memory_contradiction: {
@@ -127,6 +136,7 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: true, minIntervalSec: 300 }, // max 1 per 5 min per memory
       "google-chat": { enabled: true, minIntervalSec: 60 },
+      slack: { enabled: true, minIntervalSec: 60 },
     },
   },
   dispatch_confirm: {
@@ -134,6 +144,7 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: true, minIntervalSec: 0 },
       "google-chat": { enabled: true, minIntervalSec: 0 },
+      slack: { enabled: false, minIntervalSec: 0 }, // too noisy for dispatch confirms
     },
   },
   // ELLIE-387: Proactive status alerts for orchestration lifecycle
@@ -142,6 +153,7 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: true, minIntervalSec: 120 }, // max 1 per 2 min per run
       "google-chat": { enabled: true, minIntervalSec: 60 },
+      slack: { enabled: true, minIntervalSec: 60 },
     },
   },
   // ELLIE-397: Added throttle for parity with run_stale
@@ -150,6 +162,7 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: true, minIntervalSec: 30 },
       "google-chat": { enabled: true, minIntervalSec: 30 },
+      slack: { enabled: true, minIntervalSec: 30 },
     },
   },
   error: {
@@ -157,6 +170,7 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: true, minIntervalSec: 0 },
       "google-chat": { enabled: true, minIntervalSec: 0 },
+      slack: { enabled: true, minIntervalSec: 0 },
     },
   },
   rollup: {
@@ -164,6 +178,7 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: true, minIntervalSec: 0 }, // summary only
       "google-chat": { enabled: true, minIntervalSec: 0 }, // full detail
+      slack: { enabled: true, minIntervalSec: 0 },
     },
   },
   weekly_review: {
@@ -171,6 +186,7 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
     channels: {
       telegram: { enabled: true, minIntervalSec: 0 },
       "google-chat": { enabled: true, minIntervalSec: 0 },
+      slack: { enabled: true, minIntervalSec: 0 },
     },
   },
 };
@@ -254,6 +270,7 @@ function tryCoalesce(ctx: NotifyContext, options: NotifyOptions): boolean {
   const policy = NOTIFICATION_POLICY[options.event];
   if (policy.channels.telegram.enabled) channels.push("telegram");
   if (policy.channels["google-chat"].enabled && ctx.gchatSpaceName) channels.push("google-chat");
+  if (policy.channels["slack"]?.enabled && ctx.slackSend) channels.push("slack");
 
   for (const channel of channels) {
     const existing = coalesceBuffers.get(channel);
@@ -303,7 +320,7 @@ async function flushCoalesceBuffer(channel: NotificationChannel): Promise<void> 
     // Single event — send as-is (no coalescing overhead)
     const e = entries[0];
     await sendDirect(ctx, e.event, channel, e.workItemId,
-      channel === "telegram" ? e.telegramMessage : (e.gchatMessage || e.telegramMessage));
+      channel === "telegram" ? e.telegramMessage : (e.gchatMessage || e.telegramMessage)); // slack also uses gchatMessage fallback
     return;
   }
 
@@ -345,6 +362,8 @@ async function sendDirect(
       await ctx.bot.api.sendMessage(ctx.telegramUserId, message, { parse_mode: "Markdown" });
     } else if (channel === "google-chat" && ctx.gchatSpaceName) {
       await sendGoogleChatMessage(ctx.gchatSpaceName, message);
+    } else if (channel === "slack" && ctx.slackSend) {
+      await ctx.slackSend(message);
     }
     console.log(`[notify] ${channel}/${event}/${workItemId}: sent`);
   } catch (err: unknown) {
@@ -360,6 +379,8 @@ export interface NotifyContext {
   bot: Bot;
   telegramUserId: string;
   gchatSpaceName?: string;
+  /** ELLIE-443: Bound function to post a message to the Slack notification channel */
+  slackSend?: (message: string) => Promise<void>;
 }
 
 export interface NotifyOptions {
@@ -404,6 +425,16 @@ export async function notify(ctx: NotifyContext, options: NotifyOptions): Promis
     }
   }
 
+  // Slack (ELLIE-443)
+  if (policy.channels["slack"]?.enabled && ctx.slackSend) {
+    const msg = gchatMessage || telegramMessage;
+    if (!isThrottled(event, "slack", workItemId)) {
+      sends.push(sendDirect(ctx, event, "slack", workItemId, msg));
+    } else {
+      scheduleBatchedSend(ctx, event, "slack", workItemId, msg);
+    }
+  }
+
   await Promise.allSettled(sends);
 }
 
@@ -441,6 +472,8 @@ function scheduleBatchedSend(
         await ctx.bot.api.sendMessage(ctx.telegramUserId, message, { parse_mode: "Markdown" });
       } else if (channel === "google-chat" && ctx.gchatSpaceName) {
         await sendGoogleChatMessage(ctx.gchatSpaceName, message);
+      } else if (channel === "slack" && ctx.slackSend) {
+        await ctx.slackSend(message);
       }
       console.log(`[notify] ${channel}/${event}/${workItemId}: batched send`);
     } catch (err: unknown) {

@@ -759,6 +759,90 @@ export function handleHttpRequest(req: IncomingMessage, res: ServerResponse): vo
     return;
   }
 
+  // ── Slack Events API + Slash Commands (ELLIE-443) ────────────────────────────
+  if (url.pathname === "/slack" && req.method === "POST") {
+    let rawBody = "";
+    req.on("data", (chunk: Buffer) => { rawBody += chunk.toString(); });
+    req.on("end", async () => {
+      const signingSecret = process.env.SLACK_SIGNING_SECRET;
+      const botToken = process.env.SLACK_BOT_TOKEN;
+      if (!signingSecret || !botToken) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Slack not configured" }));
+        return;
+      }
+
+      // Signature verification
+      const { verifySlackRequest } = await import("./channels/slack/verify.ts");
+      const timestamp = req.headers["x-slack-request-timestamp"] as string ?? "";
+      const signature = req.headers["x-slack-signature"] as string ?? "";
+      if (!verifySlackRequest(signingSecret, rawBody, timestamp, signature)) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid signature" }));
+        return;
+      }
+
+      const contentType = req.headers["content-type"] ?? "";
+
+      // ── Slash commands (application/x-www-form-urlencoded) ───
+      if (contentType.includes("application/x-www-form-urlencoded")) {
+        const { handleSlackCommand } = await import("./channels/slack/handler.ts");
+        const params = new URLSearchParams(rawBody);
+        const payload = {
+          command: params.get("command") ?? "",
+          text: params.get("text") ?? "",
+          user_id: params.get("user_id") ?? "",
+          channel_id: params.get("channel_id") ?? "",
+          response_url: params.get("response_url") ?? "",
+          trigger_id: params.get("trigger_id") ?? "",
+        };
+        const ackText = await handleSlackCommand(payload);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ response_type: "ephemeral", text: ackText }));
+        return;
+      }
+
+      // ── Events API (application/json) ─────────────────────────
+      let payload: Record<string, unknown>;
+      try {
+        payload = JSON.parse(rawBody);
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid JSON" }));
+        return;
+      }
+
+      // URL verification challenge (one-time during app setup)
+      if (payload.type === "url_verification") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ challenge: payload.challenge }));
+        return;
+      }
+
+      // Acknowledge immediately — Slack requires response within 3s
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+
+      // Process event asynchronously
+      if (payload.type === "event_callback") {
+        const event = payload.event as Record<string, unknown> | undefined;
+        if (!event) return;
+
+        const eventType = event.type as string;
+        // Handle: app_mention and DMs (message.im)
+        if (eventType === "app_mention" || (eventType === "message" && event.channel_type === "im")) {
+          const { handleSlackEvent } = await import("./channels/slack/handler.ts");
+          const { resolveAgent } = await import("./channels/slack/index.ts");
+          handleSlackEvent(event as Parameters<typeof handleSlackEvent>[0], resolveAgent)
+            .catch(err => logger.error("Slack event handler error", { error: err instanceof Error ? err.message : String(err) }));
+        }
+      }
+
+      return;
+    });
+    return;
+  }
+
   // Alexa Custom Skill webhook
   if (url.pathname === "/alexa" && req.method === "POST") {
     let body = "";
