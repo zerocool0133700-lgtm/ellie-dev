@@ -1,6 +1,6 @@
 ---
 token_budget: 28000
-allowed_skills: [memory, forest, google-workspace]
+allowed_skills: [memory, forest, google-workspace, verify, skill-detector]
 section_priorities:
   forest-awareness: 1
   archetype: 2

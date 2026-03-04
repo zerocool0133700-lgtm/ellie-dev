@@ -1,5 +1,6 @@
 ---
 token_budget: 16000
+allowed_skills: [skill-detector]
 section_priorities:
   queue: 1
   archetype: 2

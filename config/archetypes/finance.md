@@ -1,6 +1,6 @@
 ---
 token_budget: 20000
-allowed_skills: [plane, memory, forest]
+allowed_skills: [plane, memory, forest, verify]
 section_priorities:
   archetype: 1
   forest-awareness: 2

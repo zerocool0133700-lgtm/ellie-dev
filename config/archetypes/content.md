@@ -1,6 +1,6 @@
 ---
 token_budget: 20000
-allowed_skills: [memory, forest, google-workspace]
+allowed_skills: [memory, forest, google-workspace, context-strategy]
 section_priorities:
   archetype: 1
   psy: 2

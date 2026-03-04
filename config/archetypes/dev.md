@@ -1,6 +1,6 @@
 ---
 token_budget: 28000
-allowed_skills: [github, plane, memory, forest, verify]
+allowed_skills: [github, plane, memory, forest, verify, context-strategy]
 section_priorities:
   archetype: 1
   work-item: 2

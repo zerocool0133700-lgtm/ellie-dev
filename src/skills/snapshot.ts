@@ -18,7 +18,14 @@ let snapshotVersion = 0;
  * Optionally filter to only include specific skills (ELLIE-367: creature skill allow-lists).
  */
 export async function getSkillSnapshot(allowedSkills?: string[]): Promise<SkillSnapshot> {
-  const cacheKey = allowedSkills ? allowedSkills.slice().sort().join(",") : "all";
+  // ELLIE-430: No declaration = no skills. If allowedSkills is undefined,
+  // the agent has no skill list — return empty. Pass explicit array to load skills.
+  if (!allowedSkills) {
+    const empty: SkillSnapshot = { prompt: "", skills: [], version: snapshotVersion, totalChars: 0 };
+    return empty;
+  }
+
+  const cacheKey = allowedSkills.length > 0 ? allowedSkills.slice().sort().join(",") : "none";
   const cached = snapshotCache.get(cacheKey);
   if (cached && cached.version === snapshotVersion) {
     return cached;
@@ -27,10 +34,8 @@ export async function getSkillSnapshot(allowedSkills?: string[]): Promise<SkillS
   const allSkills = await loadSkillEntries();
   let eligible = await filterEligibleSkills(allSkills);
 
-  if (allowedSkills) {
-    const allowed = new Set(allowedSkills);
-    eligible = eligible.filter(s => allowed.has(s.name));
-  }
+  const allowed = new Set(allowedSkills);
+  eligible = eligible.filter(s => allowed.has(s.name));
 
   const prompt = buildSkillsPrompt(eligible);
 
@@ -58,11 +63,11 @@ export function bumpSnapshotVersion(): void {
 }
 
 /**
- * Force a fresh rebuild (ignores cache).
+ * Force a cache invalidation. Next getSkillSnapshot() call with any
+ * allowedSkills will rebuild from disk.
  */
-export async function rebuildSnapshot(): Promise<SkillSnapshot> {
+export function rebuildSnapshot(): void {
   bumpSnapshotVersion();
-  return getSkillSnapshot();
 }
 
 /**

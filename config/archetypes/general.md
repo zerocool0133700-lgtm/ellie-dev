@@ -1,6 +1,6 @@
 ---
 token_budget: 24000
-allowed_skills: [plane, memory, forest, github, briefing, google-workspace]
+allowed_skills: [plane, memory, forest, github, briefing, google-workspace, verify, context-strategy, skill-detector]
 section_priorities:
   conversation: 1
   forest-awareness: 2

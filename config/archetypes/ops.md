@@ -1,6 +1,6 @@
 ---
 token_budget: 24000
-allowed_skills: [plane, github, memory, forest, alert]
+allowed_skills: [plane, github, memory, forest, alert, verify]
 section_priorities:
   health: 1
   queue: 2
