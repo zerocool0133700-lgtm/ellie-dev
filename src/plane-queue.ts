@@ -69,6 +69,9 @@ export async function enqueuePlaneStateChange(opts: {
 
 /**
  * Enqueue a Plane comment for reliable delivery.
+ * When session_id is provided, uses ON CONFLICT DO NOTHING so duplicate
+ * enqueue calls (e.g. after a transient failure retry) are idempotent.
+ * Requires the plane_sync_queue_session_dedup partial unique index (ELLIE-477).
  */
 export async function enqueuePlaneComment(opts: {
   workItemId: string;
@@ -79,10 +82,19 @@ export async function enqueuePlaneComment(opts: {
 }): Promise<void> {
   try {
     const sql = await getSql();
-    await sql`
-      INSERT INTO plane_sync_queue (action, work_item_id, comment_html, project_id, issue_id, session_id)
-      VALUES ('add_comment', ${opts.workItemId}, ${opts.commentHtml}, ${opts.projectId || null}, ${opts.issueId || null}, ${opts.sessionId || null})
-    `;
+    if (opts.sessionId) {
+      // Idempotent insert — skip if same session comment already queued
+      await sql`
+        INSERT INTO plane_sync_queue (action, work_item_id, comment_html, project_id, issue_id, session_id)
+        VALUES ('add_comment', ${opts.workItemId}, ${opts.commentHtml}, ${opts.projectId || null}, ${opts.issueId || null}, ${opts.sessionId})
+        ON CONFLICT (work_item_id, action, session_id) WHERE session_id IS NOT NULL DO NOTHING
+      `;
+    } else {
+      await sql`
+        INSERT INTO plane_sync_queue (action, work_item_id, comment_html, project_id, issue_id, session_id)
+        VALUES ('add_comment', ${opts.workItemId}, ${opts.commentHtml}, ${opts.projectId || null}, ${opts.issueId || null}, NULL)
+      `;
+    }
     logger.info("Enqueued comment", { workItemId: opts.workItemId });
   } catch (err) {
     logger.error("Failed to enqueue comment", err);

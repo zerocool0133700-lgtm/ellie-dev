@@ -163,12 +163,22 @@ export async function updateWorkItemOnSessionStart(workItemId: string, sessionId
   }
 
   const { projectId, issueId } = resolved;
+  const comment = `<p>Work session started — <code>${sessionId}</code></p>`;
 
-  // Move to "In Progress" (group: "started")
+  // Fetch state ID (shared prerequisite), then fire state + comment in parallel.
+  // Each failure is caught independently so a comment failure never masks a
+  // successful state change and vice versa (ELLIE-477).
   const inProgressStateId = await getStateIdByGroup(projectId, "started");
+  const [stateOutcome, commentOutcome] = await Promise.allSettled([
+    inProgressStateId
+      ? updateIssueState(projectId, issueId, inProgressStateId)
+      : Promise.resolve(null),
+    addIssueComment(projectId, issueId, comment),
+  ]);
+
   if (inProgressStateId) {
-    const result = await updateIssueState(projectId, issueId, inProgressStateId);
-    if (result === null) {
+    const stateFailed = stateOutcome.status === "rejected" || (stateOutcome.status === "fulfilled" && stateOutcome.value === null);
+    if (stateFailed) {
       logger.warn("State update failed — queueing for retry", { workItemId });
       await enqueuePlaneStateChange({ workItemId, stateGroup: "started", projectId, issueId, sessionId });
     } else {
@@ -176,10 +186,8 @@ export async function updateWorkItemOnSessionStart(workItemId: string, sessionId
     }
   }
 
-  // Add comment with session ID
-  const comment = `<p>Work session started — <code>${sessionId}</code></p>`;
-  const commentResult = await addIssueComment(projectId, issueId, comment);
-  if (commentResult === null) {
+  const commentFailed = commentOutcome.status === "rejected" || (commentOutcome.status === "fulfilled" && commentOutcome.value === null);
+  if (commentFailed) {
     logger.warn("Comment failed — queueing for retry", { workItemId });
     await enqueuePlaneComment({ workItemId, commentHtml: comment, projectId, issueId, sessionId });
   } else {
@@ -223,11 +231,18 @@ export async function updateWorkItemOnSessionComplete(
 
   const { projectId, issueId } = resolved;
 
-  // Map session status to Plane state group
+  // Fetch state ID (shared prerequisite), then fire state + comment in parallel (ELLIE-477).
   const stateId = await getStateIdByGroup(projectId, stateGroup);
+  const [stateOutcome, commentOutcome] = await Promise.allSettled([
+    stateId
+      ? updateIssueState(projectId, issueId, stateId)
+      : Promise.resolve(null),
+    addIssueComment(projectId, issueId, comment),
+  ]);
+
   if (stateId) {
-    const result = await updateIssueState(projectId, issueId, stateId);
-    if (result === null) {
+    const stateFailed = stateOutcome.status === "rejected" || (stateOutcome.status === "fulfilled" && stateOutcome.value === null);
+    if (stateFailed) {
       logger.warn("State update failed — queueing for retry", { workItemId });
       await enqueuePlaneStateChange({ workItemId, stateGroup, projectId, issueId });
     } else {
@@ -235,9 +250,8 @@ export async function updateWorkItemOnSessionComplete(
     }
   }
 
-  // Add completion comment
-  const commentResult = await addIssueComment(projectId, issueId, comment);
-  if (commentResult === null) {
+  const commentFailed = commentOutcome.status === "rejected" || (commentOutcome.status === "fulfilled" && commentOutcome.value === null);
+  if (commentFailed) {
     logger.warn("Comment failed — queueing for retry", { workItemId });
     await enqueuePlaneComment({ workItemId, commentHtml: comment, projectId, issueId });
   } else {
@@ -263,17 +277,15 @@ export async function updateWorkItemOnFailure(workItemId: string, errorMessage: 
   }
 
   const { projectId, issueId } = resolved;
-
-  // Move back to "unstarted" (Todo)
-  const unstarted = await getStateIdByGroup(projectId, "unstarted");
-  if (unstarted) {
-    await updateIssueState(projectId, issueId, unstarted).catch(() => {});
-    console.log(`[plane] ${workItemId} → Todo (pipeline failure)`);
-  }
-
-  // Add failure comment
   const comment = `<p>⚠️ Pipeline failed — ticket moved back to Todo</p><p><code>${errorMessage.slice(0, 500)}</code></p>`;
-  await addIssueComment(projectId, issueId, comment).catch(() => {});
+
+  // Move back to "unstarted" (Todo) + add failure comment in parallel (ELLIE-477).
+  const unstarted = await getStateIdByGroup(projectId, "unstarted");
+  await Promise.allSettled([
+    unstarted ? updateIssueState(projectId, issueId, unstarted) : Promise.resolve(null),
+    addIssueComment(projectId, issueId, comment),
+  ]);
+  if (unstarted) console.log(`[plane] ${workItemId} → Todo (pipeline failure)`);
 }
 
 // ============================================================
