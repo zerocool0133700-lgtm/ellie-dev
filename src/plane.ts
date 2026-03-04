@@ -104,6 +104,18 @@ export async function getStateIdByGroup(projectId: string, group: string): Promi
 }
 
 /**
+ * Get the current state group of an issue by its UUID.
+ * Used by the queue worker to detect idempotency before retrying a state
+ * change — if the issue is already in the target group, the PATCH is skipped
+ * (ELLIE-488).
+ */
+export async function getIssueStateGroup(projectId: string, issueId: string): Promise<string | null> {
+  const data = await planeRequest(`/projects/${projectId}/issues/${issueId}/`);
+  if (!data) return null;
+  return (data.state_detail as Record<string, string>)?.group ?? null;
+}
+
+/**
  * Resolve a readable work item ID (e.g. "ELLIE-7") to Plane UUIDs.
  * Returns { projectId, issueId } or null if not found.
  */

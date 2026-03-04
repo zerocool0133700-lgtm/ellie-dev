@@ -158,11 +158,27 @@ export async function processQueue(): Promise<{ processed: number; failed: numbe
 
       // Execute the action
       if (item.action === "state_change" && item.state_group) {
-        const { getStateIdByGroup } = await import("./plane.ts");
-        const stateId = await getStateIdByGroup(projectId, item.state_group);
-        if (!stateId) throw new Error(`Unknown state group: ${item.state_group}`);
-        const result = await updateIssueState(projectId, issueId, stateId);
-        if (result === null) throw new Error("updateIssueState returned null (circuit breaker or API error)");
+        const { getStateIdByGroup, getIssueStateGroup } = await import("./plane.ts");
+
+        // Idempotency check — fetch current state before retrying (ELLIE-488).
+        // If the previous attempt succeeded but confirmation failed (e.g. circuit
+        // breaker tripped while reading the PATCH response), skip the redundant
+        // PATCH rather than blindly re-applying a state transition that may
+        // already have taken effect.
+        const currentGroup = await getIssueStateGroup(projectId, issueId);
+        if (currentGroup === item.state_group) {
+          logger.info("State already matches target — skipping redundant PATCH", {
+            workItemId: item.work_item_id,
+            stateGroup: item.state_group,
+          });
+          // Fall through to the success path — mark as completed
+        } else {
+          const stateId = await getStateIdByGroup(projectId, item.state_group);
+          if (!stateId) throw new Error(`Unknown state group: ${item.state_group}`);
+          const result = await updateIssueState(projectId, issueId, stateId);
+          if (result === null) throw new Error("Circuit breaker open — Plane API unavailable, will retry later");
+          logger.info("State change applied", { workItemId: item.work_item_id, stateGroup: item.state_group });
+        }
       } else if (item.action === "add_comment" && item.comment_html) {
         const result = await addIssueComment(projectId, issueId, item.comment_html);
         if (result === null) throw new Error("addIssueComment returned null (circuit breaker or API error)");
