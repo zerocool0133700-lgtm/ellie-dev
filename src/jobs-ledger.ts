@@ -20,6 +20,11 @@ function db() {
   return _db;
 }
 
+/** Reset the DB singleton — for unit tests only. */
+export function _resetDbForTesting(): void {
+  _db = null;
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export type JobType = "dispatch" | "pipeline" | "fan-out" | "critic-loop";
