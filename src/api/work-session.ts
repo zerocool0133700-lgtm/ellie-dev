@@ -28,6 +28,12 @@ import {
 import { notify, type NotifyContext } from "../notification-policy.ts";
 import { findJobByTreeId, writeJobTouchpointForAgent } from "../jobs-ledger.ts";
 import { resolveEntityName } from "../agent-entity-map.ts";
+import {
+  writeWorkTrailStart,
+  appendWorkTrailProgress,
+  buildWorkTrailUpdateAppend,
+  buildWorkTrailCompleteAppend,
+} from "../work-trail-writer.ts";
 
 /**
  * Resolve agent from Supabase agent_sessions when not explicitly provided.
@@ -116,6 +122,9 @@ export async function startWorkSession(req: ApiRequest, res: ApiResponse, bot: B
       entity_names: entityNames,
     });
     const { tree, trunk, creatures, branches } = result;
+
+    // ELLIE-531: Create work trail document (fire-and-forget, non-fatal)
+    writeWorkTrailStart(work_item_id, title, agent).catch(() => {});
     if ((result as Record<string, unknown>).resumed) {
       console.log(`[work-session:start] Resumed existing session ${tree.id} for ${work_item_id}`);
     }
@@ -211,6 +220,9 @@ export async function updateWorkSession(req: ApiRequest, res: ApiResponse, bot: 
 
     // Add progress commit (replaces Supabase insert)
     await forestAddUpdate(tree.id, entity?.id, message, undefined, git_sha || undefined);
+
+    // ELLIE-531: Append update to work trail (fire-and-forget, non-fatal)
+    appendWorkTrailProgress(work_item_id, buildWorkTrailUpdateAppend(message)).catch(() => {});
 
     // Notify via policy engine (Google Chat only by default — Telegram disabled for updates)
     const telegramMsg = [
@@ -359,6 +371,9 @@ export async function completeWorkSession(req: ApiRequest, res: ApiResponse, bot
 
     // Complete session in forest (merges branches, completes creatures, transitions to dormant)
     await forestCompleteSession(tree.id, summary);
+
+    // ELLIE-531: Append completion summary to work trail (fire-and-forget, non-fatal)
+    appendWorkTrailProgress(work_item_id, buildWorkTrailCompleteAppend(summary)).catch(() => {});
 
     // Auto-deploy: if dashboard source is newer than build, rebuild and restart
     try {
