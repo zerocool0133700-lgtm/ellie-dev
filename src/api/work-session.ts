@@ -23,6 +23,7 @@ import {
   addWorkSessionDecision as forestAddDecision,
   getWorkSessionByPlaneId,
   getEntity,
+  getAgent,
 } from '../../../ellie-forest/src/index';
 import { notify, type NotifyContext } from "../notification-policy.ts";
 import { findJobByTreeId, writeJobTouchpointForAgent } from "../jobs-ledger.ts";
@@ -92,11 +93,19 @@ export async function startWorkSession(req: ApiRequest, res: ApiResponse, bot: B
     // Resolve agent: use explicit value if provided, otherwise auto-detect from active session
     const agent = await resolveAgent(supabase ?? null, explicitAgent);
 
+    // Validate agent exists before touching Plane or Forest
+    if (agent) {
+      const agentRecord = await getAgent(agent);
+      if (!agentRecord) {
+        return res.status(400).json({ error: `Agent "${agent}" does not exist` });
+      }
+    }
+
     // Map agent short names to forest entity names
     const AGENT_ENTITY_MAP: Record<string, string> = {
       dev: 'dev_agent', research: 'research_agent', critic: 'critic_agent',
       content: 'content_agent', finance: 'finance_agent', strategy: 'strategy_agent',
-      general: 'general_agent', router: 'agent_router',
+      general: 'general_agent', router: 'agent_router', ops: 'ops_agent',
     };
     const entityName = agent ? (AGENT_ENTITY_MAP[agent] ?? agent) : undefined;
     const entityNames = entityName ? [entityName] : undefined;
