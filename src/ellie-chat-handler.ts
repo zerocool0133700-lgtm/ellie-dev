@@ -118,6 +118,12 @@ import {
   _buildShouldFetch as buildShouldFetch,
   _gatherContextSources as gatherContextSources,
 } from "./ellie-chat-pipeline.ts";
+import {
+  extractCommandBarScope,
+  extractWorkItemId,
+  classifyRoute,
+  COMMAND_BAR_CHANNEL_ID,
+} from "./ellie-chat-utils.ts";
 
 export async function handleEllieChatMessage(
   ws: WebSocket,
@@ -182,12 +188,11 @@ async function _handleEllieChatMessage(
 
   // ELLIE-400: Extract scope context from command bar messages
   let commandBarContext: string | undefined;
-  if (channelId === "a0000000-0000-0000-0000-000000000100") {
-    const scopeMatch = text.match(/^\[scope:\s*([^\]]+)\]\s*/);
-    if (scopeMatch) {
-      const scopePath = scopeMatch[1].trim();
+  {
+    const { scopePath, strippedText } = extractCommandBarScope(text, channelId);
+    if (scopePath) {
       commandBarContext = `FOREST EDITOR CONTEXT:\nYou are operating in the inline Forest Editor command bar on the Knowledge Tree page.\nThe user is viewing scope: ${scopePath}\nWhen writing memories, use scope_path: "${scopePath}"\nWhen browsing or searching, start from this scope.\nKeep responses concise — this is an inline editor, not a full chat.`;
-      text = text.slice(scopeMatch[0].length);
+      text = strippedText;
     }
   }
 
@@ -633,7 +638,7 @@ async function _handleEllieChatMessage(
       console.log(`[context] refresh triggered — reloading all sources`);
     }
 
-    const ellieChatWorkItem = text.match(/\b([A-Z]+-\d+)\b/)?.[1];
+    const ellieChatWorkItem = extractWorkItemId(text);
 
     // ELLIE-381: Pre-routing mode check — skill-only → road-runner override
     const preRouteDetection = detectMode(text);
@@ -671,8 +676,11 @@ async function _handleEllieChatMessage(
 
     // ── ASYNC SPECIALIST PATH: ack immediately, run in background ──
     const ecRouteAgent = agentResult?.dispatch?.agent?.name || "general";
-    const isSpecialist = ecRouteAgent !== "general";
-    const isMultiStep = agentResult?.route.execution_mode !== "single" && agentResult?.route.skills?.length;
+    const { isSpecialist, isMultiStep } = classifyRoute(
+      ecRouteAgent,
+      agentResult?.route.execution_mode,
+      agentResult?.route.skills?.length ?? 0,
+    );
 
     if (isSpecialist && !isMultiStep && agentResult) {
       const ack = getSpecialistAck(ecRouteAgent);
@@ -1200,15 +1208,15 @@ export async function runSpecialistAsync(
 
     // Work item context
     let workItemContext = "";
-    const workItemMatch = effectiveText.match(/\b([A-Z]+-\d+)\b/);
+    const workItemId2 = extractWorkItemId(effectiveText);
     const isWorkIntent = agentResult.route.skill_name === "code_changes" ||
       agentResult.route.skill_name === "code_review" ||
       agentResult.route.skill_name === "debugging";
-    if (workItemMatch && isPlaneConfigured()) {
-      const details = await fetchWorkItemDetails(workItemMatch[1]);
+    if (workItemId2 && isPlaneConfigured()) {
+      const details = await fetchWorkItemDetails(workItemId2);
       if (details) {
         const label = isWorkIntent ? "ACTIVE WORK ITEM" : "REFERENCED WORK ITEM";
-        workItemContext = `\n${label}: ${workItemMatch[1]}\n` +
+        workItemContext = `\n${label}: ${workItemId2}\n` +
           `Title: ${details.name}\n` +
           `Priority: ${details.priority}\n` +
           `Description: ${details.description}\n`;
