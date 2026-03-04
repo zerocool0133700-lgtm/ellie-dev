@@ -16,6 +16,7 @@ import {
   getActiveAgent, setActiveAgent,
   broadcastExtension, getRelayDeps, getNotifyCtx,
 } from "./relay-state.ts";
+import { resolveEntityName } from "./agent-entity-map.ts";
 import {
   resetTelegramIdleTimer, resetGchatIdleTimer, resetEllieChatIdleTimer,
 } from "./relay-idle.ts";
@@ -531,8 +532,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
     try {
       const { default: forestSql } = await import('../../ellie-forest/src/db');
       const { getEntity } = await import('../../ellie-forest/src/index');
-      const AGENT_ENTITY_MAP: Record<string, string> = { dev: "dev_agent", general: "general_agent" };
-      const entityName = AGENT_ENTITY_MAP[agentResult.dispatch.agent.name] ?? agentResult.dispatch.agent.name;
+      const entityName = resolveEntityName(agentResult.dispatch.agent.name);
       const entity = await getEntity(entityName);
       if (entity) {
         const [tree] = await forestSql<{ id: string; work_item_id: string | null }[]>`

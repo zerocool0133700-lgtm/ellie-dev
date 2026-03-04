@@ -18,6 +18,7 @@ import {
   wsAppUserMap, ellieChatPhoneHistories, ellieChatClients,
   broadcastExtension, getRelayDeps, getNotifyCtx,
 } from "./relay-state.ts";
+import { resolveEntityName } from "./agent-entity-map.ts";
 import { resetEllieChatIdleTimer, resetTelegramIdleTimer, resetGchatIdleTimer } from "./relay-idle.ts";
 import { textToSpeechFast } from "./tts.ts";
 import {
@@ -1017,8 +1018,7 @@ async function _handleEllieChatMessage(
       try {
         const { default: forestSql } = await import('../../ellie-forest/src/db');
         const { getEntity } = await import('../../ellie-forest/src/index');
-        const AGENT_ENTITY_MAP: Record<string, string> = { dev: "dev_agent", general: "general_agent" };
-        const entityName = AGENT_ENTITY_MAP[agentResult.dispatch.agent.name] ?? agentResult.dispatch.agent.name;
+        const entityName = resolveEntityName(agentResult.dispatch.agent.name);
         const entity = await getEntity(entityName);
         if (entity) {
           // Find most recently active tree (growing or dormant within last 5 min)
