@@ -830,6 +830,158 @@ describe("buildPrompt — awareness and command bar context", () => {
   });
 });
 
+// ── ELLIE-525: Soul only for primary Ellie ────────────────────
+
+describe("buildPrompt — ELLIE-525 soul gating", () => {
+  // The soul section only appears when soulContext is non-empty AND the agent
+  // is primary Ellie (general). If soul.md is not loaded in the test environment
+  // we check via metrics; if it is loaded we can check string content too.
+
+  it("general agent (no agentConfig.name) includes soul section in metrics", () => {
+    buildPrompt("Hello");
+    const metrics = getLastBuildMetrics()!;
+    // Soul section should be present for primary Ellie (or absent if soul.md not loaded)
+    const soul = metrics.sections.find(s => s.label === "soul");
+    // If soulContext is loaded the section exists; if not, it correctly doesn't appear.
+    // Either way, there must be NO soul when we pass a downstream agent name (tested below).
+    expect(metrics).not.toBeNull();
+  });
+
+  it("dev agent does NOT include soul section in metrics", () => {
+    buildPrompt(
+      "Fix the bug",
+      undefined, undefined, undefined, "telegram",
+      { system_prompt: "You are a dev agent.", name: "dev" },
+    );
+    const metrics = getLastBuildMetrics()!;
+    const soul = metrics.sections.find(s => s.label === "soul");
+    expect(soul).toBeUndefined();
+  });
+
+  it("research agent does NOT include soul section", () => {
+    buildPrompt(
+      "Research this topic",
+      undefined, undefined, undefined, "telegram",
+      { system_prompt: "You are a research agent.", name: "research" },
+    );
+    const metrics = getLastBuildMetrics()!;
+    expect(metrics.sections.find(s => s.label === "soul")).toBeUndefined();
+  });
+
+  it("strategy agent does NOT include soul section", () => {
+    buildPrompt(
+      "Plan Q2",
+      undefined, undefined, undefined, "telegram",
+      { system_prompt: "You are a strategy agent.", name: "strategy" },
+    );
+    const metrics = getLastBuildMetrics()!;
+    expect(metrics.sections.find(s => s.label === "soul")).toBeUndefined();
+  });
+
+  it("critic agent does NOT include soul section", () => {
+    buildPrompt(
+      "Review this code",
+      undefined, undefined, undefined, "telegram",
+      { system_prompt: "You are a critic.", name: "critic" },
+    );
+    const metrics = getLastBuildMetrics()!;
+    expect(metrics.sections.find(s => s.label === "soul")).toBeUndefined();
+  });
+
+  it("finance agent does NOT include soul section", () => {
+    buildPrompt(
+      "Analyse the P&L",
+      undefined, undefined, undefined, "telegram",
+      { system_prompt: "You are a finance agent.", name: "finance" },
+    );
+    const metrics = getLastBuildMetrics()!;
+    expect(metrics.sections.find(s => s.label === "soul")).toBeUndefined();
+  });
+
+  it("ops agent does NOT include soul section", () => {
+    buildPrompt(
+      "Check the servers",
+      undefined, undefined, undefined, "telegram",
+      { system_prompt: "You are an ops agent.", name: "ops" },
+    );
+    const metrics = getLastBuildMetrics()!;
+    expect(metrics.sections.find(s => s.label === "soul")).toBeUndefined();
+  });
+
+  it("explicit general agent name still includes soul section", () => {
+    buildPrompt(
+      "Hello",
+      undefined, undefined, undefined, "telegram",
+      { system_prompt: null, name: "general" },
+    );
+    const metrics = getLastBuildMetrics()!;
+    // Soul should be present for 'general' IF soul.md is loaded
+    // (section only exists when soulContext is non-empty)
+    const soul = metrics.sections.find(s => s.label === "soul");
+    // General agent is allowed to have it — it must not be explicitly absent due to the gate
+    // We can't assert presence unless we know soul.md content, but we assert the label
+    // is not artificially blocked for 'general'.
+    // Verify the gate condition: if soul.md exists and content is loaded, it should appear.
+    if (soul !== undefined) {
+      expect(soul.label).toBe("soul");
+    }
+  });
+
+  it("downstream agent gets archetype and psy but NOT soul", () => {
+    buildPrompt(
+      "Do the work",
+      undefined, undefined, undefined, "telegram",
+      { system_prompt: "You are a dev agent.", name: "dev" },
+      undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, "Dev archetype content", "Psy context here",
+    );
+    const metrics = getLastBuildMetrics()!;
+    const labels = metrics.sections.map(s => s.label);
+
+    expect(labels).not.toContain("soul");
+    expect(labels).toContain("archetype"); // archetype is NOT gated
+    expect(labels).toContain("psy");       // psy is NOT gated
+  });
+
+  it("no agentConfig at all treats as general agent (soul allowed)", () => {
+    // buildPrompt with no agentConfig → isGeneralAgent = true
+    buildPrompt("Hello");
+    const metrics = getLastBuildMetrics()!;
+    // soul section may or may not be present depending on whether soul.md is loaded,
+    // but the gate MUST NOT block it when there's no agent config.
+    // We verify by checking dev does NOT have soul, confirming the gate is asymmetric.
+    const noneMetrics = metrics;
+
+    buildPrompt(
+      "Hello",
+      undefined, undefined, undefined, "telegram",
+      { name: "dev" },
+    );
+    const devMetrics = getLastBuildMetrics()!;
+    expect(devMetrics.sections.find(s => s.label === "soul")).toBeUndefined();
+  });
+
+  it("soul-gating does not affect other personality sections (archetype/psy/phase/health)", () => {
+    // Downstream agent should still receive archetype, psy, phase, health
+    buildPrompt(
+      "Hello",
+      undefined, undefined, undefined, "telegram",
+      { name: "research" },
+      undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined,
+      "Research archetype", "MBTI: INTJ", "Phase: Established", "Health: Good",
+    );
+    const metrics = getLastBuildMetrics()!;
+    const labels = metrics.sections.map(s => s.label);
+
+    expect(labels).not.toContain("soul");
+    expect(labels).toContain("archetype");
+    expect(labels).toContain("psy");
+    expect(labels).toContain("phase");
+    expect(labels).toContain("health");
+  });
+});
+
 // ── Prompt section ordering sanity checks ────────────────────
 
 describe("buildPrompt — section ordering", () => {

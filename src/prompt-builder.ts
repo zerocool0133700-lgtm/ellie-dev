@@ -526,11 +526,17 @@ export function buildPrompt(
   // Priority: 1 = never trim, 2 = essential, 3 = important, 4-6 = context, 7-9 = trim first
   const sections: PromptSection[] = [];
 
+  // ELLIE-525: Only primary Ellie (general agent) loads soul.md.
+  // Downstream agents (dev, critic, research, finance, strategy, ops) are tools,
+  // not user-facing personalities — they don't need warmth or identity instructions.
+  const isGeneralAgent = !agentConfig?.name || agentConfig.name === "general";
+
   // Priority 1: User message (never trimmed)
   sections.push({ label: "user-message", content: `\nUser: ${userMessage}`, priority: 1 });
 
   // Priority 2: Soul + personality (small, defines who Ellie is)
-  if (soulContext) sections.push({ label: "soul", content: `# Ellie Soul\n${soulContext}\n---\n`, priority: 2 });
+  // ELLIE-525: Soul only for primary Ellie — saves ~2,500 tokens per downstream agent call.
+  if (soulContext && isGeneralAgent) sections.push({ label: "soul", content: `# Ellie Soul\n${soulContext}\n---\n`, priority: 2 });
   if (archetypeContext) sections.push({ label: "archetype", content: `# Behavioral Archetype\n${archetypeContext}\n---\n`, priority: 2 });
   if (psyContext) sections.push({ label: "psy", content: `# Psychological Profile\n${psyContext}\n---\n`, priority: 2 });
   if (phaseContext) sections.push({ label: "phase", content: `# Relationship Phase\n${phaseContext}\n---\n`, priority: 2 });
@@ -747,8 +753,6 @@ export function buildPrompt(
 
   // Priority 3: Work item + dispatch protocols
   if (workItemContext) sections.push({ label: "work-item", content: workItemContext, priority: 3 });
-
-  const isGeneralAgent = !agentConfig?.name || agentConfig.name === "general";
 
   if (workItemContext?.includes("ACTIVE WORK ITEM") && !isGeneralAgent) {
     sections.push({ label: "dev-protocol", content:
