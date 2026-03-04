@@ -50,6 +50,8 @@ const SOURCE_TIMEOUTS: Record<string, number> = {
   calendar:  6_000,
   gmail:     6_000,
   tasks:     6_000,
+  // River (QMD) — local CLI, should be fast
+  river:     3_000,
 };
 const DEFAULT_SOURCE_TIMEOUT_MS = 3_000;
 
@@ -842,7 +844,7 @@ const STRATEGY_PRESETS: Record<ContextStrategy, StrategyPreset> = {
     sectionPriorities: { soul: 2 },
   },
   focused: {
-    sources: ['work_items', 'work_sessions', 'action_items', 'goals'],
+    sources: ['work_items', 'work_sessions', 'action_items', 'goals', 'river'],
     priority: ['work_items', 'work_sessions'],
     exclude: [],
     excludeSections: ['context-docket'],
@@ -948,13 +950,15 @@ export async function getAgentStructuredContext(
 
   // Determine which sources to fetch:
   // Explicit sources > strategy sources > all
+  // 'river' is a special source handled separately (needs agentName, not in SOURCE_REGISTRY)
+  const SPECIAL_SOURCES = new Set(['river']);
   let sourceNames: string[];
   if (Array.isArray(profile.sources)) {
-    sourceNames = profile.sources.filter(s => s in SOURCE_REGISTRY);
+    sourceNames = profile.sources.filter(s => s in SOURCE_REGISTRY || SPECIAL_SOURCES.has(s));
   } else if (Array.isArray(preset.sources)) {
-    sourceNames = preset.sources.filter(s => s in SOURCE_REGISTRY);
+    sourceNames = preset.sources.filter(s => s in SOURCE_REGISTRY || SPECIAL_SOURCES.has(s));
   } else {
-    sourceNames = [...ALL_SOURCE_NAMES];
+    sourceNames = [...ALL_SOURCE_NAMES, ...SPECIAL_SOURCES];
   }
 
   // Apply exclusions: merge strategy + explicit
@@ -966,22 +970,37 @@ export async function getAgentStructuredContext(
     sourceNames = sourceNames.filter(s => !allExclusions.has(s));
   }
 
+  // Split registry sources from special sources
+  const registryNames = sourceNames.filter(s => s in SOURCE_REGISTRY);
+  const includeRiver = sourceNames.includes('river');
+
   // Fetch all selected sources in parallel (ELLIE-327: with freshness tracking)
   // ELLIE-458/465: allSettled + per-source timeout so slow/failing sources never kill context
-  const rawEntries = await Promise.allSettled(
-    sourceNames.map(async (name) => {
+  // ELLIE-477: River fetched in parallel as special source (needs agentName)
+  const rawEntries = await Promise.allSettled([
+    ...registryNames.map(async (name) => {
       const start = Date.now();
       const timeoutMs = SOURCE_TIMEOUTS[name] ?? DEFAULT_SOURCE_TIMEOUT_MS;
       const content = await withTimeout(SOURCE_REGISTRY[name](supabase), timeoutMs, "");
       const latencyMs = Date.now() - start;
       freshnessTracker.recordFetch(name, latencyMs);
       return { name, content };
-    })
-  );
+    }),
+    // ELLIE-477: River context — agent-aware QMD search
+    ...(includeRiver ? [
+      (async () => {
+        const start = Date.now();
+        const content = await withTimeout(getRiverContextForAgent(agentName), SOURCE_TIMEOUTS.river ?? DEFAULT_SOURCE_TIMEOUT_MS, "");
+        freshnessTracker.recordFetch("river", Date.now() - start);
+        return { name: "river", content };
+      })(),
+    ] : []),
+  ]);
+  const allSourceNames = [...registryNames, ...(includeRiver ? ['river'] : [])];
   const entries = rawEntries.map((r, i) => {
     if (r.status === "rejected") {
-      logger.warn(`Context source '${sourceNames[i]}' failed`, { error: r.reason instanceof Error ? r.reason.message : String(r.reason) });
-      return { name: sourceNames[i], content: "" };
+      logger.warn(`Context source '${allSourceNames[i]}' failed`, { error: r.reason instanceof Error ? r.reason.message : String(r.reason) });
+      return { name: allSourceNames[i], content: "" };
     }
     return r.value;
   });
@@ -1048,12 +1067,7 @@ export function getMaxMemoriesForModel(model?: string | null): number {
   return 20; // opus and other large models
 }
 
-/** Agent name → forest entity name mapping */
-const AGENT_ENTITY_MAP: Record<string, string> = {
-  dev: 'dev_agent', research: 'research_agent', critic: 'critic_agent',
-  content: 'content_agent', finance: 'finance_agent', strategy: 'strategy_agent',
-  general: 'general_agent',
-};
+import { AGENT_ENTITY_MAP } from './agent-entity-map.ts';
 
 export interface AgentSessionContext {
   /** Formatted memory text for prompt injection */
