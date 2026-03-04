@@ -59,16 +59,16 @@ import { startExpiryCleanup } from "./approval.ts";
 import { notify } from "./notification-policy.ts";
 import { expireIdleConversations } from "./conversations.ts";
 import { expireStaleItems } from "./api/agent-queue.ts";
-import { startPlaneQueueWorker, purgeCompleted as purgePlaneQueue } from "./plane-queue.ts";
-import { startWatchdog, recoverActiveRuns, setWatchdogNotify } from "./orchestration-tracker.ts";
-import { reconcileOnStartup, startReconciler } from "./orchestration-reconciler.ts";
+import { startPlaneQueueWorker, purgeCompleted as purgePlaneQueue, stopPlaneQueueWorker } from "./plane-queue.ts";
+import { startWatchdog, recoverActiveRuns, setWatchdogNotify, stopWatchdog } from "./orchestration-tracker.ts";
+import { reconcileOnStartup, startReconciler, stopReconciler } from "./orchestration-reconciler.ts";
 import { restoreModeState } from "./context-mode.ts";
 import { cleanupOrphanedJobs, registerJobVines } from "./jobs-ledger.ts";
 import { onBridgeWrite } from "./api/bridge.ts";
 import { setBroadcastToEllieChat } from "./tool-approval.ts";
 import { getSummaryState } from "./ums/consumers/summary.ts";
 import { runHealthCheck } from "./channel-health.ts";
-import { periodicTask, _startedAt, STARTUP_GRACE_MS } from "./periodic-task.ts";
+import { periodicTask, stopAllPeriodicTasks, _startedAt, STARTUP_GRACE_MS } from "./periodic-task.ts";
 
 // ============================================================
 // SETUP
@@ -120,7 +120,8 @@ startExpiryCleanup();
 // Periodic idle conversation expiry (every 5 minutes)
 // ELLIE-232: Now uses expireIdleConversations() which has atomic claim protection
 // to prevent duplicate memory extraction from racing close paths.
-setInterval(async () => {
+// ELLIE-487: Handle tracked so it can be cleared on shutdown.
+const _housekeepingInterval = setInterval(async () => {
   if (Date.now() - _startedAt < STARTUP_GRACE_MS) return; // startup gate
   if (supabase) {
     try {
@@ -564,7 +565,16 @@ async function gracefulShutdown(signal: string): Promise<void> {
   await stopDiscordGateway().catch(() => {});
   console.log("[relay] Discord gateway stopped");
 
-  // 2. Wait for active queue tasks to finish (ELLIE-460: graceful drain)
+  // 2. Stop all background tasks (ELLIE-487)
+  // Prevents periodic tasks from firing during teardown and corrupting state.
+  stopAllPeriodicTasks();
+  clearInterval(_housekeepingInterval);
+  stopWatchdog();
+  stopReconciler();
+  stopPlaneQueueWorker();
+  console.log("[relay] Background tasks stopped (periodic, watchdog, reconciler, plane queue)");
+
+  // 3. Wait for active queue tasks to finish (ELLIE-460: graceful drain)
   const drained = await drainQueues(20_000); // 20s max wait
   if (drained) {
     console.log("[relay] Queues drained cleanly");
@@ -572,15 +582,18 @@ async function gracefulShutdown(signal: string): Promise<void> {
     console.log("[relay] Queue drain timed out — proceeding anyway");
   }
 
-  // 3. Close HTTP server + file watchers
+  // 4. Close HTTP server + file watchers
   httpServer.close();
   const { stopPersonalityWatchers } = await import("./prompt-builder.ts");
   stopPersonalityWatchers();
   console.log("[relay] HTTP server closed, personality watchers stopped");
 
-  // 4. Release lock file
+  // 5. Release lock file with timeout — guards against hung FS or slow cleanup (ELLIE-487)
   const { releaseLock } = await import("./claude-cli.ts");
-  await releaseLock();
+  await Promise.race([
+    releaseLock(),
+    new Promise<void>(resolve => setTimeout(resolve, 5_000)),
+  ]);
 
   console.log("[relay] Shutdown complete");
   process.exit(0);
