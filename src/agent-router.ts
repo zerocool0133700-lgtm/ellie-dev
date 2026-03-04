@@ -9,6 +9,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { classifyIntent, type ExecutionMode } from "./intent-classifier.ts";
 import { log } from "./logger.ts";
+import { RELAY_EPOCH } from "./relay-epoch.ts";
 
 const logger = log.child("agent-router");
 
@@ -174,6 +175,7 @@ async function localDispatch(
         work_item_id: workItemId || null,
         state: "active",
         last_activity: new Date().toISOString(),
+        metadata: { relay_epoch: RELAY_EPOCH },
       })
       .select("id")
       .single();

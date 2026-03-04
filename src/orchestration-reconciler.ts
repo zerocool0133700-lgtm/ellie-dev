@@ -1,5 +1,5 @@
 /**
- * Orchestration State Reconciler — ELLIE-393
+ * Orchestration State Reconciler — ELLIE-393, ELLIE-480
  *
  * Syncs orchestration state across three sources:
  *   1. In-memory tracker (orchestration-tracker.ts)
@@ -10,8 +10,27 @@
  *   - At startup (after recovery)
  *   - Periodically every 60s
  *
- * Logs discrepancies as warnings rather than auto-correcting,
- * except for clearly orphaned in-memory runs with dead processes.
+ * ## State Ownership Model
+ *
+ * | State                        | Owner                   | Lifetime           |
+ * |------------------------------|-------------------------|--------------------|
+ * | Active run tracking          | orchestration-tracker   | Process lifetime   |
+ * | Run history / audit trail    | Forest orchestration_events | Permanent      |
+ * | Session continuity / context | Supabase agent_sessions | Until completed    |
+ * | Active agent per channel     | relay-state             | Process lifetime   |
+ * | Typing / processing status   | ws-delivery             | Request lifetime   |
+ * | Message delivery buffer      | ws-delivery             | 15-min ring buffer |
+ *
+ * **Ground truth after a crash:**
+ *   - For "was this work done?" → Forest orchestration_events (durable)
+ *   - For "was this message delivered?" → Supabase messages.delivery_status
+ *   - In-memory state (activeRuns, activeAgentByChannel, processingUsers) is
+ *     lost on restart and rebuilt from the next incoming requests.
+ *
+ * **On startup (ELLIE-480):** The reconciler closes all orphaned agent_sessions
+ * immediately rather than waiting for the 2-hour inactivity expiry. Sessions
+ * tagged with a previous relay_epoch are stale — the process that created them
+ * is gone and can never resume them.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -196,10 +215,27 @@ async function reconcile(trigger: "startup" | "periodic"): Promise<ReconcileResu
     }
   }
 
-  // ── Check 4: Long-running Supabase sessions with no matching in-memory run ──
-  // This is informational only — active sessions may be from interactive chat,
-  // not orchestrated runs. Just log for visibility.
-  if (supabaseActiveSessions.length > 20) {
+  // ── Check 4: Orphaned Supabase sessions ──
+  // On startup: all "active" sessions are orphaned — the process that created
+  // them is gone and in-memory state is lost. Close them immediately rather
+  // than waiting for the 2-hour inactivity expiry (ELLIE-480).
+  // On periodic: warn if an unusual number accumulate (indicates a leak).
+  if (trigger === "startup" && _supabase && supabaseActiveSessions.length > 0) {
+    const ids = supabaseActiveSessions.map(s => s.id);
+    const { error: cleanupErr } = await _supabase
+      .from("agent_sessions")
+      .update({ state: "completed", completed_at: new Date().toISOString() })
+      .in("id", ids);
+
+    if (cleanupErr) {
+      logger.warn("Could not clean orphaned sessions on startup", cleanupErr);
+    } else {
+      stats.orphansReaped += ids.length;
+      details.push(`startup-session-cleanup: closed ${ids.length} orphaned session(s) from previous relay instance`);
+      discrepancies++;
+      logger.info("Startup: closed orphaned agent sessions", { count: ids.length });
+    }
+  } else if (trigger === "periodic" && supabaseActiveSessions.length > 20) {
     details.push(`supabase: ${supabaseActiveSessions.length} active sessions — may indicate session leak`);
     discrepancies++;
   }
