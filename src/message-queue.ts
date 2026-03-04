@@ -34,8 +34,14 @@ export function setQueueBroadcast(fn: typeof _broadcastExtension): void { _broad
 
 // ── Queue types ──────────────────────────────────────────────
 
+/**
+ * ELLIE-482: Tasks accept an AbortSignal so the queue can cancel them on timeout.
+ * Existing callers may use `() => Promise<void>` — TypeScript allows fewer params.
+ */
+export type QueueTask = (signal: AbortSignal) => Promise<void>;
+
 interface QueueItem {
-  task: () => Promise<void>;
+  task: QueueTask;
   channel: string;
   preview: string;
   enqueuedAt: number;
@@ -56,40 +62,54 @@ export interface DeadLetterEntry {
  * Wraps a task with a timeout. Returns false if timed out or errored.
  * The queue is unblocked either way so processing can continue.
  * Exported with _ prefix for unit testing (ELLIE-465).
+ *
+ * ELLIE-482: Creates an AbortController per task. On timeout, aborts the
+ * controller (which kills any spawned subprocess via callClaude's abortSignal
+ * handler) before unblocking the queue. The signal is passed to the task so
+ * it can propagate it to callClaude().
+ *
+ * @param _testTimeoutMs Override timeout for unit tests only.
  */
-export async function _withQueueTimeout(task: () => Promise<void>, channel: string, preview: string): Promise<boolean> {
-  return withTimeout(task, channel, preview);
+export async function _withQueueTimeout(task: QueueTask, channel: string, preview: string, _testTimeoutMs?: number): Promise<boolean> {
+  return withTimeout(task, channel, preview, _testTimeoutMs);
 }
-async function withTimeout(task: () => Promise<void>, channel: string, preview: string): Promise<boolean> {
+async function withTimeout(task: QueueTask, channel: string, preview: string, overrideMs?: number): Promise<boolean> {
   let resolved = false;
   let success = true;
+  const controller = new AbortController();
+  const timeoutMs = overrideMs ?? QUEUE_TASK_TIMEOUT_MS;
 
   const timeoutPromise = new Promise<void>((resolve) => {
     setTimeout(() => {
       if (!resolved) {
         success = false;
-        logger.error("Queue task timeout — unblocking queue", {
+        controller.abort();  // ELLIE-482: kill spawned subprocess
+        logger.error("Queue task timeout — aborting task and unblocking queue", {
           channel,
           preview,
-          timeoutMs: QUEUE_TASK_TIMEOUT_MS,
+          timeoutMs,
         });
         _broadcastExtension({
           type: "error",
           source: "queue",
-          message: `Task timed out after ${QUEUE_TASK_TIMEOUT_MS / 1000}s on ${channel}`,
+          message: `Task timed out after ${timeoutMs / 1000}s on ${channel}`,
         });
         resolve();
       }
-    }, QUEUE_TASK_TIMEOUT_MS);
+    }, timeoutMs);
   });
 
+  // Keep a reference so we can suppress its unhandled rejection after timeout
+  const taskPromise = task(controller.signal);
   try {
-    await Promise.race([task(), timeoutPromise]);
+    await Promise.race([taskPromise, timeoutPromise]);
   } catch (err) {
     success = false;
     logger.error("Queue task error", { channel, preview }, err);
   } finally {
     resolved = true;
+    // Prevent unhandled rejection if the task throws after the timeout race settled
+    taskPromise.catch(() => {});
   }
 
   return success;
@@ -141,6 +161,30 @@ export class ChannelQueue {
     });
   }
 
+  // ELLIE-482: Unified task runner — all tasks go through withTimeout for consistent
+  // abort-on-timeout behaviour (including the first task, which previously bypassed it).
+  private async _runTask(item: QueueItem): Promise<void> {
+    const ok = await withTimeout(item.task, item.channel, item.preview);
+    if (!ok) {
+      const entry: DeadLetterEntry = {
+        id: randomUUID(),
+        channel: item.channel,
+        preview: item.preview,
+        error: "timed out or failed",
+        ts: Date.now(),
+        queue: this.name,
+      };
+      this._deadLetters.push(entry);
+      if (this._deadLetters.length > MAX_DEAD_LETTERS) {
+        this._deadLetters.shift();
+        rewriteDlqFile().catch(() => {});
+      } else {
+        persistDeadLetter(entry).catch(() => {});
+      }
+      logger.error("Task added to dead letter queue", { queue: this.name, channel: entry.channel, preview: entry.preview });
+    }
+  }
+
   private async process(): Promise<void> {
     while (this._queue.length > 0) {
       const next = this._queue.shift()!;
@@ -150,42 +194,23 @@ export class ChannelQueue {
       }
       this._current = { channel: next.channel, preview: next.preview, startedAt: Date.now() };
       this.broadcast();
-      const ok = await withTimeout(next.task, next.channel, next.preview);
-      if (!ok) {
-        const entry: DeadLetterEntry = {
-          id: randomUUID(),
-          channel: next.channel,
-          preview: next.preview,
-          error: "timed out or failed",
-          ts: Date.now(),
-          queue: this.name,
-        };
-        this._deadLetters.push(entry);
-        if (this._deadLetters.length > MAX_DEAD_LETTERS) {
-          this._deadLetters.shift();
-          // Rewrite file to reflect trim (fire-and-forget)
-          rewriteDlqFile().catch(() => {});
-        } else {
-          // Append new entry (fire-and-forget)
-          persistDeadLetter(entry).catch(() => {});
-        }
-        logger.error("Task added to dead letter queue", { queue: this.name, channel: entry.channel, preview: entry.preview });
-      }
+      await this._runTask(next);
     }
     this._current = null;
     this._busy = false;
     this.broadcast();
   }
 
-  enqueue(task: () => Promise<void>, channel: string, preview: string): Promise<void> {
+  enqueue(task: QueueTask, channel: string, preview: string): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const item: QueueItem = {
-        task: async () => {
+        task: async (signal: AbortSignal) => {
           try {
-            await task();
+            await task(signal);
             resolve();
           } catch (err) {
             reject(err);
+            throw err; // re-throw so _runTask/withTimeout records the failure
           }
         },
         channel,
@@ -199,7 +224,9 @@ export class ChannelQueue {
       }
       this._busy = true;
       this._current = { channel, preview, startedAt: Date.now() };
-      item.task().finally(() => this.process());
+      this.broadcast();
+      // ELLIE-482: Route first task through _runTask too (consistent abort behaviour)
+      this._runTask(item).finally(() => this.process());
     });
   }
 
@@ -237,7 +264,7 @@ const ellieChatQueue = new ChannelQueue("ellie-chat"); // Ellie Chat
  * Returns a promise that resolves when the task completes.
  */
 export function enqueue(
-  task: () => Promise<void>,
+  task: QueueTask,
   channel: string = "google-chat",
   preview: string = "(message)",
 ): Promise<void> {
@@ -247,7 +274,7 @@ export function enqueue(
 // ── Public API: Ellie Chat queue ─────────────────────────────
 
 export function enqueueEllieChat(
-  task: () => Promise<void>,
+  task: QueueTask,
   preview: string = "(message)",
 ): Promise<void> {
   return ellieChatQueue.enqueue(task, "ellie-chat", preview);
@@ -268,12 +295,13 @@ export function withQueue(
       const position = mainQueue.length + 1;
       await ctx.reply(`I'm working on something — I'll get to this next. (Queue position: ${position})`);
       // Fire-and-forget when queuing — returns immediately after the reply (original behavior)
-      mainQueue.enqueue(() => handler(ctx), "telegram", preview).catch((err) => {
+      // ELLIE-482: signal forwarded but Telegram handlers don't use it yet
+      mainQueue.enqueue((_signal) => handler(ctx), "telegram", preview).catch((err) => {
         logger.error("Queued Telegram task failed", { preview }, err);
       });
       return;
     }
-    return mainQueue.enqueue(() => handler(ctx), "telegram", preview);
+    return mainQueue.enqueue((_signal) => handler(ctx), "telegram", preview);
   };
 }
 

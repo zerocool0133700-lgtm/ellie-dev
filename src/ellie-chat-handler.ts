@@ -623,7 +623,8 @@ async function _handleEllieChatMessage(
   }
 
   // ── Normal text mode: full agent routing + context gathering (mirrors Google Chat) ──
-  await enqueueEllieChat(async () => {
+  // ELLIE-482: Accept queue-level abort signal so queue timeout kills the subprocess
+  await enqueueEllieChat(async (queueSignal) => {
     markProcessing(ecUserId || "anonymous", text);
     // ELLIE-391: Context refresh — bust all caches so this message gets fully fresh data
     if (isContextRefresh(text)) {
@@ -969,7 +970,8 @@ async function _handleEllieChatMessage(
         allowedTools: agentTools?.length ? agentTools : undefined,
         model: agentModel || undefined,
         timeoutMs: 600_000, // 10 min — async coordinator needs time for multi-step work
-        abortSignal,         // ELLIE-461: cancel if WS closes mid-dispatch
+        // ELLIE-482: compose WS-disconnect signal (ELLIE-461) with queue-timeout signal
+        abortSignal: abortSignal ? AbortSignal.any([abortSignal, queueSignal]) : queueSignal,
       });
       recordAnthropicSuccess();
     } catch (err) {
@@ -996,6 +998,14 @@ async function _handleEllieChatMessage(
     } finally {
       clearInterval(typingInterval);
     }
+
+    // ELLIE-482: idempotency check — if queue timed out while callClaude was running,
+    // the queue already moved on and logged a DLQ entry. Don't send a late response.
+    if (queueSignal.aborted) {
+      logger.warn("Queue timed out mid-dispatch — discarding late response to prevent duplicate");
+      return;
+    }
+
     const durationMs = Date.now() - startTime;
 
     // If sessionIds weren't available at context-build time (tree created during agent run),
@@ -1254,7 +1264,9 @@ export async function runSpecialistAsync(
         allowedTools: agentTools?.length ? agentTools : undefined,
         model: agentModel || undefined,
         timeoutMs: 600_000, // 10 min — specialists may do multi-step tool use
-        // ELLIE-479: No abort signal — specialist work survives WS close
+        // ELLIE-479: No WS-disconnect abort — specialist work survives WS close
+        // ELLIE-482: but DO abort on queue timeout to prevent double responses
+        abortSignal: queueSignal,
       });
       recordAnthropicSuccess();
     } catch (err) {
@@ -1275,6 +1287,12 @@ export async function runSpecialistAsync(
       throw err;
     } finally {
       clearInterval(heartbeat);
+    }
+
+    // ELLIE-482: idempotency check — queue timed out, don't send late specialist response
+    if (queueSignal.aborted) {
+      logger.warn("Queue timed out mid-specialist — discarding late response to prevent duplicate", { agentName });
+      return;
     }
 
     const durationMs = Date.now() - startTime;
