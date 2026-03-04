@@ -4,6 +4,10 @@
  * Processes inbound Slack events and slash commands.
  * Routes through callClaude with agent context prefix, replies in thread.
  *
+ * Features:
+ *   - Typing indicator posted before Claude call, deleted after
+ *   - Markdown → mrkdwn formatting applied to all responses
+ *
  * Events handled:
  *   app_mention  — @mention in any channel
  *   message.im   — DM to the bot
@@ -16,7 +20,8 @@
 import { log } from '../../logger.ts'
 import { enqueue } from '../../message-queue.ts'
 import { saveMessage } from '../../message-sender.ts'
-import { sendSlackMessage, sendSlackCommandResponse } from './send.ts'
+import { sendSlackMessage, deleteSlackMessage, sendSlackCommandResponse } from './send.ts'
+import { markdownToMrkdwn } from './format.ts'
 
 const logger = log.child('slack-handler')
 
@@ -80,7 +85,7 @@ async function forestSearch(query: string): Promise<string> {
 
 /**
  * Handle an inbound Slack event (app_mention or message.im).
- * Reads env vars directly — only called when SLACK_BOT_TOKEN is set.
+ * Posts a typing indicator, calls Claude, deletes indicator, sends mrkdwn response.
  */
 export async function handleSlackEvent(
   event: SlackEventPayload,
@@ -110,16 +115,24 @@ export async function handleSlackEvent(
   await enqueue(async () => {
     await saveMessage('user', text, { slack_channel: channelId, slack_ts: event.ts, slack_thread_ts: event.thread_ts }, 'slack', userId)
 
+    // Post typing indicator — deleted after response is ready
+    const indicator = await sendSlackMessage(token, channelId, '_Thinking..._', threadTs)
+
     try {
       const { callClaude } = await import('../../claude-cli.ts')
       const contextPrefix = `[Slack · ${agent} · from ${userId}]\n\n`
       const response = await callClaude(contextPrefix + text, { resume: false })
 
-      await sendSlackMessage(token, channelId, response, threadTs)
+      // Delete typing indicator before posting response
+      if (indicator.ts) await deleteSlackMessage(token, channelId, indicator.ts)
+
+      const formatted = markdownToMrkdwn(response)
+      await sendSlackMessage(token, channelId, formatted, threadTs)
       await saveMessage('assistant', response, { slack_channel: channelId }, 'slack')
 
       logger.info('Slack response sent', { agent, channelId })
     } catch (err) {
+      if (indicator.ts) await deleteSlackMessage(token, channelId, indicator.ts).catch(() => {})
       logger.error('Slack handler error', { agent, error: err instanceof Error ? err.message : String(err) })
       await sendSlackMessage(token, channelId, 'Sorry, something went wrong. Please try again.', threadTs).catch(() => {})
     }
@@ -140,14 +153,11 @@ export async function handleSlackCommand(payload: SlackCommandPayload): Promise<
     return 'Unauthorized.'
   }
 
-  const token = process.env.SLACK_BOT_TOKEN ?? ''
-
   // /forest — Forest knowledge search
   if (command === '/forest') {
     const query = text.trim()
     if (!query) return 'Usage: `/forest <search query>`'
 
-    // Async search — respond via response_url
     Promise.resolve().then(async () => {
       const result = await forestSearch(query)
       await sendSlackCommandResponse(response_url, `*Forest search:* "${query}"\n\n${result}`)
@@ -161,14 +171,13 @@ export async function handleSlackCommand(payload: SlackCommandPayload): Promise<
     const userText = text.trim()
     if (!userText) return 'Usage: `/ellie <message>`'
 
-    // Acknowledge immediately, process async
     Promise.resolve().then(async () => {
       await saveMessage('user', userText, { slack_channel: channel_id, via: 'slash-command' }, 'slack', user_id)
       try {
         const { callClaude } = await import('../../claude-cli.ts')
         const contextPrefix = `[Slack slash command · general · from ${user_id}]\n\n`
         const response = await callClaude(contextPrefix + userText, { resume: false })
-        await sendSlackCommandResponse(response_url, response)
+        await sendSlackCommandResponse(response_url, markdownToMrkdwn(response))
         await saveMessage('assistant', response, { slack_channel: channel_id }, 'slack')
       } catch (err) {
         logger.error('/ellie command error', err)

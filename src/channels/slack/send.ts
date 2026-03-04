@@ -4,8 +4,9 @@
  * Plain fetch-based Slack Web API client.
  * No SDK dependency — uses native Bun fetch.
  *
- * sendSlackMessage() — post text to a channel/thread, auto-chunked at 3000 chars
- * sendSlackNotification() — fire-and-forget convenience for notification policy
+ * sendSlackMessage()         — post text to a channel/thread, auto-chunked at 3000 chars
+ * deleteSlackMessage()       — delete a message by ts (used to remove typing indicator)
+ * sendSlackCommandResponse() — delayed response via slash command response_url
  */
 
 import { log } from '../../logger.ts'
@@ -36,6 +37,7 @@ function chunkText(text: string): string[] {
 
 /**
  * Post a message to a Slack channel or thread.
+ * Returns the ts of the first posted message (needed to delete typing indicators).
  * Automatically chunks at 3000 characters.
  */
 export async function sendSlackMessage(
@@ -43,8 +45,10 @@ export async function sendSlackMessage(
   channelId: string,
   text: string,
   threadTs?: string,
-): Promise<void> {
+): Promise<{ ts?: string }> {
   const chunks = chunkText(text)
+  let firstTs: string | undefined
+
   for (const chunk of chunks) {
     const body: Record<string, unknown> = { channel: channelId, text: chunk }
     if (threadTs) body.thread_ts = threadTs
@@ -63,16 +67,45 @@ export async function sendSlackMessage(
       if (!resp.ok) {
         const detail = await resp.json().catch(() => ({})) as { error?: string }
         logger.warn('Slack API error', { status: resp.status, error: detail.error, channelId })
-        return
+        return {}
       }
 
-      const result = await resp.json() as { ok: boolean; error?: string }
+      const result = await resp.json() as { ok: boolean; ts?: string; error?: string }
       if (!result.ok) {
         logger.warn('Slack postMessage failed', { error: result.error, channelId })
+        return {}
       }
+      if (!firstTs) firstTs = result.ts
     } catch (err) {
       logger.error('sendSlackMessage fetch error', { channelId, error: err instanceof Error ? err.message : String(err) })
+      return {}
     }
+  }
+
+  return { ts: firstTs }
+}
+
+/**
+ * Delete a Slack message by channel + ts.
+ * Used to remove the typing indicator after Claude responds.
+ */
+export async function deleteSlackMessage(
+  token: string,
+  channelId: string,
+  ts: string,
+): Promise<void> {
+  try {
+    await fetch(`${SLACK_API}/chat.delete`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ channel: channelId, ts }),
+      signal: AbortSignal.timeout(5_000),
+    })
+  } catch {
+    // Non-fatal — indicator just stays visible
   }
 }
 
