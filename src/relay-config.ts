@@ -38,6 +38,18 @@ export const HTTP_PORT = parseInt(process.env.HTTP_PORT || "3000");
 export const PUBLIC_URL = process.env.PUBLIC_URL || "";
 export const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
 export const EXTENSION_API_KEY = process.env.EXTENSION_API_KEY || "";
+
+/**
+ * ELLIE-557: Base URL for the local relay API.
+ * Configurable via RELAY_URL env var — set this on VPS/cloud deployments.
+ * Default: http://localhost:3001
+ */
+export const RELAY_BASE_URL = process.env.RELAY_URL || "http://localhost:3001";
+
+/** Function form of RELAY_BASE_URL — reads env at call time (useful in tests). */
+export function getRelayBaseUrl(): string {
+  return process.env.RELAY_URL || "http://localhost:3001";
+}
 export const ALLOWED_CALLERS: Set<string> = new Set(
   [process.env.DAVE_PHONE_NUMBER, ...(process.env.ALLOWED_CALLERS || "").split(",")]
     .map(n => n?.trim().replace(/\D/g, ""))

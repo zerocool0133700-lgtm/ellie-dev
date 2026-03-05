@@ -15,6 +15,7 @@ import type { UnifiedMessage } from "../types.ts";
 import { subscribe } from "../events.ts";
 import { log } from "../../logger.ts";
 import { USER_TIMEZONE, getToday, formatTime } from "../../timezone.ts";
+import { RELAY_BASE_URL } from "../../relay-config.ts";
 
 const logger = log.child("ums-consumer-calendar-intel");
 
@@ -838,7 +839,7 @@ async function fetchForestContext(title: string, attendeeNames: string[]): Promi
   const query = [title, ...attendeeNames.slice(0, 3)].join(" ");
 
   try {
-    const resp = await fetch("http://localhost:3001/api/bridge/read", {
+    const resp = await fetch(`${RELAY_BASE_URL}/api/bridge/read`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

@@ -22,6 +22,7 @@ import { enqueue } from '../../message-queue.ts'
 import { saveMessage } from '../../message-sender.ts'
 import { sendSlackMessage, deleteSlackMessage, sendSlackCommandResponse } from './send.ts'
 import { markdownToMrkdwn } from './format.ts'
+import { RELAY_BASE_URL } from '../../relay-config.ts'
 
 const logger = log.child('slack-handler')
 
@@ -62,7 +63,7 @@ function stripMentions(text: string): string {
 
 async function forestSearch(query: string): Promise<string> {
   try {
-    const resp = await fetch('http://localhost:3001/api/bridge/read', {
+    const resp = await fetch(`${RELAY_BASE_URL}/api/bridge/read`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

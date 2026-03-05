@@ -11,6 +11,7 @@
  */
 
 import { log } from "./logger.ts";
+import { RELAY_BASE_URL } from "./relay-config.ts";
 
 const logger = log.child("channel-health");
 
@@ -92,7 +93,7 @@ async function checkTelegram(
   }
 }
 
-const BRIDGE_URL = "http://localhost:3001/api/bridge/read";
+const BRIDGE_URL = `${RELAY_BASE_URL}/api/bridge/read`;
 // ELLIE-465: Key from env — hardcoded value is a fallback for backward compat only
 const BRIDGE_KEY = process.env.BRIDGE_KEY ?? "bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e740f6577a";
 

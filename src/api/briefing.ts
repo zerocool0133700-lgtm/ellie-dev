@@ -15,6 +15,7 @@ import { getCalendarInsights, clearInsights } from "../ums/consumers/calendar-in
 import { sendGoogleChatMessage, isGoogleChatEnabled } from "../google-chat.ts";
 import { log } from "../logger.ts";
 import { USER_TIMEZONE, getToday, formatTime } from "../timezone.ts";
+import { RELAY_BASE_URL } from "../relay-config.ts";
 
 const logger = log.child("briefing");
 
@@ -275,7 +276,7 @@ async function fetchMessages(supabase: SupabaseClient): Promise<BriefingSection>
 async function fetchForestFindings(): Promise<BriefingSection> {
   const items: BriefingItem[] = [];
   try {
-    const resp = await fetch("http://localhost:3001/api/bridge/read", {
+    const resp = await fetch(`${RELAY_BASE_URL}/api/bridge/read`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

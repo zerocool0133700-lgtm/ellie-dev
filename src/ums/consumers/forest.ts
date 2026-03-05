@@ -13,10 +13,11 @@
 import type { UnifiedMessage } from "../types.ts";
 import { subscribe } from "../events.ts";
 import { log } from "../../logger.ts";
+import { RELAY_BASE_URL } from "../../relay-config.ts";
 
 const logger = log.child("ums-consumer-forest");
 
-const BRIDGE_URL = "http://localhost:3001/api/bridge/write";
+const BRIDGE_URL = `${RELAY_BASE_URL}/api/bridge/write`;
 const BRIDGE_KEY = "bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e740f6577a";
 
 /** Providers/types that contain knowledge worth preserving. */

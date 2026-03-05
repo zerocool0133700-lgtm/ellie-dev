@@ -26,6 +26,7 @@ import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost, w
 import { estimateTokens } from "./relay-utils.ts";
 import { startCreature, failCreature, completeCreature, dispatchPushCreature, writeJobCompletionMetric } from "../../ellie-forest/src/index";
 import { postCreatureEvent, postJobEvent } from "./channels/discord/observation.ts";
+import { RELAY_BASE_URL } from "./relay-config.ts";
 
 const logger = log.child("orchestration-dispatch");
 
@@ -229,7 +230,7 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     // 3. Start work session
     let sessionResult: Record<string, unknown> | undefined;
     try {
-      const resp = await fetch("http://localhost:3001/api/work-session/start", {
+      const resp = await fetch(`${RELAY_BASE_URL}/api/work-session/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ work_item_id: workItemId, title: details.name, project: "ELLIE", entity_name: `${agentType}_agent` }),

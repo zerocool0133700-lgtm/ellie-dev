@@ -31,6 +31,7 @@ import {
   createPlaneIssue,
 } from "./plane.ts";
 import { parseAgentSequence, parseStepDescriptions } from "./pipeline.ts";
+import { RELAY_BASE_URL } from "./relay-config.ts";
 import { dispatchAgent, syncResponse } from "./agent-router.ts";
 import { processMemoryIntents } from "./memory.ts";
 import { emitEvent } from "./orchestration-ledger.ts";
@@ -362,7 +363,7 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
   // 3. Start work session (creates forest tree)
   let sessionResult: Record<string, unknown> | undefined;
   try {
-    const resp = await fetch("http://localhost:3001/api/work-session/start", {
+    const resp = await fetch(`${RELAY_BASE_URL}/api/work-session/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ work_item_id: ticketId, title: details.name, project: "ELLIE", entity_name: `${agentName}_agent` }),
@@ -495,7 +496,7 @@ async function handleClose(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<
 
   // Call the existing work-session complete endpoint
   // It handles: forest dormant transition, auto-deploy, Plane Done update, notifications
-  const resp = await fetch("http://localhost:3001/api/work-session/complete", {
+  const resp = await fetch(`${RELAY_BASE_URL}/api/work-session/complete`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ work_item_id: ticketId, summary }),
@@ -566,7 +567,7 @@ async function handleStartSession(cmd: PlaybookCommand, ctx: PlaybookContext): P
     return;
   }
 
-  const resp = await fetch("http://localhost:3001/api/work-session/start", {
+  const resp = await fetch(`${RELAY_BASE_URL}/api/work-session/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ work_item_id: ticketId, title: details.name, project: "ELLIE", agent: agentName }),
@@ -591,7 +592,7 @@ async function handleCheckIn(cmd: PlaybookCommand, ctx: PlaybookContext): Promis
 
   console.log(`[playbook] check-in ${ticketId}`);
 
-  const resp = await fetch("http://localhost:3001/api/work-session/update", {
+  const resp = await fetch(`${RELAY_BASE_URL}/api/work-session/update`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ work_item_id: ticketId, message: "Agent check-in: still active" }),
@@ -614,7 +615,7 @@ async function handleEscalate(cmd: PlaybookCommand, ctx: PlaybookContext): Promi
   console.log(`[playbook] escalate ${ticketId} to ${agentName}: ${reason.slice(0, 80)}`);
 
   const message = `Escalated to ${agentName}: ${reason}`;
-  const resp = await fetch("http://localhost:3001/api/work-session/update", {
+  const resp = await fetch(`${RELAY_BASE_URL}/api/work-session/update`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ work_item_id: ticketId, message }),
@@ -645,7 +646,7 @@ async function handleHandoff(cmd: PlaybookCommand, ctx: PlaybookContext): Promis
   console.log(`[playbook] handoff ${ticketId} from ${fromAgent} to ${toAgent}`);
 
   const message = `Handoff from ${fromAgent} to ${toAgent}: ${context}`;
-  const resp = await fetch("http://localhost:3001/api/work-session/update", {
+  const resp = await fetch(`${RELAY_BASE_URL}/api/work-session/update`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ work_item_id: ticketId, message, agent: toAgent }),
@@ -673,7 +674,7 @@ async function handlePauseSession(cmd: PlaybookCommand, ctx: PlaybookContext): P
 
   console.log(`[playbook] pause-session ${ticketId}`);
 
-  const resp = await fetch("http://localhost:3001/api/work-session/pause", {
+  const resp = await fetch(`${RELAY_BASE_URL}/api/work-session/pause`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ work_item_id: ticketId, reason }),
@@ -698,7 +699,7 @@ async function handleResumeSession(cmd: PlaybookCommand, ctx: PlaybookContext): 
 
   console.log(`[playbook] resume-session ${ticketId}`);
 
-  const resp = await fetch("http://localhost:3001/api/work-session/resume", {
+  const resp = await fetch(`${RELAY_BASE_URL}/api/work-session/resume`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ work_item_id: ticketId }),
