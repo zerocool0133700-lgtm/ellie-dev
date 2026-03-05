@@ -28,6 +28,7 @@ import type { ContextMode } from "./context-mode.ts";
 import { getModeSectionPriorities, getModeTokenBudget } from "./context-mode.ts";
 import { freshnessTracker, buildStalenessWarning } from "./context-freshness.ts";
 import type { ChannelContextProfile } from "./api/mode-profile.ts";
+import { sanitizeUserMessage } from "./sanitize.ts";
 import { buildSourceHierarchyInstruction } from "./source-hierarchy.ts";
 import { getActiveRunStates } from "./orchestration-tracker.ts";
 import {
@@ -603,7 +604,7 @@ export async function runPostMessageAssessment(
     let claudeResult = null;
     if (anthropic) {
       try {
-        const prompt = buildAssessmentPrompt(userMessage, assistantResponse);
+        const prompt = buildAssessmentPrompt(sanitizeUserMessage(userMessage), assistantResponse);
         const response = await anthropic.messages.create({
           model: "claude-haiku-4-5-20251001",
           max_tokens: 800,
@@ -740,7 +741,8 @@ export function buildPrompt(
   const isGeneralAgent = !agentConfig?.name || agentConfig.name === "general";
 
   // Priority 1: User message (never trimmed)
-  sections.push({ label: "user-message", content: `\nUser: ${userMessage}`, priority: 1 });
+  // ELLIE-555: sanitize user message before embedding in prompt
+  sections.push({ label: "user-message", content: `\nUser: ${sanitizeUserMessage(userMessage)}`, priority: 1 });
 
   // Priority 2: Soul + personality (small, defines who Ellie is)
   // ELLIE-525: Soul only for primary Ellie — saves ~2,500 tokens per downstream agent call.
@@ -751,9 +753,6 @@ export function buildPrompt(
     if (effectiveSoul) sections.push({ label: "soul", content: `# Ellie Soul\n${effectiveSoul}\n---\n`, priority: 2 });
   }
   if (archetypeContext) sections.push({ label: "archetype", content: `# Behavioral Archetype\n${archetypeContext}\n---\n`, priority: 2 });
-  if (psyContext) sections.push({ label: "psy", content: `# Psychological Profile\n${psyContext}\n---\n`, priority: 2 });
-  if (phaseContext) sections.push({ label: "phase", content: `# Relationship Phase\n${phaseContext}\n---\n`, priority: 2 });
-  if (healthContext) sections.push({ label: "health", content: `# Health & Life Context\n${healthContext}\n---\n`, priority: 3 });
 
   // Command bar context (ELLIE-400) — priority configurable per channel, default 2
   if (commandBarContext) sections.push({ label: "command-bar-context", content: commandBarContext, priority: channelProfile?.contextPriority ?? 2 });
@@ -781,7 +780,7 @@ export function buildPrompt(
 
     const mcpDetails =
       "You also have MCP tools:\n" +
-      "- Google Workspace (user_google_email: zerocool0133700@gmail.com):\n" +
+      `- Google Workspace (user_google_email: ${process.env.USER_GOOGLE_EMAIL || "not configured"}):\n` +
       "  Gmail: search_gmail_messages, get_gmail_message_content, send_gmail_message (send requires [CONFIRM])\n" +
       "  Calendar: get_events, create_event (create/modify requires [CONFIRM])\n" +
       "  Tasks: list_tasks, create_task, update_task, get_task\n" +
