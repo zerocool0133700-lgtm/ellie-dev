@@ -105,6 +105,7 @@ import { withTrace } from "./trace.ts";
 import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost } from "./jobs-ledger.ts";
 import { checkContextPressure, shouldNotify, getCompactionNotice, checkpointSessionToForest } from "./api/session-compaction.ts";
 import { resilientTask } from "./resilient-task.ts";
+import { primeWorkingMemoryCache } from "./working-memory.ts";
 import {
   isFallbackActive,
   isOutageError,
@@ -689,8 +690,9 @@ async function _handleEllieChatMessage(
       broadcastExtension({ type: "message_out", channel: "ellie-chat", agent: "general", preview: ack });
 
       // Fire-and-forget: specialist runs outside the queue
-      // ELLIE-479: No abort signal — specialist work survives WS close since it's already acked
-      runSpecialistAsync(ws, supabase, effectiveText, text, agentResult, imagePath, ellieChatWorkItem, channelId, channelProfile).catch(err => {
+      // ELLIE-479: WS-disconnect abort not used — specialist survives WS close since it's already acked
+      // ELLIE-482: queue-timeout signal passed so specialist can be aborted on queue timeout
+      runSpecialistAsync(ws, supabase, effectiveText, text, agentResult, imagePath, ellieChatWorkItem, channelId, channelProfile, queueSignal).catch(err => {
         logger.error("Specialist async error", err);
       });
 
@@ -921,6 +923,10 @@ async function _handleEllieChatMessage(
       buildCrossChannelSection(supabase, "ellie-chat"),
     ]);
 
+    // ELLIE-541: Populate working memory cache so buildPrompt can inject session context
+    const _ecAgentName = agentResult?.dispatch.agent?.name || "general";
+    try { await primeWorkingMemoryCache(session.sessionId, _ecAgentName); } catch { /* non-critical */ }
+
     const enrichedPrompt = buildPrompt(
       effectiveText, ecDocket, relevantContext, elasticContext, "ellie-chat",
       agentResult?.dispatch.agent ? {
@@ -1131,7 +1137,8 @@ async function _handleEllieChatMessage(
 
 /**
  * Run a specialist agent asynchronously (outside the ellie-chat queue).
- * ELLIE-479: No abort signal — specialist work survives WS close since it's already acked.
+ * ELLIE-479: WS-disconnect abort not used — specialist survives WS close since it's already acked.
+ * ELLIE-482: queueSignal passed so specialist aborts if the queue times out.
  */
 export async function runSpecialistAsync(
   ws: WebSocket,
@@ -1143,6 +1150,7 @@ export async function runSpecialistAsync(
   workItemId: string | undefined,
   channelId?: string,
   channelProfile?: import("./api/mode-profile.ts").ChannelContextProfile | null,
+  queueSignal?: AbortSignal,
 ): Promise<void> {
   const { bot, anthropic } = getRelayDeps();
   const agentName = agentResult.dispatch.agent.name;
@@ -1235,6 +1243,9 @@ export async function runSpecialistAsync(
       buildCrossChannelSection(supabase, "ellie-chat"),
     ]);
 
+    // ELLIE-541: Populate working memory cache so buildPrompt can inject session context
+    try { await primeWorkingMemoryCache(session.sessionId, agentResult.dispatch.agent.name); } catch { /* non-critical */ }
+
     const enrichedPrompt = buildPrompt(
       effectiveText, contextDocket, relevantContext, elasticContext, "ellie-chat",
       {
@@ -1315,7 +1326,7 @@ export async function runSpecialistAsync(
     }
 
     // ELLIE-482: idempotency check — queue timed out, don't send late specialist response
-    if (queueSignal.aborted) {
+    if (queueSignal?.aborted) {
       logger.warn("Queue timed out mid-specialist — discarding late response to prevent duplicate", { agentName });
       return;
     }

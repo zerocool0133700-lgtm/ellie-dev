@@ -62,6 +62,7 @@ import { getChannelHealth } from "./channel-health.ts";
 import { getTaskStatus } from "./periodic-task.ts";
 import { getFireForgetMetrics } from "./resilient-task.ts";
 import { checkContextPressure, shouldNotify, getCompactionNotice, checkpointSessionToForest } from "./api/session-compaction.ts";
+import { primeWorkingMemoryCache } from "./working-memory.ts";
 import { getReconcileStatus } from "./elasticsearch/reconcile.ts";
 import {
   saveMessage,
@@ -648,6 +649,10 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
               buildCrossChannelSection(supabase, "google-chat"),
             ]);
 
+            // ELLIE-541: Populate working memory cache so buildPrompt can inject session context
+            const _gchatAgentName = gchatAgentResult?.dispatch.agent?.name || "general";
+            try { await primeWorkingMemoryCache(session.sessionId, _gchatAgentName); } catch { /* non-critical */ }
+
             const enrichedPrompt = buildPrompt(
               effectiveGchatText, gchatDocket, relevantContext, elasticContext, "google-chat",
               gchatAgentResult?.dispatch.agent ? { system_prompt: gchatAgentResult.dispatch.agent.system_prompt, name: gchatAgentResult.dispatch.agent.name, tools_enabled: gchatAgentResult.dispatch.agent.tools_enabled } : undefined,
@@ -976,6 +981,10 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
             if (agentResult?.dispatch.is_new && alexaQueueContext) {
               resilientTask("acknowledgeQueueItems", "critical", () => acknowledgeQueueItems(alexaActiveAgent));
             }
+            // ELLIE-541: Populate working memory cache so buildPrompt can inject session context
+            const _alexaAgentName = agentResult?.dispatch.agent?.name || "general";
+            try { await primeWorkingMemoryCache(session.sessionId, _alexaAgentName); } catch { /* non-critical */ }
+
             const enrichedPrompt = buildPrompt(
               effectiveQuery, contextDocket, relevantContext, elasticContext, "alexa",
               agentResult?.dispatch.agent ? {

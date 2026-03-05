@@ -221,6 +221,25 @@ export async function archiveIdleWorkingMemory(): Promise<number> {
   return archived.length;
 }
 
+// ── Relay wiring (ELLIE-541) ─────────────────────────────────────────────────
+
+/**
+ * Fetch the active working memory from DB and populate the in-process cache.
+ *
+ * Call this before buildPrompt() so the prompt gets session context injected
+ * automatically. No-ops when session_id is null or no active record exists.
+ * Errors propagate to the caller — wrap in try/catch to keep the prompt path
+ * non-blocking when the DB is unreachable.
+ */
+export async function primeWorkingMemoryCache(
+  session_id: string | null,
+  agent: string,
+): Promise<void> {
+  if (!session_id) return;
+  const record = await readWorkingMemory({ session_id, agent });
+  if (record) setWorkingMemoryCache(agent, record);
+}
+
 // ── In-process cache (ELLIE-539) ─────────────────────────────────────────────
 //
 // Mirrors the River doc cache pattern from prompt-builder.ts.

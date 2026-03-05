@@ -101,6 +101,7 @@ import { logVerificationTrail } from "./data-quality.ts";
 import { withTrace } from "./trace.ts";
 import { resilientTask } from "./resilient-task.ts";
 import { checkContextPressure, shouldNotify, getCompactionNotice, checkpointSessionToForest } from "./api/session-compaction.ts";
+import { primeWorkingMemoryCache } from "./working-memory.ts";
 
 const logger = log.child("telegram");
 
@@ -439,6 +440,8 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
         runPostMessageAssessment(text, partialResponse, anthropic).catch(err2 => logger.error("Post-message assessment failed", err2));
       } else {
         logger.error("Multi-step failed, falling back to single agent", err);
+        // ELLIE-541: Populate working memory cache before fallback prompt build
+        try { await primeWorkingMemoryCache(session.sessionId, agentResult?.dispatch.agent?.name || "general"); } catch { /* non-critical */ }
         const fallbackPrompt = buildPrompt(
           effectiveText, contextDocket, relevantContext, elasticContext, "telegram",
           agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
@@ -482,6 +485,10 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
     checkGroundTruthConflicts(effectiveText, tgContextSections),
     buildCrossChannelSection(supabase, "telegram"),
   ]);
+
+  // ELLIE-541: Populate working memory cache so buildPrompt can inject session context
+  const _tgAgentName = agentResult?.dispatch.agent?.name || "general";
+  try { await primeWorkingMemoryCache(session.sessionId, _tgAgentName); } catch { /* non-critical */ }
 
   const enrichedPrompt = buildPrompt(
     effectiveText, tgDocket, relevantContext, elasticContext, "telegram",
