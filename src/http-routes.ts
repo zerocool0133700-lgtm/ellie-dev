@@ -173,6 +173,26 @@ import { getQueueStatus } from "./dispatch-queue.ts";
 
 const logger = log.child("http");
 
+/**
+ * ELLIE-546: Returns true when a request to `pathname` from `clientIp` requires API authentication.
+ * Pure function — easy to unit test.
+ *
+ * Exemptions:
+ *   - /api/auth/token     — issues tokens, must be reachable unauthenticated
+ *   - /api/bridge/*       — uses its own x-bridge-key scheme
+ *   - /api/app-auth/*     — handles its own auth flow
+ *   - Localhost IPs       — on-machine agents bypass auth
+ */
+export function requiresApiAuth(pathname: string, clientIp: string): boolean {
+  if (!pathname.startsWith("/api/")) return false;
+  if (pathname === "/api/auth/token") return false;
+  if (pathname.startsWith("/api/bridge/")) return false;
+  if (pathname.startsWith("/api/app-auth/")) return false;
+  const isLocalhost = clientIp === "127.0.0.1" || clientIp === "::1" || clientIp === "::ffff:127.0.0.1";
+  if (isLocalhost) return false;
+  return true;
+}
+
 export async function handleHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const { bot, anthropic, supabase } = getRelayDeps();
 
@@ -1140,6 +1160,16 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(getQueueStatus()));
     return;
+  }
+
+  // ELLIE-546: API auth middleware — see requiresApiAuth() for exemption rules.
+  if (requiresApiAuth(url.pathname, req.socket?.remoteAddress ?? "")) {
+    const auth = await authenticateRequest(req, "api", EXTENSION_API_KEY);
+    if (!auth) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unauthorized" }));
+      return;
+    }
   }
 
   // Dead-letter queue — inspect and clear (ELLIE-490)
