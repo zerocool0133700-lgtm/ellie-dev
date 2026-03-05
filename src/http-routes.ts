@@ -178,6 +178,8 @@ import { handleCalendarIntelRoute } from "./api/routes/calendar-intel.ts";
 import { handleRelationshipsRoute } from "./api/routes/relationships.ts";
 import { handleBriefingRoute } from "./api/routes/briefing.ts";
 import { handleAlertsRoute } from "./api/routes/alerts.ts";
+// ELLIE-547: CORS whitelist (replaces wildcard *)
+import { handlePreflight, corsHeader } from "./cors.ts";
 
 const logger = log.child("http");
 
@@ -208,6 +210,9 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
 
   // ELLIE-554: IP-based rate limiting for all HTTP requests (skips localhost)
   if (checkHttpRateLimit(req, res)) return;
+
+  // ELLIE-547: CORS preflight — must run before auth/routing
+  if (handlePreflight(req, res)) return;
 
   // Gateway intake endpoints (ELLIE-151) — forwarded from ellie-gateway
   if (req.method === "POST" && handleGatewayRoute(req, res, url.pathname)) return;
@@ -2640,7 +2645,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           };
         });
 
-        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+        res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
         res.end(JSON.stringify({
           skills,
           stats: {
@@ -2666,7 +2671,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     // /api/skills/<name>/help → parts = ["", "api", "skills", "<name>", "help"]
     const skillName = parts[3];
     if (!skillName) {
-      res.writeHead(400, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+      res.writeHead(400, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
       res.end(JSON.stringify({ error: "Missing skill name" }));
       return;
     }
@@ -2679,7 +2684,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         const skill = allSkills.find(s => s.name === skillName);
 
         if (!skill) {
-          res.writeHead(404, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+          res.writeHead(404, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
           res.end(JSON.stringify({ error: `Skill '${skillName}' not found` }));
           return;
         }
@@ -2712,7 +2717,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           }
         }
 
-        res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
+        res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
         res.end(JSON.stringify({
           name: skill.name,
           description: skill.description,
