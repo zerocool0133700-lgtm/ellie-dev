@@ -274,6 +274,21 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
     req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
     req.on("end", async () => {
       try {
+        // ELLIE-553: Bearer token verification
+        const { verifyGoogleChatRequest } = await import("./channels/google-chat/verify.ts");
+        const gchatVerifyResult = verifyGoogleChatRequest(
+          req.headers["authorization"] as string | undefined,
+          process.env.GOOGLE_CHAT_VERIFICATION_TOKEN,
+        );
+        if (gchatVerifyResult === "unauthorized") {
+          res.writeHead(401, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Unauthorized" }));
+          return;
+        }
+        if (gchatVerifyResult === "unconfigured") {
+          logger.warn("Google Chat verification not configured — set GOOGLE_CHAT_VERIFICATION_TOKEN");
+        }
+
         const event: GoogleChatEvent = JSON.parse(body);
 
         // Handle card button clicks (approval actions)
@@ -916,18 +931,22 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
     req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
     req.on("end", async () => {
       try {
-        // Verify Alexa request signature (skip in dev if headers missing)
-        const certUrl = req.headers["signaturecertchainurl"] as string;
-        const signature = req.headers["signature-256"] as string;
+        // ELLIE-553: Alexa signature headers are always present in production.
+        // Reject requests that are missing them — do not silently allow.
+        const certUrl = req.headers["signaturecertchainurl"] as string | undefined;
+        const signature = req.headers["signature-256"] as string | undefined;
 
-        if (certUrl && signature) {
-          const { verifyAlexaRequest } = await import("./alexa.ts");
-          const valid = await verifyAlexaRequest(certUrl, signature, body);
-          if (!valid) {
-            res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Invalid signature" }));
-            return;
-          }
+        const { verifyAlexaRequest, hasAlexaSignatureHeaders } = await import("./alexa.ts");
+        if (!hasAlexaSignatureHeaders(certUrl, signature)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing Alexa signature headers" }));
+          return;
+        }
+        const valid = await verifyAlexaRequest(certUrl!, signature!, body);
+        if (!valid) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid signature" }));
+          return;
         }
 
         const {

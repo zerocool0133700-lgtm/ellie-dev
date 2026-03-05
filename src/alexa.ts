@@ -33,6 +33,19 @@ export async function verifyAlexaRequest(
   }
 }
 
+/**
+ * ELLIE-553: Returns true only when both Alexa signature headers are present.
+ * Amazon always sends these headers in production — a missing header indicates
+ * a non-Alexa or tampered request and must be rejected.
+ */
+export function hasAlexaSignatureHeaders(
+  certUrl: string | undefined,
+  signature: string | undefined,
+): boolean {
+  return typeof certUrl === "string" && certUrl.length > 0 &&
+    typeof signature === "string" && signature.length > 0;
+}
+
 // ============================================================
 // REQUEST PARSING
 // ============================================================
