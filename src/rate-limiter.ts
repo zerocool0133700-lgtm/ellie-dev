@@ -6,6 +6,7 @@
  * and rejects when the count exceeds the limit within the window.
  */
 
+import type { IncomingMessage, ServerResponse } from "http";
 import { log } from "./logger.ts";
 
 const logger = log.child("rate-limit");
@@ -128,6 +129,13 @@ export const toolLimiter = new SlidingWindowLimiter({
   windowMs: 60_000,
 });
 
+/** Per-IP HTTP rate limit for all inbound requests (120 req/min). */
+export const httpLimiter = new SlidingWindowLimiter({
+  name: "http",
+  maxRequests: parseInt(process.env.RATE_LIMIT_HTTP || "120"),
+  windowMs: 60_000,
+});
+
 // ── Convenience helpers ─────────────────────────────────────
 
 /**
@@ -175,6 +183,29 @@ export function checkApiRate(key: string): Response | null {
   return null;
 }
 
+/**
+ * ELLIE-554: Check IP-based HTTP rate limit for all inbound requests.
+ * Skips localhost (internal agents/services). Returns true if rate limited
+ * (response already sent), false if allowed.
+ */
+export function checkHttpRateLimit(req: IncomingMessage, res: ServerResponse): boolean {
+  const clientIp = req.socket?.remoteAddress ?? "unknown";
+  const isLocalhost = clientIp === "127.0.0.1" || clientIp === "::1" || clientIp === "::ffff:127.0.0.1";
+  if (isLocalhost) return false;
+
+  const result = httpLimiter.check(clientIp);
+  if (!result.allowed) {
+    const retryAfterSec = Math.ceil((result.retryAfterMs ?? 0) / 1000);
+    res.writeHead(429, {
+      "Content-Type": "application/json",
+      "Retry-After": String(retryAfterSec),
+    });
+    res.end(JSON.stringify({ error: "Rate limited", retryAfterMs: result.retryAfterMs }));
+    return true;
+  }
+  return false;
+}
+
 /** Get status of all limiters (for health endpoint). */
 export function getRateLimitStatus() {
   return {
@@ -182,6 +213,7 @@ export function getRateLimitStatus() {
     voice: { activeKeys: voiceLimiter.peek("_all") },
     api: { activeKeys: apiLimiter.peek("_all") },
     tool: { activeKeys: toolLimiter.peek("_all") },
+    http: { activeKeys: httpLimiter.peek("_all") },
   };
 }
 
@@ -192,4 +224,5 @@ setInterval(() => {
   voiceLimiter.cleanup();
   apiLimiter.cleanup();
   toolLimiter.cleanup();
+  httpLimiter.cleanup();
 }, 300_000); // Every 5 minutes
