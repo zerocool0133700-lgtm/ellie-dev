@@ -3601,6 +3601,99 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Working Memory API — session-scoped state layer (ELLIE-538)
+  if (
+    url.pathname.startsWith("/api/working-memory/") &&
+    (req.method === "POST" || req.method === "PATCH" || req.method === "GET")
+  ) {
+    const isGet = req.method === "GET";
+
+    const handleWorkingMemoryRequest = async (body?: string) => {
+      let data: Record<string, unknown> = {};
+      if (!isGet && body) {
+        try {
+          data = JSON.parse(body);
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid JSON body" }));
+          return;
+        }
+      }
+
+      const endpoint = url.pathname.replace("/api/working-memory/", "");
+
+      const {
+        workingMemoryInitEndpoint,
+        workingMemoryUpdateEndpoint,
+        workingMemoryReadEndpoint,
+        workingMemoryCheckpointEndpoint,
+        workingMemoryPromoteEndpoint,
+      } = await import("./api/working-memory.ts");
+
+      const queryParams: Record<string, string> = {};
+      url.searchParams.forEach((v: string, k: string) => { queryParams[k] = v; });
+
+      const mockReq: ApiRequest = { body: data, query: queryParams };
+      const mockRes: ApiResponse = {
+        status: (code: number) => ({
+          json: (resData: unknown) => {
+            res.writeHead(code, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(resData));
+          },
+        }),
+        json: (resData: unknown) => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(resData));
+        },
+      };
+
+      switch (endpoint) {
+        case "init":
+          if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
+          await workingMemoryInitEndpoint(mockReq, mockRes);
+          break;
+        case "update":
+          if (req.method !== "PATCH") { res.writeHead(405); res.end(); return; }
+          await workingMemoryUpdateEndpoint(mockReq, mockRes);
+          break;
+        case "read":
+          if (req.method !== "GET") { res.writeHead(405); res.end(); return; }
+          await workingMemoryReadEndpoint(mockReq, mockRes);
+          break;
+        case "checkpoint":
+          if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
+          await workingMemoryCheckpointEndpoint(mockReq, mockRes);
+          break;
+        case "promote":
+          if (req.method !== "POST") { res.writeHead(405); res.end(); return; }
+          await workingMemoryPromoteEndpoint(mockReq, mockRes);
+          break;
+        default:
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Unknown working-memory endpoint" }));
+      }
+    };
+
+    if (isGet) {
+      handleWorkingMemoryRequest().catch((err) => {
+        logger.error("Working-memory GET error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      });
+    } else {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+      req.on("end", () => {
+        handleWorkingMemoryRequest(body).catch((err) => {
+          logger.error("Working-memory error", err);
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Internal server error" }));
+        });
+      });
+    }
+    return;
+  }
+
   // Ellie Chat broadcast endpoint
   if (url.pathname === "/api/ellie-chat/send" && req.method === "POST") {
     let body = "";
