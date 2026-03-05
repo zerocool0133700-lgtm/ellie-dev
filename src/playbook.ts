@@ -7,9 +7,16 @@
  * and executes infrastructure actions asynchronously.
  *
  * Commands:
- *   ELLIE:: send ELLIE-144 to dev     — dispatch agent to work a ticket
- *   ELLIE:: close ELLIE-144 "summary" — close ticket (Plane + forest + auto-deploy)
- *   ELLIE:: create ticket "title" "description" — create Plane issue
+ *   ELLIE:: send ELLIE-144 to dev                                          — dispatch agent to work a ticket
+ *   ELLIE:: close ELLIE-144 "summary"                                      — close ticket (Plane + forest + auto-deploy)
+ *   ELLIE:: create ticket "title" "description"                            — create Plane issue
+ *   ELLIE:: start session on ELLIE-144 with dev                            — start a work session (ELLIE-542)
+ *   ELLIE:: check in on session ELLIE-144                                  — log progress check-in (ELLIE-542)
+ *   ELLIE:: escalate ELLIE-144 to research "reason"                        — escalate to another agent (ELLIE-542)
+ *   ELLIE:: handoff ELLIE-144 from dev to research "ctx"                   — transfer ownership (ELLIE-542)
+ *   ELLIE:: pause session ELLIE-144 "blocker"                              — pause active session (ELLIE-542)
+ *   ELLIE:: resume session ELLIE-144                                       — resume paused session (ELLIE-542)
+ *   ELLIE:: pipeline ELLIE-144 dev→research→dev "impl→validate→finalize"  — sequential multi-agent pipeline (ELLIE-544)
  */
 
 import type { Bot } from "grammy";
@@ -23,6 +30,7 @@ import {
   fetchWorkItemDetails,
   createPlaneIssue,
 } from "./plane.ts";
+import { parseAgentSequence, parseStepDescriptions } from "./pipeline.ts";
 import { dispatchAgent, syncResponse } from "./agent-router.ts";
 import { processMemoryIntents } from "./memory.ts";
 import { emitEvent } from "./orchestration-ledger.ts";
@@ -35,12 +43,17 @@ import { withTrace, getTraceId } from "./trace.ts";
 // ────────────────────────────────────────────────────────────────
 
 export interface PlaybookCommand {
-  type: "send" | "close" | "create";
+  type: "send" | "close" | "create" | "start-session" | "check-in" | "escalate" | "handoff" | "pause-session" | "resume-session" | "pipeline";
   ticketId?: string;
   agentName?: string;
+  fromAgent?: string;      // handoff: source agent
   summary?: string;
   title?: string;
   description?: string;
+  reason?: string;         // escalate/pause-session: reason text
+  context?: string;        // handoff: context note
+  agents?: string[];       // pipeline: ordered agent sequence
+  pipelineSteps?: string[]; // pipeline: step descriptions
   raw: string;
 }
 
@@ -76,9 +89,16 @@ export interface PlaybookContext {
 // Tag Extraction
 // ────────────────────────────────────────────────────────────────
 
-const SEND_RE  = /ELLIE::\s*send\s+([A-Z]+-\d+)\s+to\s+(\w+)/gi;
-const CLOSE_RE = /ELLIE::\s*close\s+([A-Z]+-\d+)\s+"([^"]+)"/gi;
-const CREATE_RE = /ELLIE::\s*create\s+ticket\s+"([^"]+)"\s+"([^"]+)"/gi;
+const SEND_RE           = /ELLIE::\s*send\s+([A-Z]+-\d+)\s+to\s+(\w+)/gi;
+const CLOSE_RE          = /ELLIE::\s*close\s+([A-Z]+-\d+)\s+"([^"]+)"/gi;
+const CREATE_RE         = /ELLIE::\s*create\s+ticket\s+"([^"]+)"\s+"([^"]+)"/gi;
+const START_SESSION_RE  = /ELLIE::\s*start\s+session\s+on\s+([A-Z]+-\d+)\s+with\s+(\w+)/gi;
+const CHECK_IN_RE       = /ELLIE::\s*check\s+in\s+on\s+session\s+([A-Z]+-\d+)/gi;
+const ESCALATE_RE       = /ELLIE::\s*escalate\s+([A-Z]+-\d+)\s+to\s+(\w+)\s+"([^"]+)"/gi;
+const HANDOFF_RE        = /ELLIE::\s*handoff\s+([A-Z]+-\d+)\s+from\s+(\w+)\s+to\s+(\w+)\s+"([^"]+)"/gi;
+const PAUSE_SESSION_RE  = /ELLIE::\s*pause\s+session\s+([A-Z]+-\d+)\s+"([^"]+)"/gi;
+const RESUME_SESSION_RE = /ELLIE::\s*resume\s+session\s+([A-Z]+-\d+)/gi;
+const PIPELINE_RE       = /ELLIE::\s*pipeline\s+([A-Z]+-\d+)\s+([^\s"]+)\s+"([^"]+)"/gi;
 
 /**
  * Extract ELLIE:: commands from a response.
@@ -121,6 +141,78 @@ export function extractPlaybookCommands(response: string): {
     cleaned = cleaned.replace(match[0], "");
   }
 
+  for (const match of response.matchAll(START_SESSION_RE)) {
+    commands.push({
+      type: "start-session",
+      ticketId: match[1],
+      agentName: match[2].toLowerCase(),
+      raw: match[0],
+    });
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  for (const match of response.matchAll(CHECK_IN_RE)) {
+    commands.push({
+      type: "check-in",
+      ticketId: match[1],
+      raw: match[0],
+    });
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  for (const match of response.matchAll(ESCALATE_RE)) {
+    commands.push({
+      type: "escalate",
+      ticketId: match[1],
+      agentName: match[2].toLowerCase(),
+      reason: match[3],
+      raw: match[0],
+    });
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  for (const match of response.matchAll(HANDOFF_RE)) {
+    commands.push({
+      type: "handoff",
+      ticketId: match[1],
+      fromAgent: match[2].toLowerCase(),
+      agentName: match[3].toLowerCase(),
+      context: match[4],
+      raw: match[0],
+    });
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  for (const match of response.matchAll(PAUSE_SESSION_RE)) {
+    commands.push({
+      type: "pause-session",
+      ticketId: match[1],
+      reason: match[2],
+      raw: match[0],
+    });
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  for (const match of response.matchAll(RESUME_SESSION_RE)) {
+    commands.push({
+      type: "resume-session",
+      ticketId: match[1],
+      raw: match[0],
+    });
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  for (const match of response.matchAll(PIPELINE_RE)) {
+    commands.push({
+      type: "pipeline",
+      ticketId: match[1],
+      agents: parseAgentSequence(match[2]),
+      pipelineSteps: parseStepDescriptions(match[3]),
+      raw: match[0],
+    });
+    cleaned = cleaned.replace(match[0], "");
+  }
+
   return { cleanedText: cleaned.trim(), commands };
 }
 
@@ -155,6 +247,27 @@ export async function executePlaybookCommands(
           break;
         case "create":
           await handleCreate(cmd, ctx);
+          break;
+        case "start-session":
+          await handleStartSession(cmd, ctx);
+          break;
+        case "check-in":
+          await handleCheckIn(cmd, ctx);
+          break;
+        case "escalate":
+          await handleEscalate(cmd, ctx);
+          break;
+        case "handoff":
+          await handleHandoff(cmd, ctx);
+          break;
+        case "pause-session":
+          await handlePauseSession(cmd, ctx);
+          break;
+        case "resume-session":
+          await handleResumeSession(cmd, ctx);
+          break;
+        case "pipeline":
+          await handlePipeline(cmd, ctx);
           break;
       }
     } catch (err: unknown) {
@@ -431,4 +544,315 @@ async function handleCreate(cmd: PlaybookCommand, ctx: PlaybookContext): Promise
   });
 
   console.log(`[playbook] Created ${result.identifier}: ${title}`);
+}
+
+// ────────────────────────────────────────────────────────────────
+// start-session — start a work session for a ticket (ELLIE-542)
+// ────────────────────────────────────────────────────────────────
+
+async function handleStartSession(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<void> {
+  const ticketId = cmd.ticketId!;
+  const agentName = cmd.agentName;
+
+  console.log(`[playbook] start-session ${ticketId} with ${agentName ?? "auto"}`);
+
+  const details = await fetchWorkItemDetails(ticketId);
+  if (!details) {
+    await notify(getNotifyCtx(ctx), {
+      event: "error",
+      workItemId: ticketId,
+      telegramMessage: `Could not find ${ticketId} in Plane`,
+    });
+    return;
+  }
+
+  const resp = await fetch("http://localhost:3001/api/work-session/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ work_item_id: ticketId, title: details.name, project: "ELLIE", agent: agentName }),
+  });
+  const result = await resp.json();
+  if (!result?.success && result?.error) {
+    logger.warn("Start session returned unexpected result", { ticket: ticketId, result });
+    await notify(getNotifyCtx(ctx), {
+      event: "error",
+      workItemId: ticketId,
+      telegramMessage: `Failed to start session for ${ticketId}: ${result.error}`,
+    });
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
+// check-in — log a progress check-in for an active session (ELLIE-542)
+// ────────────────────────────────────────────────────────────────
+
+async function handleCheckIn(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<void> {
+  const ticketId = cmd.ticketId!;
+
+  console.log(`[playbook] check-in ${ticketId}`);
+
+  const resp = await fetch("http://localhost:3001/api/work-session/update", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ work_item_id: ticketId, message: "Agent check-in: still active" }),
+  });
+  const result = await resp.json();
+  if (!result?.success) {
+    logger.warn("Check-in returned unexpected result", { ticket: ticketId, result });
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
+// escalate — escalate ticket to another agent (ELLIE-542)
+// ────────────────────────────────────────────────────────────────
+
+async function handleEscalate(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<void> {
+  const ticketId = cmd.ticketId!;
+  const agentName = cmd.agentName!;
+  const reason = cmd.reason!;
+
+  console.log(`[playbook] escalate ${ticketId} to ${agentName}: ${reason.slice(0, 80)}`);
+
+  const message = `Escalated to ${agentName}: ${reason}`;
+  const resp = await fetch("http://localhost:3001/api/work-session/update", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ work_item_id: ticketId, message }),
+  });
+  const result = await resp.json();
+  if (!result?.success) {
+    logger.warn("Escalate update returned unexpected result", { ticket: ticketId, result });
+  }
+
+  await notify(getNotifyCtx(ctx), {
+    event: "dispatch_confirm",
+    workItemId: ticketId,
+    telegramMessage: `Escalated ${ticketId} to ${agentName}: ${reason}`,
+    gchatMessage: `Escalation: ${ticketId} → ${agentName}\n${reason}`,
+  });
+}
+
+// ────────────────────────────────────────────────────────────────
+// handoff — transfer ticket ownership between agents (ELLIE-542)
+// ────────────────────────────────────────────────────────────────
+
+async function handleHandoff(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<void> {
+  const ticketId = cmd.ticketId!;
+  const fromAgent = cmd.fromAgent!;
+  const toAgent = cmd.agentName!;
+  const context = cmd.context!;
+
+  console.log(`[playbook] handoff ${ticketId} from ${fromAgent} to ${toAgent}`);
+
+  const message = `Handoff from ${fromAgent} to ${toAgent}: ${context}`;
+  const resp = await fetch("http://localhost:3001/api/work-session/update", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ work_item_id: ticketId, message, agent: toAgent }),
+  });
+  const result = await resp.json();
+  if (!result?.success) {
+    logger.warn("Handoff update returned unexpected result", { ticket: ticketId, result });
+  }
+
+  await notify(getNotifyCtx(ctx), {
+    event: "dispatch_confirm",
+    workItemId: ticketId,
+    telegramMessage: `Handoff ${ticketId}: ${fromAgent} → ${toAgent}\n${context}`,
+    gchatMessage: `Handoff: ${ticketId} from ${fromAgent} to ${toAgent}\n${context}`,
+  });
+}
+
+// ────────────────────────────────────────────────────────────────
+// pause-session — pause an active work session (ELLIE-542)
+// ────────────────────────────────────────────────────────────────
+
+async function handlePauseSession(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<void> {
+  const ticketId = cmd.ticketId!;
+  const reason = cmd.reason;
+
+  console.log(`[playbook] pause-session ${ticketId}`);
+
+  const resp = await fetch("http://localhost:3001/api/work-session/pause", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ work_item_id: ticketId, reason }),
+  });
+  const result = await resp.json();
+  if (!result?.success && result?.error) {
+    logger.warn("Pause session returned unexpected result", { ticket: ticketId, result });
+    await notify(getNotifyCtx(ctx), {
+      event: "error",
+      workItemId: ticketId,
+      telegramMessage: `Failed to pause ${ticketId}: ${result.error}`,
+    });
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
+// resume-session — resume a paused work session (ELLIE-542)
+// ────────────────────────────────────────────────────────────────
+
+async function handleResumeSession(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<void> {
+  const ticketId = cmd.ticketId!;
+
+  console.log(`[playbook] resume-session ${ticketId}`);
+
+  const resp = await fetch("http://localhost:3001/api/work-session/resume", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ work_item_id: ticketId }),
+  });
+  const result = await resp.json();
+  if (!result?.success && result?.error) {
+    logger.warn("Resume session returned unexpected result", { ticket: ticketId, result });
+    await notify(getNotifyCtx(ctx), {
+      event: "error",
+      workItemId: ticketId,
+      telegramMessage: `Failed to resume ${ticketId}: ${result.error}`,
+    });
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
+// pipeline — sequential multi-agent coordination (ELLIE-544)
+// ────────────────────────────────────────────────────────────────
+
+async function handlePipeline(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<void> {
+  const ticketId = cmd.ticketId!;
+  const agents = cmd.agents ?? [];
+  const stepDescs = cmd.pipelineSteps ?? [];
+
+  if (agents.length === 0) {
+    logger.warn("[playbook] pipeline: no agents specified", { ticketId });
+    return;
+  }
+
+  console.log(`[playbook] pipeline ${ticketId}: ${agents.join("→")} (${agents.length} steps)`);
+
+  // Fetch ticket details once — shared across all steps
+  const details = await fetchWorkItemDetails(ticketId);
+  if (!details) {
+    await notify(getNotifyCtx(ctx), {
+      event: "error",
+      workItemId: ticketId,
+      telegramMessage: `Pipeline: could not find ${ticketId} in Plane`,
+    });
+    return;
+  }
+
+  const {
+    createPipeline,
+    startCurrentStep,
+    completeCurrentStep,
+    failCurrentStep,
+    buildStepContext,
+    formatPipelineSummary,
+  } = await import("./pipeline.ts");
+
+  const pipeline = createPipeline(ticketId, agents, stepDescs);
+
+  await notify(getNotifyCtx(ctx), {
+    event: "session_start",
+    workItemId: ticketId,
+    telegramMessage: `Pipeline started: ${ticketId} — ${agents.join(" → ")} (${agents.length} steps)\n${details.name}`,
+    gchatMessage: `Pipeline: ${ticketId}\n${agents.map((a, i) => `${i + 1}. ${a}: ${stepDescs[i] ?? "step"}`).join("\n")}`,
+  });
+
+  // Run each step sequentially
+  for (let i = 0; i < pipeline.steps.length; i++) {
+    startCurrentStep(pipeline.id);
+    const step = pipeline.steps[i];
+    const priorContext = buildStepContext(pipeline);
+
+    const workItemContext =
+      `\nPIPELINE: ${ticketId} — Step ${i + 1}/${pipeline.steps.length}\n` +
+      `Task: ${step.description}\n`;
+
+    const userMessage =
+      `Work on ${ticketId} — ${step.description}\n\n${details.description}` +
+      (priorContext ? `\n\nPRIOR STEPS:\n${priorContext}` : "");
+
+    try {
+      const dispatch = await dispatchAgent(
+        ctx.supabase,
+        step.agent,
+        ctx.telegramUserId,
+        ctx.channel,
+        `${step.description} on ${ticketId}`,
+        ticketId,
+      );
+
+      if (!dispatch) {
+        failCurrentStep(pipeline.id, "dispatch failed");
+        await notify(getNotifyCtx(ctx), {
+          event: "error",
+          workItemId: ticketId,
+          telegramMessage: `Pipeline ${ticketId} step ${i + 1} failed: could not dispatch ${step.agent}`,
+        });
+        return;
+      }
+
+      await notify(getNotifyCtx(ctx), {
+        event: "dispatch_confirm",
+        workItemId: ticketId,
+        telegramMessage: `Pipeline step ${i + 1}/${pipeline.steps.length}: ${step.agent} — ${step.description}`,
+      });
+
+      const prompt = ctx.buildPromptFn(
+        userMessage,
+        undefined, undefined, undefined,
+        ctx.channel,
+        dispatch.agent,
+        workItemContext,
+      );
+
+      const response = await ctx.callClaudeFn(prompt, {
+        resume: false,
+        model: dispatch.agent.model,
+        allowedTools: dispatch.agent.tools_enabled,
+      });
+
+      // Capture output (strip memory tags) for context passing to next step
+      const output = response.replace(/\[MEMORY:[^\]]*\]/gi, "").trim().slice(0, 2000);
+
+      if (dispatch.session_id) {
+        await syncResponse(ctx.supabase, dispatch.session_id, response, {
+          status: "completed",
+          agent_name: step.agent,
+        });
+      }
+
+      const result = completeCurrentStep(pipeline.id, output);
+
+      if (result?.done) {
+        await notify(getNotifyCtx(ctx), {
+          event: "session_complete",
+          workItemId: ticketId,
+          telegramMessage: `Pipeline complete: ${ticketId} — all ${agents.length} steps done ✓\n${formatPipelineSummary(pipeline)}`,
+          gchatMessage: formatPipelineSummary(pipeline),
+        });
+        return;
+      }
+
+      // Brief step-complete notification before continuing to next
+      const preview = output.slice(0, 200);
+      await notify(getNotifyCtx(ctx), {
+        event: "session_update",
+        workItemId: ticketId,
+        telegramMessage: `Step ${i + 1} done (${step.agent}): ${preview}…\nHanding off to ${pipeline.steps[pipeline.currentStepIndex]?.agent}`,
+        gchatMessage: `Step ${i + 1}/${pipeline.steps.length} complete — ${step.agent} → ${pipeline.steps[pipeline.currentStepIndex]?.agent}`,
+      });
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      failCurrentStep(pipeline.id, errMsg);
+      logger.error(`[pipeline] Step ${i + 1} failed for ${ticketId}`, { agent: step.agent, error: errMsg });
+      await notify(getNotifyCtx(ctx), {
+        event: "error",
+        workItemId: ticketId,
+        telegramMessage: `Pipeline ${ticketId} step ${i + 1} (${step.agent}) failed: ${errMsg.slice(0, 100)}`,
+      });
+      throw err;
+    }
+  }
 }

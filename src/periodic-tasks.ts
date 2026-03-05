@@ -304,6 +304,32 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     }
   }, 15 * 60_000, "job-intelligence");
 
+  // ELLIE-543: Check-in monitor — proactive notifications for long-running agent sessions (every 5 minutes)
+  periodicTask(async () => {
+    const { getActiveRunStates } = await import("./orchestration-tracker.ts");
+    const { runCheckInMonitor } = await import("./check-in-monitor.ts");
+    const { notify } = await import("./notification-policy.ts");
+    const { getNotifyCtx } = await import("./relay-state.ts");
+
+    const runs = getActiveRunStates();
+    if (runs.length === 0) return;
+
+    const ctx = getNotifyCtx();
+    const { checkedIn, escalated } = await runCheckInMonitor(
+      runs,
+      (opts) => notify(ctx, {
+        event: opts.event as import("./notification-policy.ts").NotificationEvent,
+        workItemId: opts.workItemId,
+        telegramMessage: opts.telegramMessage,
+        gchatMessage: opts.gchatMessage,
+      }),
+    );
+
+    if (checkedIn > 0 || escalated > 0) {
+      logger.info(`[check-in-monitor] Cycle complete`, { checkedIn, escalated });
+    }
+  }, 5 * 60_000, "check-in-monitor");
+
   // ELLIE-496: ES reconciliation — detect and backfill Supabase/Forest → ES gaps (every 30 minutes)
   periodicTask(async () => {
     const { runReconciliation } = await import("./elasticsearch/reconcile.ts");
