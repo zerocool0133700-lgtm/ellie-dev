@@ -17,7 +17,7 @@ import { log } from "./logger.ts";
 
 const logger = log.child("periodic");
 
-export const _startedAt = Date.now();
+export let _startedAt = Date.now();
 export const STARTUP_GRACE_MS = 15_000;
 
 export interface PeriodicTaskOpts {
@@ -90,6 +90,25 @@ export function stopAllTasks(): void {
 
 // Back-compat alias used by ELLIE-487 graceful shutdown
 export const stopAllPeriodicTasks = stopAllTasks;
+
+// ── Test utilities ────────────────────────────────────────────
+
+/**
+ * Override the module start time — for unit tests only.
+ * Set to `Date.now() - STARTUP_GRACE_MS - 1000` to bypass the startup grace check.
+ */
+export function _setStartedAtForTesting(t: number): void {
+  _startedAt = t;
+}
+
+/**
+ * Stop all tasks and clear the registry — for unit tests only.
+ * Call in beforeEach to ensure test isolation.
+ */
+export function _resetTasksForTesting(): void {
+  stopAllTasks();
+  _tasks.clear();
+}
 
 // ── Register + run a periodic task ───────────────────────────
 

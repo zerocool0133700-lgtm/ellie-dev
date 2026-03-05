@@ -228,6 +228,13 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     if (refreshed > 0) console.log(`[memory-maintenance] Refreshed weights for ${refreshed} memories`);
   }, 60 * 60_000, "weight-refresh");
 
+  // Working memory idle archive — archive sessions idle >24h (every 2 hours — ELLIE-540)
+  periodicTask(async () => {
+    const { archiveIdleWorkingMemory } = await import("./working-memory.ts");
+    const archived = await archiveIdleWorkingMemory();
+    if (archived > 0) console.log(`[working-memory] Archived ${archived} idle session(s)`);
+  }, 2 * 60 * 60_000, "working-memory-archive");
+
   // ELLIE-457: Oak Catalog — daily QMD scan → R/1 manifest (every 24 hours)
   periodicTask(async () => {
     const { syncOakCatalog } = await import("./api/bridge-river.ts");
