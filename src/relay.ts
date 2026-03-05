@@ -6,6 +6,57 @@
  * Periodic background tasks live in periodic-tasks.ts (ELLIE-492).
  *
  * Run: bun run src/relay.ts
+ *
+ * ── Startup DAG (ELLIE-497) ──────────────────────────────────
+ *
+ * The initialization sequence forms a directed acyclic graph.
+ * Phases are grouped by dependency depth — phases in the same group
+ * can run in parallel; phases in later groups depend on earlier ones.
+ *
+ * DEPTH 0 — No dependencies (all run in parallel):
+ *   config, directories, supabase, lock, anthropic, dead-letters,
+ *   approval-expiry, plane-queue, plane-reconcile, job-vines,
+ *   mode-restore, archetype-validate, bridge-write, slack,
+ *   routing-rules, workflow-templates, voice-providers, skill-watcher,
+ *   google-chat, outlook, http-server, forest-sync
+ *
+ * DEPTH 1 — Depends on depth-0 phases:
+ *   bot (← config)
+ *   orchestration (← supabase)
+ *   discord (← supabase)
+ *   model-costs (← supabase)
+ *   classifiers (← anthropic + supabase)
+ *
+ * DEPTH 2 — Depends on depth-1:
+ *   dep-wiring (← bot + anthropic + supabase) [CRITICAL]
+ *   telegram-handlers (← bot)
+ *   nudge-checker (← bot + google-chat)
+ *
+ * DEPTH 3:
+ *   periodic-tasks (← dep-wiring)
+ *   websocket-servers (← http-server + dep-wiring)
+ *   bot-start (← telegram-handlers)
+ *
+ * DEPTH 4:
+ *   http-listen (← http-server + websocket-servers)
+ *
+ * Critical phases (failure aborts startup):
+ *   config, directories, lock, bot, dep-wiring, telegram-handlers,
+ *   http-server, websocket-servers, http-listen, bot-start,
+ *   orchestration (ELLIE-563)
+ *
+ * ── Shutdown (reverse order) ─────────────────────────────────
+ *
+ * 1. bot.stop() — stop accepting Telegram messages
+ * 2. discord — stop Discord gateway
+ * 3. periodic-tasks — stopAllTasks() (includes creature reaper, health checks, etc.)
+ * 4. orchestration — stopWatchdog() + stopReconciler()
+ * 5. plane-queue — stopPlaneQueueWorker()
+ * 6. message-queues — drainQueues(20s) for in-flight tasks
+ * 7. http-server — close HTTP + personality watchers
+ * 8. lock — releaseLock() with 5s timeout
+ *
+ * See src/startup-dag.ts for the formal DAG engine and tests.
  */
 
 import { Bot } from "grammy";
@@ -30,7 +81,7 @@ import {
 import { triggerConsolidation } from "./relay-idle.ts";
 import { handleHttpRequest } from "./http-routes.ts";
 import { registerTelegramHandlers } from "./telegram-handlers.ts";
-import { createWebSocketServers } from "./websocket-servers.ts";
+import { createWebSocketServers, stopWebSocketPings } from "./websocket-servers.ts";
 
 // Extracted modules
 import {
@@ -54,19 +105,35 @@ import { startExpiryCleanup } from "./approval.ts";
 import { notify } from "./notification-policy.ts";
 import { startPlaneQueueWorker, stopPlaneQueueWorker } from "./plane-queue.ts";
 import { reconcilePlaneState } from "./plane.ts";
-import { startWatchdog, recoverActiveRuns, setWatchdogNotify, stopWatchdog } from "./orchestration-tracker.ts";
-import { reconcileOnStartup, startReconciler, stopReconciler } from "./orchestration-reconciler.ts";
+import { setWatchdogNotify, stopWatchdog } from "./orchestration-tracker.ts";
+import { stopReconciler } from "./orchestration-reconciler.ts";
 import { restoreModeState } from "./context-mode.ts";
-import { cleanupOrphanedJobs, registerJobVines } from "./jobs-ledger.ts";
+import { registerJobVines } from "./jobs-ledger.ts";
+import { initOrchestration } from "./orchestration-init.ts";
 import { onBridgeWrite } from "./api/bridge.ts";
 import { setBroadcastToEllieChat } from "./tool-approval.ts";
 import { stopAllTasks } from "./periodic-task.ts";
 import { initPeriodicTasks, runStartupTasks } from "./periodic-tasks.ts";
 
+// ── Startup phase timer (ELLIE-497) ─────────────────────────
+const _startupBegin = Date.now();
+const _phaseTimings: Array<{ name: string; ms: number }> = [];
+
+function startPhase(name: string): () => void {
+  const t0 = Date.now();
+  logger.info(`[startup] START ${name}`);
+  return () => {
+    const ms = Date.now() - t0;
+    _phaseTimings.push({ name, ms });
+    logger.info(`[startup] DONE  ${name} (${ms}ms)`);
+  };
+}
+
 // ============================================================
 // SETUP
 // ============================================================
 
+const _doneConfig = startPhase("config");
 if (!BOT_TOKEN) {
   logger.error("TELEGRAM_BOT_TOKEN not set!");
   console.log("\nTo set up:");
@@ -75,27 +142,36 @@ if (!BOT_TOKEN) {
   console.log("3. Copy the token to .env");
   process.exit(1);
 }
+_doneConfig();
 
 // Create directories
+const _doneDirectories = startPhase("directories");
 await mkdir(TEMP_DIR, { recursive: true });
 await mkdir(UPLOADS_DIR, { recursive: true });
+_doneDirectories();
 
 // ============================================================
 // SUPABASE (optional — only if configured)
 // ============================================================
 
+const _doneSupabase = startPhase("supabase");
 const supabase: SupabaseClient | null =
   process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY
     ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY)
     : null;
+_doneSupabase();
 
 // Acquire lock
+const _doneLock = startPhase("lock");
 if (!(await acquireLock())) {
   logger.error("Could not acquire lock. Another instance may be running.");
   process.exit(1);
 }
+_doneLock();
 
+const _doneBot = startPhase("bot");
 export const bot = new Bot(BOT_TOKEN);
+_doneBot();
 
 // ELLIE-462: Bot restart gate — prevent concurrent restarts and rapid flap loops
 // ELLIE-467: Added 5-min cooldown between restarts
@@ -103,38 +179,50 @@ let _botRestarting = false;
 let _lastBotRestartAt = 0;
 
 // ELLIE-490: Restore dead letters that survived previous process restart
-loadPersistedDeadLetters().catch(err => logger.warn("DLQ restore failed (non-fatal)", err));
+{ const _done = startPhase("dead-letters");
+  loadPersistedDeadLetters().then(() => _done()).catch(err => { _done(); logger.warn("DLQ restore failed (non-fatal)", err); });
+}
 
 // Start approval expiry cleanup
-startExpiryCleanup();
+{ const _done = startPhase("approval-expiry"); startExpiryCleanup(); _done(); }
 
 // Plane sync queue — persistent retry for failed Plane API calls (ELLIE-234)
-startPlaneQueueWorker();
+{ const _done = startPhase("plane-queue"); startPlaneQueueWorker(); _done(); }
 // ELLIE-483: Detect partial Plane states from prior crashes
-reconcilePlaneState().catch(err => logger.warn("Plane reconciliation failed (non-fatal)", err));
+{ const _done = startPhase("plane-reconcile");
+  reconcilePlaneState().then(() => _done()).catch(err => { _done(); logger.warn("Plane reconciliation failed (non-fatal)", err); });
+}
 
 // Orchestration tracker — ELLIE-349: heartbeat watchdog + orphan recovery
 // ELLIE-387: Wire proactive notifications to watchdog (deferred — needs setRelayDeps first)
-recoverActiveRuns()
-  .then(() => cleanupOrphanedJobs())
-  .then(count => { if (count > 0) console.log(`[jobs] Cleaned up ${count} orphaned job(s) on startup`); })
-  .then(() => reconcileOnStartup(supabase))
-  .then(() => {
-    startWatchdog();
-    startReconciler(supabase);
-  })
-  .catch(err => logger.error("Orchestration startup error", err));
+// ELLIE-563: Marked critical — relay exits if orchestration fails to initialize
+{ const _done = startPhase("orchestration");
+  initOrchestration(supabase)
+    .then(() => _done())
+    .catch(err => {
+      _done();
+      logger.error("CRITICAL: Orchestration startup failed — relay cannot route messages", err);
+      process.exit(1);
+    });
+}
 
 // ELLIE-455: Register J scope tree-level vines on startup
-registerJobVines().catch(err => logger.warn("[job-vines] Startup registration failed", { err: err.message }));
+{ const _done = startPhase("job-vines");
+  registerJobVines().then(() => _done()).catch(err => { _done(); logger.warn("[job-vines] Startup registration failed", { err: err.message }); });
+}
 
 // ELLIE-395: Restore conversation mode state from disk
-restoreModeState().catch(err => logger.warn("Mode state restore failed (non-fatal)", err));
+{ const _done = startPhase("mode-restore");
+  restoreModeState().then(() => _done()).catch(err => { _done(); logger.warn("Mode state restore failed (non-fatal)", err); });
+}
 
 // ELLIE-374: Validate all archetype files on startup
-import("./prompt-builder.ts").then(({ validateArchetypes }) => validateArchetypes()).catch(err => logger.warn("Archetype validation failed", { error: err instanceof Error ? err.message : String(err) }));
+{ const _done = startPhase("archetype-validate");
+  import("./prompt-builder.ts").then(({ validateArchetypes }) => validateArchetypes()).then(() => _done()).catch(err => { _done(); logger.warn("Archetype validation failed", { error: err instanceof Error ? err.message : String(err) }); });
+}
 
 // Bridge write notifications — Telegram + ellie-chat (ELLIE-199)
+{ const _done = startPhase("bridge-write");
 onBridgeWrite(({ collaborator, content, memoryId, type, workItemId }) => {
   const preview = content.length > 80 ? content.slice(0, 80) + '...' : content;
   const ticket = workItemId ? ` (${workItemId})` : '';
@@ -159,16 +247,20 @@ onBridgeWrite(({ collaborator, content, memoryId, type, workItemId }) => {
     ts: Date.now(),
   });
 });
+_done(); }
 
 // ============================================================
 // CLIENTS + DEPENDENCY WIRING
 // ============================================================
 
+const _doneAnthropic = startPhase("anthropic");
 const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   : null;
+_doneAnthropic();
 
 // Wire shared dependencies for all extracted modules
+const _doneDepWiring = startPhase("dep-wiring");
 setRelayDeps({ bot, anthropic, supabase });
 setBroadcastExtension(broadcastExtension);
 setNotifyCtx(getNotifyCtx);
@@ -180,10 +272,12 @@ setSenderDeps({ supabase, getActiveAgent });
 initDelivery(supabase);
 setVoicePipelineDeps({ supabase, getActiveAgent, broadcastExtension, getContextDocket, triggerConsolidation });
 setBroadcastToEllieChat(broadcastToEllieChatClients);
+_doneDepWiring();
 
 // ── ELLIE-492: Unified periodic task runner ──────────────────
 // All background periodic tasks registered in one place.
 // Must run after dependency wiring so supabase/anthropic/bot are available.
+const _donePeriodicTasks = startPhase("periodic-tasks");
 initPeriodicTasks({
   supabase,
   bot,
@@ -201,51 +295,71 @@ runStartupTasks({ supabase, bot, anthropic, botRestart: {
   lastRestartAt: () => _lastBotRestartAt,
   setLastRestartAt: (t) => { _lastBotRestartAt = t; },
 }});
+_donePeriodicTasks();
 
 // ELLIE-469: Discord channel plugin — only activates if DISCORD_BOT_TOKEN is set
 import { startDiscordGateway } from "./channels/discord/index.ts";
-startDiscordGateway(supabase);
+{ const _done = startPhase("discord"); startDiscordGateway(supabase); _done(); }
 
 // ELLIE-443: Slack channel plugin — only activates if SLACK_BOT_TOKEN + SLACK_SIGNING_SECRET are set
 import { startSlackChannel } from "./channels/slack/index.ts";
-startSlackChannel();
+{ const _done = startPhase("slack"); startSlackChannel(); _done(); }
 
 // Initialize classifiers
-if (anthropic && supabase) initClassifier(anthropic, supabase);
-if (anthropic) initEntailmentClassifier(anthropic);
+{ const _done = startPhase("classifiers");
+  if (anthropic && supabase) initClassifier(anthropic, supabase);
+  if (anthropic) initEntailmentClassifier(anthropic);
+  _done();
+}
 
 // ELLIE-435: Pre-warm orchestrator routing rules from Forest tree
-warmTreeRoutingRules().catch(err => logger.warn("[ELLIE-435] Tree routing warm failed", err));
+{ const _done = startPhase("routing-rules");
+  warmTreeRoutingRules().then(() => _done()).catch(err => { _done(); logger.warn("[ELLIE-435] Tree routing warm failed", err); });
+}
 
 // ELLIE-388: Load workflow templates
 import { loadWorkflowTemplates } from "./workflow-templates.ts";
-loadWorkflowTemplates();
+{ const _done = startPhase("workflow-templates"); loadWorkflowTemplates(); _done(); }
 
 // ELLIE-235: Preload model costs at startup (avoids first-request latency)
 import { preloadModelCosts } from "./orchestrator.ts";
-preloadModelCosts(supabase).catch(err => logger.warn("Model cost preload failed", err));
+{ const _done = startPhase("model-costs");
+  preloadModelCosts(supabase).then(() => _done()).catch(err => { _done(); logger.warn("Model cost preload failed", err); });
+}
 
 // ELLIE-229: Probe voice transcription providers at startup
 import { probeVoiceProviders } from "./transcribe.ts";
-probeVoiceProviders().catch(err => logger.warn("Voice provider probe failed", err));
+{ const _done = startPhase("voice-providers");
+  probeVoiceProviders().then(() => _done()).catch(err => { _done(); logger.warn("Voice provider probe failed", err); });
+}
 
 // Initialize SKILL.md watcher for hot-reload (ELLIE-217)
-startSkillWatcher();
-getSkillSnapshot().then(s => {
-  console.log(`[skills] Initial snapshot: ${s.skills.length} skills, ${s.totalChars} chars`);
-}).catch(err => logger.warn("Initial snapshot failed", err));
+{ const _done = startPhase("skill-watcher");
+  startSkillWatcher();
+  getSkillSnapshot().then(s => {
+    console.log(`[skills] Initial snapshot: ${s.skills.length} skills, ${s.totalChars} chars`);
+    _done();
+  }).catch(err => { _done(); logger.warn("Initial snapshot failed", err); });
+}
 
 // Register Telegram handlers + create HTTP server
-registerTelegramHandlers(bot);
+{ const _done = startPhase("telegram-handlers"); registerTelegramHandlers(bot); _done(); }
+const _doneHttpServer = startPhase("http-server");
 const httpServer = createServer(handleHttpRequest);
+_doneHttpServer();
 
 // Init Google Chat (optional — skips gracefully if not configured)
+const _doneGchat = startPhase("google-chat");
 const gchatEnabled = await initGoogleChat();
+_doneGchat();
 
 // Init Microsoft Outlook (optional — skips gracefully if not configured)
+const _doneOutlook = startPhase("outlook");
 const outlookEnabled = await initOutlook();
+_doneOutlook();
 
 // Start delivery nudge checker — sends reminder if response wasn't acknowledged
+{ const _done = startPhase("nudge-checker");
 startNudgeChecker(async (channel, count) => {
   const nudgeText = `Hey Dave \u2014 I sent you a response${count > 1 ? ` (${count} messages)` : ""} a few minutes ago. Did it come through?`;
   console.log(`[delivery] Nudging on ${channel} (${count} pending responses)`);
@@ -260,6 +374,7 @@ startNudgeChecker(async (channel, count) => {
     logger.error("Nudge failed", { channel }, err);
   }
 });
+_done(); }
 
 console.log("Starting Claude Telegram Relay...");
 console.log(`Authorized user: ${ALLOWED_USER_ID || "ANY (not recommended)"}`);
@@ -269,13 +384,15 @@ console.log(`Google Chat: ${gchatEnabled ? "ON" : "OFF"}`);
 console.log(`Outlook: ${outlookEnabled ? "ON (" + getOutlookEmail() + ")" : "OFF"}`);
 
 // Initialize ES forest sync (if configured)
-await initForestSync();
+{ const _done = startPhase("forest-sync"); await initForestSync(); _done(); }
 
 // Set up WebSocket servers (voice, extension, ellie-chat)
-createWebSocketServers(httpServer);
+{ const _done = startPhase("websocket-servers"); createWebSocketServers(httpServer); _done(); }
 
 // Start HTTP + WebSocket server
+const _doneHttpListen = startPhase("http-listen");
 httpServer.listen(HTTP_PORT, () => {
+  _doneHttpListen();
   console.log(`[http] Server listening on port ${HTTP_PORT}`);
   console.log(`[voice] WebSocket: ws://localhost:${HTTP_PORT}/media-stream`);
   console.log(`[extension] WebSocket: ws://localhost:${HTTP_PORT}/extension`);
@@ -292,9 +409,16 @@ httpServer.listen(HTTP_PORT, () => {
 });
 
 // Start Telegram bot (long-polling)
+const _doneBotStart = startPhase("bot-start");
 bot.start({
   onStart: () => {
-    console.log("Telegram bot is running!");
+    _doneBotStart();
+    const totalMs = Date.now() - _startupBegin;
+    console.log(`Telegram bot is running!`);
+    logger.info(`[startup] All phases complete in ${totalMs}ms`, {
+      phases: _phaseTimings.length,
+      totalMs,
+    });
   },
 });
 
@@ -305,44 +429,53 @@ let shutdownInProgress = false;
 async function gracefulShutdown(signal: string): Promise<void> {
   if (shutdownInProgress) return;
   shutdownInProgress = true;
-  console.log(`[relay] ${signal} received \u2014 shutting down gracefully...`);
+  const shutdownStart = Date.now();
+  logger.info(`[shutdown] ${signal} received — shutting down gracefully...`);
 
-  // 1. Stop accepting new messages
+  // ── ELLIE-497: Shutdown mirrors startup in reverse ────────
+  // Dependents shut down before their dependencies.
+  // Order: bot → channels → background-tasks → queues → http → lock
+
+  // 1. Stop accepting new messages (reverse of bot-start)
+  logger.info("[shutdown] Stopping telegram bot...");
   try { await bot.stop(); } catch {}
-  console.log("[relay] Telegram bot stopped");
+  logger.info("[shutdown] Telegram bot stopped");
+  logger.info("[shutdown] Stopping discord...");
   const { stopDiscordGateway } = await import("./channels/discord/index.ts");
   await stopDiscordGateway().catch(() => {});
-  console.log("[relay] Discord gateway stopped");
+  logger.info("[shutdown] Discord gateway stopped");
 
-  // 2. Stop all background tasks (ELLIE-487/492)
-  stopAllTasks();
-  stopWatchdog();
-  stopReconciler();
-  stopPlaneQueueWorker();
-  console.log("[relay] Background tasks stopped (periodic, watchdog, reconciler, plane queue)");
+  // 2. Stop all background tasks (reverse of periodic-tasks + orchestration)
+  logger.info("[shutdown] Stopping background tasks...");
+  stopAllTasks();      // periodic-tasks
+  stopWatchdog();      // orchestration watchdog
+  stopReconciler();    // orchestration reconciler
+  stopPlaneQueueWorker(); // plane-queue
+  logger.info("[shutdown] Background tasks stopped");
 
   // 3. Wait for active queue tasks to finish (ELLIE-460: graceful drain)
+  logger.info("[shutdown] Draining message queues...");
   const drained = await drainQueues(20_000); // 20s max wait
-  if (drained) {
-    console.log("[relay] Queues drained cleanly");
-  } else {
-    console.log("[relay] Queue drain timed out \u2014 proceeding anyway");
-  }
+  logger.info(`[shutdown] Queues ${drained ? "drained cleanly" : "drain timed out"}`);
 
-  // 4. Close HTTP server + file watchers
+  // 4. Close HTTP server + file watchers + WS pings (reverse of http-listen + websocket-servers)
+  logger.info("[shutdown] Closing HTTP server...");
+  stopWebSocketPings(); // ELLIE-561
   httpServer.close();
   const { stopPersonalityWatchers } = await import("./prompt-builder.ts");
   stopPersonalityWatchers();
-  console.log("[relay] HTTP server closed, personality watchers stopped");
+  logger.info("[shutdown] HTTP server closed");
 
-  // 5. Release lock file with timeout — guards against hung FS or slow cleanup (ELLIE-487)
+  // 5. Release lock file (reverse of lock — deepest foundation)
+  logger.info("[shutdown] Releasing lock...");
   const { releaseLock } = await import("./claude-cli.ts");
   await Promise.race([
     releaseLock(),
     new Promise<void>(resolve => setTimeout(resolve, 5_000)),
   ]);
 
-  console.log("[relay] Shutdown complete");
+  const shutdownMs = Date.now() - shutdownStart;
+  logger.info(`[shutdown] Complete in ${shutdownMs}ms`);
   process.exit(0);
 }
 
