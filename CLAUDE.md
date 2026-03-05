@@ -526,6 +526,44 @@ To add a new skill: create `skills/<name>/SKILL.md` with frontmatter + instructi
 
 ## Project Architecture
 
+### Working Memory — Session-Scoped Context (ELLIE-538/539)
+
+Working memory is a session-scoped document that survives context compression. It lives in the `working_memory` table (Forest DB) and is injected into every agent prompt automatically.
+
+**7 sections** (all optional strings, updated as work progresses):
+- `session_identity` — agent name, ticket ID, channel
+- `task_stack` — ordered todo list with active task highlighted
+- `conversation_thread` — narrative summary (not a transcript)
+- `investigation_state` — hypotheses, files read, current exploration
+- `decision_log` — choices made with reasoning
+- `context_anchors` — must-survive details (exact error messages, line numbers, values)
+- `resumption_prompt` — continuation note written for your future self
+
+**API** (all at `http://localhost:3001/api/working-memory/`):
+
+| Endpoint | Method | Body | Purpose |
+|----------|--------|------|---------|
+| `init` | POST | `{ session_id, agent, sections?, channel? }` | Start/reinit session |
+| `update` | PATCH | `{ session_id, agent, sections }` | Merge section updates |
+| `read` | GET | `?session_id=&agent=` | Fetch active record |
+| `checkpoint` | POST | `{ session_id, agent }` | Increment turn counter |
+| `promote` | POST | `{ session_id, agent, scope_path?, work_item_id? }` | Archive + write decisions to Forest |
+
+**Prompt injection** (ELLIE-539):
+- `resumption_prompt` is **always injected** at priority 2 (between soul and protocols)
+- Full working memory injected on demand when `fullWorkingMemory: true` passed to `buildPrompt()`
+- Cache set via `setWorkingMemoryCache(agent, record)` before each prompt build
+- Tests use `_injectWorkingMemoryForTesting(agent, sections)` to control cache state
+
+**Write protocol for agents:**
+- Update working memory after **meaningful actions**: task changes, decisions, findings
+- Refresh `conversation_thread` every **3–5 turns** (narrative summary, not transcript)
+- Update `context_anchors` whenever you encounter a critical detail (error message, exact line number, specific value) that must survive context compression
+- Update `resumption_prompt` when pausing or completing a sub-task — write it for your future self
+- **Do NOT** update after every tool call — only on meaningful state changes
+
+---
+
 ### River Vault — Prompt Architecture (ELLIE-532/537)
 
 All agent prompt content (soul, memory-protocol, confirm-protocol, forest-writes, dev/research/strategy-agent-template, playbook-commands, work-commands, planning-mode) lives in the **River Obsidian vault** (`/home/ellie/obsidian-vault/`), synced to Ellie via `src/bridge-river.ts` (QMD endpoint).

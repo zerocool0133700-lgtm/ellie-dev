@@ -30,6 +30,13 @@ import { freshnessTracker, buildStalenessWarning } from "./context-freshness.ts"
 import type { ChannelContextProfile } from "./api/mode-profile.ts";
 import { buildSourceHierarchyInstruction } from "./source-hierarchy.ts";
 import { getActiveRunStates } from "./orchestration-tracker.ts";
+import {
+  getCachedWorkingMemory,
+  setWorkingMemoryCache,
+  clearWorkingMemoryCache,
+  _injectWorkingMemoryForTesting,
+} from "./working-memory.ts";
+export { setWorkingMemoryCache, getCachedWorkingMemory, clearWorkingMemoryCache, _injectWorkingMemoryForTesting };
 
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
 
@@ -715,6 +722,7 @@ export function buildPrompt(
   groundTruthConflicts?: string,
   crossChannelCorrections?: string,
   commandBarContext?: string,
+  fullWorkingMemory?: boolean,
 ): string {
   const channelLabel = channel === "google-chat" ? "Google Chat" : channel === "ellie-chat" ? "Ellie Chat (dashboard)" : "Telegram";
 
@@ -826,6 +834,43 @@ export function buildPrompt(
       `\nThis conversation is scoped to the "${channelProfile.channelName}" sub-channel. ` +
       `Stay focused on topics relevant to this channel's purpose.`,
       priority: 2 });
+  }
+
+  // Priority 2: Working memory (ELLIE-539)
+  // Resumption prompt is always injected when present — gives the agent instant
+  // context continuity without requiring compression detection.
+  // Full working memory (all 7 sections) is injected on demand when fullWorkingMemory=true.
+  {
+    const agentName = agentConfig?.name || "general";
+    const wm = getCachedWorkingMemory(agentName);
+    if (wm) {
+      const s = wm.sections;
+      if (fullWorkingMemory) {
+        // Full pull: all non-empty sections
+        const parts: string[] = [];
+        if (s.session_identity)    parts.push(`**Session:** ${s.session_identity}`);
+        if (s.task_stack)          parts.push(`**Tasks:**\n${s.task_stack}`);
+        if (s.conversation_thread) parts.push(`**Thread:** ${s.conversation_thread}`);
+        if (s.investigation_state) parts.push(`**Investigation:**\n${s.investigation_state}`);
+        if (s.decision_log)        parts.push(`**Decisions:**\n${s.decision_log}`);
+        if (s.context_anchors)     parts.push(`**Anchors:** ${s.context_anchors}`);
+        if (s.resumption_prompt)   parts.push(`**Resumption:** ${s.resumption_prompt}`);
+        if (parts.length > 0) {
+          sections.push({
+            label: "working-memory-full",
+            content: `\nWORKING MEMORY — ${agentName}:\n${parts.join("\n")}`,
+            priority: 2,
+          });
+        }
+      } else if (s.resumption_prompt?.trim()) {
+        // Resumption-only: lightweight always-on injection
+        sections.push({
+          label: "working-memory-resumption",
+          content: `\nRESUMPTION CONTEXT:\n${s.resumption_prompt}`,
+          priority: 2,
+        });
+      }
+    }
   }
 
   // Priority 3: Protocols — River-backed, River is source of truth (ELLIE-150, ELLIE-532, ELLIE-537)

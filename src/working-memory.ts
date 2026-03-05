@@ -220,3 +220,64 @@ export async function archiveIdleWorkingMemory(): Promise<number> {
   `;
   return archived.length;
 }
+
+// ── In-process cache (ELLIE-539) ─────────────────────────────────────────────
+//
+// Mirrors the River doc cache pattern from prompt-builder.ts.
+// The relay/message handler populates this cache before calling buildPrompt(),
+// so the prompt-builder can read working memory synchronously.
+//
+// Cache key: agent name (e.g. "dev", "research", "general")
+// One active record per agent at a time.
+
+const _workingMemoryCache = new Map<string, WorkingMemoryRecord>();
+
+/**
+ * Store the active working memory record for an agent.
+ * Called by the relay/message handler before building a prompt.
+ */
+export function setWorkingMemoryCache(agent: string, record: WorkingMemoryRecord): void {
+  _workingMemoryCache.set(agent, record);
+}
+
+/**
+ * Get the cached working memory for an agent.
+ * Returns null if no record is cached.
+ * Called synchronously by buildPrompt().
+ */
+export function getCachedWorkingMemory(agent: string): WorkingMemoryRecord | null {
+  return _workingMemoryCache.get(agent) ?? null;
+}
+
+/**
+ * Clear all cached working memory records.
+ * Used in tests and on session teardown.
+ */
+export function clearWorkingMemoryCache(): void {
+  _workingMemoryCache.clear();
+}
+
+/**
+ * Inject a working memory record into the cache for testing.
+ * Bypasses the DB so tests can control prompt content without live data.
+ *
+ * @param agent    — agent name (e.g. "dev")
+ * @param sections — partial sections to inject
+ */
+export function _injectWorkingMemoryForTesting(
+  agent: string,
+  sections: Partial<WorkingMemorySections>,
+): void {
+  const record: WorkingMemoryRecord = {
+    id: `test-${agent}`,
+    session_id: `test-session-${agent}`,
+    agent,
+    sections: sections as WorkingMemorySections,
+    turn_number: 0,
+    channel: null,
+    created_at: new Date(),
+    updated_at: new Date(),
+    archived_at: null,
+  };
+  _workingMemoryCache.set(agent, record);
+}
