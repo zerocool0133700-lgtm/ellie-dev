@@ -9,6 +9,7 @@
 
 import { RELAY_BASE_URL } from "./relay-config.ts";
 import { log } from "./logger.ts";
+import { trackMemoryId } from "./dispatch-memory-tracker.ts";
 
 const logger = log.child("decision-forest-writer");
 
@@ -25,6 +26,7 @@ export interface ForestDecision {
     work_item_id: string;
     source: string;
     agent?: string;
+    session_id?: string;
   };
 }
 
@@ -38,17 +40,20 @@ export function buildForestDecision(
   workItemId: string,
   message: string,
   agent?: string,
+  sessionId?: string,
 ): ForestDecision {
+  const metadata: ForestDecision["metadata"] = {
+    work_item_id: workItemId,
+    source: "work-session",
+    agent,
+  };
+  if (sessionId) metadata.session_id = sessionId;
   return {
     content: `${workItemId}: ${message}`,
     type: "decision",
     scope_path: "2/1",
     confidence: 0.8,
-    metadata: {
-      work_item_id: workItemId,
-      source: "work-session",
-      agent,
-    },
+    metadata,
   };
 }
 
@@ -63,9 +68,10 @@ export async function writeDecisionToForest(
   message: string,
   agent?: string,
   fetchFn: typeof fetch = fetch,
+  sessionId?: string,
 ): Promise<boolean> {
   try {
-    const decision = buildForestDecision(workItemId, message, agent);
+    const decision = buildForestDecision(workItemId, message, agent, sessionId);
     const resp = await fetchFn(`${RELAY_BASE_URL}/api/bridge/write`, {
       method: "POST",
       headers: {
@@ -81,6 +87,16 @@ export async function writeDecisionToForest(
         workItemId,
       });
       return false;
+    }
+
+    // ELLIE-632: Track memory ID for dispatch cross-referencing
+    try {
+      const body = await resp.json() as { memory_id?: string };
+      if (body.memory_id) {
+        trackMemoryId(workItemId, body.memory_id);
+      }
+    } catch {
+      // Response parsing failure is non-fatal
     }
 
     logger.info("Decision written to Forest", { workItemId, agent });

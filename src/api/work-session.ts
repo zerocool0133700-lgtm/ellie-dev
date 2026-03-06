@@ -35,9 +35,12 @@ import {
   appendWorkTrailProgress,
   buildWorkTrailUpdateAppend,
   buildWorkTrailCompleteAppend,
+  buildWorkTrailDecisionAppend,
+  finalizeWorkTrail,
 } from "../work-trail-writer.ts";
 import { verifyDispatch } from "../dispatch-verifier.ts";
 import { journalDispatchStart, journalDispatchEnd } from "../dispatch-journal.ts";
+import { getTrackedMemoryIds, clearTrackedMemoryIds } from "../dispatch-memory-tracker.ts";
 import { dashboardOnStart, dashboardOnComplete, dashboardOnPause, dashboardOnBlocked } from "../active-tickets-dashboard.ts";
 import { ensureContextCard, appendWorkHistory, appendHandoffNote } from "../ticket-context-card.ts";
 import { writePostMortem, classifyPauseReason } from "../post-mortem.ts";
@@ -313,9 +316,9 @@ export async function updateWorkSession(req: ApiRequest, res: ApiResponse, bot: 
     // Add progress commit (replaces Supabase insert)
     await forestAddUpdate(tree.id, entity?.id, message, undefined, git_sha || undefined);
 
-    // ELLIE-586: If type is "finding", fire-and-forget write to Forest Bridge
+    // ELLIE-586 + ELLIE-632: If type is "finding", fire-and-forget write with session cross-ref
     if (type === "finding") {
-      writeFindingToForest(work_item_id, message, agent, confidence).catch(e =>
+      writeFindingToForest(work_item_id, message, agent, confidence, undefined, tree.id).catch(e =>
         logRiverWriteFailure("writeFindingToForest", e));
     }
 
@@ -419,9 +422,13 @@ export async function logDecision(req: ApiRequest, res: ApiResponse, bot: Bot) {
       gchatMessage: gchatMsg,
     });
 
-    // ELLIE-585: Fire-and-forget Forest Bridge write — queryable decision node
-    writeDecisionToForest(work_item_id, message, agent).catch(e =>
+    // ELLIE-585 + ELLIE-632: Fire-and-forget Forest Bridge write with session cross-ref
+    writeDecisionToForest(work_item_id, message, agent, undefined, tree.id).catch(e =>
       logRiverWriteFailure("writeDecisionToForest", e));
+
+    // ELLIE-630: Append decision to work trail (fire-and-forget, non-fatal)
+    appendWorkTrailProgress(work_item_id, buildWorkTrailDecisionAppend(message, agent)).catch(e =>
+      logRiverWriteFailure("appendWorkTrailProgress/decision", e));
 
     // ELLIE-455: J scope touchpoint — decision logged
     findJobByTreeId(tree.id).then(job => {
@@ -477,8 +484,10 @@ export async function completeWorkSession(req: ApiRequest, res: ApiResponse, bot
     // Complete session in forest (merges branches, completes creatures, transitions to dormant)
     await forestCompleteSession(tree.id, summary);
 
-    // ELLIE-531: Append completion summary to work trail (fire-and-forget, non-fatal)
-    appendWorkTrailProgress(work_item_id, buildWorkTrailCompleteAppend(summary)).catch(e => logRiverWriteFailure("appendWorkTrailProgress/complete", e));
+    // ELLIE-531 + ELLIE-630: Append completion summary then finalize frontmatter (chained, fire-and-forget)
+    appendWorkTrailProgress(work_item_id, buildWorkTrailCompleteAppend(summary))
+      .then(() => finalizeWorkTrail(work_item_id))
+      .catch(e => logRiverWriteFailure("appendWorkTrailProgress/complete+finalize", e));
 
     // ELLIE-564: Verify dispatch — check reality vs agent report (fire-and-forget)
     verifyDispatch({
@@ -488,13 +497,16 @@ export async function completeWorkSession(req: ApiRequest, res: ApiResponse, bot
       summary,
     }).catch(e => logRiverWriteFailure("verifyDispatch", e));
 
-    // ELLIE-565: Log dispatch end to daily journal (fire-and-forget)
+    // ELLIE-565 + ELLIE-632: Log dispatch end with tracked Forest memory IDs
+    const memoryIds = getTrackedMemoryIds(work_item_id);
     journalDispatchEnd({
       workItemId: work_item_id,
       agent,
       outcome: "completed",
       summary,
-    }).catch(e => logRiverWriteFailure("journalDispatchEnd/complete", e));
+      memoryIds: memoryIds.length > 0 ? memoryIds : undefined,
+    }).then(() => clearTrackedMemoryIds(work_item_id))
+      .catch(e => logRiverWriteFailure("journalDispatchEnd/complete", e));
 
     // ELLIE-566: Update active tickets dashboard (fire-and-forget)
     dashboardOnComplete({
@@ -728,13 +740,16 @@ export async function pauseWorkSession(req: ApiRequest, res: ApiResponse, bot: B
       gchatMessage: gchatMsg,
     });
 
-    // ELLIE-565: Log dispatch pause to daily journal (fire-and-forget)
+    // ELLIE-565 + ELLIE-632: Log dispatch pause with tracked Forest memory IDs
+    const pauseMemoryIds = getTrackedMemoryIds(work_item_id);
     journalDispatchEnd({
       workItemId: work_item_id,
       agent,
       outcome: "paused",
       summary: reason,
-    }).catch(e => logRiverWriteFailure("journalDispatchEnd/pause", e));
+      memoryIds: pauseMemoryIds.length > 0 ? pauseMemoryIds : undefined,
+    }).then(() => clearTrackedMemoryIds(work_item_id))
+      .catch(e => logRiverWriteFailure("journalDispatchEnd/pause", e));
 
     // ELLIE-566: Update active tickets dashboard (fire-and-forget)
     dashboardOnPause(work_item_id).catch(e => logRiverWriteFailure("dashboardOnPause", e));

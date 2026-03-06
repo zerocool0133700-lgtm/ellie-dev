@@ -9,6 +9,7 @@
 
 import { RELAY_BASE_URL } from "./relay-config.ts";
 import { log } from "./logger.ts";
+import { trackMemoryId } from "./dispatch-memory-tracker.ts";
 
 const logger = log.child("finding-forest-writer");
 
@@ -25,6 +26,7 @@ export interface ForestFindingPayload {
     work_item_id: string;
     source: string;
     agent?: string;
+    session_id?: string;
   };
 }
 
@@ -42,17 +44,20 @@ export function buildForestFinding(
   message: string,
   agent?: string,
   confidence: number = 0.7,
+  sessionId?: string,
 ): ForestFindingPayload {
+  const metadata: ForestFindingPayload["metadata"] = {
+    work_item_id: workItemId,
+    source: "work-session",
+    agent,
+  };
+  if (sessionId) metadata.session_id = sessionId;
   return {
     content: `${workItemId}: ${message}`,
     type: "finding",
     scope_path: "2/1",
     confidence,
-    metadata: {
-      work_item_id: workItemId,
-      source: "work-session",
-      agent,
-    },
+    metadata,
   };
 }
 
@@ -68,9 +73,10 @@ export async function writeFindingToForest(
   agent?: string,
   confidence?: number,
   fetchFn: typeof fetch = fetch,
+  sessionId?: string,
 ): Promise<boolean> {
   try {
-    const finding = buildForestFinding(workItemId, message, agent, confidence);
+    const finding = buildForestFinding(workItemId, message, agent, confidence, sessionId);
     const resp = await fetchFn(`${RELAY_BASE_URL}/api/bridge/write`, {
       method: "POST",
       headers: {
@@ -86,6 +92,16 @@ export async function writeFindingToForest(
         workItemId,
       });
       return false;
+    }
+
+    // ELLIE-632: Track memory ID for dispatch cross-referencing
+    try {
+      const body = await resp.json() as { memory_id?: string };
+      if (body.memory_id) {
+        trackMemoryId(workItemId, body.memory_id);
+      }
+    } catch {
+      // Response parsing failure is non-fatal
     }
 
     logger.info("Finding written to Forest", { workItemId, agent });

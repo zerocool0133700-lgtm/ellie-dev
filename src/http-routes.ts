@@ -3777,8 +3777,8 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
               }),
               {
                 creaturesByEntity: {}, eventsByKind: {}, treesByType: {},
-                creaturesByState: {}, failureRate: 0,
-                totalEvents: 0, totalCreatures: 0, totalTrees: 0,
+                creaturesByState: {}, memoriesByType: {}, failureRate: 0,
+                totalEvents: 0, totalCreatures: 0, totalTrees: 0, totalMemories: 0,
               }
             );
             res.writeHead(200, { "Content-Type": "application/json" });

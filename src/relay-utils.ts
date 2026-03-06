@@ -55,21 +55,33 @@ export function getSpecialistAck(agentName: string): string {
   return acks[agentName] || `Working on that — I've dispatched the ${agentName} specialist.`;
 }
 
-/** Format forest metrics for chat display (ELLIE-113). */
+/** Format forest metrics for chat display (ELLIE-113, ELLIE-629). */
 export function formatForestMetrics(m: {
   creaturesByEntity: Record<string, number>;
   eventsByKind: Record<string, number>;
   treesByType: Record<string, number>;
   creaturesByState: Record<string, number>;
+  memoriesByType?: Record<string, number>;
   failureRate: number;
   totalEvents: number;
   totalCreatures: number;
   totalTrees: number;
+  totalMemories?: number;
 }): string {
   const lines = ["Forest Metrics (last 7 days)\n"];
 
   lines.push(`Events: ${m.totalEvents} | Creatures: ${m.totalCreatures} | Trees: ${m.totalTrees}`);
+  if (m.totalMemories) {
+    lines.push(`Shared memories: ${m.totalMemories}`);
+  }
   lines.push(`Failure rate: ${(m.failureRate * 100).toFixed(1)}%`);
+
+  if (m.memoriesByType && Object.keys(m.memoriesByType).length) {
+    lines.push("\nMemories by type:");
+    for (const [type, count] of Object.entries(m.memoriesByType).sort((a, b) => b[1] - a[1])) {
+      lines.push(`  ${type}: ${count}`);
+    }
+  }
 
   if (Object.keys(m.creaturesByEntity).length) {
     lines.push("\nCreatures by entity:");

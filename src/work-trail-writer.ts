@@ -100,6 +100,67 @@ export function buildWorkTrailCompleteAppend(summary: string, ts?: string): stri
   return `\n## Completion Summary\n\n**Completed at:** ${timestamp}\n\n${summary}\n`
 }
 
+/**
+ * Build the content to append for a decision log entry (ELLIE-630).
+ *
+ * @param message  Decision description
+ * @param agent    Agent name (optional)
+ * @param ts       ISO 8601 timestamp (optional, defaults to now — injectable for tests)
+ */
+export function buildWorkTrailDecisionAppend(message: string, agent?: string, ts?: string): string {
+  const timestamp = ts ?? new Date().toISOString()
+  const prefix = agent ? `**${agent}:** ` : ''
+  return `\n### Decision — ${timestamp}\n\n${prefix}${message}\n`
+}
+
+// ── Pure frontmatter updaters ─────────────────────────────────────────────
+
+/**
+ * Update frontmatter fields in a work trail document (ELLIE-630).
+ *
+ * Replaces values between the `---` delimiters. If a field doesn't exist, it's added.
+ * Returns the updated content, or null if the document has no valid frontmatter.
+ *
+ * Pure — no file system access.
+ */
+export function updateWorkTrailFrontmatter(
+  content: string,
+  updates: Record<string, string>,
+): string | null {
+  const fmStart = content.indexOf('---')
+  if (fmStart === -1) return null
+  const fmEnd = content.indexOf('---', fmStart + 3)
+  if (fmEnd === -1) return null
+
+  const before = content.slice(0, fmStart + 3)
+  const fmBlock = content.slice(fmStart + 3, fmEnd)
+  const after = content.slice(fmEnd)
+
+  const lines = fmBlock.split('\n')
+  const updatedKeys = new Set<string>()
+
+  const updatedLines = lines.map(line => {
+    const colonIdx = line.indexOf(':')
+    if (colonIdx === -1) return line
+    const key = line.slice(0, colonIdx).trim()
+    if (key in updates) {
+      updatedKeys.add(key)
+      return `${key}: ${updates[key]}`
+    }
+    return line
+  })
+
+  // Add any keys that weren't already present
+  for (const [key, value] of Object.entries(updates)) {
+    if (!updatedKeys.has(key)) {
+      // Insert before the last empty line (if any)
+      updatedLines.push(`${key}: ${value}`)
+    }
+  }
+
+  return before + updatedLines.join('\n') + after
+}
+
 // ── Effectful writers ──────────────────────────────────────────────────────────
 
 /**
@@ -184,6 +245,51 @@ export async function appendWorkTrailProgress(
     return true
   } catch (err) {
     logger.warn('appendWorkTrailProgress failed (non-fatal)', err)
+    return false
+  }
+}
+
+/**
+ * Finalize a work trail — update frontmatter status to 'done' and set completed_at (ELLIE-630).
+ *
+ * Non-fatal: catches all errors and returns false.
+ * Triggers QMD reindex after write.
+ */
+export async function finalizeWorkTrail(
+  workItemId: string,
+  completedAt?: string,
+  date?: string,
+): Promise<boolean> {
+  try {
+    const path = buildWorkTrailPath(workItemId, date)
+    const fullPath = join(RIVER_ROOT, path)
+
+    let existing: string
+    try {
+      existing = await readFile(fullPath, 'utf-8')
+    } catch {
+      logger.info('No work trail to finalize', { path })
+      return false
+    }
+
+    const ts = completedAt ?? new Date().toISOString()
+    const updated = updateWorkTrailFrontmatter(existing, {
+      status: 'done',
+      completed_at: ts,
+    })
+
+    if (!updated) {
+      logger.warn('Could not parse work trail frontmatter for finalization', { path })
+      return false
+    }
+
+    await writeFile(fullPath, updated, 'utf-8')
+    logger.info('Work trail finalized', { path })
+
+    await qmdReindex()
+    return true
+  } catch (err) {
+    logger.warn('finalizeWorkTrail failed (non-fatal)', err)
     return false
   }
 }

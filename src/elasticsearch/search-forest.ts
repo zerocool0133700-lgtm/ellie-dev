@@ -66,10 +66,12 @@ export interface ForestMetrics {
   eventsByKind: Record<string, number>;
   treesByType: Record<string, number>;
   creaturesByState: Record<string, number>;
+  memoriesByType: Record<string, number>;
   failureRate: number;
   totalEvents: number;
   totalCreatures: number;
   totalTrees: number;
+  totalMemories: number;
 }
 
 export interface ForestMetricsOptions {
@@ -228,6 +230,32 @@ export async function searchForestSafe(
 }
 
 // ============================================================
+// SHARED MEMORIES STATS (Forest DB)
+// ============================================================
+
+/**
+ * Query shared_memories table for type counts (ELLIE-629).
+ */
+export async function getSharedMemoriesStats(): Promise<{ memoriesByType: Record<string, number>; totalMemories: number }> {
+  try {
+    const { default: forestSql } = await import("../../../ellie-forest/src/db");
+    const rows = await forestSql<{ type: string; count: string }[]>`
+      SELECT type, COUNT(*)::text as count FROM shared_memories GROUP BY type ORDER BY count DESC
+    `;
+    const memoriesByType: Record<string, number> = {};
+    let totalMemories = 0;
+    for (const row of rows) {
+      const n = parseInt(row.count, 10);
+      memoriesByType[row.type] = n;
+      totalMemories += n;
+    }
+    return { memoriesByType, totalMemories };
+  } catch {
+    return { memoriesByType: {}, totalMemories: 0 };
+  }
+}
+
+// ============================================================
 // AGGREGATION API (for ELLIE-100 Memory Graph)
 // ============================================================
 
@@ -237,11 +265,15 @@ export async function searchForestSafe(
 export async function getForestMetrics(
   options?: ForestMetricsOptions
 ): Promise<ForestMetrics> {
+  const emptyMemories = { memoriesByType: {}, totalMemories: 0 };
+
   if (!ES_URL) {
+    const memStats = await getSharedMemoriesStats();
     return {
       creaturesByEntity: {}, eventsByKind: {}, treesByType: {},
       creaturesByState: {}, failureRate: 0,
       totalEvents: 0, totalCreatures: 0, totalTrees: 0,
+      ...memStats,
     };
   }
 
@@ -260,8 +292,8 @@ export async function getForestMetrics(
   const filters = [timeFilter, entityFilter, treeFilter].filter(Boolean);
   const filterClause = filters.length > 0 ? { bool: { filter: filters } } : { match_all: {} };
 
-  // Run three aggregation queries in parallel
-  const [creatureAggs, eventAggs, treeAggs] = await Promise.all([
+  // Run ES aggregations + shared_memories stats in parallel
+  const [creatureAggs, eventAggs, treeAggs, memStats] = await Promise.all([
     // Creatures: by entity, by state, failure rate
     esRequest("POST", "/ellie-forest-creatures/_search", {
       size: 0,
@@ -288,6 +320,8 @@ export async function getForestMetrics(
         by_type: { terms: { field: "type", size: 20 } },
       },
     }),
+    // Shared memories from Forest DB (ELLIE-629)
+    getSharedMemoriesStats(),
   ]);
 
   // Parse buckets into maps
@@ -307,10 +341,12 @@ export async function getForestMetrics(
     creaturesByState: toBucketMap(creatureAggs.aggregations?.by_state),
     eventsByKind: toBucketMap(eventAggs.aggregations?.by_kind),
     treesByType: toBucketMap(treeAggs.aggregations?.by_type),
+    memoriesByType: memStats.memoriesByType,
     failureRate: totalCreatures > 0 ? failedCreatures / totalCreatures : 0,
     totalEvents: eventAggs.hits?.total?.value || 0,
     totalCreatures,
     totalTrees: treeAggs.hits?.total?.value || 0,
+    totalMemories: memStats.totalMemories,
   };
 }
 
@@ -324,8 +360,8 @@ export async function getForestMetricsSafe(
     () => getForestMetrics(options),
     {
       creaturesByEntity: {}, eventsByKind: {}, treesByType: {},
-      creaturesByState: {}, failureRate: 0,
-      totalEvents: 0, totalCreatures: 0, totalTrees: 0,
+      creaturesByState: {}, memoriesByType: {}, failureRate: 0,
+      totalEvents: 0, totalCreatures: 0, totalTrees: 0, totalMemories: 0,
     }
   );
 }

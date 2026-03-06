@@ -44,6 +44,8 @@ export interface JournalEndEntry {
   summary?: string;
   durationMinutes?: number;
   endedAt?: string;
+  /** ELLIE-632: Forest memory IDs produced during this dispatch. */
+  memoryIds?: string[];
 }
 
 // ── Pure: Path builder ─────────────────────────────────────────────────────────
@@ -113,6 +115,10 @@ export function buildEndEntry(entry: JournalEndEntry): string {
   }
   if (entry.summary) {
     lines.push(`- **Summary:** ${entry.summary}`);
+  }
+  // ELLIE-632: Include Forest memory IDs for cross-referencing
+  if (entry.memoryIds && entry.memoryIds.length > 0) {
+    lines.push(`- **Forest Memories:** ${entry.memoryIds.map(id => `\`${id}\``).join(", ")}`);
   }
   lines.push("");
   return lines.join("\n");
