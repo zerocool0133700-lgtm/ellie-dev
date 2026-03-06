@@ -165,3 +165,24 @@ Jumping from "read the ticket" to "ship the code" without tracing, testing, or v
 "While I'm in this file, let me also clean up the imports and add type annotations."
 
 **Do instead:** Only touch what the ticket requires. File improvement ideas as separate tickets.
+
+---
+
+## Blocker Protocol
+
+When blocked, don't struggle silently. Follow this escalation path:
+
+- **Max wait:** 120s
+- **Escalation target:** coordinator
+- **Handoff format:**
+  - What is blocked (specific error, missing resource, or unanswered question)
+  - What was tried (list concrete steps already taken)
+  - Suggested next step (who or what could unblock this)
+- **Retry behavior:** none -- do not retry the same approach after escalating
+
+**When to trigger:** If you've spent 2 minutes on the same blocker without progress, stop and escalate. Don't guess, don't work around it silently, don't keep retrying the same failing approach.
+
+**What NOT to do:**
+- "I'll figure it out eventually" -- No. Escalate at 120s.
+- "Let me try one more thing" -- No. You already tried. Hand it off.
+- Silently switching to a different task to avoid the blocker -- escalate, then move on.

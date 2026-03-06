@@ -18,6 +18,8 @@
  * Pure module — in-memory store, zero external side effects.
  */
 
+import { readFileSync, existsSync, watch, type FSWatcher } from "fs";
+import { join } from "path";
 import { hasArchetype, getArchetype, type ArchetypeConfig } from "./archetype-loader";
 import { hasRole, getRole, type RoleConfig } from "./role-loader";
 
@@ -65,9 +67,15 @@ export const DEFAULT_BINDINGS: AgentBinding[] = [
   { agentName: "ops", archetype: "ant", role: "ops" },
 ];
 
+// ── Constants ────────────────────────────────────────────────────────────────
+
+/** Default path to the bindings config file. */
+export const DEFAULT_BINDINGS_PATH = join("config", "bindings.json");
+
 // ── Storage ──────────────────────────────────────────────────────────────────
 
 const _bindings = new Map<string, AgentBinding>();
+let _watcher: FSWatcher | null = null;
 
 // ── Registration ─────────────────────────────────────────────────────────────
 
@@ -262,9 +270,100 @@ export function buildBindingsSummary(): string {
   return lines.join("\n");
 }
 
+// ── File Loading (ELLIE-620) ─────────────────────────────────────────────────
+
+/**
+ * Load bindings from a JSON config file.
+ * The file should contain an array of AgentBinding objects.
+ * Returns the number of bindings loaded, or an error string.
+ */
+export function loadBindingsFromFile(filePath?: string): { loaded: number; error?: string } {
+  const path = filePath ?? DEFAULT_BINDINGS_PATH;
+
+  if (!existsSync(path)) {
+    return { loaded: 0, error: `Bindings file not found: ${path}` };
+  }
+
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf-8");
+  } catch (err) {
+    return { loaded: 0, error: `Failed to read bindings file: ${err}` };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return { loaded: 0, error: `Invalid JSON in bindings file: ${err}` };
+  }
+
+  if (!Array.isArray(parsed)) {
+    return { loaded: 0, error: "Bindings file must contain a JSON array" };
+  }
+
+  let loaded = 0;
+  for (const entry of parsed) {
+    if (
+      entry &&
+      typeof entry === "object" &&
+      typeof entry.agentName === "string" &&
+      typeof entry.archetype === "string" &&
+      typeof entry.role === "string"
+    ) {
+      registerBinding(entry as AgentBinding);
+      loaded++;
+    }
+  }
+
+  return { loaded };
+}
+
+/**
+ * Start watching a bindings JSON file for changes.
+ * On change, clears all bindings and reloads from the file.
+ * Returns true if the watcher was started.
+ */
+export function startBindingsWatcher(
+  filePath?: string,
+  onChange?: (loaded: number) => void,
+): boolean {
+  const path = filePath ?? DEFAULT_BINDINGS_PATH;
+
+  if (_watcher) return false;
+  if (!existsSync(path)) return false;
+
+  try {
+    _watcher = watch(path, (eventType) => {
+      if (eventType === "change") {
+        _bindings.clear();
+        const result = loadBindingsFromFile(path);
+        if (result.loaded === 0) {
+          loadDefaultBindings();
+        }
+        onChange?.(result.loaded);
+      }
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Stop the bindings file watcher.
+ */
+export function stopBindingsWatcher(): void {
+  if (_watcher) {
+    _watcher.close();
+    _watcher = null;
+  }
+}
+
 // ── Testing ──────────────────────────────────────────────────────────────────
 
 /** Reset all state — for testing only. */
 export function _resetBindingsForTesting(): void {
   _bindings.clear();
+  stopBindingsWatcher();
 }

@@ -106,7 +106,11 @@ export function buildRoleSections(config: RoleConfig): string {
  * Build identity prompt sections for an agent.
  *
  * Resolves the agent's binding and produces PromptSection entries for
- * its archetype (priority 3) and role (priority 5).
+ * its archetype and role.
+ *
+ * Priority resolution (ELLIE-618):
+ *   Archetype: section_priorities.archetype from config, or ARCHETYPE_PRIORITY (3)
+ *   Role: ROLE_PRIORITY (5) — role files don't define section_priorities
  *
  * Returns an empty sections array if the agent has no binding or
  * if both archetype and role are missing.
@@ -130,10 +134,13 @@ export function buildIdentitySections(agentName: string): IdentityInjectionResul
   if (resolved.archetype) {
     const content = buildArchetypeSections(resolved.archetype);
     if (content) {
+      // ELLIE-618: Honor archetype-defined priority from section_priorities.archetype
+      const archetypePriority =
+        resolved.archetype.schema.frontmatter.section_priorities?.archetype ?? ARCHETYPE_PRIORITY;
       sections.push({
         label: "identity-archetype",
         content: `${content}\n---`,
-        priority: ARCHETYPE_PRIORITY,
+        priority: archetypePriority,
       });
     }
   }

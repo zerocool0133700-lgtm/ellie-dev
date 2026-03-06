@@ -37,10 +37,14 @@ import {
   type RoleLoadResult,
 } from "./role-loader.ts";
 import {
+  loadBindingsFromFile,
   loadDefaultBindings,
   validateAllBindings,
   listBindings,
   buildBindingsSummary,
+  startBindingsWatcher,
+  stopBindingsWatcher,
+  DEFAULT_BINDINGS_PATH,
   type BindingValidationResult,
 } from "./agent-identity-binding.ts";
 
@@ -55,7 +59,8 @@ export interface IdentityStartupResult {
   bindingsLoaded: number;
   bindingValidation: BindingValidationResult;
   archetypeValidationWarnings: string[];
-  watchersStarted: { archetypes: boolean; roles: boolean };
+  watchersStarted: { archetypes: boolean; roles: boolean; bindings: boolean };
+  bindingsSource: "file" | "defaults";
 }
 
 // ── Initialization ──────────────────────────────────────────────────────────
@@ -74,6 +79,7 @@ export interface IdentityStartupResult {
 export function initIdentitySystem(opts?: {
   archetypesDir?: string;
   rolesDir?: string;
+  bindingsPath?: string;
   skipWatchers?: boolean;
 }): IdentityStartupResult {
   const archetypesDir = opts?.archetypesDir ?? DEFAULT_ARCHETYPES_DIR;
@@ -122,11 +128,23 @@ export function initIdentitySystem(opts?: {
     }
   }
 
-  // 3. Register default bindings
-  const bindingsLoaded = loadDefaultBindings();
-  logger.info(`Registered ${bindingsLoaded} default agent bindings`, {
-    total: listBindings().length,
-  });
+  // 3. Load bindings — try config file first, fall back to hardcoded defaults (ELLIE-620)
+  let bindingsLoaded: number;
+  let bindingsSource: "file" | "defaults";
+  const bindingsPath = opts?.bindingsPath ?? DEFAULT_BINDINGS_PATH;
+  const fileResult = loadBindingsFromFile(bindingsPath);
+  if (fileResult.loaded > 0) {
+    bindingsLoaded = fileResult.loaded;
+    bindingsSource = "file";
+    logger.info(`Loaded ${bindingsLoaded} agent bindings from ${bindingsPath}`);
+  } else {
+    if (fileResult.error) {
+      logger.warn(`Bindings file: ${fileResult.error} — falling back to defaults`);
+    }
+    bindingsLoaded = loadDefaultBindings();
+    bindingsSource = "defaults";
+    logger.info(`Registered ${bindingsLoaded} default agent bindings`);
+  }
 
   // 4. Validate bindings
   const bindingValidation = validateAllBindings();
@@ -137,7 +155,7 @@ export function initIdentitySystem(opts?: {
   }
 
   // 5. Start file watchers (unless skipped)
-  let watchersStarted = { archetypes: false, roles: false };
+  let watchersStarted = { archetypes: false, roles: false, bindings: false };
   if (!opts?.skipWatchers) {
     watchersStarted.archetypes = startArchetypeWatcher(archetypesDir, (event, species) => {
       logger.info(`Archetype ${event}: ${species}`);
@@ -145,7 +163,10 @@ export function initIdentitySystem(opts?: {
     watchersStarted.roles = startRoleWatcher(rolesDir, (event, role) => {
       logger.info(`Role ${event}: ${role}`);
     });
-    if (watchersStarted.archetypes || watchersStarted.roles) {
+    watchersStarted.bindings = startBindingsWatcher(bindingsPath, (loaded) => {
+      logger.info(`Bindings reloaded: ${loaded} agents`);
+    });
+    if (watchersStarted.archetypes || watchersStarted.roles || watchersStarted.bindings) {
       logger.info("Identity hot-reload watchers started", watchersStarted);
     }
   }
@@ -160,6 +181,7 @@ export function initIdentitySystem(opts?: {
     bindingValidation,
     archetypeValidationWarnings,
     watchersStarted,
+    bindingsSource,
   };
 }
 
@@ -169,6 +191,7 @@ export function initIdentitySystem(opts?: {
 export function shutdownIdentitySystem(): void {
   stopArchetypeWatcher();
   stopRoleWatcher();
+  stopBindingsWatcher();
   logger.info("Identity system watchers stopped");
 }
 

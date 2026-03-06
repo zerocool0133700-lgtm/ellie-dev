@@ -1,0 +1,10 @@
+[
+  { "agentName": "dev", "archetype": "ant", "role": "dev" },
+  { "agentName": "general", "archetype": "ant", "role": "general" },
+  { "agentName": "research", "archetype": "owl", "role": "researcher" },
+  { "agentName": "strategy", "archetype": "owl", "role": "strategy" },
+  { "agentName": "critic", "archetype": "ant", "role": "critic" },
+  { "agentName": "content", "archetype": "bee", "role": "content" },
+  { "agentName": "finance", "archetype": "ant", "role": "finance" },
+  { "agentName": "ops", "archetype": "ant", "role": "ops" }
+]

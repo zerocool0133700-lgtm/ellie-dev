@@ -329,6 +329,80 @@ describe("priority constants", () => {
   });
 });
 
+// ── section_priorities override (ELLIE-618) ─────────────────────────────────
+
+describe("section_priorities override", () => {
+  it("uses archetype-defined priority when section_priorities.archetype is set", () => {
+    const config = makeArchetypeConfig("ant");
+    config.schema.frontmatter.section_priorities = { archetype: 1 };
+    _injectArchetypeForTesting(config);
+    _injectRoleForTesting(makeRoleConfig("dev"));
+    registerBinding({ agentName: "dev", archetype: "ant", role: "dev" });
+
+    const result = buildIdentitySections("dev");
+    const archetypeSection = result.sections.find(s => s.label === "identity-archetype");
+    expect(archetypeSection).toBeDefined();
+    expect(archetypeSection!.priority).toBe(1);
+  });
+
+  it("falls back to ARCHETYPE_PRIORITY when section_priorities is undefined", () => {
+    const config = makeArchetypeConfig("ant");
+    // No section_priorities set
+    _injectArchetypeForTesting(config);
+    registerBinding({ agentName: "dev", archetype: "ant", role: "dev" });
+
+    const result = buildIdentitySections("dev");
+    const archetypeSection = result.sections.find(s => s.label === "identity-archetype");
+    expect(archetypeSection!.priority).toBe(ARCHETYPE_PRIORITY);
+    expect(archetypeSection!.priority).toBe(3);
+  });
+
+  it("falls back to ARCHETYPE_PRIORITY when section_priorities exists but archetype key is missing", () => {
+    const config = makeArchetypeConfig("ant");
+    config.schema.frontmatter.section_priorities = { conversation: 5, psy: 6 };
+    _injectArchetypeForTesting(config);
+    registerBinding({ agentName: "dev", archetype: "ant", role: "dev" });
+
+    const result = buildIdentitySections("dev");
+    const archetypeSection = result.sections.find(s => s.label === "identity-archetype");
+    expect(archetypeSection!.priority).toBe(ARCHETYPE_PRIORITY);
+  });
+
+  it("role priority is unaffected by archetype section_priorities", () => {
+    const config = makeArchetypeConfig("ant");
+    config.schema.frontmatter.section_priorities = { archetype: 1 };
+    _injectArchetypeForTesting(config);
+    _injectRoleForTesting(makeRoleConfig("dev"));
+    registerBinding({ agentName: "dev", archetype: "ant", role: "dev" });
+
+    const result = buildIdentitySections("dev");
+    const roleSection = result.sections.find(s => s.label === "identity-role");
+    expect(roleSection!.priority).toBe(ROLE_PRIORITY);
+    expect(roleSection!.priority).toBe(5);
+  });
+
+  it("different archetypes can have different priorities", () => {
+    const antConfig = makeArchetypeConfig("ant");
+    antConfig.schema.frontmatter.section_priorities = { archetype: 1 };
+    _injectArchetypeForTesting(antConfig);
+
+    const beeConfig = makeArchetypeConfig("bee");
+    beeConfig.schema.frontmatter.section_priorities = { archetype: 2 };
+    _injectArchetypeForTesting(beeConfig);
+
+    _injectRoleForTesting(makeRoleConfig("dev"));
+    _injectRoleForTesting(makeRoleConfig("critic"));
+    registerBinding({ agentName: "dev", archetype: "ant", role: "dev" });
+    registerBinding({ agentName: "critic", archetype: "bee", role: "critic" });
+
+    const devResult = buildIdentitySections("dev");
+    const criticResult = buildIdentitySections("critic");
+
+    expect(devResult.sections.find(s => s.label === "identity-archetype")!.priority).toBe(1);
+    expect(criticResult.sections.find(s => s.label === "identity-archetype")!.priority).toBe(2);
+  });
+});
+
 // ── Full scenario ───────────────────────────────────────────────────────────
 
 describe("full scenario", () => {

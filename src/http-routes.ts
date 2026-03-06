@@ -1854,6 +1854,9 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
       };
       // ELLIE-459: Include channel health (cached — no live checks here)
       (result as Record<string, unknown>).channels = getChannelHealth();
+      // ELLIE-621: Include identity system status
+      const { getIdentityStatus } = await import("./identity-startup.ts");
+      (result as Record<string, unknown>).identity = getIdentityStatus();
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result));
@@ -3809,6 +3812,18 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Identity observability: archetypes list (ELLIE-621)
+  if (url.pathname === "/api/archetypes" && req.method === "GET") {
+    const { archetypesEndpoint } = await import("./api/identity-endpoints.ts");
+    const mockReq: ApiRequest = {};
+    const mockRes: ApiResponse = {
+      status(code: number) { return { json: (data: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); } }; },
+      json(data: unknown) { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); },
+    };
+    archetypesEndpoint(mockReq, mockRes);
+    return;
+  }
+
   // Agent registry endpoints (ELLIE-91)
   if (url.pathname.startsWith("/api/agents") || url.pathname === "/api/capabilities") {
     (async () => {
@@ -3845,6 +3860,14 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         } else if (agentName === "compliance" && req.method === "GET") {
           const { agentComplianceEndpoint } = await import("./api/agent-compliance.ts");
           await agentComplianceEndpoint(mockReq, mockRes);
+        } else if (agentName === "bindings" && req.method === "GET") {
+          // ELLIE-621: GET /api/agents/bindings
+          const { bindingsEndpoint } = await import("./api/identity-endpoints.ts");
+          bindingsEndpoint(mockReq, mockRes);
+        } else if (subResource === "identity" && req.method === "GET") {
+          // ELLIE-621: GET /api/agents/:name/identity
+          const { agentIdentityEndpoint } = await import("./api/identity-endpoints.ts");
+          agentIdentityEndpoint(mockReq, mockRes);
         } else if (subResource === "skills") {
           await getAgentSkillsEndpoint(mockReq, mockRes, supabase, bot);
         } else if (agentName) {

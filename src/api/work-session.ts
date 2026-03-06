@@ -44,6 +44,7 @@ import { writePostMortem, classifyPauseReason } from "../post-mortem.ts";
 import { validateWorkflowInput, type WorkflowDefinition, type WorkflowInput } from "../workflow-schema.ts";
 import { resolveChainAction, formatChainForTelegram, formatChainForGChat } from "../workflow-chainer.ts";
 import { persistToForest as persistMetricsToForest } from "../growth-metrics-collector.ts";
+import { collectSessionCompleteMetrics, collectSessionPauseMetrics } from "../session-metric-hooks.ts";
 import { requestCriticReview } from "../dev-critic-review.ts";
 
 /**
@@ -569,6 +570,18 @@ export async function completeWorkSession(req: ApiRequest, res: ApiResponse, bot
       logger.info(`Skipping Plane update — session too short (${duration}min)`);
     }
 
+    // ELLIE-622: Record session completion metrics (task completion + commit quality)
+    try {
+      collectSessionCompleteMetrics({
+        agentName: (agent as string) || "dev",
+        sessionId: tree.id,
+        durationMinutes: duration,
+        workItemId: work_item_id as string,
+      });
+    } catch (e) {
+      logger.warn("Session complete metrics failed (non-fatal)", e);
+    }
+
     const telegramMsg = [
       `✅ **Work Session Complete**`,
       ``,
@@ -742,6 +755,18 @@ export async function pauseWorkSession(req: ApiRequest, res: ApiResponse, bot: B
         blocker: reason,
         since: new Date().toISOString(),
       }).catch(e => logRiverWriteFailure("dashboardOnBlocked", e));
+    }
+
+    // ELLIE-622: Record session pause metrics (task incomplete + blocker speed)
+    try {
+      collectSessionPauseMetrics({
+        agentName: (agent as string) || "dev",
+        sessionId: tree.id,
+        sessionStartedAt: tree.created_at,
+        reason: reason as string | undefined,
+      });
+    } catch (e) {
+      logger.warn("Session pause metrics failed (non-fatal)", e);
     }
 
     return res.json({

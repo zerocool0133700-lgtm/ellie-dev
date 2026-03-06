@@ -46,6 +46,18 @@ export interface ArchetypeSchema {
   body: string;
 }
 
+/**
+ * Parsed blocker escalation protocol from a "## Blocker Protocol" section.
+ * Defines what an agent does when blocked: how long to wait, who to escalate to,
+ * and what format to use for the handoff. (ELLIE-619)
+ */
+export interface BlockerProtocol {
+  maxWaitSeconds: number;
+  escalationTarget: string;
+  handoffFormat: string[];
+  retryBehavior?: string;
+}
+
 /** Validation error with field path and message. */
 export interface ArchetypeValidationError {
   field: string;
@@ -294,6 +306,67 @@ export function hasAllRequiredSections(schema: ArchetypeSchema): boolean {
 export function getMissingSections(schema: ArchetypeSchema): string[] {
   const headings = schema.sections.map(s => normalizeHeading(s.heading));
   return REQUIRED_SECTIONS.filter(r => !headingMatchesRequired(headings, r));
+}
+
+/**
+ * Extract a BlockerProtocol from the archetype's "Blocker Protocol" section.
+ * Returns null if the section doesn't exist or can't be parsed.
+ *
+ * Expected markdown format:
+ *   ## Blocker Protocol
+ *   - **Max wait:** 120s
+ *   - **Escalation target:** coordinator
+ *   - **Handoff format:**
+ *     - What is blocked
+ *     - What was tried
+ *     - Suggested next step
+ *   - **Retry behavior:** none (optional)
+ *
+ * ELLIE-619
+ */
+export function getBlockerProtocol(schema: ArchetypeSchema): BlockerProtocol | null {
+  const section = schema.sections.find(s =>
+    normalizeHeading(s.heading).startsWith("blocker protocol")
+  );
+  if (!section || !section.content.trim()) return null;
+
+  const content = section.content;
+
+  // Parse max wait (seconds)
+  const waitMatch = content.match(/\*\*Max wait[:\s]*\*\*\s*(\d+)\s*s/i);
+  if (!waitMatch) return null;
+  const maxWaitSeconds = parseInt(waitMatch[1], 10);
+
+  // Parse escalation target
+  const targetMatch = content.match(/\*\*Escalation target[:\s]*\*\*\s*(.+)/i);
+  if (!targetMatch) return null;
+  const escalationTarget = targetMatch[1].trim();
+
+  // Parse handoff format (list items after "Handoff format")
+  const handoffFormat: string[] = [];
+  const handoffMatch = content.match(/\*\*Handoff format[:\s]*\*\*([\s\S]*?)(?=\n-\s*\*\*|$)/i);
+  if (handoffMatch) {
+    const listItems = handoffMatch[1].match(/^\s*-\s+(.+)/gm);
+    if (listItems) {
+      for (const item of listItems) {
+        const cleaned = item.replace(/^\s*-\s+/, "").trim();
+        if (cleaned) handoffFormat.push(cleaned);
+      }
+    }
+  }
+
+  // Parse optional retry behavior
+  const retryMatch = content.match(/\*\*Retry behavior[:\s]*\*\*\s*(.+)/i);
+  const retryBehavior = retryMatch ? retryMatch[1].trim() : undefined;
+
+  const protocol: BlockerProtocol = {
+    maxWaitSeconds,
+    escalationTarget,
+    handoffFormat,
+  };
+  if (retryBehavior) protocol.retryBehavior = retryBehavior;
+
+  return protocol;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
