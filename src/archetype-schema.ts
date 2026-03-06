@@ -31,6 +31,7 @@ export interface ArchetypeFrontmatter {
   token_budget?: number;
   allowed_skills?: string[];
   section_priorities?: Record<string, number>;
+  compliance_thresholds?: Record<string, number>;
 }
 
 /** A parsed markdown section (H2 heading + content). */
@@ -158,6 +159,10 @@ export function parseArchetype(raw: string, speciesHint?: string): ArchetypeSche
 
   if (fm.section_priorities && typeof fm.section_priorities === "object" && !Array.isArray(fm.section_priorities)) {
     frontmatter.section_priorities = fm.section_priorities as Record<string, number>;
+  }
+
+  if (fm.compliance_thresholds && typeof fm.compliance_thresholds === "object" && !Array.isArray(fm.compliance_thresholds)) {
+    frontmatter.compliance_thresholds = fm.compliance_thresholds as Record<string, number>;
   }
 
   const sections = parseSections(body);

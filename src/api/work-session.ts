@@ -45,6 +45,7 @@ import { validateWorkflowInput, type WorkflowDefinition, type WorkflowInput } fr
 import { resolveChainAction, formatChainForTelegram, formatChainForGChat } from "../workflow-chainer.ts";
 import { persistToForest as persistMetricsToForest } from "../growth-metrics-collector.ts";
 import { collectSessionCompleteMetrics, collectSessionPauseMetrics } from "../session-metric-hooks.ts";
+import { checkAndFormat as checkComplianceAlerts, recordAlertSent } from "../compliance-alerting.ts";
 import { requestCriticReview } from "../dev-critic-review.ts";
 
 /**
@@ -580,6 +581,24 @@ export async function completeWorkSession(req: ApiRequest, res: ApiResponse, bot
       });
     } catch (e) {
       logger.warn("Session complete metrics failed (non-fatal)", e);
+    }
+
+    // ELLIE-625: Check compliance thresholds and send alert if violated
+    try {
+      const compliance = checkComplianceAlerts((agent as string) || "dev", tree.id);
+      if (compliance.alert) {
+        for (const v of compliance.violations) {
+          recordAlertSent(v.agentName, v.metricName);
+        }
+        await notify(getNotifyCtx(bot), {
+          event: "session_update",
+          workItemId: work_item_id as string,
+          telegramMessage: compliance.alert,
+          gchatMessage: compliance.alert.replace(/\*\*/g, ""),
+        });
+      }
+    } catch (e) {
+      logger.warn("Compliance alert check failed (non-fatal)", e);
     }
 
     const telegramMsg = [
