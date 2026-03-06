@@ -420,3 +420,8 @@ export function _resetMetricsForTesting(): void {
   _hydrated = false;
   _hydratePromise = null;
 }
+
+/** Mark as hydrated without calling Forest — for testing only. */
+export function _markHydratedForTesting(): void {
+  _hydrated = true;
+}
