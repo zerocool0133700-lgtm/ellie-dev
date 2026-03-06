@@ -85,7 +85,7 @@ export async function routeMessage(
     return null;
   }
 
-  console.log(`[agent-router] Routed to "${invoked.data.agent_name}" via ${invoked.data.rule_name}`);
+  logger.info(`Routed to "${invoked.data.agent_name}" via ${invoked.data.rule_name}`);
   return invoked.data as RouteResult;
 }
 
@@ -196,8 +196,8 @@ async function localDispatch(
     content: message,
   });
 
-  console.log(
-    `[agent-router] Local dispatch: ${isNew ? "New" : "Resumed"} session ${sessionId.slice(0, 8)} for ${agentName}`,
+  logger.info(
+    `Local dispatch: ${isNew ? "New" : "Resumed"} session ${sessionId.slice(0, 8)} for ${agentName}`,
   );
 
   return {
@@ -248,8 +248,8 @@ export async function dispatchAgent(
     return localDispatch(supabase, agentName, userId, channel, message, workItemId, skillName);
   }
 
-  console.log(
-    `[agent-router] ${invoked.data.is_new ? "New" : "Resumed"} session ${invoked.data.session_id.slice(0, 8)} for ${agentName}`,
+  logger.info(
+    `${invoked.data.is_new ? "New" : "Resumed"} session ${invoked.data.session_id.slice(0, 8)} for ${agentName}`,
   );
   return invoked.data as DispatchResult;
 }

@@ -26,7 +26,7 @@ let _anthropic: Anthropic | null = null;
 
 export function initEntailmentClassifier(anthropic: Anthropic): void {
   _anthropic = anthropic;
-  console.log("[entailment] Initialized");
+  logger.info("Initialized");
 }
 
 export async function classifyEntailment(

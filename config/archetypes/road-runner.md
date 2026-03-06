@@ -1,4 +1,6 @@
 ---
+species: road-runner
+cognitive_style: "pattern-matching, sprint-focused triage"
 token_budget: 16000
 allowed_skills: [skill-detector]
 section_priorities:

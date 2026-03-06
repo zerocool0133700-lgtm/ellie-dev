@@ -189,8 +189,8 @@ export async function executeOrchestrated(
       logger.warn("High cost", { cost: artifacts.total_cost_usd, mode, steps: effectiveSteps.length });
     }
 
-    console.log(
-      `[orchestrator] Completed ${mode} in ${artifacts.total_duration_ms}ms, ` +
+    logger.info(
+      `Completed ${mode} in ${artifacts.total_duration_ms}ms, ` +
       `${artifacts.total_input_tokens + artifacts.total_output_tokens} tokens, ` +
       `$${artifacts.total_cost_usd.toFixed(4)}`,
     );

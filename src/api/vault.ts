@@ -62,7 +62,7 @@ export async function createVaultCredential(req: ApiRequest, res: ApiResponse, _
       expires_at: expires_at ? new Date(expires_at as string) : undefined,
     });
 
-    console.log(`[vault] Created credential "${label}" for ${domain}`);
+    logger.info(`Created credential "${label}" for ${domain}`);
     return res.json(toCredentialRecord(entry));
   } catch (err: unknown) {
     logger.error("Create failed", err);
@@ -115,7 +115,7 @@ export async function updateVaultCredential(req: ApiRequest, res: ApiResponse, _
     if (req.body.payload !== undefined) updates.value = JSON.stringify(req.body.payload);
 
     const entry = await updateCredential(req.params.id, updates);
-    console.log(`[vault] Updated credential ${req.params.id}`);
+    logger.info(`Updated credential ${req.params.id}`);
     return res.json(toCredentialRecord(entry));
   } catch (err: unknown) {
     logger.error("Update failed", err);
@@ -129,7 +129,7 @@ export async function updateVaultCredential(req: ApiRequest, res: ApiResponse, _
 export async function deleteVaultCredential(req: ApiRequest, res: ApiResponse, _supabase: unknown) {
   try {
     await deleteCredential(req.params.id);
-    console.log(`[vault] Deleted credential ${req.params.id}`);
+    logger.info(`Deleted credential ${req.params.id}`);
     return res.json({ success: true });
   } catch (err: unknown) {
     logger.error("Delete failed", err);
@@ -231,7 +231,7 @@ export async function authenticatedFetch(req: ApiRequest, res: ApiResponse, _sup
       }
     }
 
-    console.log(`[vault] Authenticated fetch: ${method} ${domain}${targetUrl.pathname}`);
+    logger.info(`Authenticated fetch: ${method} ${domain}${targetUrl.pathname}`);
 
     const response = await fetch(url, {
       method,

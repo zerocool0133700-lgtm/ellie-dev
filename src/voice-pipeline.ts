@@ -75,16 +75,16 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
     // Start context retrieval in parallel with transcription
     const contextDocketPromise = _deps.getContextDocket();
 
-    console.log(`[voice] Transcribing ${chunks.length} chunks...`);
+    logger.info("Transcribing audio", { chunks: chunks.length });
     const text = await transcribeMulaw(chunks);
 
     if (!text || text.length < 2 || text.includes("[BLANK_AUDIO]") || text.includes("(blank audio)")) {
-      console.log("[voice] Empty/blank transcription, skipping");
+      logger.info("Empty/blank transcription, skipping");
       session.processing = false;
       return;
     }
 
-    console.log(`[voice] User said: "${text}" (transcribed in ${Date.now() - pipelineStart}ms)`);
+    logger.info("User transcription complete", { length: text.length, transcribeMs: Date.now() - pipelineStart });
     session.conversationHistory.push({ role: "user", content: text });
 
     // Fire-and-forget: save user message
@@ -128,7 +128,7 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
       .replace(/\[DONE:.*?\]/g, "")
       .trim();
 
-    console.log(`[voice] Ellie says: "${cleanResponse}" (LLM done at ${Date.now() - pipelineStart}ms)`);
+    logger.info("LLM response ready", { length: cleanResponse.length, llmMs: Date.now() - pipelineStart });
     session.conversationHistory.push({ role: "assistant", content: cleanResponse });
 
     // Fire-and-forget: save assistant message
@@ -152,7 +152,7 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
 
     if (!streamed) {
       // Fallback to non-streaming TTS
-      console.log("[voice] Streaming failed, falling back to buffered TTS");
+      logger.info("Streaming failed, falling back to buffered TTS");
       const audioBase64 = await textToSpeechMulaw(cleanResponse);
       if (!audioBase64) {
         logger.error("No audio from fallback TTS");
@@ -179,7 +179,7 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
       mark: { name: `response_${Date.now()}` },
     }));
 
-    console.log(`[voice] Total pipeline: ${Date.now() - pipelineStart}ms`);
+    logger.info("Total pipeline complete", { pipelineMs: Date.now() - pipelineStart });
   } catch (error) {
     logger.error("Processing error", error);
   }
@@ -194,7 +194,7 @@ async function processVoiceAudio(session: VoiceCallSession): Promise<void> {
  * Call from voiceWss.on("connection", handleVoiceConnection).
  */
 export function handleVoiceConnection(ws: WebSocket): void {
-  console.log("[voice] Media stream connected");
+  logger.info("Media stream connected");
   const session: VoiceCallSession = {
     ws, streamSid: null, callSid: null,
     audioChunks: [], silenceTimer: null,
@@ -209,13 +209,13 @@ export function handleVoiceConnection(ws: WebSocket): void {
 
       switch (msg.event) {
         case "connected":
-          console.log("[voice] Stream connected:", msg.protocol);
+          logger.info("Stream connected", { protocol: msg.protocol });
           break;
 
         case "start":
           session.streamSid = msg.streamSid;
           session.callSid = msg.callSid;
-          console.log(`[voice] Call started — streamSid: ${msg.streamSid}, callSid: ${msg.callSid}`);
+          logger.info("Call started", { streamSid: msg.streamSid, callSid: msg.callSid });
           break;
 
         case "media": {
@@ -261,14 +261,14 @@ export function handleVoiceConnection(ws: WebSocket): void {
         }
 
         case "mark":
-          console.log(`[voice] Playback mark: ${msg.mark?.name}`);
+          logger.info("Playback mark", { name: msg.mark?.name });
           session.speaking = false;
           session.audioChunks = [];
           session.hasSpeech = false;
           break;
 
         case "stop":
-          console.log("[voice] Stream stopped");
+          logger.info("Stream stopped");
           if (session.silenceTimer) clearTimeout(session.silenceTimer);
           break;
       }
@@ -278,12 +278,12 @@ export function handleVoiceConnection(ws: WebSocket): void {
   });
 
   ws.on("close", () => {
-    console.log("[voice] WebSocket closed");
+    logger.info("WebSocket closed");
     if (session.silenceTimer) clearTimeout(session.silenceTimer);
 
     // Voice call ended — consolidate immediately
     if (session.conversationHistory.length > 0) {
-      console.log("[voice] Call ended with messages — triggering consolidation...");
+      logger.info("Call ended with messages, triggering consolidation", { turns: session.conversationHistory.length });
       _deps.triggerConsolidation("voice");
 
       // ELLIE-444: Index call transcript in Forest for semantic search
@@ -305,7 +305,7 @@ export function handleVoiceConnection(ws: WebSocket): void {
           tags: ["voice", "call", "twilio"],
           source_agent_species: "ant",
         }))
-        .catch(err => logger.warn("[voice] Failed to write Forest memory", { err: String(err) }));
+        .catch(err => logger.warn("Failed to write Forest memory", { err: String(err) }));
     }
   });
 

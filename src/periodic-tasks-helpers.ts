@@ -24,6 +24,6 @@ export async function expireStaleAgentSessions(sb: SupabaseClient): Promise<void
     return;
   }
   if (data && data.length > 0) {
-    console.log(`[session-cleanup] Expired ${data.length} stale agent session(s)`);
+    logger.info(`Expired ${data.length} stale agent session(s)`);
   }
 }

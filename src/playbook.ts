@@ -23,7 +23,7 @@ import type { Bot } from "grammy";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { notify, type NotifyContext } from "./notification-policy.ts";
 import { log } from "./logger.ts";
-import { getAgentArchetype, getPsyContext, getPhaseContext, getHealthContext } from "./prompt-builder.ts";
+import { getAgentArchetype, getAgentRoleContext, getPsyContext, getPhaseContext, getHealthContext } from "./prompt-builder.ts";
 
 const logger = log.child("playbook");
 import {
@@ -333,7 +333,7 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
 
   const runId = crypto.randomUUID();
 
-  console.log(`[playbook] send ${ticketId} to ${agentName} (run ${runId.slice(0, 8)})`);
+  logger.info(`send ${ticketId} to ${agentName}`, { ticketId, agentName, runId: runId.slice(0, 8) });
 
   // Register with orchestration tracker (ELLIE-371: was missing, caused zombie runs)
   startRun(runId, agentName, ticketId, undefined, { channel: ctx.channel, message: `Work on ${ticketId}` });
@@ -404,8 +404,9 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
     `Description: ${details.description}\n`;
 
   // Load personality context for the dispatched agent
-  const [archetype, psy, phase, health] = await Promise.all([
+  const [archetype, roleContext, psy, phase, health] = await Promise.all([
     getAgentArchetype(agentName),
+    getAgentRoleContext(agentName),
     getPsyContext(),
     getPhaseContext(),
     getHealthContext(),
@@ -426,6 +427,7 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
     undefined, // agentMemoryContext
     sessionIds, // forest sessionIds
     archetype,
+    roleContext,
     psy,
     phase,
     health,
@@ -434,7 +436,7 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
   // 6-8. Execute agent, process results, notify — all wrapped to ensure endRun() fires
   try {
     // 6. Call Claude (pass runId for heartbeat tracking)
-    console.log(`[playbook] Calling ${agentName} for ${ticketId}...`);
+    logger.info(`Calling ${agentName} for ${ticketId}`, { agentName, ticketId });
     const startTime = Date.now();
     const rawResponse = await ctx.callClaudeFn(prompt, {
       resume: false,
@@ -481,7 +483,7 @@ async function handleSend(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<v
     throw execErr; // Re-throw so outer catch can notify
   }
 
-  console.log(`[playbook] ${agentName} completed ${ticketId} in ${durationMin}min`);
+  logger.info(`${agentName} completed ${ticketId} in ${durationMin}min`, { agentName, ticketId, durationMin });
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -492,7 +494,7 @@ async function handleClose(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<
   const ticketId = cmd.ticketId!;
   const summary = cmd.summary!;
 
-  console.log(`[playbook] close ${ticketId}: ${summary.slice(0, 80)}`);
+  logger.info("Close ticket", { ticketId, summary: summary.slice(0, 80) });
 
   // Call the existing work-session complete endpoint
   // It handles: forest dormant transition, auto-deploy, Plane Done update, notifications
@@ -525,7 +527,7 @@ async function handleCreate(cmd: PlaybookCommand, ctx: PlaybookContext): Promise
   const title = cmd.title!;
   const description = cmd.description!;
 
-  console.log(`[playbook] create ticket: ${title}`);
+  logger.info(`Create ticket: ${title}`, { title });
 
   const result = await createPlaneIssue("ELLIE", title, description);
   if (!result) {
@@ -544,7 +546,7 @@ async function handleCreate(cmd: PlaybookCommand, ctx: PlaybookContext): Promise
     gchatMessage: `New ticket ${result.identifier}: ${title}\n${description}`,
   });
 
-  console.log(`[playbook] Created ${result.identifier}: ${title}`);
+  logger.info(`Created ${result.identifier}: ${title}`, { identifier: result.identifier, title });
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -555,7 +557,7 @@ async function handleStartSession(cmd: PlaybookCommand, ctx: PlaybookContext): P
   const ticketId = cmd.ticketId!;
   const agentName = cmd.agentName;
 
-  console.log(`[playbook] start-session ${ticketId} with ${agentName ?? "auto"}`);
+  logger.info(`start-session ${ticketId} with ${agentName ?? "auto"}`, { ticketId, agentName: agentName ?? "auto" });
 
   const details = await fetchWorkItemDetails(ticketId);
   if (!details) {
@@ -590,7 +592,7 @@ async function handleStartSession(cmd: PlaybookCommand, ctx: PlaybookContext): P
 async function handleCheckIn(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<void> {
   const ticketId = cmd.ticketId!;
 
-  console.log(`[playbook] check-in ${ticketId}`);
+  logger.info(`check-in ${ticketId}`, { ticketId });
 
   const resp = await fetch(`${RELAY_BASE_URL}/api/work-session/update`, {
     method: "POST",
@@ -612,7 +614,7 @@ async function handleEscalate(cmd: PlaybookCommand, ctx: PlaybookContext): Promi
   const agentName = cmd.agentName!;
   const reason = cmd.reason!;
 
-  console.log(`[playbook] escalate ${ticketId} to ${agentName}: ${reason.slice(0, 80)}`);
+  logger.info("Escalate ticket", { ticketId, agentName, reason: reason.slice(0, 80) });
 
   const message = `Escalated to ${agentName}: ${reason}`;
   const resp = await fetch(`${RELAY_BASE_URL}/api/work-session/update`, {
@@ -643,7 +645,7 @@ async function handleHandoff(cmd: PlaybookCommand, ctx: PlaybookContext): Promis
   const toAgent = cmd.agentName!;
   const context = cmd.context!;
 
-  console.log(`[playbook] handoff ${ticketId} from ${fromAgent} to ${toAgent}`);
+  logger.info(`handoff ${ticketId} from ${fromAgent} to ${toAgent}`, { ticketId, fromAgent, toAgent });
 
   const message = `Handoff from ${fromAgent} to ${toAgent}: ${context}`;
   const resp = await fetch(`${RELAY_BASE_URL}/api/work-session/update`, {
@@ -672,7 +674,7 @@ async function handlePauseSession(cmd: PlaybookCommand, ctx: PlaybookContext): P
   const ticketId = cmd.ticketId!;
   const reason = cmd.reason;
 
-  console.log(`[playbook] pause-session ${ticketId}`);
+  logger.info(`pause-session ${ticketId}`, { ticketId });
 
   const resp = await fetch(`${RELAY_BASE_URL}/api/work-session/pause`, {
     method: "POST",
@@ -697,7 +699,7 @@ async function handlePauseSession(cmd: PlaybookCommand, ctx: PlaybookContext): P
 async function handleResumeSession(cmd: PlaybookCommand, ctx: PlaybookContext): Promise<void> {
   const ticketId = cmd.ticketId!;
 
-  console.log(`[playbook] resume-session ${ticketId}`);
+  logger.info(`resume-session ${ticketId}`, { ticketId });
 
   const resp = await fetch(`${RELAY_BASE_URL}/api/work-session/resume`, {
     method: "POST",
@@ -725,11 +727,11 @@ async function handlePipeline(cmd: PlaybookCommand, ctx: PlaybookContext): Promi
   const stepDescs = cmd.pipelineSteps ?? [];
 
   if (agents.length === 0) {
-    logger.warn("[playbook] pipeline: no agents specified", { ticketId });
+    logger.warn("pipeline: no agents specified", { ticketId });
     return;
   }
 
-  console.log(`[playbook] pipeline ${ticketId}: ${agents.join("→")} (${agents.length} steps)`);
+  logger.info(`pipeline ${ticketId}: ${agents.join("→")}`, { ticketId, agents, stepCount: agents.length });
 
   // Fetch ticket details once — shared across all steps
   const details = await fetchWorkItemDetails(ticketId);
@@ -847,7 +849,7 @@ async function handlePipeline(cmd: PlaybookCommand, ctx: PlaybookContext): Promi
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
       failCurrentStep(pipeline.id, errMsg);
-      logger.error(`[pipeline] Step ${i + 1} failed for ${ticketId}`, { agent: step.agent, error: errMsg });
+      logger.error(`Pipeline step ${i + 1} failed for ${ticketId}`, { agent: step.agent, ticketId, step: i + 1, error: errMsg });
       await notify(getNotifyCtx(ctx), {
         event: "error",
         workItemId: ticketId,

@@ -176,6 +176,6 @@ export async function detectAndLinkCalendarEvents(
     .eq("id", conversationId);
 
   for (const link of newLinks) {
-    console.log(`[calendar-link] Linked "${link.event_title}" to conversation ${conversationId.slice(0, 8)} (${link.matched_on})`);
+    logger.info("Linked event to conversation", { eventTitle: link.event_title, conversationId: conversationId.slice(0, 8), matchedOn: link.matched_on });
   }
 }

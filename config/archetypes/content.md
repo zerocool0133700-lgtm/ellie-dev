@@ -1,4 +1,6 @@
 ---
+species: ant
+cognitive_style: "narrative-driven, audience-focused"
 token_budget: 20000
 allowed_skills: [memory, forest, google-workspace, context-strategy]
 section_priorities:

@@ -195,12 +195,12 @@ export async function streamTTSToTwilio(
       }));
 
       if (!firstChunkSent) {
-        console.log(`[voice] First TTS chunk sent in ${Date.now() - start}ms (openai)`);
+        logger.info(`First TTS chunk sent in ${Date.now() - start}ms (openai)`);
         firstChunkSent = true;
       }
     }
 
-    console.log(`[voice] TTS complete in ${Date.now() - start}ms (openai)`);
+    logger.info(`TTS complete in ${Date.now() - start}ms (openai)`);
     return true;
   }
 
@@ -244,7 +244,7 @@ export async function streamTTSToTwilio(
       }));
 
       if (!firstChunkSent) {
-        console.log(`[voice] First TTS chunk sent in ${Date.now() - start}ms (elevenlabs)`);
+        logger.info(`First TTS chunk sent in ${Date.now() - start}ms (elevenlabs)`);
         firstChunkSent = true;
       }
     }
@@ -258,7 +258,7 @@ export async function streamTTSToTwilio(
     }));
   }
 
-  console.log(`[voice] TTS stream complete in ${Date.now() - start}ms (elevenlabs)`);
+  logger.info(`TTS stream complete in ${Date.now() - start}ms (elevenlabs)`);
   return true;
 }
 

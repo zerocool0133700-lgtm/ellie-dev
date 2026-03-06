@@ -119,7 +119,7 @@ export async function getContextDocket(): Promise<string> {
     writeToDisk("context-docket", data.document);
     // ELLIE-327: Track context docket freshness
     freshnessTracker.recordFetch("context-docket", Date.now() - fetchStart);
-    console.log("[context] Loaded context docket");
+    logger.info("Loaded context docket");
     return data.document;
   } catch (err) {
     // Return in-memory cache if available

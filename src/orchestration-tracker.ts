@@ -312,6 +312,17 @@ export function stopWatchdog(): void {
   }
 }
 
+/** Clear all run state — for unit tests only. */
+export function _resetForTesting(): void {
+  activeRuns.clear();
+  if (_watchdogTimer) {
+    clearInterval(_watchdogTimer);
+    _watchdogTimer = null;
+  }
+  _notifyFn = null;
+  _notifyCtx = null;
+}
+
 // ── Recovery ───────────────────────────────────────────────
 
 /**

@@ -8,6 +8,9 @@
 import { watch, type FSWatcher } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+import { log } from "../logger.ts";
+
+const logger = log.child("skills");
 import { bumpSnapshotVersion } from "./snapshot.ts";
 import { clearBinCache } from "./eligibility.ts";
 import { clearSkillFileCache } from "./loader.ts";
@@ -41,7 +44,7 @@ export function startSkillWatcher(): void {
   }
 
   if (watchers.length > 0) {
-    console.log(`[skills] Watching ${watchers.length} directories for changes`);
+    logger.info(`Watching ${watchers.length} directories for changes`);
   }
 }
 
@@ -58,7 +61,7 @@ export function stopSkillWatcher(): void {
 function scheduleReload(filename: string): void {
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
-    console.log(`[skills] Reloading after change: ${filename}`);
+    logger.info(`Reloading after change: ${filename}`);
     clearBinCache();
     clearSkillFileCache();
     bumpSnapshotVersion();

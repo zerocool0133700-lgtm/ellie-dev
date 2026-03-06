@@ -43,7 +43,7 @@ export async function executeCriticLoop(
     ? steps[1]
     : { agent_name: "critic", skill_name: "critical_review", instruction: "Review and provide constructive feedback" };
 
-  console.log(`[orchestrator] Critic-loop: producer=${producer.agent_name}/${producer.skill_name || "none"}, critic=${critic.agent_name}/${critic.skill_name || "none"}`);
+  logger.info("Critic-loop started", { producer: `${producer.agent_name}/${producer.skill_name || "none"}`, critic: `${critic.agent_name}/${critic.skill_name || "none"}` });
 
   let producerOutput = "";
   let feedback: string | null = null;
@@ -112,7 +112,7 @@ export async function executeCriticLoop(
     // 3. Parse critic verdict
     const verdict = parseCriticVerdict(criticResult.output, round);
 
-    console.log(`[orchestrator] Critic round ${round + 1}: score=${verdict.score}, accepted=${verdict.accepted}`);
+    logger.info("Critic round complete", { round: round + 1, score: verdict.score, accepted: verdict.accepted });
 
     if (verdict.accepted) {
       break;

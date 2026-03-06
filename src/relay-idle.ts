@@ -42,7 +42,7 @@ export async function triggerConsolidation(channel?: string): Promise<void> {
       const closed = await closeActiveConversation(supabase, channel);
       if (closed) {
         clearContextCache();
-        console.log(`[conversation] Conversation closed (${channel}) — context cache cleared`);
+        logger.info(`Conversation closed (${channel}) — context cache cleared`);
         return;
       }
     }
@@ -54,7 +54,7 @@ export async function triggerConsolidation(channel?: string): Promise<void> {
       },
     });
     if (created) {
-      console.log(`[consolidate] Conversation ended (${channel || "all"}) — context cache cleared`);
+      logger.info(`Conversation ended (${channel || "all"}) — context cache cleared`);
     }
   } catch (err) {
     logger.error("Consolidation error", err);
@@ -69,7 +69,7 @@ export function resetTelegramIdleTimer(): void {
   if (telegramIdleTimer) clearTimeout(telegramIdleTimer);
   const ms = getIdleMs();
   telegramIdleTimer = setTimeout(() => {
-    console.log(`[consolidate] Telegram idle for ${ms / 60_000} minutes — consolidating...`);
+    logger.info(`Telegram idle for ${ms / 60_000} minutes — consolidating...`);
     triggerConsolidation("telegram");
   }, ms);
 }
@@ -78,7 +78,7 @@ export function resetGchatIdleTimer(): void {
   if (gchatIdleTimer) clearTimeout(gchatIdleTimer);
   const ms = getIdleMs();
   gchatIdleTimer = setTimeout(() => {
-    console.log(`[consolidate] Google Chat idle for ${ms / 60_000} minutes — consolidating...`);
+    logger.info(`Google Chat idle for ${ms / 60_000} minutes — consolidating...`);
     triggerConsolidation("google-chat");
   }, ms);
 }
@@ -87,7 +87,7 @@ export function resetEllieChatIdleTimer(): void {
   if (ellieChatIdleTimer) clearTimeout(ellieChatIdleTimer);
   const ms = getIdleMs();
   ellieChatIdleTimer = setTimeout(() => {
-    console.log(`[consolidate] Ellie Chat idle for ${ms / 60_000} minutes — consolidating...`);
+    logger.info(`Ellie Chat idle for ${ms / 60_000} minutes — consolidating...`);
     triggerConsolidation("ellie-chat");
   }, ms);
 }

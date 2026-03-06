@@ -9,6 +9,9 @@
  */
 
 import { randomUUID } from "crypto";
+import { log } from "./logger.ts";
+
+const logger = log.child("approval");
 
 export interface PendingAction {
   id: string;
@@ -88,7 +91,7 @@ export function startExpiryCleanup(): void {
     for (const [id, action] of pendingActions) {
       if (now - action.createdAt > EXPIRY_MS) {
         pendingActions.delete(id);
-        console.log(`[approval] Expired action: ${action.description.substring(0, 60)}`);
+        logger.info(`Expired action: ${action.description.substring(0, 60)}`);
       }
     }
   }, CLEANUP_INTERVAL_MS);

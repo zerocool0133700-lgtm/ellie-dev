@@ -52,7 +52,7 @@ export async function loadSkillEntries(): Promise<SkillEntry[]> {
   }
 
   const skills = [...seen.values()];
-  console.log(`[skills] Loaded ${skills.length} skills from ${SEARCH_DIRS.length} locations`);
+  logger.info(`Loaded ${skills.length} skills from ${SEARCH_DIRS.length} locations`);
   return skills;
 }
 

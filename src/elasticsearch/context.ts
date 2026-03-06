@@ -10,6 +10,9 @@
 
 import { searchForestSafe, type ForestSearchOptions } from "./search-forest.ts";
 import { startSyncListener, stopSyncListener, getSyncStats } from "./sync-listener.ts";
+import { log } from "../logger.ts";
+
+const logger = log.child("es-forest");
 
 // ============================================================
 // QUERY DETECTION — only search forest for relevant messages
@@ -78,7 +81,7 @@ export async function getForestContext(
  */
 export async function initForestSync(): Promise<void> {
   if (!process.env.ELASTICSEARCH_URL || process.env.ELASTICSEARCH_ENABLED === "false") {
-    console.log("[es-forest] Elasticsearch disabled (ELASTICSEARCH_URL not set or ELASTICSEARCH_ENABLED=false)");
+    logger.info("Elasticsearch disabled (ELASTICSEARCH_URL not set or ELASTICSEARCH_ENABLED=false)");
     return;
   }
 

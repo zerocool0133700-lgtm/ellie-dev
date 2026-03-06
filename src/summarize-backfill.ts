@@ -55,15 +55,15 @@ async function run() {
     .order("started_at", { ascending: true });
 
   if (!convos?.length) {
-    console.log("No conversations need summaries.");
+    logger.info("No conversations need summaries.");
     return;
   }
 
-  console.log(`${convos.length} conversations need summaries.\n`);
+  logger.info(`${convos.length} conversations need summaries.`);
 
   for (let i = 0; i < convos.length; i++) {
     const convo = convos[i];
-    console.log(`[${i + 1}/${convos.length}] ${convo.channel} (${convo.message_count} msgs)...`);
+    logger.info(`[${i + 1}/${convos.length}] ${convo.channel} (${convo.message_count} msgs)...`);
 
     const { data: msgs } = await supabase
       .from("messages")
@@ -85,13 +85,13 @@ async function run() {
         .update({ summary })
         .eq("id", convo.id);
 
-      console.log(`  -> ${summary.substring(0, 100)}...`);
+      logger.info(`Summary: ${summary.substring(0, 100)}...`);
     } catch (err) {
       logger.error("Failed to summarize conversation", { conversationId: convo.id }, err);
     }
   }
 
-  console.log("\nDone.");
+  logger.info("Done.");
 }
 
 run().catch((err) => logger.error("Fatal error", err));

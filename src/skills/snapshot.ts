@@ -8,6 +8,9 @@
 import { loadSkillEntries } from "./loader.ts";
 import { filterEligibleSkills } from "./eligibility.ts";
 import { SKILL_LIMITS, type SkillEntry, type SkillSnapshot } from "./types.ts";
+import { log } from "../logger.ts";
+
+const logger = log.child("skills");
 
 // ELLIE-367: Per-filter cache keyed by allowed skills list (or "all" for unfiltered)
 const snapshotCache: Map<string, SkillSnapshot> = new Map();
@@ -47,8 +50,8 @@ export async function getSkillSnapshot(allowedSkills?: string[]): Promise<SkillS
   };
   snapshotCache.set(cacheKey, snapshot);
 
-  console.log(
-    `[skills] Snapshot built (${cacheKey}): ${eligible.length}/${allSkills.length} eligible, ${prompt.length} chars`
+  logger.info(
+    `Snapshot built (${cacheKey}): ${eligible.length}/${allSkills.length} eligible, ${prompt.length} chars`
   );
 
   return snapshot;
@@ -94,7 +97,7 @@ function buildSkillsPrompt(skills: SkillEntry[]): string {
 
     // Check char limit
     if (totalChars + block.length > SKILL_LIMITS.maxSkillsPromptChars) {
-      console.log(`[skills] Char limit reached at ${count} skills (${totalChars} chars)`);
+      logger.info(`Char limit reached at ${count} skills (${totalChars} chars)`);
       break;
     }
 

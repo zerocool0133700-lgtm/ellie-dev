@@ -324,9 +324,7 @@ export async function insertMemoryWithDedup(
     existing, params.content, params.source_agent, params.visibility,
   );
 
-  console.log(
-    `[memory] Dedup: ${resolution.resolution} for "${params.content.substring(0, 60)}..." — ${resolution.reason}`,
-  );
+  logger.info(`Dedup: ${resolution.resolution} for "${params.content.substring(0, 60)}..." — ${resolution.reason}`);
 
   // 3. Execute resolution
   switch (resolution.resolution) {
@@ -441,8 +439,8 @@ async function doMerge(
     return await doInsert(supabase, params, resolution);
   }
 
-  console.log(
-    `[memory] Merged into existing memory ${existing.id.slice(0, 8)}: ` +
+  logger.info(
+    `Merged into existing memory ${existing.id.slice(0, 8)}: ` +
     `${[...allSources].join(", ")} (corroboration #${updatedMetadata.corroboration_count})`,
   );
 
@@ -483,9 +481,7 @@ async function doFlag(
     return await doInsert(supabase, params, resolution);
   }
 
-  console.log(
-    `[memory] Flagged memory ${existing.id.slice(0, 8)} for review: ${resolution.reason}`,
-  );
+  logger.info(`Flagged memory ${existing.id.slice(0, 8)} for review: ${resolution.reason}`);
 
   return { id: existing.id, action: "flagged", resolution };
 }
@@ -643,11 +639,11 @@ export async function processMemoryIntents(
 
   // [MEMORY:] tags → forest shared memories
   if (forestSessionIds?.tree_id) {
-    console.log(`[memory] Forest session active — tree: ${forestSessionIds.tree_id.slice(0, 8)}, scanning for [MEMORY:] tags`);
+    logger.info(`Forest session active — tree: ${forestSessionIds.tree_id.slice(0, 8)}, scanning for [MEMORY:] tags`);
     const memoryRegex = /\[MEMORY:(?:(\w+):)?(?:([\d.]+):)?\s*(.+?)\]/gi;
     const memoryMatches = [...response.matchAll(memoryRegex)];
     if (memoryMatches.length === 0) {
-      console.log(`[memory] No [MEMORY:] tags found in response (${response.length} chars)`);
+      logger.info(`No [MEMORY:] tags found in response (${response.length} chars)`);
     }
     for (const match of memoryMatches) {
       const memType = match[1] || 'finding';
@@ -665,7 +661,7 @@ export async function processMemoryIntents(
           confidence,
           scope_path: '2/1/2',
         });
-        console.log(`[memory] Forest memory: [${memType}:${confidence}] ${content.slice(0, 60)}...`);
+        logger.info(`Forest memory: [${memType}:${confidence}] ${content.slice(0, 60)}...`);
       } catch (err) {
         logger.warn("Forest memory write failed", err);
       }

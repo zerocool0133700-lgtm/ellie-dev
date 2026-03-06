@@ -8,15 +8,15 @@
  * Every incoming message gets attached to an active conversation immediately.
  */
 
-import { spawn } from "bun";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { indexConversation, indexMemory, classifyDomain } from "./elasticsearch.ts";
 import { resilientTask } from "./resilient-task.ts";
 import { log } from "./logger.ts";
+import { callClaudeCLI } from "./summary-cli.ts";
+import { buildRiverDocument, type ConversationContext } from "./conversation-river-promoter.ts";
 
 const logger = log.child("conversation");
 
-const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
 import { USER_TIMEZONE } from "./timezone.ts";
 
 // How many messages between rolling summary updates
@@ -103,7 +103,9 @@ async function extractRecentlyExpired(
     if (convo.message_count >= 2) {
       // extractMemories is idempotent — safe to call even if already extracted
       await extractMemories(supabase, convo.id);
-      console.log(`[conversation] Extracted memories from RPC-expired ${convo.id}`);
+      // ELLIE-612: Promote to River vault (fire-and-forget, non-fatal)
+      resilientTask("promoteToRiver", "best-effort", () => promoteToRiver(supabase, convo.id));
+      logger.info("Extracted memories from RPC-expired conversation", { conversationId: convo.id });
     }
   }
 }
@@ -167,7 +169,7 @@ export async function maybeGenerateSummary(
     if (convo.message_count < SUMMARY_INTERVAL) return;
     if (convo.message_count % SUMMARY_INTERVAL !== 0) return;
 
-    console.log(`[conversation] Summary due for ${conversationId} (${convo.message_count} msgs)`);
+    logger.info("Summary due", { conversationId, messageCount: convo.message_count });
 
     // Fetch recent messages for this conversation
     const { data: messages } = await supabase
@@ -225,11 +227,84 @@ Return ONLY the summary text, nothing else.`;
         .update({ summary })
         .eq("id", conversationId);
 
-      console.log(`[conversation] Summary updated: ${summary.substring(0, 80)}...`);
+      logger.info("Summary updated", { preview: summary.substring(0, 80) });
     }
   } catch (err) {
     logger.error("summary generation failed", { conversationId }, err);
     // Non-fatal — conversation tracking continues without summary
+  }
+}
+
+/**
+ * ELLIE-612: Promote a closed conversation to the River vault.
+ * Builds a markdown document from conversation context and writes it
+ * via the bridge API so QMD indexes it for future sessions.
+ *
+ * Graceful failure — if the write fails, the conversation still closes normally.
+ */
+export async function promoteToRiver(
+  supabase: SupabaseClient,
+  conversationId: string,
+): Promise<void> {
+  try {
+    const { data: convo } = await supabase
+      .from("conversations")
+      .select("id, channel, agent, summary, message_count, started_at, ended_at")
+      .eq("id", conversationId)
+      .single();
+
+    if (!convo || !convo.summary) {
+      logger.info("River promote skipped — no conversation or summary", { conversationId });
+      return;
+    }
+
+    // Fetch extracted facts and action items
+    const { data: memories } = await supabase
+      .from("memory")
+      .select("type, content")
+      .eq("conversation_id", conversationId)
+      .in("type", ["fact", "action_item"]);
+
+    const facts = (memories || []).filter((m) => m.type === "fact").map((m) => m.content);
+    const actionItems = (memories || []).filter((m) => m.type === "action_item").map((m) => m.content);
+
+    const ctx: ConversationContext = {
+      conversationId,
+      channel: convo.channel,
+      summary: convo.summary,
+      facts: facts.length > 0 ? facts : undefined,
+      actionItems: actionItems.length > 0 ? actionItems : undefined,
+      agent: convo.agent || undefined,
+      messageCount: convo.message_count || undefined,
+      startedAt: convo.started_at || undefined,
+      endedAt: convo.ended_at || undefined,
+    };
+
+    const doc = buildRiverDocument(ctx);
+    if (!doc) {
+      logger.warn("River promote skipped — document build returned null", { conversationId });
+      return;
+    }
+
+    const resp = await fetch("http://localhost:3001/api/bridge/river/write", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        path: doc.path,
+        content: doc.content,
+        operation: "create",
+      }),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      logger.warn("River promote write failed", { conversationId, status: resp.status, body: text });
+      return;
+    }
+
+    logger.info("Promoted conversation to River", { conversationId, path: doc.path });
+  } catch (err) {
+    logger.error("promoteToRiver error (non-fatal)", { conversationId }, err);
   }
 }
 
@@ -279,7 +354,10 @@ export async function closeConversation(
     // Run memory extraction (idempotent — checks for existing memories)
     await extractMemories(supabase, conversationId);
 
-    console.log(`[conversation] Closed: ${conversationId}`);
+    // ELLIE-612: Promote to River vault (fire-and-forget, non-fatal)
+    resilientTask("promoteToRiver", "best-effort", () => promoteToRiver(supabase, conversationId));
+
+    logger.info("Closed conversation", { conversationId });
   } catch (err) {
     logger.error("closeConversation error", { conversationId }, err);
   }
@@ -468,7 +546,7 @@ ${transcript}`;
       ).select("id, type, content");
 
       for (const mem of validMemories) {
-        console.log(`  [${mem.type}] ${mem.content}`);
+        logger.info("Extracted memory", { type: mem.type, content: mem.content });
       }
 
       // ELLIE-479: resilient ES indexing
@@ -509,7 +587,7 @@ ${transcript}`;
       }
     }
 
-    console.log(`[conversation] Memories extracted for ${conversationId}: ${validMemories.length} memories`);
+    logger.info("Memories extracted", { conversationId, count: validMemories.length });
   } catch (err) {
     logger.error("extractMemories error", { conversationId }, err);
   }
@@ -715,7 +793,7 @@ export async function expireIdleConversations(
     }
 
     if (count > 0) {
-      console.log(`[conversation] Expired ${count} idle conversation(s)`);
+      logger.info("Expired idle conversations", { count });
     }
     return count;
   } catch (err) {
@@ -725,48 +803,6 @@ export async function expireIdleConversations(
 }
 
 // --- Helpers ---
-
-async function callClaudeCLI(prompt: string): Promise<string> {
-  const args = [CLAUDE_PATH, "-p", "--output-format", "text"];
-
-  const proc = spawn(args, {
-    stdin: new Blob([prompt]),
-    stdout: "pipe",
-    stderr: "pipe",
-    env: {
-      ...process.env,
-      CLAUDECODE: "",
-      ANTHROPIC_API_KEY: "",
-    },
-  });
-
-  const TIMEOUT_MS = 60_000;
-  let timedOut = false;
-  let killTimer: ReturnType<typeof setTimeout> | null = null;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    logger.error("CLI timeout — sending SIGTERM", { timeoutMs: TIMEOUT_MS });
-    proc.kill();
-    // SIGKILL fallback if SIGTERM doesn't work (ELLIE-239)
-    killTimer = setTimeout(() => {
-      try { process.kill(proc.pid, 0); proc.kill(9); } catch {}
-    }, 5_000);
-  }, TIMEOUT_MS);
-
-  const output = await new Response(proc.stdout).text();
-  const stderr = await new Response(proc.stderr).text();
-  clearTimeout(timeout);
-  if (killTimer) clearTimeout(killTimer);
-
-  const exitCode = await proc.exited;
-
-  if (exitCode !== 0) {
-    const msg = timedOut ? "timed out" : stderr || `exit code ${exitCode}`;
-    throw new Error(`Claude CLI failed: ${msg}`);
-  }
-
-  return output.trim();
-}
 
 function formatTime(iso: string): string {
   return new Date(iso).toLocaleString("en-US", {

@@ -73,7 +73,7 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     if (!supabaseOk || !forestOk) {
       // Anthropic recovered but critical deps still unhealthy — log, stay in fallback
       const failures = ([!supabaseOk && "supabase", !forestOk && "forest"] as (string | false)[]).filter(Boolean);
-      logger.warn("[recovery-probe] Anthropic up but critical deps still down — staying in fallback", { failures });
+      logger.warn("Anthropic up but critical deps still down — staying in fallback", { failures });
       return;
     }
 
@@ -92,7 +92,7 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
       event: "incident_resolved",
       telegramMessage: `\u2713 Claude recovered \u2014 Ellie back to normal${esDegraded}`,
     });
-    if (!esOk) logger.warn("[recovery-probe] Recovered with ES degraded");
+    if (!esOk) logger.warn("Recovered with ES degraded");
   }, 5 * 60_000, "recovery-probe");
 
   periodicTask(async () => {
@@ -101,7 +101,7 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     for (const [id, action] of ellieChatPendingActions) {
       if (now - action.createdAt > 15 * 60_000) {
         ellieChatPendingActions.delete(id);
-        console.log(`[ellie-chat approval] Expired: ${action.description.substring(0, 60)}`);
+        logger.info(`Expired: ${action.description.substring(0, 60)}`);
       }
     }
   }, 5 * 60_000, "action-expiry");
@@ -117,15 +117,15 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
         if (count >= 2 && !botRestart.isRestarting() && cooldownOk) {
           botRestart.setRestarting(true);
           botRestart.setLastRestartAt(Date.now());
-          logger.warn("[health-restart] Telegram down 2+ checks \u2014 restarting bot", { count });
+          logger.warn("Telegram down 2+ checks — restarting bot", { count });
           bot.stop()
             .then(() => bot.start())
             .then(() => {
-              logger.info("[health-restart] Bot restarted successfully");
+              logger.info("Bot restarted successfully");
               botRestart.setRestarting(false);
             })
             .catch(err => {
-              logger.error("[health-restart] Bot restart failed", { error: err instanceof Error ? err.message : String(err) });
+              logger.error("Bot restart failed", { error: err instanceof Error ? err.message : String(err) });
               botRestart.setRestarting(false);
             });
         } else if (count === 0) {
@@ -171,9 +171,9 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
       reapPreemptedCreatures(supabase),
     ]);
 
-    if (reaped.length > 0) console.log(`[creature-reaper] Reaped ${reaped.length} timed-out creature(s)`);
-    if (exhausted.length > 0) console.log(`[creature-reaper] Reaped ${exhausted.length} exhausted-retry creature(s)`);
-    if (preempted.length > 0) console.log(`[creature-reaper] Preempted ${preempted.length} orphaned creature(s)`);
+    if (reaped.length > 0) logger.info(`Reaped ${reaped.length} timed-out creature(s)`);
+    if (exhausted.length > 0) logger.info(`Reaped ${exhausted.length} exhausted-retry creature(s)`);
+    if (preempted.length > 0) logger.info(`Preempted ${preempted.length} orphaned creature(s)`);
 
     // ELLIE-499: Post-reap cleanup — mark work sessions incomplete, roll back Plane tickets
     const allReaped = [
@@ -206,10 +206,10 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     if (validReaped.length > 0) {
       const cleanup = await cleanupReapedCreatures(validReaped);
       if (cleanup.sessionsCleanedUp > 0) {
-        console.log(`[creature-reaper] Cleaned up ${cleanup.sessionsCleanedUp} work session(s)`);
+        logger.info(`Cleaned up ${cleanup.sessionsCleanedUp} work session(s)`);
       }
       if (cleanup.planeRolledBack > 0) {
-        console.log(`[creature-reaper] Rolled back ${cleanup.planeRolledBack} Plane ticket(s)`);
+        logger.info(`Rolled back ${cleanup.planeRolledBack} Plane ticket(s)`);
       }
     }
   }, 5 * 60_000, "creature-reaper");
@@ -218,21 +218,21 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
   periodicTask(async () => {
     const { expireShortTermMemories } = await import("../../ellie-forest/src/shared-memory");
     const expired = await expireShortTermMemories();
-    if (expired > 0) console.log(`[memory-maintenance] Expired ${expired} short-term memories`);
+    if (expired > 0) logger.info(`Expired ${expired} short-term memories`);
   }, 15 * 60_000, "memory-expiry");
 
   // Memory maintenance: refresh weights (every hour)
   periodicTask(async () => {
     const { refreshWeights } = await import("../../ellie-forest/src/shared-memory");
     const refreshed = await refreshWeights({ limit: 500 });
-    if (refreshed > 0) console.log(`[memory-maintenance] Refreshed weights for ${refreshed} memories`);
+    if (refreshed > 0) logger.info(`Refreshed weights for ${refreshed} memories`);
   }, 60 * 60_000, "weight-refresh");
 
   // Working memory idle archive — archive sessions idle >24h (every 2 hours — ELLIE-540)
   periodicTask(async () => {
     const { archiveIdleWorkingMemory } = await import("./working-memory.ts");
     const archived = await archiveIdleWorkingMemory();
-    if (archived > 0) console.log(`[working-memory] Archived ${archived} idle session(s)`);
+    if (archived > 0) logger.info(`Archived ${archived} idle session(s)`);
   }, 2 * 60 * 60_000, "working-memory-archive");
 
   // ELLIE-457: Oak Catalog — daily QMD scan → R/1 manifest (every 24 hours)
@@ -274,7 +274,7 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
         const { getNotifyCtx } = await import("./relay-state.ts");
         notify(getNotifyCtx(), { event: "incident_raised", text: `\u26a0\ufe0f Weekly data integrity audit found issues:\n${result.summary}`, workItemId: "data-integrity" });
       } else {
-        logger.info("[audit] Weekly audit passed \u2014 all clear.");
+        logger.info("Weekly audit passed — all clear.");
       }
     }
   }, 15 * 60_000, "data-integrity-audit");
@@ -289,7 +289,7 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
       const { getRelayDeps } = await import("./relay-state.ts");
       const { anthropic: a } = getRelayDeps();
       const result = await runNightlyGardener(supabase, a ?? null);
-      logger.info("[gardener] Nightly run complete", result);
+      logger.info("Nightly run complete", result);
     }
   }, 15 * 60_000, "channel-gardener");
 
@@ -300,7 +300,7 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     if (cst.getHours() === 3 && cst.getMinutes() >= 30 && cst.getMinutes() < 45) {
       const { runNightlyJobIntelligence } = await import("./api/job-intelligence.ts");
       const result = await runNightlyJobIntelligence();
-      logger.info("[job-intel] Nightly run complete", result);
+      logger.info("Nightly run complete", result);
     }
   }, 15 * 60_000, "job-intelligence");
 
@@ -326,7 +326,7 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     );
 
     if (checkedIn > 0 || escalated > 0) {
-      logger.info(`[check-in-monitor] Cycle complete`, { checkedIn, escalated });
+      logger.info("Cycle complete", { checkedIn, escalated });
     }
   }, 5 * 60_000, "check-in-monitor");
 
@@ -351,7 +351,7 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
           };
       forestSql = postgres(pgConfig as string, { max: 1, idle_timeout: 30, connect_timeout: 10 });
     } catch {
-      logger.warn("[es-reconcile] Could not connect to Forest DB — skipping forest indices");
+      logger.warn("Could not connect to Forest DB — skipping forest indices");
     }
 
     try {
@@ -373,7 +373,7 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     }
   }, 30 * 60_000, "es-reconciliation");
 
-  console.log("[periodic-tasks] All background tasks registered");
+  logger.info("All background tasks registered");
 }
 
 /**
@@ -388,7 +388,7 @@ export function runStartupTasks(deps: PeriodicTaskDeps): void {
     try {
       const { syncAllCalendars } = await import("./calendar-sync.ts");
       await syncAllCalendars();
-      console.log("[calendar-sync] Initial sync complete");
+      logger.info("Initial sync complete");
     } catch (err: unknown) {
       logger.error("Initial sync error", { error: err instanceof Error ? err.message : String(err) });
     }
@@ -415,7 +415,7 @@ async function initUmsConsumers(supabase: SupabaseClient, bot: Bot): Promise<voi
   try {
     const { initCommsConsumer } = await import("./ums/consumers/comms.ts");
     initCommsConsumer(supabase);
-    console.log("[comms] Comms consumer initialized with DB-backed threads");
+    logger.info("Comms consumer initialized with DB-backed threads");
   } catch (err) {
     logger.error("Comms consumer init failed", err);
   }
@@ -424,7 +424,7 @@ async function initUmsConsumers(supabase: SupabaseClient, bot: Bot): Promise<voi
   try {
     const { initCalendarIntelConsumer } = await import("./ums/consumers/calendar-intel.ts");
     initCalendarIntelConsumer(supabase);
-    console.log("[calendar-intel] Calendar Intel consumer initialized with DB-backed intel");
+    logger.info("Calendar Intel consumer initialized with DB-backed intel");
   } catch (err) {
     logger.error("Calendar Intel consumer init failed", err);
   }
@@ -433,7 +433,7 @@ async function initUmsConsumers(supabase: SupabaseClient, bot: Bot): Promise<voi
   try {
     const { initRelationshipConsumer } = await import("./ums/consumers/relationship.ts");
     initRelationshipConsumer(supabase);
-    console.log("[relationship] Relationship consumer initialized with DB-backed profiles");
+    logger.info("Relationship consumer initialized with DB-backed profiles");
   } catch (err) {
     logger.error("Relationship consumer init failed", err);
   }
@@ -461,7 +461,7 @@ async function initUmsConsumers(supabase: SupabaseClient, bot: Bot): Promise<voi
       }
       return channels;
     });
-    console.log("[alert] Alert consumer initialized with DB-backed rules");
+    logger.info("Alert consumer initialized with DB-backed rules");
   } catch (err) {
     logger.error("Alert consumer init failed", err);
   }

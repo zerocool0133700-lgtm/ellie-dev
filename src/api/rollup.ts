@@ -243,7 +243,7 @@ export async function generateRollup(req: ApiRequest, res: ApiResponse, supabase
       return res.status(400).json({ error: "Invalid date format. Use YYYY-MM-DD." });
     }
 
-    console.log(`[rollup] Generating digest for ${rollupDate}`);
+    logger.info(`Generating digest for ${rollupDate}`);
 
     const digest = await buildDigestForDate(supabase, rollupDate);
 
@@ -295,8 +295,8 @@ export async function generateRollup(req: ApiRequest, res: ApiResponse, supabase
       }
     }
 
-    console.log(
-      `[rollup] Stored digest for ${rollupDate}: ${digest.sessionsCount} sessions, ${digest.totalDurationMin} min`,
+    logger.info(
+      `Stored digest for ${rollupDate}: ${digest.sessionsCount} sessions, ${digest.totalDurationMin} min`,
     );
 
     return res.json({

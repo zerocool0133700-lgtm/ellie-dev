@@ -1,4 +1,6 @@
 ---
+species: deer
+cognitive_style: "baseline-aware, deviation detection"
 token_budget: 24000
 allowed_skills: [plane, memory, forest, alert, verify]
 section_priorities:

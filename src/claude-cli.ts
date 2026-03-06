@@ -92,10 +92,10 @@ export async function acquireLock(): Promise<boolean> {
       const pid = parseInt(existingLock);
       try {
         process.kill(pid, 0);
-        console.log(`Another instance running (PID: ${pid})`);
+        logger.info(`Another instance running (PID: ${pid})`);
         return false;
       } catch {
-        console.log("Stale lock found, taking over...");
+        logger.info("Stale lock found, taking over...");
       }
     }
 
@@ -369,7 +369,7 @@ export async function callClaude(
       logger.info("CLI stderr (exit 0)", { stderr: stderr.substring(0, 500), outputLength: output.length });
     }
 
-    console.log(`[claude] Success: ${output.length} chars, exit ${exitCode}`);
+    logger.info(`Success: ${output.length} chars, exit ${exitCode}`);
 
     if (options?.resume !== false) {
       const sessionMatch = output.match(/Session ID: ([a-f0-9-]+)/i);
@@ -377,7 +377,7 @@ export async function callClaude(
         session.sessionId = sessionMatch[1];
         session.lastActivity = new Date().toISOString();
         await saveSessionSafe(session);
-        console.log(`[claude] Session ID: ${session.sessionId.slice(0, 8)}`);
+        logger.info(`Session ID: ${session.sessionId.slice(0, 8)}`);
       }
     }
 
@@ -437,7 +437,7 @@ export async function callClaudeVoice(systemPrompt: string, userMessage: string)
         .filter((b: { type: string }) => b.type === "text")
         .map((b: { type: string; text: string }) => b.text)
         .join("");
-      console.log(`[voice] API responded in ${Date.now() - start}ms`);
+      logger.info(`Voice API responded in ${Date.now() - start}ms`);
       return text.trim();
     } catch (err) {
       const { recordAnthropicFailure } = await import("./llm-provider.ts");
@@ -450,7 +450,7 @@ export async function callClaudeVoice(systemPrompt: string, userMessage: string)
   const prompt = `${systemPrompt}\n\n${userMessage}`;
   const args = [CLAUDE_PATH, "-p", "--output-format", "text", "--model", "claude-haiku-4-5-20251001"];
 
-  console.log(`[voice] Claude CLI fallback: ${userMessage.substring(0, 80)}...`);
+  logger.info("Voice CLI fallback", { messagePreview: userMessage.substring(0, 80) });
 
   const proc = spawn(args, {
     stdin: new Blob([prompt]),
@@ -469,6 +469,6 @@ export async function callClaudeVoice(systemPrompt: string, userMessage: string)
     return "Sorry, I had trouble processing that. Could you repeat?";
   }
 
-  console.log(`[voice] CLI responded in ${Date.now() - start}ms`);
+  logger.info(`Voice CLI responded in ${Date.now() - start}ms`);
   return output.trim();
 }

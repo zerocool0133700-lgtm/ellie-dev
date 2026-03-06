@@ -229,7 +229,7 @@ export async function detectAndCaptureCorrection(
   const result = await classifyCorrection(userMessage, previousAssistantMessage, anthropic);
   if (!result?.is_correction || !result.ground_truth) return;
 
-  console.log(`[correction] Detected: "${result.what_was_wrong}" → "${result.ground_truth}"`);
+  logger.info("Correction detected", { whatWasWrong: result.what_was_wrong, groundTruth: result.ground_truth });
   const correctionMemoryId = await writeCorrectionToForest(result, conversationId, channel);
 
   // ELLIE-329: Invalidate related context sources so stale data gets refreshed

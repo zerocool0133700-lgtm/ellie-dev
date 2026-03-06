@@ -10,6 +10,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type Anthropic from "@anthropic-ai/sdk";
 import { WebSocket } from "ws";
 import { ALLOWED_USER_ID, GCHAT_SPACE_NOTIFY } from "./relay-config.ts";
+import { log } from "./logger.ts";
+
+const logger = log.child("relay-state");
 import type { NotifyContext } from "./notification-policy.ts";
 import { getSlackSendFn } from "./channels/slack/index.ts";
 
@@ -89,7 +92,7 @@ export function sweepPhoneHistories(ttlMs: number = 24 * 60 * 60_000): number {
     }
   }
   if (removed > 0) {
-    console.log(`[relay-state] Swept ${removed} stale phone history entries (TTL: ${ttlMs / 3_600_000}h)`);
+    logger.info(`Swept ${removed} stale phone history entries (TTL: ${ttlMs / 3_600_000}h)`);
   }
   return removed;
 }
@@ -100,12 +103,12 @@ export function sweepPhoneHistories(ttlMs: number = 24 * 60 * 60_000): number {
 export function broadcastExtension(event: Record<string, unknown>): void {
   if (extensionClients.size === 0) return;
   const payload = JSON.stringify({ ...event, ts: Date.now() });
-  console.log(`[extension] Broadcasting ${event.type} to ${extensionClients.size} client(s)`);
+  logger.info(`Broadcasting ${event.type} to ${extensionClients.size} client(s)`);
   for (const ws of extensionClients) {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(payload);
     } else {
-      console.log(`[extension] Client readyState=${ws.readyState}, skipping`);
+      logger.warn(`Client readyState=${ws.readyState}, skipping`);
     }
   }
 }

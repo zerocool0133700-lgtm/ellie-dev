@@ -104,7 +104,8 @@ import { initOutlook, getOutlookEmail } from "./outlook.ts";
 import { startExpiryCleanup } from "./approval.ts";
 import { notify } from "./notification-policy.ts";
 import { startPlaneQueueWorker, stopPlaneQueueWorker } from "./plane-queue.ts";
-import { reconcilePlaneState } from "./plane.ts";
+import { reconcilePlaneState, isWorkItemDone } from "./plane.ts";
+import { reconcileDashboard } from "./active-tickets-dashboard.ts";
 import { setWatchdogNotify, stopWatchdog } from "./orchestration-tracker.ts";
 import { stopReconciler } from "./orchestration-reconciler.ts";
 import { restoreModeState } from "./context-mode.ts";
@@ -114,6 +115,7 @@ import { onBridgeWrite } from "./api/bridge.ts";
 import { setBroadcastToEllieChat } from "./tool-approval.ts";
 import { stopAllTasks } from "./periodic-task.ts";
 import { initPeriodicTasks, runStartupTasks } from "./periodic-tasks.ts";
+import { initIdentitySystem, shutdownIdentitySystem } from "./identity-startup.ts";
 
 // ── Startup phase timer (ELLIE-497) ─────────────────────────
 const _startupBegin = Date.now();
@@ -121,11 +123,11 @@ const _phaseTimings: Array<{ name: string; ms: number }> = [];
 
 function startPhase(name: string): () => void {
   const t0 = Date.now();
-  logger.info(`[startup] START ${name}`);
+  logger.info(`START ${name}`);
   return () => {
     const ms = Date.now() - t0;
     _phaseTimings.push({ name, ms });
-    logger.info(`[startup] DONE  ${name} (${ms}ms)`);
+    logger.info(`DONE ${name}`, { ms });
   };
 }
 
@@ -136,10 +138,7 @@ function startPhase(name: string): () => void {
 const _doneConfig = startPhase("config");
 if (!BOT_TOKEN) {
   logger.error("TELEGRAM_BOT_TOKEN not set!");
-  console.log("\nTo set up:");
-  console.log("1. Message @BotFather on Telegram");
-  console.log("2. Create a new bot with /newbot");
-  console.log("3. Copy the token to .env");
+  logger.info("To set up: 1. Message @BotFather on Telegram, 2. Create a new bot with /newbot, 3. Copy the token to .env");
   process.exit(1);
 }
 _doneConfig();
@@ -193,6 +192,18 @@ let _lastBotRestartAt = 0;
   reconcilePlaneState().then(() => _done()).catch(err => { _done(); logger.warn("Plane reconciliation failed (non-fatal)", err); });
 }
 
+// ELLIE-580: Reconcile stale dashboard entries on startup
+{ const _done = startPhase("dashboard-reconcile");
+  const { getWorkSessionByPlaneId } = await import('../../ellie-forest/src/index');
+  reconcileDashboard({
+    isWorkItemDone,
+    hasActiveSession: async (workItemId: string) => {
+      const tree = await getWorkSessionByPlaneId(workItemId);
+      return tree?.state === 'growing';
+    },
+  }).then(() => _done()).catch(err => { _done(); logger.warn("Dashboard reconciliation failed (non-fatal)", err); });
+}
+
 // Orchestration tracker — ELLIE-349: heartbeat watchdog + orphan recovery
 // ELLIE-387: Wire proactive notifications to watchdog (deferred — needs setRelayDeps first)
 // ELLIE-563: Marked critical — relay exits if orchestration fails to initialize
@@ -208,7 +219,7 @@ let _lastBotRestartAt = 0;
 
 // ELLIE-455: Register J scope tree-level vines on startup
 { const _done = startPhase("job-vines");
-  registerJobVines().then(() => _done()).catch(err => { _done(); logger.warn("[job-vines] Startup registration failed", { err: err.message }); });
+  registerJobVines().then(() => _done()).catch(err => { _done(); logger.warn("Startup registration failed", { err: err.message }); });
 }
 
 // ELLIE-395: Restore conversation mode state from disk
@@ -219,6 +230,17 @@ let _lastBotRestartAt = 0;
 // ELLIE-374: Validate all archetype files on startup
 { const _done = startPhase("archetype-validate");
   import("./prompt-builder.ts").then(({ validateArchetypes }) => validateArchetypes()).then(() => _done()).catch(err => { _done(); logger.warn("Archetype validation failed", { error: err instanceof Error ? err.message : String(err) }); });
+}
+
+// ELLIE-615: Initialize ODS identity system (archetypes, roles, bindings, watchers)
+{ const _done = startPhase("identity-system");
+  try {
+    initIdentitySystem();
+    _done();
+  } catch (err) {
+    _done();
+    logger.warn("Identity system init failed (non-fatal)", { error: err instanceof Error ? err.message : String(err) });
+  }
 }
 
 // Bridge write notifications — Telegram + ellie-chat (ELLIE-199)
@@ -314,7 +336,7 @@ import { startSlackChannel } from "./channels/slack/index.ts";
 
 // ELLIE-435: Pre-warm orchestrator routing rules from Forest tree
 { const _done = startPhase("routing-rules");
-  warmTreeRoutingRules().then(() => _done()).catch(err => { _done(); logger.warn("[ELLIE-435] Tree routing warm failed", err); });
+  warmTreeRoutingRules().then(() => _done()).catch(err => { _done(); logger.warn("Tree routing warm failed", err); });
 }
 
 // ELLIE-388: Load workflow templates
@@ -337,7 +359,7 @@ import { probeVoiceProviders } from "./transcribe.ts";
 { const _done = startPhase("skill-watcher");
   startSkillWatcher();
   getSkillSnapshot().then(s => {
-    console.log(`[skills] Initial snapshot: ${s.skills.length} skills, ${s.totalChars} chars`);
+    logger.info("Initial skill snapshot loaded", { skills: s.skills.length, totalChars: s.totalChars });
     _done();
   }).catch(err => { _done(); logger.warn("Initial snapshot failed", err); });
 }
@@ -362,7 +384,7 @@ _doneOutlook();
 { const _done = startPhase("nudge-checker");
 startNudgeChecker(async (channel, count) => {
   const nudgeText = `Hey Dave \u2014 I sent you a response${count > 1 ? ` (${count} messages)` : ""} a few minutes ago. Did it come through?`;
-  console.log(`[delivery] Nudging on ${channel} (${count} pending responses)`);
+  logger.info("Nudging user", { channel, pendingResponses: count });
   try {
     if (channel === "google-chat" && gchatEnabled) {
       const gchatSpace = process.env.GOOGLE_CHAT_SPACE_NAME;
@@ -376,12 +398,14 @@ startNudgeChecker(async (channel, count) => {
 });
 _done(); }
 
-console.log("Starting Claude Telegram Relay...");
-console.log(`Authorized user: ${ALLOWED_USER_ID || "ANY (not recommended)"}`);
-console.log(`Project directory: ${PROJECT_DIR || "(relay working directory)"}`);
-console.log(`Agent mode: ${AGENT_MODE ? "ON" : "OFF"}${AGENT_MODE ? ` (tools: ${ALLOWED_TOOLS.join(", ")})` : ""}`);
-console.log(`Google Chat: ${gchatEnabled ? "ON" : "OFF"}`);
-console.log(`Outlook: ${outlookEnabled ? "ON (" + getOutlookEmail() + ")" : "OFF"}`);
+logger.info("Starting Claude Telegram Relay...", {
+  authorizedUser: ALLOWED_USER_ID || "ANY (not recommended)",
+  projectDir: PROJECT_DIR || "(relay working directory)",
+  agentMode: AGENT_MODE ? "ON" : "OFF",
+  tools: AGENT_MODE ? ALLOWED_TOOLS : undefined,
+  googleChat: gchatEnabled ? "ON" : "OFF",
+  outlook: outlookEnabled ? "ON" : "OFF",
+});
 
 // Initialize ES forest sync (if configured)
 { const _done = startPhase("forest-sync"); await initForestSync(); _done(); }
@@ -393,18 +417,17 @@ console.log(`Outlook: ${outlookEnabled ? "ON (" + getOutlookEmail() + ")" : "OFF
 const _doneHttpListen = startPhase("http-listen");
 httpServer.listen(HTTP_PORT, () => {
   _doneHttpListen();
-  console.log(`[http] Server listening on port ${HTTP_PORT}`);
-  console.log(`[voice] WebSocket: ws://localhost:${HTTP_PORT}/media-stream`);
-  console.log(`[extension] WebSocket: ws://localhost:${HTTP_PORT}/extension`);
-  console.log(`[ellie-chat] WebSocket: ws://localhost:${HTTP_PORT}/ws/ellie-chat`);
-  console.log(`[voice] TwiML webhook: http://localhost:${HTTP_PORT}/voice`);
+  logger.info("Server listening", { port: HTTP_PORT });
+  logger.info("WebSocket endpoints ready", {
+    voice: `ws://localhost:${HTTP_PORT}/media-stream`,
+    extension: `ws://localhost:${HTTP_PORT}/extension`,
+    ellieChat: `ws://localhost:${HTTP_PORT}/ws/ellie-chat`,
+    twiml: `http://localhost:${HTTP_PORT}/voice`,
+  });
   if (PUBLIC_URL) {
-    console.log(`[voice] Public URL: ${PUBLIC_URL}`);
-    if (gchatEnabled) {
-      console.log(`[gchat] Webhook URL: ${PUBLIC_URL}/google-chat`);
-    }
+    logger.info("Public URL configured", { url: PUBLIC_URL, gchatWebhook: gchatEnabled ? `${PUBLIC_URL}/google-chat` : undefined });
   } else {
-    console.log(`[voice] Warning: PUBLIC_URL not set in .env`);
+    logger.warn("PUBLIC_URL not set in .env");
   }
 });
 
@@ -414,8 +437,8 @@ bot.start({
   onStart: () => {
     _doneBotStart();
     const totalMs = Date.now() - _startupBegin;
-    console.log(`Telegram bot is running!`);
-    logger.info(`[startup] All phases complete in ${totalMs}ms`, {
+    logger.info("Telegram bot is running!");
+    logger.info("All startup phases complete", {
       phases: _phaseTimings.length,
       totalMs,
     });
@@ -430,44 +453,45 @@ async function gracefulShutdown(signal: string): Promise<void> {
   if (shutdownInProgress) return;
   shutdownInProgress = true;
   const shutdownStart = Date.now();
-  logger.info(`[shutdown] ${signal} received — shutting down gracefully...`);
+  logger.info("Shutting down gracefully...", { signal });
 
   // ── ELLIE-497: Shutdown mirrors startup in reverse ────────
   // Dependents shut down before their dependencies.
   // Order: bot → channels → background-tasks → queues → http → lock
 
   // 1. Stop accepting new messages (reverse of bot-start)
-  logger.info("[shutdown] Stopping telegram bot...");
+  logger.info("Stopping telegram bot...");
   try { await bot.stop(); } catch {}
-  logger.info("[shutdown] Telegram bot stopped");
-  logger.info("[shutdown] Stopping discord...");
+  logger.info("Telegram bot stopped");
+  logger.info("Stopping discord...");
   const { stopDiscordGateway } = await import("./channels/discord/index.ts");
   await stopDiscordGateway().catch(() => {});
-  logger.info("[shutdown] Discord gateway stopped");
+  logger.info("Discord gateway stopped");
 
   // 2. Stop all background tasks (reverse of periodic-tasks + orchestration)
-  logger.info("[shutdown] Stopping background tasks...");
+  logger.info("Stopping background tasks...");
   stopAllTasks();      // periodic-tasks
   stopWatchdog();      // orchestration watchdog
   stopReconciler();    // orchestration reconciler
   stopPlaneQueueWorker(); // plane-queue
-  logger.info("[shutdown] Background tasks stopped");
+  logger.info("Background tasks stopped");
 
   // 3. Wait for active queue tasks to finish (ELLIE-460: graceful drain)
-  logger.info("[shutdown] Draining message queues...");
+  logger.info("Draining message queues...");
   const drained = await drainQueues(20_000); // 20s max wait
-  logger.info(`[shutdown] Queues ${drained ? "drained cleanly" : "drain timed out"}`);
+  logger.info("Queue drain complete", { drained });
 
   // 4. Close HTTP server + file watchers + WS pings (reverse of http-listen + websocket-servers)
-  logger.info("[shutdown] Closing HTTP server...");
+  logger.info("Closing HTTP server...");
   stopWebSocketPings(); // ELLIE-561
   httpServer.close();
   const { stopPersonalityWatchers } = await import("./prompt-builder.ts");
   stopPersonalityWatchers();
-  logger.info("[shutdown] HTTP server closed");
+  shutdownIdentitySystem(); // ELLIE-615
+  logger.info("HTTP server closed");
 
   // 5. Release lock file (reverse of lock — deepest foundation)
-  logger.info("[shutdown] Releasing lock...");
+  logger.info("Releasing lock...");
   const { releaseLock } = await import("./claude-cli.ts");
   await Promise.race([
     releaseLock(),
@@ -475,7 +499,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
   ]);
 
   const shutdownMs = Date.now() - shutdownStart;
-  logger.info(`[shutdown] Complete in ${shutdownMs}ms`);
+  logger.info("Shutdown complete", { ms: shutdownMs });
   process.exit(0);
 }
 
@@ -492,7 +516,7 @@ process.on("uncaughtException", (err: Error, origin: string) => {
   process.stderr.write(
     JSON.stringify({ level: "fatal", event: "UNCAUGHT EXCEPTION", error: err.message, stack: err.stack, origin, memory_mb: mem, ts: new Date().toISOString() }) + "\n"
   );
-  logger.error("[UNCAUGHT EXCEPTION] Process will exit", {
+  logger.error("Uncaught exception — process will exit", {
     error: err.message,
     stack: err.stack,
     origin,
@@ -505,7 +529,7 @@ process.on("uncaughtException", (err: Error, origin: string) => {
 process.on("unhandledRejection", (reason: unknown) => {
   const msg = reason instanceof Error ? reason.message : String(reason);
   const stack = reason instanceof Error ? reason.stack : undefined;
-  logger.error("[UNHANDLED REJECTION] Non-fatal \u2014 logged and continuing", {
+  logger.error("Unhandled rejection — logged and continuing", {
     reason: msg,
     stack,
     memory_mb: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),

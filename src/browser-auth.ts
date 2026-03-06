@@ -81,9 +81,7 @@ export async function getAuthenticatedSession(
 
     // Extract cookies
     const cookies = await context.cookies();
-    console.log(
-      `[browser-auth] Login successful for ${domain}, got ${cookies.length} cookies`,
-    );
+    logger.info("Login successful", { domain, cookieCount: cookies.length });
 
     return { cookies, source: "fresh_login" };
   } catch (err) {

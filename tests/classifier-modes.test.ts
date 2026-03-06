@@ -182,7 +182,7 @@ describe("Classifier Execution Mode Detection", () => {
       initClassifier(anthropic, createClassifierSupabase());
 
       const result = await classifyIntent(
-        "Write an email to the team about the release and make it really good",
+        "Help me prepare a proposal for the stakeholders and make it really good",
         "telegram",
         "user1",
       );

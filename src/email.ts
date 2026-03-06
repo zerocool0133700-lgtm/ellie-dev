@@ -51,7 +51,7 @@ export async function sendVerificationCode(email: string, code: string): Promise
       return false
     }
 
-    console.log(`[email] Verification code sent to ${email}`)
+    logger.info("Verification code sent")
     return true
   } catch (err) {
     logger.error('Failed to send', err)

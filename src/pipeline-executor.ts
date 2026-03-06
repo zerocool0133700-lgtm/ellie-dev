@@ -100,7 +100,7 @@ export async function executePipeline(
       throw new PipelineStepError(i, step, "timeout", previousOutput);
     }
 
-    console.log(`[orchestrator] Pipeline ${i + 1}/${steps.length}: ${step.agent_name}/${step.skill_name || "none"} — "${sanitizeInstruction(step.instruction).substring(0, 60)}"`);
+    logger.info(`Pipeline ${i + 1}/${steps.length}: ${step.agent_name}/${step.skill_name || "none"} — "${sanitizeInstruction(step.instruction).substring(0, 60)}"`);
 
     let stepResult: import("./orchestrator-types.ts").StepResult;
     let dispatch: DispatchResult;

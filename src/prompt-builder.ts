@@ -37,6 +37,9 @@ import {
   clearWorkingMemoryCache,
   _injectWorkingMemoryForTesting,
 } from "./working-memory.ts";
+import { getPendingCommitmentsForPrompt } from "./pending-commitments-prompt.ts";
+import { getWorkflowProgressForPrompt } from "./workflow-progress-tracker.ts";
+import { getIdentityPromptSections } from "./prompt-identity-injector.ts";
 export { setWorkingMemoryCache, getCachedWorkingMemory, clearWorkingMemoryCache, _injectWorkingMemoryForTesting };
 
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
@@ -187,7 +190,7 @@ function watchPersonalityFiles(): void {
   }
 
   if (personalityWatchers.length > 0) {
-    console.log(`[prompt-builder] Watching ${personalityWatchers.length} personality files for changes`);
+    logger.info(`Watching ${personalityWatchers.length} personality files for changes`);
   }
 }
 
@@ -457,6 +460,55 @@ export async function getAgentArchetype(agentName?: string): Promise<string> {
   }
 }
 
+// ── Per-agent role loader (ELLIE-611) ─────────────────────────
+// Loads role context from config/roles/{role}.md via the ODS role-loader.
+// Parallel to getAgentArchetype above — same cache pattern.
+
+const _agentRoleCache: Map<string, { content: string; loadedAt: number }> = new Map();
+const AGENT_ROLE_CACHE_MS = 60_000;
+const ROLES_DIR = join(PROJECT_ROOT, "config", "roles");
+
+/** Map agent names to their role file names (from DEFAULT_BINDINGS). */
+const AGENT_ROLE_MAP: Record<string, string> = {
+  dev: "dev",
+  general: "general",
+  research: "researcher",
+  strategy: "strategy",
+  critic: "critic",
+  content: "content",
+  finance: "finance",
+  ops: "ops",
+};
+
+/**
+ * Load a role file for an agent.
+ * Returns the role body (no frontmatter) for injection into prompts.
+ */
+export async function getAgentRoleContext(agentName?: string): Promise<string> {
+  if (!agentName) return "";
+
+  const normalized = agentName.toLowerCase().replace(/[^a-z0-9-]/g, "");
+  const cached = _agentRoleCache.get(normalized);
+  if (cached && Date.now() - cached.loadedAt < AGENT_ROLE_CACHE_MS) return cached.content;
+
+  const roleName = AGENT_ROLE_MAP[normalized];
+  if (!roleName) return "";
+
+  try {
+    const filePath = join(ROLES_DIR, `${roleName}.md`);
+    const raw = await readFile(filePath, "utf-8");
+    // Strip YAML frontmatter, return body only
+    const fmMatch = raw.match(/^---\s*\n[\s\S]*?\n---\s*\n?([\s\S]*)$/);
+    const body = fmMatch ? fmMatch[1].trim() : raw.trim();
+    _agentRoleCache.set(normalized, { content: body, loadedAt: Date.now() });
+    logger.info(`Role ${normalized}: loaded from ${roleName}.md`);
+    return body;
+  } catch {
+    logger.debug(`Role ${normalized}: no role file found (${roleName}.md)`);
+    return "";
+  }
+}
+
 /**
  * ELLIE-374: Validate all archetype files on startup.
  * Logs warnings for missing files, parse failures, or missing profile keys.
@@ -683,10 +735,10 @@ export async function runPostMessageAssessment(
     }
 
     if (newPhase.phase !== phase.phase) {
-      console.log(`[assessment] Phase transition: ${phase.phase_name} -> ${newPhase.phase_name}`);
+      logger.info(`Phase transition: ${phase.phase_name} -> ${newPhase.phase_name}`);
     }
 
-    console.log(`[assessment] Completed in ${Date.now() - start}ms` +
+    logger.info(`Completed in ${Date.now() - start}ms` +
       (claudeResult ? ` (mbti:${claudeResult.mbti.length} enn:${claudeResult.enneagram.length} health:${claudeResult.health.length} mem:${claudeResult.memories.length})` : " (rules only)"));
   } catch (err: unknown) {
     logger.error("Assessment failed", err);
@@ -710,6 +762,7 @@ export function buildPrompt(
   agentMemoryContext?: string,
   sessionIds?: { tree_id: string; branch_id?: string; creature_id?: string; entity_id?: string; work_item_id?: string },
   archetypeContext?: string,
+  roleContext?: string,
   psyContext?: string,
   phaseContext?: string,
   healthContext?: string,
@@ -753,6 +806,26 @@ export function buildPrompt(
     if (effectiveSoul) sections.push({ label: "soul", content: `# Ellie Soul\n${effectiveSoul}\n---\n`, priority: 2 });
   }
   if (archetypeContext) sections.push({ label: "archetype", content: `# Behavioral Archetype\n${archetypeContext}\n---\n`, priority: 2 });
+  // ELLIE-611: Inject agent role context (WHAT the agent does) at priority 5
+  if (roleContext) sections.push({ label: "identity-role", content: `# Agent Role\n${roleContext}\n---\n`, priority: 5 });
+
+  // ELLIE-616: Inject ODS identity sections (archetype at priority 3, role at priority 5)
+  // Only inject when legacy params are absent — avoids duplicate content during migration.
+  if (!archetypeContext || !roleContext) {
+    try {
+      const agentName = agentConfig?.name || "general";
+      const identitySections = getIdentityPromptSections(agentName);
+      for (const section of identitySections) {
+        // Skip archetype if legacy archetypeContext is already present
+        if (section.label === "identity-archetype" && archetypeContext) continue;
+        // Skip role if legacy roleContext is already present
+        if (section.label === "identity-role" && roleContext) continue;
+        sections.push(section);
+      }
+    } catch (e) {
+      logger.warn("ODS identity injection failed (non-fatal)", { error: e instanceof Error ? e.message : String(e) });
+    }
+  }
 
   // Command bar context (ELLIE-400) — priority configurable per channel, default 2
   if (commandBarContext) sections.push({ label: "command-bar-context", content: commandBarContext, priority: channelProfile?.contextPriority ?? 2 });
@@ -869,6 +942,24 @@ export function buildPrompt(
           priority: 2,
         });
       }
+    }
+  }
+
+  // Priority 2: Pending commitments (ELLIE-590)
+  // Injected when there are in-flight promises — ensures agents never forget them.
+  {
+    const commitmentsSection = getPendingCommitmentsForPrompt();
+    if (commitmentsSection) {
+      sections.push({ label: "pending-commitments", content: commitmentsSection, priority: 2 });
+    }
+  }
+
+  // Priority 2: Active workflow progress (ELLIE-595)
+  // Injected when multi-step workflows are in flight — shows step status to coordinator.
+  {
+    const workflowSection = getWorkflowProgressForPrompt();
+    if (workflowSection) {
+      sections.push({ label: "workflow-progress", content: workflowSection, priority: 2 });
     }
   }
 

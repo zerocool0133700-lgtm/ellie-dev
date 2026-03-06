@@ -59,17 +59,17 @@ describe("NOTIFICATION_POLICY config", () => {
     "session_pause", "session_resume",
     "incident_raised", "incident_update", "incident_resolved",
     "memory_contradiction",
-    "dispatch_confirm", "error",
+    "dispatch_confirm", "run_stale", "run_failed", "error",
     "rollup", "weekly_review",
   ];
 
-  test("defines all 14 event types", () => {
+  test("defines all 16 event types", () => {
     for (const event of ALL_EVENTS) {
       expect(NOTIFICATION_POLICY[event]).toBeDefined();
       expect(NOTIFICATION_POLICY[event].channels.telegram).toBeDefined();
       expect(NOTIFICATION_POLICY[event].channels["google-chat"]).toBeDefined();
     }
-    expect(Object.keys(NOTIFICATION_POLICY).length).toBe(14);
+    expect(Object.keys(NOTIFICATION_POLICY).length).toBe(16);
   });
 
   test("dispatch_confirm routes to both channels with 0 throttle", () => {
@@ -113,14 +113,14 @@ describe("getEnabledChannels", () => {
     expect(channels).toContain("google-chat");
   });
 
-  test("session_update returns only google-chat", () => {
+  test("session_update returns google-chat and slack (telegram disabled)", () => {
     const channels = getEnabledChannels("session_update");
-    expect(channels).toEqual(["google-chat"]);
+    expect(channels).toEqual(["google-chat", "slack"]);
   });
 
-  test("incident_update returns only google-chat (telegram disabled)", () => {
+  test("incident_update returns google-chat and slack (telegram disabled)", () => {
     const channels = getEnabledChannels("incident_update");
-    expect(channels).toEqual(["google-chat"]);
+    expect(channels).toEqual(["google-chat", "slack"]);
   });
 
   test("returns empty for unknown event", () => {
@@ -178,8 +178,8 @@ describe("notify dispatch_confirm", () => {
 
 // ── notify() error events ───────────────────────────────
 
-describe("notify error events", () => {
-  test("error sends immediately to both channels", async () => {
+describe("notify error events (coalesced since ELLIE-397)", () => {
+  test("error is coalesced then flushed to both channels", async () => {
     const ctx = makeMockCtx();
     await notify(ctx, {
       event: "error",
@@ -188,11 +188,14 @@ describe("notify error events", () => {
       gchatMessage: "⚠️ Task timed out after 420s. The process was terminated.",
     });
 
+    // Error events are now coalesced — wait for the 2s flush timer
+    await new Promise(r => setTimeout(r, 2500));
+
     expect(telegramSendSpy).toHaveBeenCalledTimes(1);
     expect(gchatSendSpy).toHaveBeenCalledTimes(1);
   });
 
-  test("multiple rapid errors all send (0 throttle)", async () => {
+  test("multiple rapid errors are coalesced, not sent immediately", async () => {
     const ctx = makeMockCtx();
 
     await notify(ctx, {
@@ -206,8 +209,10 @@ describe("notify error events", () => {
       telegramMessage: "⚠️ SIGTERM 1",
     });
 
-    expect(telegramSendSpy).toHaveBeenCalledTimes(2);
-    expect(gchatSendSpy).toHaveBeenCalledTimes(2);
+    // Rapid errors are coalesced — NOT sent immediately
+    // (the 2s immediate timer is replaced by a 30s coalesce window)
+    expect(telegramSendSpy).toHaveBeenCalledTimes(0);
+    expect(gchatSendSpy).toHaveBeenCalledTimes(0);
   });
 });
 
@@ -327,7 +332,7 @@ describe("mock sprint scenario: 10+ tasks in 30 min", () => {
     telegramSendSpy.mockClear();
     gchatSendSpy.mockClear();
 
-    // Simulate 2 error events (timeout + SIGTERM)
+    // Simulate 2 error events (timeout + SIGTERM) — now coalesced
     await notify(ctx, {
       event: "error",
       workItemId: "timeout-sprint",
@@ -341,13 +346,13 @@ describe("mock sprint scenario: 10+ tasks in 30 min", () => {
       gchatMessage: "⚠️ Process interrupted",
     });
 
-    // Both error events sent to both channels (0 throttle, critical)
-    expect(telegramSendSpy).toHaveBeenCalledTimes(2);
-    expect(gchatSendSpy).toHaveBeenCalledTimes(2);
+    // Rapid errors are coalesced, not sent immediately (30s coalesce window)
+    expect(telegramSendSpy).toHaveBeenCalledTimes(0);
+    expect(gchatSendSpy).toHaveBeenCalledTimes(0);
 
-    // Total: 10+0+2 = 12 telegram, 10+1+2 = 13 gchat
+    // Total immediate sends: 10+0+0 = 10 telegram, 10+1+0 = 11 gchat
+    // Errors will flush later as a single coalesced message per channel
     // vs. naive: 10+15+2 = 27 per channel = 54 total
-    // Policy reduces 54 → 25 messages (53% reduction)
   });
 
   test("memory_contradiction throttled at 5 min on telegram", async () => {

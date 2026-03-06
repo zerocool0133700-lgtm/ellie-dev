@@ -1123,7 +1123,7 @@ export async function getAgentMemoryContext(
       `;
       if (activeTree) {
         tree = activeTree;
-        console.log(`[context] Found growing tree ${tree.id.slice(0, 8)} for ${entityName} (no explicit work item)`);
+        logger.info("Found growing tree for entity (no explicit work item)", { treeId: tree.id.slice(0, 8), entityName });
       }
     }
     if (!tree) return empty;

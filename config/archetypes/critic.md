@@ -1,4 +1,6 @@
 ---
+species: bee
+cognitive_style: "failure-mode analysis, cross-pollination"
 token_budget: 20000
 allowed_skills: [plane, memory, forest, verify]
 section_priorities:

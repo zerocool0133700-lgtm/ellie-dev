@@ -27,7 +27,7 @@ export async function executeFanOut(
   options: OrchestratorOptions,
   artifacts: ArtifactStore,
 ): Promise<ExecutionResult> {
-  console.log(`[orchestrator] Fan-out: ${steps.length} parallel steps`);
+  logger.info("Fan-out started", { stepCount: steps.length });
 
   // Run all steps in parallel — track original index for correct step mapping
   const results = await Promise.all(

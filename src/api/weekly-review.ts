@@ -290,7 +290,7 @@ export async function generateWeeklyReview(
   try {
     const { notify = true } = req.body || {};
 
-    console.log("[weekly-review] Generating weekly review");
+    logger.info("Generating weekly review");
 
     const data = await gatherReviewData(supabase);
     const text = formatReviewText(data);
@@ -346,8 +346,8 @@ export async function generateWeeklyReview(
       }
     }
 
-    console.log(
-      `[weekly-review] Done: ${data.openTodos.length} open, ${data.waitingFor.length} waiting, ${data.staleTodos.length} stale`,
+    logger.info(
+      `Done: ${data.openTodos.length} open, ${data.waitingFor.length} waiting, ${data.staleTodos.length} stale`,
     );
 
     return res.json({

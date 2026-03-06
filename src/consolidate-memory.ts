@@ -20,9 +20,9 @@ const supabase = createClient(
 );
 
 async function run() {
-  console.log("[batch] Starting scheduled consolidation...");
+  logger.info("Starting scheduled consolidation...");
   await consolidateNow(supabase);
-  console.log("[batch] Scheduled consolidation complete.");
+  logger.info("Scheduled consolidation complete.");
 }
 
 run().catch((err) => {

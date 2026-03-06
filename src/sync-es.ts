@@ -23,7 +23,7 @@ const ES_URL = process.env.ELASTICSEARCH_URL || "http://localhost:9200";
 const BATCH_SIZE = 500;
 
 async function syncMessages() {
-  console.log("[sync] Syncing messages...");
+  logger.info("Syncing messages...");
   let count = 0;
   let offset = 0;
 
@@ -62,15 +62,15 @@ async function syncMessages() {
 
     count += data.length;
     offset += BATCH_SIZE;
-    process.stdout.write(`\r[sync] Messages: ${count}`);
+    logger.info(`Messages: ${count}`);
 
     if (data.length < BATCH_SIZE) break;
   }
-  console.log(`\n[sync] Messages done: ${count}`);
+  logger.info(`Messages done: ${count}`);
 }
 
 async function syncMemory() {
-  console.log("[sync] Syncing memory...");
+  logger.info("Syncing memory...");
   let count = 0;
   let offset = 0;
 
@@ -110,15 +110,15 @@ async function syncMemory() {
 
     count += data.length;
     offset += BATCH_SIZE;
-    process.stdout.write(`\r[sync] Memory: ${count}`);
+    logger.info(`Memory: ${count}`);
 
     if (data.length < BATCH_SIZE) break;
   }
-  console.log(`\n[sync] Memory done: ${count}`);
+  logger.info(`Memory done: ${count}`);
 }
 
 async function syncConversations() {
-  console.log("[sync] Syncing conversations...");
+  logger.info("Syncing conversations...");
   let count = 0;
   let offset = 0;
 
@@ -156,11 +156,11 @@ async function syncConversations() {
 
     count += data.length;
     offset += BATCH_SIZE;
-    process.stdout.write(`\r[sync] Conversations: ${count}`);
+    logger.info(`Conversations: ${count}`);
 
     if (data.length < BATCH_SIZE) break;
   }
-  console.log(`\n[sync] Conversations done: ${count}`);
+  logger.info(`Conversations done: ${count}`);
 }
 
 async function run() {
@@ -168,7 +168,7 @@ async function run() {
   try {
     const res = await fetch(`${ES_URL}/_cluster/health`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    console.log("[sync] Elasticsearch connected\n");
+    logger.info("Elasticsearch connected");
   } catch {
     logger.error("Cannot reach Elasticsearch");
     process.exit(1);
@@ -190,11 +190,12 @@ async function run() {
     fetch(`${ES_URL}/ellie-conversations/_count`).then((r) => r.json()),
   ]);
 
-  console.log(`\n[sync] Final counts:`);
-  console.log(`  ellie-messages:      ${msgs.count}`);
-  console.log(`  ellie-memory:        ${mems.count}`);
-  console.log(`  ellie-conversations: ${convos.count}`);
-  console.log("[sync] Done.");
+  logger.info("Final counts", {
+    "ellie-messages": msgs.count,
+    "ellie-memory": mems.count,
+    "ellie-conversations": convos.count,
+  });
+  logger.info("Done.");
 }
 
 run().catch((err) => {

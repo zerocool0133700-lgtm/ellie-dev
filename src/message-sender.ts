@@ -172,7 +172,7 @@ export async function sendWithApprovals(
         sent.message_id,
         { agentName: agentName || _getActiveAgent("telegram") },
       );
-      console.log(`[approval] Pending: ${description.substring(0, 60)}`);
+      logger.info(`Pending approval: ${description.substring(0, 60)}`);
     }
   } else {
     await sendResponse(ctx, cleanedText);
@@ -218,7 +218,7 @@ export function sendWithApprovalsEllieChat(
         agentName,
         createdAt: Date.now(),
       });
-      console.log(`[ellie-chat approval] Pending: ${description.substring(0, 60)}`);
+      logger.info(`Pending approval: ${description.substring(0, 60)}`);
       ws.send(JSON.stringify({
         type: "confirm",
         id: actionId,

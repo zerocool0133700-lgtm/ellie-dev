@@ -113,14 +113,14 @@ export async function initGoogleChat(): Promise<boolean> {
   if (clientId && clientSecret && refreshToken) {
     oauthCreds = { clientId, clientSecret, refreshToken };
     authMethod = "oauth";
-    console.log("[gchat] OAuth 2.0 credentials loaded (client:", clientId.substring(0, 20) + "...)");
+    logger.info("OAuth 2.0 credentials loaded", { clientIdPrefix: clientId.substring(0, 20) });
     return true;
   }
 
   // Fall back to service account
   const keyPath = process.env.GOOGLE_CHAT_SERVICE_ACCOUNT_KEY_PATH;
   if (!keyPath) {
-    console.log("[gchat] No OAuth or service account configured — Google Chat disabled");
+    logger.info("No OAuth or service account configured — Google Chat disabled");
     return false;
   }
 
@@ -128,7 +128,7 @@ export async function initGoogleChat(): Promise<boolean> {
     const raw = await readFile(keyPath, "utf-8");
     serviceAccount = JSON.parse(raw);
     authMethod = "service_account";
-    console.log("[gchat] Service account loaded:", serviceAccount!.client_email);
+    logger.info("Service account loaded", { clientEmail: serviceAccount!.client_email });
     return true;
   } catch (err) {
     logger.error("Failed to load service account key", err);
@@ -181,7 +181,7 @@ async function refreshOAuthToken(): Promise<string> {
     expiresAt: Date.now() + (data.expires_in || 3600) * 1000,
   };
 
-  console.log("[gchat] OAuth access token refreshed");
+  logger.info("OAuth access token refreshed");
   return cachedToken.accessToken;
 }
 
@@ -223,7 +223,7 @@ async function refreshServiceAccountToken(): Promise<string> {
     expiresAt: Date.now() + data.expires_in * 1000,
   };
 
-  console.log("[gchat] Service account access token refreshed");
+  logger.info("Service account access token refreshed");
   return cachedToken.accessToken;
 }
 
@@ -316,7 +316,7 @@ export async function sendGoogleChatMessage(
         externalId: resBody.name || "",
         threadName: resBody.thread?.name || null,
       };
-      console.log(`[gchat] Message sent to ${spaceName} (${chunk.length} chars${threadName ? ", in-thread" : ""}) -> ${lastResult.externalId} thread=${lastResult.threadName || "none"}`);
+      logger.info("Message sent", { spaceName, chars: chunk.length, inThread: !!threadName, externalId: lastResult.externalId, threadName: lastResult.threadName || "none" });
     } finally {
       clearTimeout(timeout);
     }
@@ -343,7 +343,7 @@ export function parseGoogleChatEvent(event: GoogleChatEvent): ParsedGoogleChatMe
     const msg = payload.message;
 
     if (!msg?.text) {
-      console.log("[gchat] New format event has no message text — ignoring");
+      logger.info("New format event has no message text — ignoring");
       return null;
     }
 
@@ -363,7 +363,7 @@ export function parseGoogleChatEvent(event: GoogleChatEvent): ParsedGoogleChatMe
   // Legacy format: type/message/space at top level
   const legacy = event as GoogleChatEventLegacy;
   if (legacy.type !== "MESSAGE" || !legacy.message?.text) {
-    console.log(`[gchat] Ignoring event type: ${legacy.type}`);
+    logger.info("Ignoring event type", { type: legacy.type });
     return null;
   }
 

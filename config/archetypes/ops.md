@@ -1,4 +1,6 @@
 ---
+species: bee
+cognitive_style: "cross-pollination, system health monitoring"
 token_budget: 24000
 allowed_skills: [plane, github, memory, forest, alert, verify]
 section_priorities:

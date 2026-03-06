@@ -58,8 +58,18 @@ function abortAndRemove(ws: WebSocket): void {
   const ctrl = wsAbortControllers.get(ws);
   if (ctrl && !ctrl.signal.aborted) {
     ctrl.abort();
-    logger.info("[ws-abort] Aborted in-progress dispatch on WS close");
+    logger.info("Aborted in-progress dispatch on WS close");
   }
+}
+
+// ELLIE-561: Store ping intervals for cleanup on shutdown
+let extensionPingInterval: ReturnType<typeof setInterval> | null = null;
+let ellieChatPingInterval: ReturnType<typeof setInterval> | null = null;
+
+/** Clear WebSocket ping intervals on shutdown (ELLIE-561). */
+export function stopWebSocketPings(): void {
+  if (extensionPingInterval) { clearInterval(extensionPingInterval); extensionPingInterval = null; }
+  if (ellieChatPingInterval) { clearInterval(ellieChatPingInterval); ellieChatPingInterval = null; }
 }
 
 export function createWebSocketServers(httpServer: HttpServer): void {
@@ -114,7 +124,7 @@ extensionWss.on("connection", (ws: WebSocket) => {
           clearTimeout(authTimer);
           extensionClients.add(ws);
           ws.send(JSON.stringify({ type: "auth_ok", ts: Date.now() }));
-          console.log(`[extension] Client authenticated (${extensionClients.size} connected)`);
+          logger.info(`Client authenticated`, { clients: extensionClients.size, type: "extension" });
         } else {
           ws.close(4003, "Invalid key");
         }
@@ -129,7 +139,7 @@ extensionWss.on("connection", (ws: WebSocket) => {
         const logPath = `${import.meta.dir}/../logs/ellie-feed-log`;
         const header = `\n--- Feed saved ${new Date().toISOString()} ---\n`;
         appendFile(logPath, header + msg.content + "\n")
-          .then(() => console.log(`[extension] Feed saved to ${logPath}`))
+          .then(() => logger.info("Feed saved", { logPath }))
           .catch((err) => logger.error("Failed to save feed", err));
         return;
       }
@@ -142,7 +152,7 @@ extensionWss.on("connection", (ws: WebSocket) => {
     clearTimeout(authTimer);
     extensionClients.delete(ws);
     if (authenticated) {
-      console.log(`[extension] Client disconnected (${extensionClients.size} connected)`);
+      logger.info("Client disconnected", { clients: extensionClients.size, type: "extension" });
     }
   });
 
@@ -153,7 +163,7 @@ extensionWss.on("connection", (ws: WebSocket) => {
 });
 
 // Server-side ping every 30s to keep connections alive through nginx
-setInterval(() => {
+extensionPingInterval = setInterval(() => {
   const ping = JSON.stringify({ type: "ping", ts: Date.now() });
   for (const ws of extensionClients) {
     if (ws.readyState === WebSocket.OPEN) {
@@ -200,7 +210,7 @@ async function deliverPendingReadouts(ws: WebSocket): Promise<void> {
       }));
     }
 
-    console.log(`[ellie-chat] Delivered ${items.length} readout finding(s) on connect`);
+    logger.info(`Delivered ${items.length} readout finding(s) on connect`);
   } catch (err) {
     logger.error("Readout delivery error", err);
   }
@@ -239,7 +249,7 @@ async function deliverCatchUp(ws: WebSocket, userId: string, sinceTs?: number): 
       }
       if (deliveredIds.length > 0) {
         await markDelivered(deliveredIds);
-        console.log(`[ellie-chat] Catch-up: delivered ${deliveredIds.length} missed message(s) to ${userId}`);
+        logger.info(`Catch-up: delivered ${deliveredIds.length} missed message(s)`, { userId });
       }
     }
 
@@ -258,7 +268,7 @@ async function deliverCatchUp(ws: WebSocket, userId: string, sinceTs?: number): 
           ts: new Date(msg.created_at).getTime(),
         })),
       }));
-      console.log(`[ellie-chat] History: sent ${history.length} message(s) to ${userId}`);
+      logger.info(`History: sent ${history.length} message(s)`, { userId });
     }
 
     // 3. Send processing state if something is in-flight for this user
@@ -300,7 +310,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
           ellieChatClients.add(ws);
           wsAppUserMap.set(ws, { id: 'system-dashboard', name: 'Dashboard', email: null, onboarding_state: 'system', anonymous_id: null });
           ws.send(JSON.stringify({ type: "auth_ok", ts: Date.now() }));
-          console.log(`[ellie-chat] Client authenticated via key (${ellieChatClients.size} connected)`);
+          logger.info("Client authenticated via key", { clients: ellieChatClients.size });
           deliverPendingReadouts(ws).catch(() => {});
           deliverCatchUp(ws, "system-dashboard", msg.since).catch(() => {});
           return;
@@ -318,7 +328,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
               ellieChatClients.add(ws);
               wsAppUserMap.set(ws, { id: user.id, name: user.name, email: user.email, onboarding_state: user.onboarding_state, anonymous_id: user.anonymous_id, token: msg.token });
               ws.send(JSON.stringify({ type: "auth_ok", ts: Date.now(), user: { id: user.id, name: user.name, onboarding_state: user.onboarding_state } }));
-              console.log(`[ellie-chat] App user authenticated: ${user.name || user.id} (${ellieChatClients.size} connected)`);
+              logger.info("App user authenticated", { userId: user.id, clients: ellieChatClients.size });
               deliverPendingReadouts(ws).catch(() => {});
               deliverCatchUp(ws, user.id, msg.since).catch(() => {});
             } catch (err) {
@@ -336,7 +346,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
           ellieChatClients.add(ws);
           wsAppUserMap.set(ws, { id: '', name: null, email: null, onboarding_state: 'anonymous', anonymous_id: msg.anonymous_id });
           ws.send(JSON.stringify({ type: "auth_ok", ts: Date.now(), user: { id: null, name: null, onboarding_state: 'anonymous' } }));
-          console.log(`[ellie-chat] Anonymous app user connected: ${msg.anonymous_id} (${ellieChatClients.size} connected)`);
+          logger.info("Anonymous app user connected", { anonymousId: msg.anonymous_id, clients: ellieChatClients.size });
           return;
         }
 
@@ -366,7 +376,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
             }
             wsAppUserMap.set(ws, { id: user.id, name: user.name, email: user.email, onboarding_state: user.onboarding_state, anonymous_id: user.anonymous_id, token: msg.token });
             ws.send(JSON.stringify({ type: "session_upgraded", ts: Date.now(), user: { id: user.id, name: user.name, onboarding_state: user.onboarding_state } }));
-            console.log(`[ellie-chat] Session upgraded: ${user.name || user.id}`);
+            logger.info("Session upgraded", { userId: user.id });
           } catch (err) {
             logger.error("Session upgrade error", err);
           }
@@ -409,7 +419,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
             if (ncUserId) ellieChatPhoneHistories.delete(ncUserId);
             clearSessionApprovals(); // Reset tool approvals for new chat (ELLIE-213)
             ws.send(JSON.stringify({ type: "new_chat_ok", ts: Date.now() }));
-            console.log(`[ellie-chat] New chat started for ${ncUser?.name || ncUserId || 'unknown'}`);
+            logger.info("New chat started", { userId: ncUserId });
           } catch (err: unknown) {
             logger.error("New chat error", err);
           }
@@ -499,7 +509,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
         }
         if (!hasOtherConn) ellieChatPhoneHistories.delete(dcUserId);
       }
-      console.log(`[ellie-chat] ${dcUser?.name || 'Client'} disconnected (${ellieChatClients.size} connected)`);
+      logger.info("Client disconnected", { userId: dcUserId, clients: ellieChatClients.size });
     }
   });
 
@@ -522,7 +532,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
 });
 
 // Server-side ping every 30s + token re-validation (ELLIE-196)
-setInterval(async () => {
+ellieChatPingInterval = setInterval(async () => {
   const ping = JSON.stringify({ type: "ping", ts: Date.now() });
   for (const ws of ellieChatClients) {
     if (ws.readyState !== WebSocket.OPEN) {
@@ -537,7 +547,7 @@ setInterval(async () => {
         const { getUserByToken } = await import("./api/app-auth.ts");
         const current = await getUserByToken(user.token);
         if (!current) {
-          console.log(`[ellie-chat] Token expired for ${user.name || user.id} — disconnecting`);
+          logger.info("Token expired — disconnecting", { userId: user.id });
           ws.close(4002, "Session expired");
           ellieChatClients.delete(ws);
         }

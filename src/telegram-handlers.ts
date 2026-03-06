@@ -29,6 +29,7 @@ import {
   setPlanningMode,
   getArchetypeContext,
   getAgentArchetype,
+  getAgentRoleContext,
   getPsyContext,
   getPhaseContext,
   getHealthContext,
@@ -113,7 +114,7 @@ bot.use(async (ctx, next) => {
 
   // If ALLOWED_USER_ID is set, enforce it
   if (ALLOWED_USER_ID && userId !== ALLOWED_USER_ID) {
-    console.log(`Unauthorized: ${userId}`);
+    logger.info("unauthorized access attempt", { userId });
     await ctx.reply("This bot is private.");
     return;
   }
@@ -135,7 +136,7 @@ bot.use(async (ctx, next) => {
 bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   const text = ctx.message.text;
   const userId = ctx.from?.id.toString() || "";
-  console.log(`Message: ${text.substring(0, 50)}...`);
+  logger.info("message received", { preview: text.substring(0, 50) });
 
   // Rate limit check (ELLIE-228)
   const rateLimited = checkMessageRate(userId, "telegram");
@@ -211,7 +212,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
     const msg = getPlanningMode()
       ? "Planning mode ON — conversation will persist for up to 60 minutes of idle time."
       : "Planning mode OFF — reverting to 10-minute idle timeout.";
-    console.log(`[planning] ${msg}`);
+    logger.info(msg);
     await ctx.reply(msg);
     resetTelegramIdleTimer();
     resetGchatIdleTimer();
@@ -224,18 +225,18 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   try {
     const instant = await matchInstantCommand(text);
     if (instant) {
-      console.log(`[telegram] Instant command: /${instant.skillName} ${instant.subcommand}`);
+      logger.info("instant command matched", { skill: instant.skillName, subcommand: instant.subcommand });
       await sendResponse(ctx, instant.response);
       return;
     }
   } catch (err) {
-    console.warn("[telegram] Instant command match failed", err);
+    logger.warn("instant command match failed", err);
   }
 
   // ELLIE:: user-typed commands — bypass classifier, execute directly
   const { cleanedText: userPlaybookClean, commands: userPlaybookCmds } = extractPlaybookCommands(text);
   if (userPlaybookCmds.length > 0) {
-    console.log(`[telegram] ELLIE:: commands in user message: ${userPlaybookCmds.map(c => c.type).join(", ")}`);
+    logger.info("ELLIE:: commands in user message", { commands: userPlaybookCmds.map(c => c.type) });
     await ctx.reply(`Processing ${userPlaybookCmds.length} playbook command(s)...`);
     const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "telegram", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
     executePlaybookCommands(userPlaybookCmds, pbCtx).catch(err => logger.error("Playbook command execution failed", err));
@@ -246,7 +247,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   if (isContextRefresh(text)) {
     freshnessTracker.clear();
     clearContextCache();
-    console.log(`[context] refresh triggered — reloading all sources`);
+    logger.info("context refresh triggered — reloading all sources");
   }
 
   // Route message to appropriate agent via LLM classifier (falls back gracefully)
@@ -256,7 +257,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   const preRouteDetection = detectMode(text);
   const skillOnlyOverride = preRouteDetection?.mode === "skill-only" ? "road-runner" : undefined;
   if (skillOnlyOverride) {
-    console.log(`[routing] skill-only mode detected — routing to road-runner`);
+    logger.info("skill-only mode detected — routing to road-runner");
   }
 
   const agentResult = await routeAndDispatch(supabase, text, "telegram", userId, detectedWorkItem, skillOnlyOverride);
@@ -286,7 +287,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   const convoKey = activeConvoId || "telegram-default";
   const { mode: contextMode, changed: modeChanged } = processMessageMode(convoKey, effectiveText);
   if (modeChanged) {
-    console.log(`[context:mode] mode=${contextMode}`);
+    logger.info("context mode changed", { mode: contextMode });
   }
   const [conversationContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext, liveForest] = await Promise.all([
     activeConvoId && supabase ? getConversationMessages(supabase, activeConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
@@ -426,10 +427,12 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
         resilientTask("executePlaybookCommands", "best-effort", () => executePlaybookCommands(playbookCommands, pbCtx));
       }
 
-      console.log(
-        `[orchestrator] ${execMode}: ${result.stepResults.length} steps in ${result.artifacts.total_duration_ms}ms, ` +
-        `$${result.artifacts.total_cost_usd.toFixed(4)}`,
-      );
+      logger.info("orchestrator complete", {
+        execMode,
+        steps: result.stepResults.length,
+        durationMs: result.artifacts.total_duration_ms,
+        costUsd: result.artifacts.total_cost_usd.toFixed(4),
+      });
     } catch (err) {
       clearInterval(typingInterval);
       if (err instanceof PipelineStepError && err.partialOutput) {
@@ -451,6 +454,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
           agentMemory.memoryContext || undefined,
           agentMemory.sessionIds,
           await getAgentArchetype(agentResult?.dispatch.agent?.name),
+          await getAgentRoleContext(agentResult?.dispatch.agent?.name),
           await getPsyContext(),
           await getPhaseContext(),
           await getHealthContext(),
@@ -499,6 +503,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
     tgAgentMem || undefined,
     agentMemory.sessionIds,
     await getAgentArchetype(agentResult?.dispatch.agent?.name),
+    await getAgentRoleContext(agentResult?.dispatch.agent?.name),
     await getPsyContext(),
     await getPhaseContext(),
     await getHealthContext(),
@@ -517,11 +522,14 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   const buildMetrics = getLastBuildMetrics();
   if (buildMetrics) {
     const top5 = [...buildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
-    console.log(
-      `[context:snapshot] creature=${buildMetrics.creature || "general"} mode=${buildMetrics.mode || "default"} ` +
-      `tokens=${buildMetrics.totalTokens} sections=${buildMetrics.sectionCount} budget=${buildMetrics.budget} ` +
-      `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
-    );
+    logger.info("context snapshot", {
+      creature: buildMetrics.creature || "general",
+      mode: buildMetrics.mode || "default",
+      tokens: buildMetrics.totalTokens,
+      sections: buildMetrics.sectionCount,
+      budget: buildMetrics.budget,
+      top5: top5.map(s => `${s.label}:${s.tokens}`),
+    });
   }
 
   const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -574,7 +582,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
             ORDER BY created_at DESC LIMIT 1
           `;
           effectiveSessionIds = { tree_id: tree.id, creature_id: creature?.id, entity_id: entity.id, work_item_id: tree.work_item_id };
-          console.log(`[telegram] Late-resolved sessionIds: tree=${tree.id.slice(0, 8)}`);
+          logger.info("late-resolved sessionIds", { treeId: tree.id.slice(0, 8) });
         }
       }
     } catch (err: unknown) {
@@ -616,7 +624,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
 // Voice messages
 bot.on("message:voice", withQueue(async (ctx) => {
   const voice = ctx.message.voice;
-  console.log(`Voice message: ${voice.duration}s`);
+  logger.info("voice message received", { durationSec: voice.duration });
 
   // Rate limit check — voice is more expensive (ELLIE-228)
   const userId = ctx.from?.id.toString() || "";
@@ -677,7 +685,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
     const voiceConvoKey = voiceConvoId || "telegram-voice-default";
     const { mode: voiceContextMode, changed: voiceModeChanged } = processMessageMode(voiceConvoKey, effectiveTranscription);
     if (voiceModeChanged) {
-      console.log(`[context:mode] mode=${voiceContextMode} channel=voice`);
+      logger.info("context mode changed", { mode: voiceContextMode, channel: "voice" });
     }
 
     const [voiceConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, voiceQueueContext, liveForest] = await Promise.all([
@@ -764,9 +772,13 @@ bot.on("message:voice", withQueue(async (ctx) => {
           }));
         }
 
-        console.log(
-          `[orchestrator] Voice ${execMode}: ${result.stepResults.length} steps in ${result.artifacts.total_duration_ms}ms, $${result.artifacts.total_cost_usd.toFixed(4)}`,
-        );
+        logger.info("orchestrator complete", {
+          channel: "voice",
+          execMode,
+          steps: result.stepResults.length,
+          durationMs: result.artifacts.total_duration_ms,
+          costUsd: result.artifacts.total_cost_usd.toFixed(4),
+        });
       } catch (err) {
         clearInterval(typingInterval);
         if (err instanceof PipelineStepError && err.partialOutput) {
@@ -787,6 +799,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
             agentMemory.memoryContext || undefined,
             agentMemory.sessionIds,
             await getAgentArchetype(agentResult?.dispatch.agent?.name),
+            await getAgentRoleContext(agentResult?.dispatch.agent?.name),
             await getPsyContext(),
             await getPhaseContext(),
             await getHealthContext(),
@@ -829,6 +842,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
       voiceAgentMem || undefined,
       agentMemory.sessionIds,
       await getAgentArchetype(agentResult?.dispatch.agent?.name),
+      await getAgentRoleContext(agentResult?.dispatch.agent?.name),
       await getPsyContext(),
       await getPhaseContext(),
       await getHealthContext(),
@@ -844,11 +858,14 @@ bot.on("message:voice", withQueue(async (ctx) => {
     const voiceBuildMetrics = getLastBuildMetrics();
     if (voiceBuildMetrics) {
       const top5 = [...voiceBuildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
-      console.log(
-        `[context:snapshot] creature=${voiceBuildMetrics.creature || "general"} mode=${voiceBuildMetrics.mode || "default"} ` +
-        `tokens=${voiceBuildMetrics.totalTokens} sections=${voiceBuildMetrics.sectionCount} budget=${voiceBuildMetrics.budget} ` +
-        `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
-      );
+      logger.info("context snapshot", {
+        creature: voiceBuildMetrics.creature || "general",
+        mode: voiceBuildMetrics.mode || "default",
+        tokens: voiceBuildMetrics.totalTokens,
+        sections: voiceBuildMetrics.sectionCount,
+        budget: voiceBuildMetrics.budget,
+        top5: top5.map(s => `${s.label}:${s.tokens}`),
+      });
     }
 
     const agentTools = agentResult?.dispatch.agent.tools_enabled;
@@ -925,7 +942,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
 
 // Photos/Images
 bot.on("message:photo", withQueue(async (ctx) => {
-  console.log("Image received");
+  logger.info("image received");
   await ctx.replyWithChatAction("typing");
 
   try {
@@ -971,7 +988,7 @@ bot.on("message:photo", withQueue(async (ctx) => {
 // Documents
 bot.on("message:document", withQueue(async (ctx) => {
   const doc = ctx.message.document;
-  console.log(`Document: ${doc.file_name}`);
+  logger.info("document received", { fileName: doc.file_name });
   await ctx.replyWithChatAction("typing");
 
   try {

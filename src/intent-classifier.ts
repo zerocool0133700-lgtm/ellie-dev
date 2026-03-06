@@ -102,7 +102,7 @@ export function initClassifier(
 ): void {
   _anthropic = anthropic;
   _supabase = supabase;
-  console.log("[classifier] Initialized");
+  logger.info("Initialized");
 }
 
 /**
@@ -122,7 +122,7 @@ export async function classifyIntent(
   // Tier 1: Slash command fast-path (0ms)
   const slash = parseSlashCommand(message);
   if (slash) {
-    console.log(`[classifier] Slash command → "${slash.agent}"`);
+    logger.info(`Slash command → "${slash.agent}"`);
     return {
       agent_name: slash.agent,
       rule_name: "slash_command",
@@ -137,7 +137,7 @@ export async function classifyIntent(
     const skillMatch = await matchSkillCommand(message);
     if (skillMatch) {
       const agent = skillMatch.command.agent || "general";
-      console.log(`[classifier] Skill command /${skillMatch.command.name} → "${agent}"`);
+      logger.info(`Skill command /${skillMatch.command.name} → "${agent}"`);
       return {
         agent_name: agent,
         rule_name: "skill_command",
@@ -156,7 +156,7 @@ export async function classifyIntent(
   const workflowMatch = matchWorkflow(message);
   if (workflowMatch) {
     const wf = workflowMatch.workflow;
-    console.log(`[classifier] Workflow template "${wf.name}" (${wf.steps.length} steps, ${wf.mode})`);
+    logger.info(`Workflow template "${wf.name}" (${wf.steps.length} steps, ${wf.mode})`);
     return {
       agent_name: wf.steps[0].agent,
       rule_name: `workflow:${wf.name}`,
@@ -178,7 +178,7 @@ export async function classifyIntent(
   }
   const smartRoute = matchSmartPattern(message);
   if (smartRoute) {
-    console.log(`[classifier] Smart pattern → "${smartRoute.agent_name}" (${smartRoute.rule_name})`);
+    logger.info(`Smart pattern → "${smartRoute.agent_name}" (${smartRoute.rule_name})`);
     return smartRoute;
   }
 
@@ -187,7 +187,7 @@ export async function classifyIntent(
     // No LLM available — fall back to session continuity or general
     const continuity = await checkSessionContinuity(userId, channel);
     if (continuity) {
-      console.log(`[classifier] Session continuity (no LLM) → "${continuity.agent_name}"`);
+      logger.info(`Session continuity (no LLM) → "${continuity.agent_name}"`);
       return continuity;
     }
     logger.warn("No Anthropic client — falling back to general");
@@ -207,7 +207,7 @@ export async function classifyIntent(
   // Short messages ("Yes", "Do it", "Ok", "Go ahead") should never break session continuity.
   // They carry too little semantic signal for the LLM to reliably detect a domain switch.
   if (message.trim().length < 12) {
-    console.log(`[classifier] Session continuity held (short message): ${continuity.agent_name}`);
+    logger.info(`Session continuity held (short message): ${continuity.agent_name}`);
     return continuity;
   }
 
@@ -217,21 +217,15 @@ export async function classifyIntent(
     llmResult.confidence >= CROSS_DOMAIN_OVERRIDE_THRESHOLD
   ) {
     // Cross-domain breakout: LLM is highly confident about a different domain
-    console.log(
-      `[classifier] Cross-domain override: ${continuity.agent_name} → ${llmResult.agent_name}` +
-      ` (${llmResult.confidence}): ${llmResult.reasoning}`,
-    );
+    logger.info(`Cross-domain override: ${continuity.agent_name} → ${llmResult.agent_name} (${llmResult.confidence}): ${llmResult.reasoning}`);
     return llmResult;
   }
 
   // Session continuity holds — same agent or low LLM confidence for switch
   if (llmResult.agent_name !== continuity.agent_name) {
-    console.log(
-      `[classifier] Session continuity held: ${continuity.agent_name}` +
-      ` (LLM suggested ${llmResult.agent_name} at ${llmResult.confidence})`,
-    );
+    logger.info(`Session continuity held: ${continuity.agent_name} (LLM suggested ${llmResult.agent_name} at ${llmResult.confidence})`);
   } else {
-    console.log(`[classifier] Session continuity confirmed by LLM → "${continuity.agent_name}"`);
+    logger.info(`Session continuity confirmed by LLM → "${continuity.agent_name}"`);
   }
   return continuity;
 }
@@ -333,7 +327,7 @@ function parseTreeRoutingRules(content: string): SmartPattern[] {
       patterns.push({ pattern: new RegExp(patternStr, "i"), agent, rule: name });
     } catch {
       // Invalid regex — skip
-      logger.warn(`[classifier] Invalid tree routing rule pattern: ${name}`);
+      logger.warn(`Invalid tree routing rule pattern: ${name}`);
     }
   }
   return patterns;
@@ -361,7 +355,7 @@ async function loadTreeRoutingRules(): Promise<SmartPattern[]> {
     const rules = parseTreeRoutingRules(commit.content_summary);
     _treePatternCache = rules;
     _treePatternCacheTime = Date.now();
-    logger.info(`[classifier] Loaded ${rules.length} routing rules from Orchestrator tree`);
+    logger.info(`Loaded ${rules.length} routing rules from Orchestrator tree`);
     return rules;
   } catch {
     return [];
@@ -540,12 +534,12 @@ async function classifyWithHaiku(
 
     // Confidence threshold
     if (confidence < CONFIDENCE_THRESHOLD) {
-      console.log(`[classifier] Low confidence (${confidence}) for "${resolvedAgent}": ${reasoning}`);
+      logger.info(`Low confidence (${confidence}) for "${resolvedAgent}": ${reasoning}`);
       return { agent_name: "general", rule_name: "low_confidence_fallback", confidence, reasoning, execution_mode: "single" };
     }
 
     const modeLabel = executionMode !== "single" ? ` [${executionMode}: ${parsedSkills?.length} steps]` : "";
-    console.log(`[classifier] LLM → "${resolvedAgent}"${skillName ? ` [${skillName}]` : ""}${modeLabel} (${confidence}): ${reasoning}`);
+    logger.info(`LLM → "${resolvedAgent}"${skillName ? ` [${skillName}]` : ""}${modeLabel} (${confidence}): ${reasoning}`);
     return {
       agent_name: resolvedAgent,
       rule_name: "llm_classification",
@@ -661,7 +655,7 @@ async function getAgentDescriptions(): Promise<AgentDescription[]> {
     }));
     _agentCacheTime = now;
     writeToDisk("agents", _agentCache);
-    console.log(`[classifier] Agent cache refreshed from forest: ${_agentCache.length} agents`);
+    logger.info(`Agent cache refreshed from forest: ${_agentCache.length} agents`);
     return _agentCache;
   } catch (err) {
     logger.warn("Forest agent lookup failed, falling back to Supabase", err);
@@ -683,7 +677,7 @@ async function getAgentDescriptions(): Promise<AgentDescription[]> {
       }));
       _agentCacheTime = now;
       writeToDisk("agents", _agentCache);
-      console.log(`[classifier] Agent cache refreshed from Supabase: ${_agentCache.length} agents`);
+      logger.info(`Agent cache refreshed from Supabase: ${_agentCache.length} agents`);
       return _agentCache;
     } catch (err) {
       logger.warn("Supabase agent lookup failed", err);
@@ -695,7 +689,7 @@ async function getAgentDescriptions(): Promise<AgentDescription[]> {
   if (diskAgents && diskAgents.length > 0) {
     _agentCache = diskAgents;
     _agentCacheTime = now;
-    console.log(`[classifier] Agent cache loaded from disk: ${diskAgents.length} agents`);
+    logger.info(`Agent cache loaded from disk: ${diskAgents.length} agents`);
     return diskAgents;
   }
 
@@ -725,7 +719,7 @@ async function getSkillDescriptions(): Promise<SkillDescription[]> {
       }));
       _skillCacheTime = now;
       writeToDisk("skills", _skillCache);
-      console.log(`[classifier] Skill cache refreshed: ${_skillCache.length} skills`);
+      logger.info(`Skill cache refreshed: ${_skillCache.length} skills`);
       return _skillCache;
     } catch (err) {
       logger.warn("Supabase skill lookup failed", err);
@@ -737,7 +731,7 @@ async function getSkillDescriptions(): Promise<SkillDescription[]> {
   if (diskSkills && diskSkills.length > 0) {
     _skillCache = diskSkills;
     _skillCacheTime = now;
-    console.log(`[classifier] Skill cache loaded from disk: ${diskSkills.length} skills`);
+    logger.info(`Skill cache loaded from disk: ${diskSkills.length} skills`);
     return diskSkills;
   }
 

@@ -30,12 +30,12 @@ let timeoutRecoveryUntil = 0;
 
 export function setTimeoutRecoveryLock(durationMs: number = 60_000) {
   timeoutRecoveryUntil = Date.now() + durationMs;
-  console.log(`[plane] State lock set for ${durationMs / 1000}s — suppressing state changes during timeout recovery`);
+  logger.info(`State lock set for ${durationMs / 1000}s — suppressing state changes during timeout recovery`);
 }
 
 export function clearTimeoutRecoveryLock() {
   timeoutRecoveryUntil = 0;
-  console.log(`[plane] State lock cleared`);
+  logger.info("State lock cleared");
 }
 
 export function isInTimeoutRecovery(): boolean {
@@ -228,7 +228,7 @@ async function atomicStateAndComment(opts: {
     const stateResult = await updateIssueState(projectId, issueId, targetStateId);
     if (stateResult === null) throw new Error("State update returned null (circuit breaker open)");
     result.stateApplied = true;
-    console.log(`[plane] ${workItemId} → ${targetStateGroup} (${label})`);
+    logger.info(`${workItemId} → ${targetStateGroup} (${label})`);
   } catch (stateErr) {
     const msg = stateErr instanceof Error ? stateErr.message : String(stateErr);
     logger.warn("State change failed — queueing both operations", {
@@ -259,7 +259,7 @@ async function atomicStateAndComment(opts: {
     const commentResult = await addIssueComment(projectId, issueId, commentHtml);
     if (commentResult === null) throw new Error("Comment returned null (circuit breaker open)");
     result.commentApplied = true;
-    console.log(`[plane] Added ${label} comment to ${workItemId}`);
+    logger.info(`Added ${label} comment to ${workItemId}`);
   } catch (commentErr) {
     const msg = commentErr instanceof Error ? commentErr.message : String(commentErr);
 
@@ -308,12 +308,12 @@ async function atomicStateAndComment(opts: {
  */
 export async function updateWorkItemOnSessionStart(workItemId: string, sessionId: string) {
   if (!isPlaneConfigured()) {
-    console.log("[plane] Skipping — PLANE_API_KEY not configured");
+    logger.info("Skipping — PLANE_API_KEY not configured");
     return;
   }
 
   if (isInTimeoutRecovery()) {
-    console.log(`[plane] Skipping state update for ${workItemId} — timeout recovery window active`);
+    logger.info(`Skipping state update for ${workItemId} — timeout recovery window active`);
     return;
   }
 
@@ -350,12 +350,12 @@ export async function updateWorkItemOnSessionComplete(
   status: "completed" | "blocked" | "paused" = "completed",
 ) {
   if (!isPlaneConfigured()) {
-    console.log("[plane] Skipping — PLANE_API_KEY not configured");
+    logger.info("Skipping — PLANE_API_KEY not configured");
     return;
   }
 
   if (isInTimeoutRecovery()) {
-    console.log(`[plane] Skipping state update for ${workItemId} — timeout recovery window active`);
+    logger.info(`Skipping state update for ${workItemId} — timeout recovery window active`);
     return;
   }
 
@@ -623,7 +623,7 @@ export async function createPlaneIssue(
     });
 
     const identifier = `${projectIdentifier}-${issue.sequence_id}`;
-    console.log(`[plane] Created issue: ${identifier} — ${name}`);
+    logger.info(`Created issue: ${identifier} — ${name}`);
     return { id: issue.id, sequenceId: issue.sequence_id, identifier };
   } catch (error) {
     logger.warn("Failed to create issue", { projectIdentifier }, error);

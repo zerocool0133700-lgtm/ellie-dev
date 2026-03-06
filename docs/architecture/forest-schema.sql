@@ -110,7 +110,8 @@ CREATE TYPE creature_state AS ENUM (
   'working',
   'completed',
   'failed',
-  'cancelled'
+  'cancelled',
+  'preempted'
 );
 
 -- Conflict resolution strategies

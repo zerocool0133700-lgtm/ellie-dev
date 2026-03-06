@@ -59,7 +59,7 @@ export async function getModelCosts(
     if (diskCosts && Object.keys(diskCosts).length > 0) {
       _modelCostCache = new Map(Object.entries(diskCosts));
       _modelCostCacheTime = Date.now();
-      console.log(`[orchestrator] Model costs loaded from disk cache: ${_modelCostCache.size} models`);
+      logger.info(`Model costs loaded from disk cache: ${_modelCostCache.size} models`);
       return _modelCostCache;
     }
     return FALLBACK_MODEL_COSTS;
@@ -74,7 +74,7 @@ export async function preloadModelCosts(
   supabase: SupabaseClient | null,
 ): Promise<void> {
   const costs = await getModelCosts(supabase);
-  console.log(`[orchestrator] Model costs preloaded: ${costs.size} models`);
+  logger.info(`Model costs preloaded: ${costs.size} models`);
 }
 
 /**

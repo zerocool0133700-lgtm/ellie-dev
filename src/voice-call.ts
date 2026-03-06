@@ -82,7 +82,7 @@ async function callClaude(prompt: string): Promise<string> {
     args.push("--allowedTools", ...ALLOWED_TOOLS);
   }
 
-  console.log(`[voice] Claude: ${prompt.substring(0, 80)}...`);
+  logger.info("Claude prompt", { prompt: prompt.substring(0, 80) });
 
   const proc = spawn(args, {
     stdin: new Blob([prompt]),
@@ -187,16 +187,16 @@ async function processAudio(session: CallSession): Promise<void> {
 
   try {
     // 1. Transcribe
-    console.log(`[voice] Transcribing ${chunks.length} chunks...`);
+    logger.info("Transcribing chunks", { count: chunks.length });
     const text = await transcribeMulaw(chunks);
 
     if (!text || text.length < 2) {
-      console.log("[voice] Empty transcription, skipping");
+      logger.info("Empty transcription, skipping");
       session.processing = false;
       return;
     }
 
-    console.log(`[voice] User said: "${text}"`);
+    logger.info("User said", { text });
     session.conversationHistory.push({ role: "user", content: text });
 
     // 2. Get Claude response
@@ -241,7 +241,7 @@ async function processAudio(session: CallSession): Promise<void> {
       .replace(/\[DONE:.*?\]/g, "")
       .trim();
 
-    console.log(`[voice] Ellie says: "${cleanResponse}"`);
+    logger.info("Ellie says", { response: cleanResponse });
     session.conversationHistory.push({ role: "assistant", content: cleanResponse });
 
     // 3. TTS → mulaw
@@ -305,11 +305,11 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
       const params = new URLSearchParams(body);
       const from = params.get("From") || "";
 
-      console.log(`[voice] Incoming call from: ${from}`);
+      logger.info("Incoming call", { from });
 
       // Check whitelist
       if (ALLOWED_CALLERS.length > 0 && !ALLOWED_CALLERS.includes(from)) {
-        console.log(`[voice] Rejected unauthorized caller: ${from}`);
+        logger.warn("Rejected unauthorized caller", { from });
         const rejectTwiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>Sorry, this number is not authorized.</Say>
@@ -322,7 +322,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
 
       // Look up caller name
       const callerName = KNOWN_CALLERS[from] || "Unknown Caller";
-      console.log(`[voice] Authorized caller: ${callerName} (${from})`);
+      logger.info("Authorized caller", { callerName, from });
 
       // Build WebSocket URL with caller info
       const wsUrl = PUBLIC_URL
@@ -339,7 +339,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
 
       res.writeHead(200, { "Content-Type": "application/xml" });
       res.end(twiml);
-      console.log(`[voice] TwiML served for ${callerName}, connecting media stream...`);
+      logger.info("TwiML served, connecting media stream", { callerName });
     });
     return;
   }
@@ -358,14 +358,14 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
 const wss = new WebSocketServer({ server: httpServer, path: "/media-stream" });
 
 wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
-  console.log("[voice] Media stream connected");
+  logger.info("Media stream connected");
 
   // Extract caller info from query string
   const url = new URL(req.url || "/media-stream", `http://${req.headers.host}`);
   const callerNumber = url.searchParams.get("from") || "";
   const callerName = KNOWN_CALLERS[callerNumber] || "Unknown Caller";
 
-  console.log(`[voice] Session started for ${callerName} (${callerNumber})`);
+  logger.info("Session started", { callerName, from: callerNumber });
   const session = createSession(ws, callerName, callerNumber);
 
   ws.on("message", async (data: Buffer | string) => {
@@ -374,13 +374,13 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
 
       switch (msg.event) {
         case "connected":
-          console.log("[voice] Stream connected:", msg.protocol);
+          logger.info("Stream connected", { protocol: msg.protocol });
           break;
 
         case "start":
           session.streamSid = msg.streamSid;
           session.callSid = msg.callSid;
-          console.log(`[voice] Call started — streamSid: ${msg.streamSid}, callSid: ${msg.callSid}`);
+          logger.info("Call started", { streamSid: msg.streamSid, callSid: msg.callSid });
           break;
 
         case "media": {
@@ -410,16 +410,16 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
         }
 
         case "mark":
-          console.log(`[voice] Playback mark: ${msg.mark?.name}`);
+          logger.info("Playback mark", { name: msg.mark?.name });
           break;
 
         case "stop":
-          console.log("[voice] Stream stopped");
+          logger.info("Stream stopped");
           if (session.silenceTimer) clearTimeout(session.silenceTimer);
           break;
 
         default:
-          console.log(`[voice] Unknown event: ${msg.event}`);
+          logger.warn("Unknown event", { event: msg.event });
       }
     } catch (error) {
       logger.error("Message parse error", error);
@@ -427,7 +427,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
   });
 
   ws.on("close", () => {
-    console.log("[voice] WebSocket closed");
+    logger.info("WebSocket closed");
     if (session.silenceTimer) clearTimeout(session.silenceTimer);
   });
 
@@ -454,7 +454,7 @@ export async function initiateCall(toNumber?: string): Promise<string> {
       url: `${PUBLIC_URL}/voice`,
     });
 
-    console.log(`[voice] Outbound call initiated: ${call.sid}`);
+    logger.info("Outbound call initiated", { callSid: call.sid });
     return `Calling ${to}... (SID: ${call.sid})`;
   } catch (error: unknown) {
     logger.error("Call error", error);
@@ -468,13 +468,15 @@ export async function initiateCall(toNumber?: string): Promise<string> {
 
 export function startVoiceServer(): void {
   httpServer.listen(VOICE_CALL_PORT, () => {
-    console.log(`[voice] Server listening on port ${VOICE_CALL_PORT}`);
-    console.log(`[voice] WebSocket: ws://localhost:${VOICE_CALL_PORT}/media-stream`);
-    console.log(`[voice] TwiML webhook: http://localhost:${VOICE_CALL_PORT}/voice`);
+    logger.info("Server listening", {
+      port: VOICE_CALL_PORT,
+      ws: `ws://localhost:${VOICE_CALL_PORT}/media-stream`,
+      webhook: `http://localhost:${VOICE_CALL_PORT}/voice`,
+    });
     if (PUBLIC_URL) {
-      console.log(`[voice] Public URL: ${PUBLIC_URL}`);
+      logger.info("Public URL configured", { url: PUBLIC_URL });
     } else {
-      console.log(`[voice] ⚠ PUBLIC_URL not set — run ngrok or cloudflare tunnel`);
+      logger.warn("PUBLIC_URL not set — run ngrok or cloudflare tunnel");
     }
   });
 }

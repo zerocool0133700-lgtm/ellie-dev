@@ -29,6 +29,7 @@ import {
   USER_NAME,
   getArchetypeContext,
   getAgentArchetype,
+  getAgentRoleContext,
   getPsyContext,
   getPhaseContext,
   getHealthContext,
@@ -106,6 +107,9 @@ import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost } 
 import { checkContextPressure, shouldNotify, getCompactionNotice, checkpointSessionToForest } from "./api/session-compaction.ts";
 import { resilientTask } from "./resilient-task.ts";
 import { primeWorkingMemoryCache } from "./working-memory.ts";
+import { trackDispatchStart, trackDispatchComplete, trackDispatchFailure } from "./dispatch-commitment-tracker.ts";
+import { setPendingCommitmentsContext } from "./pending-commitments-prompt.ts";
+import { detectAndLogCommitments } from "./conversational-commitment-detector.ts";
 import {
   isFallbackActive,
   isOutageError,
@@ -166,7 +170,7 @@ async function _handleEllieChatMessage(
   abortSignal?: AbortSignal,
 ): Promise<void> {
   const { bot, anthropic, supabase } = getRelayDeps();
-  console.log(`[ellie-chat] User${phoneMode ? " (phone)" : ""}${image ? " [+image]" : ""}${mode ? ` [mode:${mode}]` : ""}${channelId ? ` [ch:${channelId.substring(0, 8)}]` : ""}: ${text.substring(0, 80)}...`);
+  logger.info("User message received", { phoneMode, hasImage: !!image, mode, channelId: channelId?.substring(0, 8) });
   acknowledgeChannel("ellie-chat");
 
   const ecUser = wsAppUserMap.get(ws);
@@ -181,7 +185,7 @@ async function _handleEllieChatMessage(
     try {
       const { resolveArchetypeProfile } = await import("./api/mode-profile.ts");
       channelProfile = await resolveArchetypeProfile(mode);
-      console.log(`[ellie-chat] Mode profile: mode=${mode} contextMode=${channelProfile.contextMode} budget=${channelProfile.tokenBudget}`);
+      logger.info(`Mode profile: mode=${mode} contextMode=${channelProfile.contextMode} budget=${channelProfile.tokenBudget}`);
     } catch (err) {
       logger.warn("Mode profile resolution failed, falling back to mode detection", err);
     }
@@ -233,7 +237,7 @@ async function _handleEllieChatMessage(
         : ".jpg";
       imagePath = join(UPLOADS_DIR, `ellie-chat_${Date.now()}${ext}`);
       await writeFile(imagePath, Buffer.from(image.data, "base64"));
-      console.log(`[ellie-chat] Image saved: ${imagePath} (${image.name})`);
+      logger.info(`Image saved: ${imagePath}`);
     } catch (err) {
       logger.error("Failed to save image", err);
       imagePath = null;
@@ -252,7 +256,7 @@ async function _handleEllieChatMessage(
     const msg = getPlanningMode()
       ? "Planning mode ON — conversation will persist for up to 60 minutes of idle time."
       : "Planning mode OFF — reverting to 10-minute idle timeout.";
-    console.log(`[planning] ${msg}`);
+    logger.info(msg);
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "response", text: msg, agent: "system", ts: Date.now() }));
     }
@@ -283,7 +287,7 @@ async function _handleEllieChatMessage(
         const context = contextMessages.join("\n---\n");
         const prompt = `Generate a Plane project ticket from this context. Return ONLY valid JSON with no markdown formatting:\n{"title": "concise title under 80 chars", "description": "detailed description with requirements as bullet points", "priority": "medium"}\n\nPriority must be one of: urgent, high, medium, low, none.\n\nContext:\n${context}`;
 
-        console.log(`[ticket] /ticket command — generating from ${ticketText ? "user text" : "last 5 messages"}...`);
+        logger.info(`/ticket command — generating from ${ticketText ? "user text" : "last 5 messages"}...`);
         const raw = await callClaude(prompt);
         const jsonMatch = raw.match(/\{[\s\S]*\}/);
         if (!jsonMatch) throw new Error("Could not parse ticket JSON");
@@ -293,7 +297,7 @@ async function _handleEllieChatMessage(
         if (!result) throw new Error("Plane API failed");
 
         const msg = `Created ${result.identifier}: ${ticket.title}`;
-        console.log(`[ticket] ${msg}`);
+        logger.info(msg);
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "response", text: msg, agent: "system", ts: Date.now() }));
         }
@@ -312,20 +316,20 @@ async function _handleEllieChatMessage(
   try {
     const instant = await matchInstantCommand(text);
     if (instant) {
-      console.log(`[ellie-chat] Instant command: /${instant.skillName} ${instant.subcommand}`);
+      logger.info(`Instant command: /${instant.skillName} ${instant.subcommand}`);
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "response", text: instant.response, agent: "system", ts: Date.now(), channelId }));
       }
       return;
     }
   } catch (err) {
-    console.warn("[ellie-chat] Instant command match failed", err);
+    logger.warn("Instant command match failed", err);
   }
 
   // ELLIE:: user-typed commands — bypass classifier, execute directly
   const { cleanedText: ellieChatPlaybookClean, commands: ellieChatPlaybookCmds } = extractPlaybookCommands(text);
   if (ellieChatPlaybookCmds.length > 0) {
-    console.log(`[ellie-chat] ELLIE:: commands in user message: ${ellieChatPlaybookCmds.map(c => c.type).join(", ")}`);
+    logger.info(`ELLIE:: commands in user message: ${ellieChatPlaybookCmds.map(c => c.type).join(", ")}`);
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "response", text: `Processing ${ellieChatPlaybookCmds.length} playbook command(s)...`, agent: "system", ts: Date.now() }));
     }
@@ -405,7 +409,7 @@ async function _handleEllieChatMessage(
           const verifyHist = ellieChatPhoneHistories.get(verifyHistKey)!;
           verifyHist.push({ role: "user", content: text });
           verifyHist.push({ role: "assistant", content: `Perfect, ${appUser.name || 'friend'}! Your account is verified. I'll remember our conversations from now on.` });
-          console.log(`[ellie-chat] Code verified for ${appUser.email} — session upgraded`);
+          logger.info("Code verified — session upgraded");
         } else {
           // Wrong code — increment attempts, fall through to Claude
           if (appUser.email) {
@@ -518,7 +522,7 @@ async function _handleEllieChatMessage(
         responseText = phonePbClean;
         const pbCtx: PlaybookContext = { bot, supabase, telegramUserId: ALLOWED_USER_ID, gchatSpaceName: GCHAT_SPACE_NOTIFY, channel: "ellie-chat", callClaudeFn: callClaude, buildPromptFn: buildPrompt };
         executePlaybookCommands(phonePbCmds, pbCtx).catch(err => logger.error("Phone playbook execution failed", err));
-        console.log(`[ellie-chat] Phone mode playbook: ${phonePbCmds.map(c => c.type).join(", ")}`);
+        logger.info(`Phone mode playbook: ${phonePbCmds.map(c => c.type).join(", ")}`);
       }
 
       // Process ELLIE:: onboarding commands (ELLIE-176)
@@ -550,7 +554,7 @@ async function _handleEllieChatMessage(
                 }
                 wsUser.onboarding_state = 'named';
                 wsAppUserMap.set(ws, wsUser);
-                console.log(`[ellie-chat] SET_NAME: ${name}`);
+                logger.info("SET_NAME completed");
               }
             }
 
@@ -570,7 +574,7 @@ async function _handleEllieChatMessage(
                 await sendVerificationCode(email, code);
                 wsUser.onboarding_state = 'email_sent';
                 wsAppUserMap.set(ws, wsUser);
-                console.log(`[ellie-chat] REQUEST_EMAIL: code sent to ${email}`);
+                logger.info("REQUEST_EMAIL: verification code sent");
               }
             }
 
@@ -578,7 +582,7 @@ async function _handleEllieChatMessage(
               const tz = cmd.replace('ELLIE::SET_TIMEZONE ', '').trim();
               if (tz && wsUser.id) {
                 await forestSql`UPDATE app_users SET timezone = ${tz} WHERE id = ${wsUser.id}`;
-                console.log(`[ellie-chat] SET_TIMEZONE: ${tz}`);
+                logger.info(`SET_TIMEZONE: ${tz}`);
               }
             }
 
@@ -587,7 +591,7 @@ async function _handleEllieChatMessage(
                 await forestSql`UPDATE app_users SET onboarding_state = 'onboarded' WHERE id = ${wsUser.id}`;
                 wsUser.onboarding_state = 'onboarded';
                 wsAppUserMap.set(ws, wsUser);
-                console.log(`[ellie-chat] ONBOARDING_COMPLETE for ${wsUser.name}`);
+                logger.info("ONBOARDING_COMPLETE");
               }
             }
           } catch (err) {
@@ -636,7 +640,7 @@ async function _handleEllieChatMessage(
     if (isContextRefresh(text)) {
       freshnessTracker.clear();
       clearContextCache();
-      console.log(`[context] refresh triggered — reloading all sources`);
+      logger.info("Context refresh triggered — reloading all sources");
     }
 
     const ellieChatWorkItem = extractWorkItemId(text);
@@ -645,7 +649,7 @@ async function _handleEllieChatMessage(
     const preRouteDetection = detectMode(text);
     const skillOnlyOverride = preRouteDetection?.mode === "skill-only" ? "road-runner" : undefined;
     if (skillOnlyOverride) {
-      console.log(`[routing] skill-only mode detected — routing to road-runner`);
+      logger.info("Skill-only mode detected — routing to road-runner");
     }
 
     const agentResult = await routeAndDispatch(supabase, text, "ellie-chat", "dashboard", ellieChatWorkItem, skillOnlyOverride);
@@ -707,9 +711,9 @@ async function _handleEllieChatMessage(
     const ecConvoKey = ecConvoId || "ellie-chat-default";
     const { contextMode, modeChanged } = resolveContextMode(ecConvoKey, effectiveText, channelProfile);
     if (channelProfile) {
-      console.log(`[context:mode] mode=${contextMode} channel=ellie-chat source=channel-profile`);
+      logger.info(`Context mode resolved: mode=${contextMode} source=channel-profile`);
     } else if (modeChanged) {
-      console.log(`[context:mode] mode=${contextMode} channel=ellie-chat source=detection`);
+      logger.info(`Context mode resolved: mode=${contextMode} source=detection`);
     }
 
     // Mode-aware fetch gating — skip sources that would be suppressed (priority >= 7)
@@ -839,6 +843,8 @@ async function _handleEllieChatMessage(
 
         const orcAgent = result.finalDispatch?.agent?.name || agentResult.dispatch.agent.name || "general";
         const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, orcAgent, "shared", agentMemory.sessionIds);
+        // ELLIE-592: Detect conversational commitments in orchestrated response
+        detectAndLogCommitments(pipelineResponse, session.sessionId, 0);
         const { cleanedText: ellieChatOrcPlaybookClean, commands: ellieChatOrcPlaybookCmds } = extractPlaybookCommands(pipelineResponse);
         // ELLIE-389: Save first to get memoryId, then send with it
         const { cleanedText: orcPreClean } = extractApprovalTags(ellieChatOrcPlaybookClean);
@@ -927,6 +933,9 @@ async function _handleEllieChatMessage(
     const _ecAgentName = agentResult?.dispatch.agent?.name || "general";
     try { await primeWorkingMemoryCache(session.sessionId, _ecAgentName); } catch { /* non-critical */ }
 
+    // ELLIE-590: Set pending commitments context for prompt injection
+    setPendingCommitmentsContext(session.sessionId, 0);
+
     const enrichedPrompt = buildPrompt(
       effectiveText, ecDocket, relevantContext, elasticContext, "ellie-chat",
       agentResult?.dispatch.agent ? {
@@ -940,6 +949,7 @@ async function _handleEllieChatMessage(
       ecAgentMem || undefined,
       agentMemory.sessionIds,
       shouldFetch("archetype") ? await getAgentArchetype(agentResult?.dispatch.agent?.name) : undefined,
+      shouldFetch("archetype") ? await getAgentRoleContext(agentResult?.dispatch.agent?.name) : undefined,
       shouldFetch("psy") ? await getPsyContext() : undefined,
       shouldFetch("phase") ? await getPhaseContext() : undefined,
       await getHealthContext(),
@@ -959,8 +969,8 @@ async function _handleEllieChatMessage(
     const ecBuildMetrics = getLastBuildMetrics();
     if (ecBuildMetrics) {
       const top5 = [...ecBuildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
-      console.log(
-        `[context:snapshot] creature=${ecBuildMetrics.creature || "general"} mode=${ecBuildMetrics.mode || "default"} ` +
+      logger.info(
+        `Context snapshot: creature=${ecBuildMetrics.creature || "general"} mode=${ecBuildMetrics.mode || "default"} ` +
         `tokens=${ecBuildMetrics.totalTokens} sections=${ecBuildMetrics.sectionCount} budget=${ecBuildMetrics.budget} ` +
         `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
       );
@@ -1057,14 +1067,14 @@ async function _handleEllieChatMessage(
               entity_id: entity.id,
               work_item_id: tree.work_item_id,
             };
-            console.log(`[ellie-chat] Late-resolved sessionIds: tree=${tree.id.slice(0, 8)}, creature=${creature?.id?.slice(0, 8) || 'none'}`);
+            logger.info(`Late-resolved sessionIds: tree=${tree.id.slice(0, 8)}, creature=${creature?.id?.slice(0, 8) || 'none'}`);
           }
         }
       } catch (err: unknown) {
         logger.warn("Late-resolve sessionIds failed", { detail: err instanceof Error ? err.message : String(err) });
       }
     } else if (!effectiveSessionIds) {
-      console.log(`[ellie-chat] No sessionIds and no agent to late-resolve (agent=${agentResult?.dispatch.agent.name})`);
+      logger.info(`No sessionIds and no agent to late-resolve (agent=${agentResult?.dispatch.agent.name})`);
     }
 
     // ELLIE-528: Context pressure monitoring — general agent path
@@ -1085,6 +1095,8 @@ async function _handleEllieChatMessage(
     }
 
     const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general", "shared", effectiveSessionIds);
+    // ELLIE-592: Detect conversational commitments in agent response
+    detectAndLogCommitments(response, session.sessionId, 0);
     const { cleanedText: ecPlaybookClean, commands: ecPlaybookCmds } = extractPlaybookCommands(response);
     const ecAgent = agentResult?.dispatch.agent.name || "general";
     // ELLIE-389: Save first to get memoryId, then send with it
@@ -1157,7 +1169,7 @@ export async function runSpecialistAsync(
   const specUser = wsAppUserMap.get(ws);
   const ecUserId = specUser?.id || specUser?.anonymous_id || undefined;
   const startTime = Date.now();
-  console.log(`[ellie-chat] Specialist ${agentName} starting async`);
+  logger.info(`Specialist ${agentName} starting async`);
   markProcessing(ecUserId || "anonymous", effectiveText);
 
   // ELLIE-440/446: Create job record (hoisted so catch block can update it)
@@ -1180,6 +1192,12 @@ export async function runSpecialistAsync(
     await updateJob(jobId, { status: "running", current_step: "gathering_context", last_heartbeat: new Date() });
     appendJobEvent(jobId, "running", { agent_type: agentName });
   }
+
+  // ELLIE-589: Auto-log dispatch as pending commitment
+  const dispatchTracking = trackDispatchStart(
+    session.sessionId, agentName, workItemId,
+    effectiveText.slice(0, 200), 0,
+  );
 
   // Auto-approve Bash/Edit/Write for specialist runs (same as orchestration-dispatch)
   enterDispatchMode();
@@ -1246,6 +1264,9 @@ export async function runSpecialistAsync(
     // ELLIE-541: Populate working memory cache so buildPrompt can inject session context
     try { await primeWorkingMemoryCache(session.sessionId, agentResult.dispatch.agent.name); } catch { /* non-critical */ }
 
+    // ELLIE-590: Set pending commitments context for prompt injection
+    setPendingCommitmentsContext(session.sessionId, 0);
+
     const enrichedPrompt = buildPrompt(
       effectiveText, contextDocket, relevantContext, elasticContext, "ellie-chat",
       {
@@ -1259,6 +1280,7 @@ export async function runSpecialistAsync(
       agentMemory.memoryContext || undefined,
       agentMemory.sessionIds,
       shouldFetch("archetype") ? await getAgentArchetype(agentResult.dispatch.agent.name) : undefined,
+      shouldFetch("archetype") ? await getAgentRoleContext(agentResult.dispatch.agent.name) : undefined,
       shouldFetch("psy") ? await getPsyContext() : undefined,
       shouldFetch("phase") ? await getPhaseContext() : undefined,
       await getHealthContext(),
@@ -1277,8 +1299,8 @@ export async function runSpecialistAsync(
     const specBuildMetrics = getLastBuildMetrics();
     if (specBuildMetrics) {
       const top5 = [...specBuildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
-      console.log(
-        `[context:snapshot] creature=${specBuildMetrics.creature || "general"} mode=${specBuildMetrics.mode || "default"} ` +
+      logger.info(
+        `Context snapshot: creature=${specBuildMetrics.creature || "general"} mode=${specBuildMetrics.mode || "default"} ` +
         `tokens=${specBuildMetrics.totalTokens} sections=${specBuildMetrics.sectionCount} budget=${specBuildMetrics.budget} ` +
         `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
       );
@@ -1307,6 +1329,8 @@ export async function runSpecialistAsync(
       recordAnthropicSuccess();
     } catch (err) {
       clearInterval(heartbeat);
+      // ELLIE-589: Mark dispatch commitment as failed
+      trackDispatchFailure(session.sessionId, dispatchTracking.commitmentId);
       if (isOutageError(err)) recordAnthropicFailure(err);
       if (isFallbackActive()) {
         // Specialists need tools — just let the user know to retry when Claude returns
@@ -1328,11 +1352,13 @@ export async function runSpecialistAsync(
     // ELLIE-482: idempotency check — queue timed out, don't send late specialist response
     if (queueSignal?.aborted) {
       logger.warn("Queue timed out mid-specialist — discarding late response to prevent duplicate", { agentName });
+      // ELLIE-589: Mark dispatch commitment as timed_out on queue abort
+      trackDispatchFailure(session.sessionId, dispatchTracking.commitmentId);
       return;
     }
 
     const durationMs = Date.now() - startTime;
-    console.log(`[ellie-chat] Specialist ${agentName} completed in ${durationMs}ms`);
+    logger.info(`Specialist ${agentName} completed in ${durationMs}ms`);
     if (jobId) {
       // ELLIE-445: Verify dev agents actually produced file changes before marking completed
       const { verified, note } = await verifyJobWork(agentName, startTime);
@@ -1352,9 +1378,12 @@ export async function runSpecialistAsync(
       // Bug 3: duration_ms belongs in opts (4th param), not details
       appendJobEvent(jobId, finalStatus, { verified, verification_note: note }, { duration_ms: durationMs });
       if (!verified) {
-        console.log(`[jobs] Job ${jobId.slice(0, 8)} marked 'responded' — ${note}`);
+        logger.info(`Job ${jobId.slice(0, 8)} marked 'responded' — ${note}`);
       }
     }
+
+    // ELLIE-589: Resolve dispatch commitment on success
+    trackDispatchComplete(session.sessionId, dispatchTracking.commitmentId, 1);
 
     // ELLIE-450: Append compaction notice and async-checkpoint if threshold crossed
     if (contextPressure && specConvoId && shouldNotify(specConvoId, contextPressure.level)) {
@@ -1373,6 +1402,8 @@ export async function runSpecialistAsync(
     }
 
     const response = await processMemoryIntents(supabase, rawResponse, agentName, "shared", agentMemory.sessionIds);
+    // ELLIE-592: Detect conversational commitments in specialist response
+    detectAndLogCommitments(response, session.sessionId, 0);
     const { cleanedText: playClean, commands: playCmds } = extractPlaybookCommands(response);
     // ELLIE-389: Save first to get memoryId, then send with it
     const { cleanedText: specPreClean } = extractApprovalTags(playClean);

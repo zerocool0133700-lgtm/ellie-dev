@@ -37,6 +37,7 @@ import {
   buildPrompt,
   getArchetypeContext,
   getAgentArchetype,
+  getAgentRoleContext,
   getPsyContext,
   getPhaseContext,
   getHealthContext,
@@ -64,6 +65,7 @@ import { getFireForgetMetrics } from "./resilient-task.ts";
 import { checkContextPressure, shouldNotify, getCompactionNotice, checkpointSessionToForest } from "./api/session-compaction.ts";
 import { primeWorkingMemoryCache } from "./working-memory.ts";
 import { getReconcileStatus } from "./elasticsearch/reconcile.ts";
+import { handleTicketStatus } from "./api/ticket-status-handler.ts";
 import {
   saveMessage,
   sendWithApprovals,
@@ -245,7 +247,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
           res.end(rejectTwiml);
           return;
         }
-        console.log(`[voice] Accepted call from ${params.get("From")}`);
+        logger.info("Accepted call", { from: params.get("From") });
       }
 
     const wsUrl = PUBLIC_URL
@@ -262,7 +264,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
 
     res.writeHead(200, { "Content-Type": "application/xml" });
     res.end(twiml);
-    console.log("[voice] TwiML served, connecting media stream...");
+    logger.info("TwiML served, connecting media stream...");
     }); // end req.on("end")
     return;
   }
@@ -308,7 +310,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
             if (pending) {
               const approved = actionFn === "approve_action";
               removePendingAction(actionId);
-              console.log(`[gchat] Action ${approved ? "approved" : "denied"}: ${pending.description.substring(0, 60)}`);
+              logger.info(`Action ${approved ? "approved" : "denied"}: ${pending.description.substring(0, 60)}`);
 
               // Immediately acknowledge the button click with card update
               const ackText = `${approved ? "\u2705 Approved" : "\u274C Denied"}: ${pending.description}`;
@@ -345,7 +347,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
                     logger.error("Failed to send approval follow-up", err);
                   });
                 }
-                console.log(`[gchat] Approval follow-up sent: ${cleanFollowUp.substring(0, 80)}...`);
+                logger.info(`Approval follow-up sent: ${cleanFollowUp.substring(0, 80)}...`);
               }).catch((err) => {
                 logger.error("Approval Claude call failed", err);
                 // Try to notify the user about the error
@@ -383,13 +385,13 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
         }
 
         if (!isAllowedSender(parsed.senderEmail)) {
-          console.log(`[gchat] Unauthorized sender: ${parsed.senderEmail}`);
+          logger.info("Unauthorized sender", { email: parsed.senderEmail });
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end("{}");
           return;
         }
 
-        console.log(`[gchat] ${parsed.senderName}: ${parsed.text.substring(0, 80)}...`);
+        logger.info("Incoming message", { sender: parsed.senderName, preview: parsed.text.substring(0, 80) });
 
         // Rate limit check (ELLIE-228)
         const gchatRateLimited = checkMessageRate(parsed.senderEmail, "google-chat");
@@ -496,7 +498,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
         try {
           const instant = await matchInstantCommand(parsed.text);
           if (instant) {
-            console.log(`[gchat] Instant command: /${instant.skillName} ${instant.subcommand}`);
+            logger.info(`Instant command: /${instant.skillName} ${instant.subcommand}`);
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({
               hostAppDataAction: { chatDataAction: { createMessageAction: { message: { text: instant.response } } } },
@@ -504,7 +506,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
             return;
           }
         } catch (err) {
-          console.warn("[gchat] Instant command match failed", err);
+          logger.warn("Instant command match failed", err);
         }
 
         // Immediately acknowledge — all routing + Claude work happens async.
@@ -522,7 +524,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
             if (isContextRefresh(parsed.text)) {
               freshnessTracker.clear();
               clearContextCache();
-              console.log(`[context] refresh triggered — reloading all sources`);
+              logger.info("refresh triggered — reloading all sources");
             }
 
             const gchatWorkItem = parsed.text.match(/\b([A-Z]+-\d+)\b/)?.[1];
@@ -554,7 +556,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
             const gchatConvoKey = gchatConvoId || "gchat-default";
             const { mode: gchatContextMode, changed: gchatModeChanged } = processMessageMode(gchatConvoKey, effectiveGchatText);
             if (gchatModeChanged) {
-              console.log(`[context:mode] mode=${gchatContextMode} channel=gchat`);
+              logger.info(`Context mode changed`, { mode: gchatContextMode, channel: "gchat" });
             }
 
             const [gchatConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, gchatQueueContext, liveForest] = await Promise.all([
@@ -665,7 +667,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
                 }));
               }
 
-              console.log(`[gchat] ${gchatExecMode}: ${result.stepResults.length} steps in ${result.artifacts.total_duration_ms}ms, $${result.artifacts.total_cost_usd.toFixed(4)}`);
+              logger.info(`${gchatExecMode}: ${result.stepResults.length} steps in ${result.artifacts.total_duration_ms}ms, $${result.artifacts.total_cost_usd.toFixed(4)}`);
 
               await deliverMessage(supabase, gchatClean, {
                 channel: "google-chat",
@@ -713,6 +715,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
               gchatAgentMem || undefined,
               agentMemory.sessionIds,
               await getAgentArchetype(gchatAgentResult?.dispatch.agent?.name),
+              await getAgentRoleContext(gchatAgentResult?.dispatch.agent?.name),
               await getPsyContext(),
               await getPhaseContext(),
               await getHealthContext(),
@@ -731,11 +734,14 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
             const gchatBuildMetrics = getLastBuildMetrics();
             if (gchatBuildMetrics) {
               const top5 = [...gchatBuildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
-              console.log(
-                `[context:snapshot] creature=${gchatBuildMetrics.creature || "general"} mode=${gchatBuildMetrics.mode || "default"} ` +
-                `tokens=${gchatBuildMetrics.totalTokens} sections=${gchatBuildMetrics.sectionCount} budget=${gchatBuildMetrics.budget} ` +
-                `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
-              );
+              logger.info("Context snapshot", {
+                creature: gchatBuildMetrics.creature || "general",
+                mode: gchatBuildMetrics.mode || "default",
+                tokens: gchatBuildMetrics.totalTokens,
+                sections: gchatBuildMetrics.sectionCount,
+                budget: gchatBuildMetrics.budget,
+                top5: top5.map(s => `${s.label}:${s.tokens}`).join(", "),
+              });
             }
 
             const gchatAgentTools = gchatAgentResult?.dispatch.agent.tools_enabled;
@@ -779,7 +785,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
             const msgId = await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat", parsed.senderEmail);
             broadcastExtension({ type: "message_out", channel: "google-chat", agent: gchatAgentResult?.dispatch.agent.name || "general", preview: gchatClean.substring(0, 200) });
             resetGchatIdleTimer();
-            console.log(`[gchat] Async reply (${gchatClean.length} chars) to ${parsed.spaceName}: ${gchatClean.substring(0, 80)}...`);
+            logger.info(`Async reply (${gchatClean.length} chars)`, { spaceName: parsed.spaceName, preview: gchatClean.substring(0, 80) });
 
             const gchatDeliverResult = await deliverMessage(supabase, gchatClean, {
               channel: "google-chat",
@@ -792,9 +798,9 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
             });
 
             if (gchatDeliverResult.status === "sent") {
-              console.log(`[gchat] Async delivery complete → ${gchatDeliverResult.externalId}`);
+              logger.info(`Async delivery complete`, { externalId: gchatDeliverResult.externalId });
             } else if (gchatDeliverResult.status === "fallback") {
-              console.log(`[gchat] Async delivery via fallback (${gchatDeliverResult.channel}) → ${gchatDeliverResult.externalId}`);
+              logger.info(`Async delivery via fallback`, { channel: gchatDeliverResult.channel, externalId: gchatDeliverResult.externalId });
             } else {
               logger.error("Async delivery failed", { error: gchatDeliverResult.error });
             }
@@ -957,7 +963,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
         const alexaBody = JSON.parse(body);
         const parsed = parseAlexaRequest(alexaBody);
 
-        console.log(`[alexa] ${parsed.type} ${parsed.intentName || ""}: ${parsed.text.substring(0, 80)}`);
+        logger.info(`${parsed.type} ${parsed.intentName || ""}`, { preview: parsed.text.substring(0, 80) });
 
         // Save user message
         await saveMessage("user", parsed.text, {
@@ -1053,6 +1059,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
               agentMemory.memoryContext || undefined,
               agentMemory.sessionIds,
               await getAgentArchetype(agentResult?.dispatch.agent?.name),
+              await getAgentRoleContext(agentResult?.dispatch.agent?.name),
               await getPsyContext(),
               await getPhaseContext(),
               await getHealthContext(),
@@ -1069,11 +1076,14 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
             const alexaBuildMetrics = getLastBuildMetrics();
             if (alexaBuildMetrics) {
               const top5 = [...alexaBuildMetrics.sections].sort((a, b) => b.tokens - a.tokens).slice(0, 5);
-              console.log(
-                `[context:snapshot] creature=${alexaBuildMetrics.creature || "general"} mode=${alexaBuildMetrics.mode || "default"} ` +
-                `tokens=${alexaBuildMetrics.totalTokens} sections=${alexaBuildMetrics.sectionCount} budget=${alexaBuildMetrics.budget} ` +
-                `top5=[${top5.map(s => `${s.label}:${s.tokens}`).join(", ")}]`
-              );
+              logger.info("Context snapshot", {
+                creature: alexaBuildMetrics.creature || "general",
+                mode: alexaBuildMetrics.mode || "default",
+                tokens: alexaBuildMetrics.totalTokens,
+                sections: alexaBuildMetrics.sectionCount,
+                budget: alexaBuildMetrics.budget,
+                top5: top5.map(s => `${s.label}:${s.tokens}`).join(", "),
+              });
             }
 
             const ALEXA_TIMEOUT_MS = 6_000;
@@ -1911,7 +1921,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
       try {
         const data = body ? JSON.parse(body) : {};
         const channel = data.channel || undefined;
-        console.log(`[consolidate] Manual trigger via API${channel ? ` (channel: ${channel})` : ""}`);
+        logger.info(`Manual consolidation trigger via API`, { channel });
         await triggerConsolidation(channel);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
@@ -1959,7 +1969,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
         const context = contextParts.join("\n\n");
         const prompt = `Generate a Plane project ticket from this context. Return ONLY valid JSON with no markdown formatting:\n{"title": "concise title under 80 chars", "description": "detailed description with requirements as bullet points", "priority": "medium"}\n\nPriority must be one of: urgent, high, medium, low, none.\n\nContext:\n${context}`;
 
-        console.log(`[ticket] Generating ticket from ${contextParts.length} context source(s)...`);
+        logger.info(`Generating ticket from ${contextParts.length} context source(s)...`);
         const raw = await callClaude(prompt);
         const jsonMatch = raw.match(/\{[\s\S]*\}/);
         if (!jsonMatch) throw new Error("Could not parse ticket JSON from Claude response");
@@ -1970,7 +1980,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
         const result = await createPlaneIssue("ELLIE", ticket.title, ticket.description, ticket.priority);
         if (!result) throw new Error("Plane API failed to create issue");
 
-        console.log(`[ticket] Created ${result.identifier}: ${ticket.title}`);
+        logger.info(`Created ${result.identifier}: ${ticket.title}`);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ success: true, identifier: result.identifier, title: ticket.title, description: ticket.description }));
       } catch (err: unknown) {
@@ -1979,6 +1989,16 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
         res.end(JSON.stringify({ error: err instanceof Error ? err.message : "Failed to create ticket" }));
       }
     });
+    return;
+  }
+
+  // ELLIE-570: Ticket status — QMD-first with Plane reconciliation
+  if (url.pathname === "/api/ticket/status" && req.method === "GET") {
+    (async () => {
+      const result = await handleTicketStatus(url.searchParams.get("id"));
+      res.writeHead(result.status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result.body));
+    })();
     return;
   }
 
@@ -2200,7 +2220,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
           return;
         }
 
-        console.log("[extract-ideas] Starting idea extraction from last 3 conversations");
+        logger.info("Starting idea extraction from last 3 conversations");
 
         // Fetch last 3 conversations with their messages
         const { data: convos, error: convoErr } = await supabase
@@ -2307,7 +2327,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
         }
 
         const ideas = parsed.ideas || [];
-        console.log(`[extract-ideas] Extracted ${ideas.length} ideas`);
+        logger.info(`Extracted ${ideas.length} ideas`);
 
         // Send extracted ideas to ellie-chat for interactive triage
         if (ideas.length > 0) {
@@ -2334,7 +2354,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
           for (const ws of ellieChatClients) {
             if (ws.readyState === WebSocket.OPEN) ws.send(payload);
           }
-          console.log(`[extract-ideas] Sent ${ideas.length} ideas to ellie-chat (${newIdeas.length} new, ${existingIdeas.length} existing)`);
+          logger.info(`Sent ${ideas.length} ideas to ellie-chat`, { newIdeas: newIdeas.length, existingIdeas: existingIdeas.length });
         }
 
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -2369,7 +2389,7 @@ If no actionable ideas are found, return: { "ideas": [] }`;
           return;
         }
 
-        console.log(`[harvest] Starting harvest for conversation ${conversationId}`);
+        logger.info(`Starting harvest for conversation ${conversationId}`);
 
         // Fetch conversation metadata
         const { data: convo, error: convoErr } = await supabase
@@ -2500,7 +2520,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         const seeds = candidates.filter(c => c.category === "seed");
         const rain = candidates.filter(c => c.category === "rain");
         const corrections = candidates.filter(c => c.category === "correction");
-        console.log(`[harvest] Extracted ${candidates.length} candidates (${seeds.length} seeds, ${rain.length} rain, ${corrections.length} corrections)`);
+        logger.info(`Extracted ${candidates.length} candidates`, { seeds: seeds.length, rain: rain.length, corrections: corrections.length });
 
         // Check Forest for duplicates and write results
         const { readMemories, writeMemory } = await import("../../ellie-forest/src/index");
@@ -2522,7 +2542,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
             if (candidate.category === "seed") {
               candidate.category = "rain";
             }
-            console.log(`[harvest] Duplicate detected (similarity ${topMatch.similarity?.toFixed(2)}), marking as rain`);
+            logger.info("Duplicate detected, marking as rain", { similarity: topMatch.similarity?.toFixed(2) });
           }
 
           // Write to Forest with harvest metadata
@@ -2560,7 +2580,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         const rainCount = written.filter(w => w.category === "rain").length;
         const correctionCount = written.filter(w => w.category === "correction").length;
 
-        console.log(`[harvest] Complete — ${seedCount} seeds planted, ${rainCount} rain applied, ${correctionCount} corrections captured`);
+        logger.info("Harvest complete", { seeds: seedCount, rain: rainCount, corrections: correctionCount });
 
         // Broadcast to ellie-chat clients
         if (written.length > 0) {
@@ -2877,7 +2897,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           // Bump snapshot so new skill is picked up
           bumpSnapshotVersion();
 
-          console.log(`[skills] Imported "${skillName}" (${files.length} files, ${auditReport.riskRating}) → ${installDir}`);
+          logger.info(`Imported skill "${skillName}"`, { files: files.length, risk: auditReport.riskRating, dir: installDir });
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({
             name: skillName,
@@ -3036,7 +3056,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           // Store audit report alongside the skill
           await writeFile(join(installDir, "_audit-report.json"), JSON.stringify(auditReport, null, 2), "utf-8");
 
-          console.log(`[skills] Sandbox upload "${skillName}" (${files.length} files, ${auditReport.riskRating}) → ${installDir}`);
+          logger.info(`Sandbox upload "${skillName}"`, { files: files.length, risk: auditReport.riskRating, dir: installDir });
 
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({
@@ -3091,7 +3111,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         // Bump snapshot so skill loads
         bumpSnapshotVersion();
 
-        console.log(`[skills] Promoted "${dirName}" from sandbox to live`);
+        logger.info(`Promoted "${dirName}" from sandbox to live`);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ success: true, name: dirName, dir: targetDir }));
       } catch (err: unknown) {
@@ -3114,7 +3134,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         const sandboxDir = join(process.cwd(), "skills-sandbox", dirName!);
         await rm(sandboxDir, { recursive: true, force: true });
 
-        console.log(`[skills] Deleted sandbox skill "${dirName}"`);
+        logger.info(`Deleted sandbox skill "${dirName}"`);
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ success: true }));
       } catch (err: unknown) {
@@ -3318,7 +3338,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           }
         }
 
-        console.log(`[ellie-chat] Broadcast message to ${sentCount} client(s)`);
+        logger.info(`Broadcast message to ${sentCount} client(s)`);
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, sent_to: sentCount }));
@@ -3822,6 +3842,9 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           } else {
             await listAgentsEndpoint(mockReq, mockRes, supabase, bot);
           }
+        } else if (agentName === "compliance" && req.method === "GET") {
+          const { agentComplianceEndpoint } = await import("./api/agent-compliance.ts");
+          await agentComplianceEndpoint(mockReq, mockRes);
         } else if (subResource === "skills") {
           await getAgentSkillsEndpoint(mockReq, mockRes, supabase, bot);
         } else if (agentName) {

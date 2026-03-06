@@ -64,7 +64,7 @@ export async function createQueueItem(req: ApiRequest, res: ApiResponse) {
       RETURNING *
     `
 
-    console.log(`[agent-queue] Created: ${source} → ${target} [${prio}] ${category}: ${title}`)
+    logger.info(`Created: ${source} → ${target} [${prio}] ${category}: ${title}`)
     return res.json({ ok: true, item })
   } catch (error) {
     logger.error("Create failed", error)
@@ -144,7 +144,7 @@ export async function updateQueueStatus(req: ApiRequest, res: ApiResponse, id: s
       return res.status(404).json({ error: 'Queue item not found' })
     }
 
-    console.log(`[agent-queue] ${id.slice(0, 8)} → ${status}`)
+    logger.info(`${id.slice(0, 8)} → ${status}`)
 
     // On completion, summarize to Bridge memory then delete (fire-and-forget)
     if (status === 'completed') {
@@ -172,7 +172,7 @@ export async function deleteQueueItem(req: ApiRequest, res: ApiResponse, id: str
       return res.status(404).json({ error: 'Queue item not found' })
     }
 
-    console.log(`[agent-queue] Deleted: ${id.slice(0, 8)}`)
+    logger.info(`Deleted: ${id.slice(0, 8)}`)
     return res.json({ ok: true })
   } catch (error) {
     logger.error("Delete failed", error)
@@ -204,7 +204,7 @@ async function summarizeCompletedItem(item: QueueItem): Promise<void> {
 
   // Delete the queue item now that it's preserved in Bridge
   await sql`DELETE FROM agent_queue WHERE id = ${item.id}`
-  console.log(`[agent-queue] Summarized ${item.id.slice(0, 8)} to Bridge and deleted`)
+  logger.info(`Summarized ${item.id.slice(0, 8)} to Bridge and deleted`)
 }
 
 // ── v2: Queue context for agent session start (ELLIE-201) ────
@@ -239,7 +239,7 @@ export async function acknowledgeQueueItems(target: string): Promise<number> {
     WHERE target = ${target} AND status = 'new'
   `
   const count = result.count
-  if (count > 0) console.log(`[agent-queue] Acknowledged ${count} items for ${target}`)
+  if (count > 0) logger.info(`Acknowledged ${count} items for ${target}`)
   return count
 }
 
@@ -277,7 +277,7 @@ export async function expireStaleItems(): Promise<number> {
     RETURNING id
   `
   const count = result.length
-  if (count > 0) console.log(`[agent-queue] Expired ${count} stale items (>7 days, never acknowledged)`)
+  if (count > 0) logger.info(`Expired ${count} stale items (>7 days, never acknowledged)`)
   return count
 }
 
@@ -342,6 +342,6 @@ export async function createQueueItemDirect(params: {
             ${params.work_item_id || null}, ${sql.json(params.related_refs || [])}, ${sql.json(params.metadata || {})})
     RETURNING *
   `
-  console.log(`[agent-queue] Created (direct): ${params.source} → ${params.target} [${prio}] ${params.category}: ${params.title}`)
+  logger.info(`Created (direct): ${params.source} → ${params.target} [${prio}] ${params.category}: ${params.title}`)
   return item
 }

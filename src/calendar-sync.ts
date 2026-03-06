@@ -564,5 +564,5 @@ export async function syncAllCalendars(): Promise<void> {
   }
 
   const elapsed = Date.now() - startedAt;
-  console.log(`[calendar-sync] Synced ${totalEvents} events in ${elapsed}ms`);
+  logger.info(`Synced ${totalEvents} events in ${elapsed}ms`);
 }

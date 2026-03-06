@@ -68,7 +68,7 @@ async function retry<T>(
       lastError = err instanceof Error ? err : new Error(String(err));
       if (attempt < maxRetries) {
         const delay = BACKOFF_BASE_MS * Math.pow(2, attempt - 1);
-        console.log(`[delivery] ${label} attempt ${attempt}/${maxRetries} failed, retrying in ${delay}ms: ${lastError.message}`);
+        logger.warn("Delivery attempt failed, retrying", { label, attempt, maxRetries, delayMs: delay, error: lastError.message });
         await new Promise((r) => setTimeout(r, delay));
       }
     }
@@ -214,7 +214,7 @@ async function attemptFallback(
 ): Promise<DeliveryResult> {
   // Determine fallback channel
   const fallbackChannel = options.channel === "google-chat" ? "telegram" : "google-chat";
-  console.log(`[delivery] Attempting fallback: ${options.channel} → ${fallbackChannel}`);
+  logger.info("Attempting fallback", { from: options.channel, to: fallbackChannel });
 
   try {
     if (fallbackChannel === "telegram" && options.telegramBot && options.telegramChatId) {
@@ -231,7 +231,7 @@ async function attemptFallback(
         attempts: 1,
       };
       await updateDeliveryStatus(supabase, options.messageId, delivery);
-      console.log(`[delivery] Fallback successful: delivered via Telegram`);
+      logger.info("Fallback successful", { channel: "telegram" });
       return delivery;
     }
 
@@ -251,7 +251,7 @@ async function attemptFallback(
         attempts: 1,
       };
       await updateDeliveryStatus(supabase, options.messageId, delivery);
-      console.log(`[delivery] Fallback successful: delivered via Google Chat`);
+      logger.info("Fallback successful", { channel: "google-chat" });
       return delivery;
     }
 
@@ -361,4 +361,9 @@ export function stopNudgeChecker(): void {
     clearInterval(nudgeTimer);
     nudgeTimer = null;
   }
+}
+
+/** Clear pending response tracker — for unit tests only. */
+export function _resetPendingResponsesForTesting(): void {
+  pendingResponses.clear();
 }

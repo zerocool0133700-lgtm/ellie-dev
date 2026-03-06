@@ -66,20 +66,20 @@ export async function consolidateNow(
   }
 
   if (!messages || messages.length === 0) {
-    console.log("[consolidate] No unprocessed messages.");
+    logger.info("No unprocessed messages.");
     return false;
   }
 
-  console.log(`[consolidate] Processing ${messages.length} messages...`);
+  logger.info(`Processing ${messages.length} messages...`);
 
   const blocks = groupIntoBlocks(messages);
-  console.log(`[consolidate] Grouped into ${blocks.length} conversation(s).`);
+  logger.info(`Grouped into ${blocks.length} conversation(s).`);
 
   for (const block of blocks) {
     await processBlock(supabase, block);
   }
 
-  console.log("[consolidate] Done.");
+  logger.info("Done.");
   options?.onComplete?.();
   return true;
 }
@@ -266,9 +266,7 @@ ${transcript}`;
       .from("conversations")
       .update({ summary: parsed.summary })
       .eq("id", conversationId);
-    console.log(
-      `[consolidate] ${block.channel} (${block.messages.length} msgs): ${parsed.summary}`
-    );
+    logger.info(`${block.channel} (${block.messages.length} msgs): ${parsed.summary}`);
 
     // Index conversation to Elasticsearch
     indexConversation({
@@ -297,8 +295,7 @@ ${transcript}`;
         conversation_id: conversationId,
         metadata: { source: "consolidation" },
       });
-      console.log(`  [${mem.type}] ${mem.content} → ${result.action}` +
-        (result.resolution ? ` (${result.resolution.reason})` : ""));
+      logger.info(`${mem.content} → ${result.action}${result.resolution ? ` (${result.resolution.reason})` : ""}`, { type: mem.type });
     }
   }
 

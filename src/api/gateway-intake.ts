@@ -223,7 +223,7 @@ async function handleGatewayEvent(
 ): Promise<void> {
   const { source, category, summary, actor, payload, envelope_id } = data;
 
-  console.log(`[gateway-intake] Event: ${source}/${category} — ${summary}`);
+  logger.info(`Event: ${source}/${category} — ${summary}`);
 
   // Write to Forest Bridge as a finding
   try {
@@ -260,7 +260,7 @@ async function handleGatewayAlert(
 ): Promise<void> {
   const { source, summary, payload, envelope_id } = data;
 
-  console.log(`[gateway-intake] ALERT: ${source} — ${summary}`);
+  logger.info(`ALERT: ${source} — ${summary}`);
 
   // Send notification to Telegram/Google Chat
   try {
@@ -305,13 +305,13 @@ async function handleGatewayEmail(
 ): Promise<void> {
   const { message_id, change_type, envelope_id } = data;
 
-  console.log(`[gateway-intake] Email ${change_type}: ${message_id.substring(0, 20)}...`);
+  logger.info(`Email ${change_type}: ${message_id.substring(0, 20)}...`);
 
   try {
     const message = await outlookGetMessage(message_id);
     if (message) {
-      console.log(
-        `[gateway-intake] Fetched email: "${message.subject}" from ${message.from?.emailAddress?.name || "unknown"}`,
+      logger.info(
+        `Fetched email: "${message.subject}" from ${message.from?.emailAddress?.name || "unknown"}`,
       );
 
       // Write to Bridge as awareness
@@ -345,11 +345,11 @@ async function handleGatewayCalendarSync(
   _data: GatewayCalendarSyncPayload,
   res: ServerResponse,
 ): Promise<void> {
-  console.log(`[gateway-intake] Calendar sync triggered by gateway`);
+  logger.info("Calendar sync triggered by gateway");
 
   try {
     await syncAllCalendars();
-    console.log("[gateway-intake] Calendar sync complete");
+    logger.info("Calendar sync complete");
   } catch (err: unknown) {
     logger.error("Calendar sync error", { message: errorMessage(err) });
   }

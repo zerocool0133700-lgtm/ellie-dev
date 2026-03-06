@@ -69,13 +69,13 @@ export function _resetTokenCache(): void {
 
 export async function initOutlook(): Promise<boolean> {
   if (!isOutlookConfigured()) {
-    console.log("[outlook] Not configured — Microsoft Outlook disabled");
+    logger.info("Not configured — Microsoft Outlook disabled");
     return false;
   }
 
   const token = await getAccessToken();
   if (token) {
-    console.log(`[outlook] Initialized (account: ${getOutlookEmail() || "unknown"})`);
+    logger.info("Initialized", { account: getOutlookEmail() || "unknown" });
     return true;
   }
   logger.error("Token refresh failed at init");
@@ -203,7 +203,7 @@ export async function sendEmail(payload: OutlookSendPayload): Promise<void> {
     method: "POST",
     body: JSON.stringify({ message, saveToSentItems: true }),
   });
-  console.log(`[outlook] Email sent: "${payload.subject}" to ${payload.to.join(", ")}`);
+  logger.info("Email sent", { subject: payload.subject });
 }
 
 /** Reply to an existing message. */
@@ -212,7 +212,7 @@ export async function replyToMessage(messageId: string, comment: string): Promis
     method: "POST",
     body: JSON.stringify({ comment }),
   });
-  console.log(`[outlook] Reply sent to message ${messageId.substring(0, 20)}...`);
+  logger.info("Reply sent", { messageId: messageId.substring(0, 20) });
 }
 
 /** Mark a message as read. */

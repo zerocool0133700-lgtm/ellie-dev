@@ -345,7 +345,7 @@ async function flushCoalesceBuffer(channel: NotificationChannel): Promise<void> 
   await sendDirect(ctx, "error", channel, "coalesced",
     channel === "telegram" ? telegramSummary : gchatSummary);
 
-  console.log(`[notify] ${channel}/coalesced: ${entries.length} alerts combined`);
+  logger.info(`${channel}/coalesced: ${entries.length} alerts combined`);
 }
 
 /** Low-level send to a specific channel (bypasses coalescing/throttle). */
@@ -365,7 +365,7 @@ async function sendDirect(
     } else if (channel === "slack" && ctx.slackSend) {
       await ctx.slackSend(message);
     }
-    console.log(`[notify] ${channel}/${event}/${workItemId}: sent`);
+    logger.info(`${channel}/${event}/${workItemId}: sent`);
   } catch (err: unknown) {
     logger.error(`${channel} send failed`, { channel, event, work_item_id: workItemId }, err);
   }
@@ -475,7 +475,7 @@ function scheduleBatchedSend(
       } else if (channel === "slack" && ctx.slackSend) {
         await ctx.slackSend(message);
       }
-      console.log(`[notify] ${channel}/${event}/${workItemId}: batched send`);
+      logger.info(`${channel}/${event}/${workItemId}: batched send`);
     } catch (err: unknown) {
       logger.error("Batched send failed", { channel, event, work_item_id: workItemId }, err);
     }

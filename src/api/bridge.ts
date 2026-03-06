@@ -126,7 +126,7 @@ export async function bridgeReadEndpoint(req: ApiRequest, res: ApiResponse) {
         title: r.title,
         confidence: Math.min(1, (r.score ?? 0) / 10 + 0.5),
       }))
-      console.log(`[bridge:read] ${key.key_prefix} (${key.collaborator}) queried River "${query.slice(0, 60)}" → ${memories.length} results`)
+      logger.info(`${key.key_prefix} (${key.collaborator}) queried River "${query.slice(0, 60)}" → ${memories.length} results`)
       return res.json({ success: true, count: memories.length, memories })
     }
 
@@ -150,7 +150,7 @@ export async function bridgeReadEndpoint(req: ApiRequest, res: ApiResponse) {
       )
     }
 
-    console.log(`[bridge:read] ${key.key_prefix} (${key.collaborator}) queried "${query.slice(0, 60)}"${author ? ` [author:${author}]` : ''} → ${results.length} results`)
+    logger.info(`${key.key_prefix} (${key.collaborator}) queried "${query.slice(0, 60)}"${author ? ` [author:${author}]` : ''} → ${results.length} results`)
 
     return res.json({ success: true, count: results.length, memories: results })
   } catch (error) {
@@ -221,7 +221,7 @@ export async function bridgeWriteEndpoint(req: ApiRequest, res: ApiResponse) {
       ...(source_creature_id ? { source_creature_id } : {}),
     })
 
-    console.log(`[bridge:write] ${key.key_prefix} (${key.collaborator}) wrote memory ${memory.id} at ${scope_path}`)
+    logger.info(`${key.key_prefix} (${key.collaborator}) wrote memory ${memory.id} at ${scope_path}`)
 
     // Auto-create queue item if queue_target specified (ELLIE-201)
     let queueItem = null

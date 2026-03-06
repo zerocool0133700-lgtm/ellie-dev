@@ -93,10 +93,10 @@ export async function sendCodeEndpoint(req: ApiRequest, res: ApiResponse) {
     const sent = await sendVerificationCode(normalizedEmail, code)
     if (!sent) {
       // Email not configured yet — code is in DB, log it for manual testing
-      console.log(`[app-auth] Email delivery unavailable — code for ${normalizedEmail}: ${code}`)
+      logger.warn("Email delivery unavailable — verification code logged for manual testing", { email: normalizedEmail })
     }
 
-    console.log(`[app-auth] Code sent to ${normalizedEmail}`)
+    logger.info("Verification code sent", { email: normalizedEmail })
     return res.json({ ok: true })
   } catch (error) {
     logger.error("Send code failed", error)
@@ -190,7 +190,7 @@ export async function verifyCodeEndpoint(req: ApiRequest, res: ApiResponse) {
       SELECT * FROM app_users WHERE session_token = ${token}
     `
 
-    console.log(`[app-auth] User verified: ${normalizedEmail} (${updatedUser.id})`)
+    logger.info("User verified", { userId: updatedUser.id })
     return res.json({
       ok: true,
       token,
@@ -282,7 +282,7 @@ export async function updateProfileEndpoint(req: ApiRequest, res: ApiResponse) {
 
     const [updated] = await sql<AppUser[]>`SELECT * FROM app_users WHERE id = ${user.id}`
 
-    console.log(`[app-auth] Profile updated: ${user.id} (${updates.join(', ')})`)
+    logger.info("Profile updated", { userId: user.id, fields: updates })
     return res.json({
       ok: true,
       user: {

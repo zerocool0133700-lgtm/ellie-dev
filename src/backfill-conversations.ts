@@ -14,7 +14,7 @@ const supabase = createClient(
 );
 
 async function backfill() {
-  console.log("[backfill] Fetching orphaned messages...");
+  logger.info("Fetching orphaned messages...");
 
   const { data: messages, error } = await supabase
     .from("messages")
@@ -28,7 +28,7 @@ async function backfill() {
     return;
   }
 
-  console.log(`[backfill] ${messages.length} orphaned messages to group.`);
+  logger.info(`${messages.length} orphaned messages to group.`);
 
   // Group into conversation blocks (same logic as consolidation)
   interface Block {
@@ -63,7 +63,7 @@ async function backfill() {
     current.count++;
   }
 
-  console.log(`[backfill] Grouped into ${blocks.length} conversations.`);
+  logger.info(`Grouped into ${blocks.length} conversations.`);
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
@@ -93,11 +93,11 @@ async function backfill() {
       .update({ conversation_id: convo.id })
       .in("id", block.messageIds);
 
-    console.log(`[backfill] ${i + 1}/${blocks.length}: ${block.channel} (${block.count} msgs) -> ${convo.id}`);
+    logger.info(`${i + 1}/${blocks.length}: ${block.channel} (${block.count} msgs) -> ${convo.id}`);
   }
 
   // Also try to link existing memory entries to conversations by matching timestamps
-  console.log("\n[backfill] Linking existing memories to conversations...");
+  logger.info("Linking existing memories to conversations...");
 
   const { data: memories } = await supabase
     .from("memory")
@@ -132,11 +132,11 @@ async function backfill() {
           linked++;
         }
       }
-      console.log(`[backfill] Linked ${linked}/${memories.length} memories to conversations.`);
+      logger.info(`Linked ${linked}/${memories.length} memories to conversations.`);
     }
   }
 
-  console.log("[backfill] Done.");
+  logger.info("Done.");
 }
 
 backfill().catch((err) => logger.error("Fatal error", err));

@@ -15,10 +15,11 @@ import { fetchWorkItemDetails } from "./plane.ts";
 import { dispatchAgent, syncResponse } from "./agent-router.ts";
 import { processMemoryIntents } from "./memory.ts";
 import { notify, type NotifyContext } from "./notification-policy.ts";
-import { getAgentArchetype, getPsyContext, getPhaseContext, getHealthContext } from "./prompt-builder.ts";
+import { getAgentArchetype, getAgentRoleContext, getPsyContext, getPhaseContext, getHealthContext } from "./prompt-builder.ts";
 import { getRiverContextForAgent } from "./context-sources.ts";
 import type { PlaybookContext } from "./playbook.ts";
 import { withRetry, classifyError } from "./dispatch-retry.ts";
+import { getAdviceForDispatch, enrichPromptWithAdvice } from "./dispatch-advice-injector.ts";
 import { enqueue, getQueueDepth } from "./dispatch-queue.ts";
 import { withTrace, getTraceId, generateTraceId } from "./trace.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
@@ -280,16 +281,24 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     const dispatch = dispatchResult.result;
 
     // 5. Build prompt with personality context
-    const workItemContext = `\nACTIVE WORK ITEM: ${workItemId}\n` +
+    let workItemContext = `\nACTIVE WORK ITEM: ${workItemId}\n` +
       `Title: ${details.name}\nPriority: ${details.priority}\nDescription: ${details.description}\n`;
 
-    const [archetype, psy, phase, health, riverContext] = await Promise.all([
+    // ELLIE-571: Check for post-mortem advice before dispatch (fire-and-forget safe)
+    const [archetype, roleContext, psy, phase, health, riverContext, dispatchAdvice] = await Promise.all([
       getAgentArchetype(agentType),
+      getAgentRoleContext(agentType),
       getPsyContext(),
       getPhaseContext(),
       getHealthContext(),
       getRiverContextForAgent(agentType, details.description),  // ELLIE-150
+      getAdviceForDispatch(workItemId),  // ELLIE-571
     ]);
+
+    // ELLIE-571: Inject post-mortem advice into prompt context if found
+    if (dispatchAdvice) {
+      workItemContext = enrichPromptWithAdvice(workItemContext, dispatchAdvice);
+    }
 
     const prompt = ctx.buildPromptFn(
       `Work on ${workItemId}: ${details.name}\n\n${details.description}`,
@@ -297,7 +306,7 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       channel, dispatch.agent, workItemContext,
       undefined, undefined, undefined, riverContext || undefined, undefined,
       sessionIds,
-      archetype, psy, phase, health,
+      archetype, roleContext, psy, phase, health,
     );
 
     // 6. Call Claude with runId for heartbeat tracking (with retry for transient failures)

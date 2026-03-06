@@ -229,7 +229,7 @@ export async function startSyncListener(): Promise<void> {
   // Verify connection
   try {
     await sql`SELECT 1`;
-    console.log("[es-sync] Connected to Postgres");
+    logger.info("Connected to Postgres");
   } catch (err) {
     logger.error("Failed to connect to Postgres", err);
     sql = null;
@@ -246,7 +246,7 @@ export async function startSyncListener(): Promise<void> {
     });
   });
 
-  console.log("[es-sync] Listening on forest_index_queue channel");
+  logger.info("Listening on forest_index_queue channel");
 }
 
 export async function stopSyncListener(): Promise<void> {
@@ -255,7 +255,7 @@ export async function stopSyncListener(): Promise<void> {
 
   try {
     await sql.end({ timeout: 5 });
-    console.log("[es-sync] Listener stopped");
+    logger.info("Listener stopped");
   } catch (err) {
     logger.error("Error stopping listener", err);
   }
@@ -267,12 +267,12 @@ export async function stopSyncListener(): Promise<void> {
 // ============================================================
 
 if (import.meta.main) {
-  console.log("[es-sync] Starting standalone sync listener...");
+  logger.info("Starting standalone sync listener");
 
   process.on("SIGINT", async () => {
-    console.log("\n[es-sync] Shutting down...");
+    logger.info("Shutting down");
     await stopSyncListener();
-    console.log(`[es-sync] Final stats: ${JSON.stringify(getSyncStats())}`);
+    logger.info("Final stats", getSyncStats());
     process.exit(0);
   });
 

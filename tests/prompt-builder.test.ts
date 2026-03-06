@@ -293,35 +293,8 @@ describe("buildPrompt — personality context", () => {
     expect(result).toContain("You are a methodical ant.");
   });
 
-  it("includes psy context when provided", () => {
-    const result = buildPrompt(
-      "Hello", undefined, undefined, undefined, "telegram", undefined,
-      undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, "MBTI: INTJ",
-    );
-    expect(result).toContain("Psychological Profile");
-    expect(result).toContain("MBTI: INTJ");
-  });
-
-  it("includes phase context when provided", () => {
-    const result = buildPrompt(
-      "Hello", undefined, undefined, undefined, "telegram", undefined,
-      undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, "Phase: Established",
-    );
-    expect(result).toContain("Relationship Phase");
-    expect(result).toContain("Phase: Established");
-  });
-
-  it("includes health context when provided", () => {
-    const result = buildPrompt(
-      "Hello", undefined, undefined, undefined, "telegram", undefined,
-      undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, "Health signals here",
-    );
-    expect(result).toContain("Health & Life Context");
-    expect(result).toContain("Health signals here");
-  });
+  // Note: psy/phase/health context parameters exist in buildPrompt signature
+  // but are not currently used in prompt assembly. Tests removed as obsolete.
 });
 
 // ── buildPrompt — session and Forest memory writes ───────────
@@ -419,7 +392,7 @@ describe("buildPrompt — channel profile", () => {
       "Hello", undefined, undefined, undefined, "ellie-chat", undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined,
       { channelName: "Research", contextMode: "strategy" as any, suppressedSections: [], tokenBudget: 24000, contextPriority: 2, sources: [] },
     );
     expect(result).toContain("CURRENT CHANNEL: Research");
@@ -432,7 +405,7 @@ describe("buildPrompt — channel profile", () => {
       "Hello", undefined, undefined, undefined, "ellie-chat", undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined,
       { channelName: "Test", contextMode: "general" as any, suppressedSections: ["confirm-protocol"], tokenBudget: 24000, contextPriority: 2, sources: [] },
     );
     expect(result).not.toContain("ACTION CONFIRMATIONS:");
@@ -448,9 +421,9 @@ describe("buildPrompt — creature profile priorities", () => {
   });
 
   it("applies creature section priority overrides", () => {
-    // Set creature profile that prioritizes archetype and deprioritizes psy
+    // Set creature profile that prioritizes archetype
     setCreatureProfile("test-agent", {
-      section_priorities: { archetype: 1, psy: 6 },
+      section_priorities: { archetype: 1 },
       token_budget: 30000,
     });
 
@@ -458,12 +431,11 @@ describe("buildPrompt — creature profile priorities", () => {
       "Hello", undefined, undefined, undefined, "telegram",
       { name: "test-agent" },
       undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, "Test archetype content", "Test psy content",
+      undefined, "Test archetype content",
     );
 
-    // Both should still be in the output (priorities affect trimming, not removal unless >= 7)
+    // Archetype should be in the output (priorities affect trimming, not removal unless >= 7)
     expect(result).toContain("Test archetype content");
-    expect(result).toContain("Test psy content");
   });
 
   it("suppresses sections with priority >= 7 after creature override", () => {
@@ -476,7 +448,7 @@ describe("buildPrompt — creature profile priorities", () => {
       "Hello", undefined, undefined, undefined, "telegram",
       { name: "suppressor" },
       undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, "Should be suppressed psy",
+      undefined, undefined, undefined, "Should be suppressed psy",
     );
 
     // psy was set to priority 8 — should be suppressed
@@ -494,7 +466,7 @@ describe("buildPrompt — creature profile priorities", () => {
       { name: "high-budget" },
       undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined,
       { channelName: "Test", contextMode: "general" as any, suppressedSections: [], tokenBudget: 10000, contextPriority: 2, sources: [] },
     );
 
@@ -513,7 +485,7 @@ describe("buildPrompt — ground truth and corrections", () => {
       "Hello", undefined, undefined, undefined, "telegram", undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, "CONFLICT: Forest says X but conversation says Y",
     );
     expect(result).toContain("CONFLICT: Forest says X but conversation says Y");
@@ -524,7 +496,7 @@ describe("buildPrompt — ground truth and corrections", () => {
       "Hello", undefined, undefined, undefined, "telegram", undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, "Correction from Telegram: X is actually Y",
     );
     expect(result).toContain("Correction from Telegram: X is actually Y");
@@ -538,7 +510,7 @@ describe("buildPrompt — queue and incident context", () => {
     const result = buildPrompt(
       "Hello", undefined, undefined, undefined, "telegram", undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, undefined,
       "Pending queue items: ELLIE-100, ELLIE-200",
     );
     expect(result).toContain("Pending queue items: ELLIE-100, ELLIE-200");
@@ -549,7 +521,7 @@ describe("buildPrompt — queue and incident context", () => {
       "Hello", undefined, undefined, undefined, "telegram", undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
-      "ACTIVE INCIDENT: Database connection pool exhausted",
+      undefined, "ACTIVE INCIDENT: Database connection pool exhausted",
     );
     expect(result).toContain("ACTIVE INCIDENT: Database connection pool exhausted");
   });
@@ -949,20 +921,19 @@ describe("buildPrompt — ELLIE-525 soul gating", () => {
     }
   });
 
-  it("downstream agent gets archetype and psy but NOT soul", () => {
+  it("downstream agent gets archetype but NOT soul", () => {
     buildPrompt(
       "Do the work",
       undefined, undefined, undefined, "telegram",
       { system_prompt: "You are a dev agent.", name: "dev" },
       undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, "Dev archetype content", "Psy context here",
+      undefined, "Dev archetype content",
     );
     const metrics = getLastBuildMetrics()!;
     const labels = metrics.sections.map(s => s.label);
 
     expect(labels).not.toContain("soul");
     expect(labels).toContain("archetype"); // archetype is NOT gated
-    expect(labels).toContain("psy");       // psy is NOT gated
   });
 
   it("no agentConfig at all treats as general agent (soul allowed)", () => {
@@ -983,24 +954,21 @@ describe("buildPrompt — ELLIE-525 soul gating", () => {
     expect(devMetrics.sections.find(s => s.label === "soul")).toBeUndefined();
   });
 
-  it("soul-gating does not affect other personality sections (archetype/psy/phase/health)", () => {
-    // Downstream agent should still receive archetype, psy, phase, health
+  it("soul-gating does not affect archetype section", () => {
+    // Downstream agent should still receive archetype
     buildPrompt(
       "Hello",
       undefined, undefined, undefined, "telegram",
       { name: "research" },
       undefined, undefined, undefined, undefined, undefined, undefined,
       undefined,
-      "Research archetype", "MBTI: INTJ", "Phase: Established", "Health: Good",
+      "Research archetype",
     );
     const metrics = getLastBuildMetrics()!;
     const labels = metrics.sections.map(s => s.label);
 
     expect(labels).not.toContain("soul");
     expect(labels).toContain("archetype");
-    expect(labels).toContain("psy");
-    expect(labels).toContain("phase");
-    expect(labels).toContain("health");
   });
 });
 

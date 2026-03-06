@@ -80,7 +80,7 @@ async function getCredentialDomains(): Promise<Set<string>> {
     const { listCredentialDomains } = await import("../../../ellie-forest/src/hollow");
     const domains = await listCredentialDomains();
     domainCache = new Set(domains);
-    console.log(`[skills] Credential domains: ${domains.join(", ") || "(none)"}`);
+    logger.info(`Credential domains: ${domains.join(", ") || "(none)"}`);
   } catch (err: unknown) {
     logger.warn("Credential domain lookup error", { error: err instanceof Error ? err.message : String(err) });
     domainCache = new Set();
