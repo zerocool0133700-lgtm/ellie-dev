@@ -52,6 +52,15 @@ const logger = log.child("identity");
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+/** Inventory validation result — cross-references loaded files against bindings. */
+export interface InventoryValidation {
+  unusedArchetypes: string[];
+  missingArchetypes: string[];
+  unusedRoles: string[];
+  missingRoles: string[];
+  valid: boolean;
+}
+
 /** Result of the full identity system initialization. */
 export interface IdentityStartupResult {
   archetypes: LoadResult;
@@ -59,6 +68,7 @@ export interface IdentityStartupResult {
   bindingsLoaded: number;
   bindingValidation: BindingValidationResult;
   archetypeValidationWarnings: string[];
+  inventoryValidation: InventoryValidation;
   watchersStarted: { archetypes: boolean; roles: boolean; bindings: boolean };
   bindingsSource: "file" | "defaults";
 }
@@ -154,6 +164,24 @@ export function initIdentitySystem(opts?: {
     }
   }
 
+  // 4b. Validate inventory — cross-reference loaded files against bindings (ELLIE-623)
+  const inventoryValidation = validateInventory();
+  if (inventoryValidation.unusedArchetypes.length > 0) {
+    logger.warn(`Unused archetypes (loaded but no agent binds to them): ${inventoryValidation.unusedArchetypes.join(", ")}`);
+  }
+  if (inventoryValidation.missingArchetypes.length > 0) {
+    logger.warn(`Missing archetypes (bound but not loaded): ${inventoryValidation.missingArchetypes.join(", ")}`);
+  }
+  if (inventoryValidation.unusedRoles.length > 0) {
+    logger.warn(`Unused roles (loaded but no agent binds to them): ${inventoryValidation.unusedRoles.join(", ")}`);
+  }
+  if (inventoryValidation.missingRoles.length > 0) {
+    logger.warn(`Missing roles (bound but not loaded): ${inventoryValidation.missingRoles.join(", ")}`);
+  }
+  if (inventoryValidation.valid) {
+    logger.info("Inventory validation passed — all loaded files are bound, all bindings resolved");
+  }
+
   // 5. Start file watchers (unless skipped)
   let watchersStarted = { archetypes: false, roles: false, bindings: false };
   if (!opts?.skipWatchers) {
@@ -180,8 +208,43 @@ export function initIdentitySystem(opts?: {
     bindingsLoaded,
     bindingValidation,
     archetypeValidationWarnings,
+    inventoryValidation,
     watchersStarted,
     bindingsSource,
+  };
+}
+
+// ── Inventory Validation (ELLIE-623) ─────────────────────────────────────────
+
+/**
+ * Cross-reference loaded archetypes and roles against registered bindings.
+ *
+ * Returns:
+ *   - unusedArchetypes: loaded archetype files that no agent binds to
+ *   - missingArchetypes: archetype names referenced in bindings but not loaded
+ *   - unusedRoles: loaded role files that no agent binds to
+ *   - missingRoles: role names referenced in bindings but not loaded
+ */
+export function validateInventory(): InventoryValidation {
+  const loadedArchetypes = new Set(listArchetypeConfigs().map(c => c.species));
+  const loadedRoles = new Set(listRoles());
+  const bindings = listBindings();
+
+  const boundArchetypes = new Set(bindings.map(b => b.archetype));
+  const boundRoles = new Set(bindings.map(b => b.role));
+
+  const unusedArchetypes = [...loadedArchetypes].filter(a => !boundArchetypes.has(a)).sort();
+  const missingArchetypes = [...boundArchetypes].filter(a => !loadedArchetypes.has(a)).sort();
+  const unusedRoles = [...loadedRoles].filter(r => !boundRoles.has(r)).sort();
+  const missingRoles = [...boundRoles].filter(r => !loadedRoles.has(r)).sort();
+
+  return {
+    unusedArchetypes,
+    missingArchetypes,
+    unusedRoles,
+    missingRoles,
+    valid: missingArchetypes.length === 0 && missingRoles.length === 0 &&
+           unusedArchetypes.length === 0 && unusedRoles.length === 0,
   };
 }
 
