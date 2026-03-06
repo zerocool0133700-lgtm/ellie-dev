@@ -261,7 +261,7 @@ export async function getRecentConversations(
       .select("channel, started_at, summary, message_count, status, agent")
       .gte("started_at", threeDaysAgo)
       .order("started_at", { ascending: false })
-      .limit(8);
+      .limit(3); // ELLIE-627: Cap at 3 to reduce context bloat
 
     if (error || !convos?.length) return "";
 
@@ -1059,12 +1059,12 @@ export async function refreshSource(
 // AGENT MEMORY CONTEXT (ELLIE-136)
 // ============================================================
 
-/** Model-based memory limits — smaller models get fewer memories to stay within context */
+/** Model-based memory limits — capped at 5 to reduce context bloat (ELLIE-627) */
 export function getMaxMemoriesForModel(model?: string | null): number {
-  if (!model) return 15;
-  if (model.includes('haiku')) return 8;
-  if (model.includes('sonnet')) return 15;
-  return 20; // opus and other large models
+  if (!model) return 5;
+  if (model.includes('haiku')) return 3;
+  if (model.includes('sonnet')) return 5;
+  return 5; // opus and other large models
 }
 
 import { resolveEntityName } from './agent-entity-map.ts';
