@@ -120,7 +120,15 @@ export function loadSingleFile(filePath: string): ArchetypeConfig | null {
     loadedAt: new Date().toISOString(),
   };
 
-  _cache.set(config.species.toLowerCase(), config);
+  // Canonical species files (filename matches species) take priority.
+  // Multiple files may share a species — e.g. dev.md, finance.md both have species: ant.
+  // The canonical ant.md defines the base archetype (Growth Metrics, etc.).
+  const speciesKey = config.species.toLowerCase();
+  const existing = _cache.get(speciesKey);
+  const isCanonical = basename(filePath, ".md").toLowerCase() === speciesKey;
+  if (!existing || isCanonical) {
+    _cache.set(speciesKey, config);
+  }
   return config;
 }
 
