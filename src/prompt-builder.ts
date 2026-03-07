@@ -614,6 +614,26 @@ export async function getHealthContext(): Promise<string> {
   return _healthContext;
 }
 
+// ── Cognitive load context (ELLIE-338) ───────────────────────
+
+let _cognitiveLoadHint = "";
+let _cognitiveLoadLastChecked = 0;
+const COGNITIVE_LOAD_CACHE_MS = 5 * 60_000;
+
+export async function getCognitiveLoadContext(supabase?: unknown): Promise<string> {
+  const now = Date.now();
+  if (_cognitiveLoadHint && now - _cognitiveLoadLastChecked < COGNITIVE_LOAD_CACHE_MS) return _cognitiveLoadHint;
+  try {
+    const { runCognitiveLoadDetection, formatLoadHint } = await import("./api/cognitive-load.ts");
+    const result = await runCognitiveLoadDetection(supabase as Parameters<typeof runCognitiveLoadDetection>[0]);
+    _cognitiveLoadHint = formatLoadHint(result);
+    _cognitiveLoadLastChecked = now;
+  } catch {
+    // Cognitive load detection is non-critical — skip silently
+  }
+  return _cognitiveLoadHint;
+}
+
 // ── Post-message psy assessment (ELLIE-164) ─────────────────
 
 export async function runPostMessageAssessment(
@@ -1106,6 +1126,11 @@ export function buildPrompt(
     if (riverPlanningMode) {
       sections.push({ label: "planning-mode", content: `\nPLANNING MODE ACTIVE:\n${riverPlanningMode}`, priority: getRiverDocPriority("planning-mode", 3) });
     }
+  }
+
+  // ELLIE-338: Cognitive load awareness hint — injected when load is moderate or higher
+  if (healthContext) {
+    sections.push({ label: "cognitive-load-hint", content: `\n${healthContext}`, priority: 4 });
   }
 
   // ── ELLIE-261: Apply strategy mode section filtering + budget ──

@@ -4306,6 +4306,27 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Cognitive Load Detection endpoints (ELLIE-338)
+  if (url.pathname === "/api/cognitive-load/detect" && req.method === "POST") {
+    (async () => {
+      try {
+        const { cognitiveLoadDetectHandler } = await import("./api/cognitive-load.ts");
+        await cognitiveLoadDetectHandler(req, res);
+      } catch (err) { logger.error("Cognitive load detect error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/cognitive-load/status" && req.method === "GET") {
+    (async () => {
+      try {
+        const { cognitiveLoadStatusHandler } = await import("./api/cognitive-load.ts");
+        await cognitiveLoadStatusHandler(req, res);
+      } catch (err) { logger.error("Cognitive load status error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
   // Channel Gardener endpoints (ELLIE-335)
   if (url.pathname === "/api/channel-gardener/run" && req.method === "POST") {
     (async () => {

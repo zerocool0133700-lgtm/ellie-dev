@@ -315,6 +315,14 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     }
   }, 15 * 60_000, "job-intelligence");
 
+  // ELLIE-338: Cognitive load monitor — refresh detection every 5 minutes
+  periodicTask(async () => {
+    if (supabase) {
+      const { runCognitiveLoadDetection } = await import("./api/cognitive-load.ts");
+      await runCognitiveLoadDetection(supabase);
+    }
+  }, 5 * 60_000, "cognitive-load-monitor");
+
   // ELLIE-543: Check-in monitor — proactive notifications for long-running agent sessions (every 5 minutes)
   periodicTask(async () => {
     const { getActiveRunStates } = await import("./orchestration-tracker.ts");
