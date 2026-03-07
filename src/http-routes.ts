@@ -4306,6 +4306,27 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Commitment Tracker endpoints (ELLIE-339)
+  if (url.pathname === "/api/commitments" && req.method === "GET") {
+    (async () => {
+      try {
+        const { commitmentsListHandler } = await import("./api/commitment-tracker.ts");
+        await commitmentsListHandler(req, res);
+      } catch (err) { logger.error("Commitments list error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/commitments/dismiss" && req.method === "POST") {
+    (async () => {
+      try {
+        const { commitmentsDismissHandler } = await import("./api/commitment-tracker.ts");
+        await commitmentsDismissHandler(req, res);
+      } catch (err) { logger.error("Commitments dismiss error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
   // Cognitive Load Detection endpoints (ELLIE-338)
   if (url.pathname === "/api/cognitive-load/detect" && req.method === "POST") {
     (async () => {

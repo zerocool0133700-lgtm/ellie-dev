@@ -634,6 +634,32 @@ export async function getCognitiveLoadContext(supabase?: unknown): Promise<strin
   return _cognitiveLoadHint;
 }
 
+// ── Commitment follow-up context (ELLIE-339) ────────────────
+
+let _commitmentFollowUpCtx = "";
+let _commitmentFollowUpAt = 0;
+const COMMITMENT_FOLLOWUP_CACHE_MS = 10 * 60_000;
+
+export function _getCommitmentFollowUpCache(): { _commitmentFollowUpContext: string } {
+  if (Date.now() - _commitmentFollowUpAt > COMMITMENT_FOLLOWUP_CACHE_MS) {
+    return { _commitmentFollowUpContext: "" };
+  }
+  return { _commitmentFollowUpContext: _commitmentFollowUpCtx };
+}
+
+export async function getCommitmentFollowUpContext(supabase?: unknown): Promise<string> {
+  const now = Date.now();
+  if (_commitmentFollowUpCtx && now - _commitmentFollowUpAt < COMMITMENT_FOLLOWUP_CACHE_MS) return _commitmentFollowUpCtx;
+  try {
+    const { getCommitmentContext } = await import("./api/commitment-tracker.ts");
+    _commitmentFollowUpCtx = await getCommitmentContext(supabase as Parameters<typeof getCommitmentContext>[0]);
+    _commitmentFollowUpAt = now;
+  } catch {
+    // Non-critical
+  }
+  return _commitmentFollowUpCtx;
+}
+
 // ── Post-message psy assessment (ELLIE-164) ─────────────────
 
 export async function runPostMessageAssessment(
@@ -971,6 +997,18 @@ export function buildPrompt(
     const commitmentsSection = getPendingCommitmentsForPrompt();
     if (commitmentsSection) {
       sections.push({ label: "pending-commitments", content: commitmentsSection, priority: 2 });
+    }
+  }
+
+  // ELLIE-339: Commitment follow-ups — gentle reminders for stated intentions
+  if (healthContext) {
+    // healthContext is reused for cognitive load (ELLIE-338) above;
+    // commitment follow-ups are injected separately via getCommitmentContext()
+  }
+  {
+    const { _commitmentFollowUpContext } = _getCommitmentFollowUpCache();
+    if (_commitmentFollowUpContext) {
+      sections.push({ label: "commitment-followups", content: `\n${_commitmentFollowUpContext}`, priority: 4 });
     }
   }
 
