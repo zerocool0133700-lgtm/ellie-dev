@@ -553,6 +553,12 @@ describe("integration — all River sources loaded simultaneously", () => {
     expect(result).toContain("WORK ITEM COMMANDS:");
   });
 
+  test("metrics include work-item section when workItemContext provided", () => {
+    buildPrompt("Fix", undefined, undefined, undefined, "telegram", DEV_AGENT_CONFIG, ACTIVE_WORK_ITEM);
+    const labels = getLastBuildMetrics()!.sections.map(s => s.label);
+    expect(labels).toContain("work-item");
+  });
+
   test("all protocol sections absent when cache empty (ELLIE-537)", () => {
     const result = buildPrompt(
       "Fix", undefined, undefined, undefined, "telegram",

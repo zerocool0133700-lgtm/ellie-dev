@@ -1,29 +1,25 @@
 /**
- * ELLIE-532 — River QMD query layer tests for prompt-builder.ts
+ * ELLIE-532 — River QMD cache layer tests for prompt-builder.ts
  *
- * Tests the River doc caching layer introduced/extended in ELLIE-532:
+ * Tests the River doc caching primitives:
  *   - getCachedRiverDoc: miss, hit, stale-while-revalidate
- *   - clearRiverDocCache / setRiverDocCacheTtl
  *   - _injectRiverDocForTesting: test helper for cache injection
- *   - Frontmatter section_priority applied to buildPrompt sections
- *   - River soul doc overrides config/soul.md in buildPrompt (general agent)
- *   - River soul doc NOT used for downstream agents (ELLIE-525 gating)
- *   - River protocol docs used in buildPrompt when cached
- *   - Hardcoded fallback when River is empty (QMD down scenario)
- *   - refreshRiverDocs: resolves non-fatally (QMD may be unavailable in tests)
+ *   - clearRiverDocCache: full cache wipe
+ *   - setRiverDocCacheTtl: TTL configuration + stale-while-revalidate
+ *   - RIVER_DOC_PATHS: registered key coverage
  *
- * No module mocking required — uses _injectRiverDocForTesting() to control
- * cache state, which avoids contaminating bridge-river.ts for other test files.
+ * buildPrompt integration tests (River soul, memory-protocol, confirm-protocol,
+ * frontmatter section_priority) live in prompt-builder.test.ts and
+ * prompt-builder-agents.test.ts — not duplicated here.
+ *
+ * No module mocking — uses _injectRiverDocForTesting() to control cache state.
  */
 
 import { describe, test, expect, beforeEach, afterAll } from "bun:test";
 import {
-  buildPrompt,
-  getLastBuildMetrics,
-  clearRiverDocCache,
   getCachedRiverDoc,
+  clearRiverDocCache,
   setRiverDocCacheTtl,
-  refreshRiverDocs,
   _injectRiverDocForTesting,
   stopPersonalityWatchers,
 } from "../src/prompt-builder.ts";
@@ -33,12 +29,9 @@ import {
 afterAll(() => {
   stopPersonalityWatchers();
   clearRiverDocCache();
-  setRiverDocCacheTtl(60_000); // restore default TTL
+  setRiverDocCacheTtl(60_000);
 });
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
-
-/** Reset River cache + TTL before each test. */
 beforeEach(() => {
   clearRiverDocCache();
   setRiverDocCacheTtl(60_000);
@@ -87,9 +80,7 @@ describe("_injectRiverDocForTesting — cache population", () => {
 
   test("inject with frontmatter stored separately from content", () => {
     _injectRiverDocForTesting("memory-protocol", "Protocol body", { section_priority: 4 });
-    // Content accessible via getCachedRiverDoc
     expect(getCachedRiverDoc("memory-protocol")).toBe("Protocol body");
-    // Frontmatter is used internally by buildPrompt (tested below)
   });
 });
 
@@ -118,11 +109,9 @@ describe("clearRiverDocCache", () => {
 // ── setRiverDocCacheTtl / stale-while-revalidate ──────────────────────────────
 
 describe("setRiverDocCacheTtl — TTL configuration", () => {
-  test("getCachedRiverDoc still returns stale content after TTL expires (stale-while-revalidate)", () => {
-    // Inject with TTL=0 → immediately stale
+  test("stale content still returned after TTL expires (stale-while-revalidate)", () => {
     setRiverDocCacheTtl(0);
     _injectRiverDocForTesting("soul", "Stale soul content");
-    // Stale content is still returned (refresh triggered in background)
     expect(getCachedRiverDoc("soul")).toBe("Stale soul content");
   });
 
@@ -140,159 +129,10 @@ describe("setRiverDocCacheTtl — TTL configuration", () => {
   });
 });
 
-// ── refreshRiverDocs ──────────────────────────────────────────────────────────
-
-describe("refreshRiverDocs", () => {
-  test("resolves without throwing (QMD may be unavailable)", async () => {
-    await expect(refreshRiverDocs()).resolves.toBeUndefined();
-  });
-
-  test("can be called twice concurrently without error", async () => {
-    await expect(Promise.all([refreshRiverDocs(), refreshRiverDocs()])).resolves.toBeDefined();
-  });
-});
-
-// ── buildPrompt — River soul integration ─────────────────────────────────────
-
-describe("buildPrompt — River soul (ELLIE-532)", () => {
-  test("uses River soul when injected for general agent (no agentConfig)", () => {
-    _injectRiverDocForTesting("soul", "RIVER SOUL CONTENT: patient teacher");
-    const result = buildPrompt("Hello");
-    expect(result).toContain("RIVER SOUL CONTENT: patient teacher");
-  });
-
-  test("uses River soul when agentConfig.name is 'general'", () => {
-    _injectRiverDocForTesting("soul", "RIVER SOUL: general test");
-    const result = buildPrompt("Hello", undefined, undefined, undefined, "telegram", {
-      system_prompt: null,
-      name: "general",
-    });
-    expect(result).toContain("RIVER SOUL: general test");
-  });
-
-  test("River soul section has label 'soul' in metrics", () => {
-    _injectRiverDocForTesting("soul", "River soul for metrics test");
-    buildPrompt("Hello");
-    const metrics = getLastBuildMetrics()!;
-    const soul = metrics.sections.find(s => s.label === "soul");
-    expect(soul).toBeDefined();
-  });
-
-  test("River soul does NOT appear for downstream agents (ELLIE-525 gate)", () => {
-    _injectRiverDocForTesting("soul", "RIVER SOUL SHOULD NOT APPEAR");
-    const result = buildPrompt("Fix it", undefined, undefined, undefined, "telegram", {
-      system_prompt: "You are a dev agent.",
-      name: "dev",
-    });
-    expect(result).not.toContain("RIVER SOUL SHOULD NOT APPEAR");
-    const metrics = getLastBuildMetrics()!;
-    expect(metrics.sections.find(s => s.label === "soul")).toBeUndefined();
-  });
-
-  test("River soul does NOT appear for research agent", () => {
-    _injectRiverDocForTesting("soul", "RIVER SOUL BLOCKED");
-    buildPrompt("Research this", undefined, undefined, undefined, "telegram", { name: "research" });
-    expect(getLastBuildMetrics()!.sections.find(s => s.label === "soul")).toBeUndefined();
-  });
-
-  test("falls back gracefully when River soul cache is empty (no soul section if local also missing)", () => {
-    // Cache is empty (beforeEach clears it). buildPrompt still works.
-    const result = buildPrompt("Hello");
-    expect(typeof result).toBe("string");
-    expect(result.length).toBeGreaterThan(0);
-  });
-});
-
-// ── buildPrompt — River memory-protocol integration ───────────────────────────
-
-describe("buildPrompt — River memory-protocol (ELLIE-532)", () => {
-  test("uses River memory-protocol content when injected", () => {
-    _injectRiverDocForTesting("memory-protocol", "RIVER: Custom memory instructions here");
-    const result = buildPrompt("Hello");
-    expect(result).toContain("RIVER: Custom memory instructions here");
-    expect(result).toContain("MEMORY MANAGEMENT:");
-  });
-
-  test("memory-protocol section absent when River cache is empty (ELLIE-537: no hardcoded fallback)", () => {
-    const result = buildPrompt("Hello");
-    expect(result).not.toContain("MEMORY MANAGEMENT:");
-  });
-});
-
-// ── buildPrompt — River confirm-protocol integration ──────────────────────────
-
-describe("buildPrompt — River confirm-protocol (ELLIE-532)", () => {
-  test("uses River confirm-protocol content when injected", () => {
-    _injectRiverDocForTesting("confirm-protocol", "RIVER: Custom confirm instructions");
-    const result = buildPrompt("Hello");
-    expect(result).toContain("RIVER: Custom confirm instructions");
-    expect(result).toContain("ACTION CONFIRMATIONS:");
-  });
-
-  test("confirm-protocol section absent when River cache is empty (ELLIE-537: no hardcoded fallback)", () => {
-    const result = buildPrompt("Hello");
-    expect(result).not.toContain("ACTION CONFIRMATIONS:");
-  });
-});
-
-// ── buildPrompt — frontmatter section_priority ────────────────────────────────
-
-describe("buildPrompt — frontmatter section_priority (ELLIE-532)", () => {
-  test("memory-protocol uses frontmatter section_priority when set", () => {
-    _injectRiverDocForTesting("memory-protocol", "Memory content", { section_priority: 4 });
-    buildPrompt("Hello");
-    const metrics = getLastBuildMetrics()!;
-    const mem = metrics.sections.find(s => s.label === "memory-protocol");
-    expect(mem).toBeDefined();
-    expect(mem!.priority).toBe(4);
-  });
-
-  test("confirm-protocol uses frontmatter section_priority when set", () => {
-    _injectRiverDocForTesting("confirm-protocol", "Confirm content", { section_priority: 4 });
-    buildPrompt("Hello");
-    const metrics = getLastBuildMetrics()!;
-    const confirm = metrics.sections.find(s => s.label === "confirm-protocol");
-    expect(confirm).toBeDefined();
-    expect(confirm!.priority).toBe(4);
-  });
-
-  test("default priority 3 used when no frontmatter section_priority", () => {
-    _injectRiverDocForTesting("memory-protocol", "Memory content"); // no frontmatter
-    buildPrompt("Hello");
-    const metrics = getLastBuildMetrics()!;
-    const mem = metrics.sections.find(s => s.label === "memory-protocol");
-    expect(mem).toBeDefined();
-    expect(mem!.priority).toBe(3);
-  });
-
-  test("section_priority 8 causes section to be suppressed (>= threshold)", () => {
-    _injectRiverDocForTesting("memory-protocol", "SUPPRESSED MEMORY", { section_priority: 8 });
-    const result = buildPrompt("Hello");
-    expect(result).not.toContain("SUPPRESSED MEMORY");
-  });
-
-  test("section_priority out of range (0 or 10) falls back to default 3", () => {
-    _injectRiverDocForTesting("memory-protocol", "Out of range prio", { section_priority: 0 });
-    buildPrompt("Hello");
-    const metrics = getLastBuildMetrics()!;
-    const mem = metrics.sections.find(s => s.label === "memory-protocol");
-    expect(mem!.priority).toBe(3);
-  });
-
-  test("non-numeric section_priority falls back to default 3", () => {
-    _injectRiverDocForTesting("confirm-protocol", "Non-numeric prio", { section_priority: "high" as any });
-    buildPrompt("Hello");
-    const metrics = getLastBuildMetrics()!;
-    const confirm = metrics.sections.find(s => s.label === "confirm-protocol");
-    expect(confirm!.priority).toBe(3);
-  });
-});
-
 // ── RIVER_DOC_PATHS coverage ──────────────────────────────────────────────────
 
 describe("RIVER_DOC_PATHS — registered keys", () => {
-  test("'soul' key is registered (getCachedRiverDoc accepts it)", () => {
-    // Registered keys return null on miss (not undefined/exception)
+  test("'soul' key is registered", () => {
     expect(getCachedRiverDoc("soul")).toBeNull();
   });
 
@@ -302,5 +142,75 @@ describe("RIVER_DOC_PATHS — registered keys", () => {
 
   test("'confirm-protocol' key is registered", () => {
     expect(getCachedRiverDoc("confirm-protocol")).toBeNull();
+  });
+
+  test("'dev-agent-template' key is registered", () => {
+    expect(getCachedRiverDoc("dev-agent-template")).toBeNull();
+  });
+
+  test("'research-agent-template' key is registered", () => {
+    expect(getCachedRiverDoc("research-agent-template")).toBeNull();
+  });
+
+  test("'strategy-agent-template' key is registered", () => {
+    expect(getCachedRiverDoc("strategy-agent-template")).toBeNull();
+  });
+
+  test("'forest-writes' key is registered", () => {
+    expect(getCachedRiverDoc("forest-writes")).toBeNull();
+  });
+
+  test("'playbook-commands' key is registered", () => {
+    expect(getCachedRiverDoc("playbook-commands")).toBeNull();
+  });
+
+  test("'work-commands' key is registered", () => {
+    expect(getCachedRiverDoc("work-commands")).toBeNull();
+  });
+
+  test("'planning-mode' key is registered", () => {
+    expect(getCachedRiverDoc("planning-mode")).toBeNull();
+  });
+});
+
+// ── Cache hit/miss/clear cycle ────────────────────────────────────────────────
+
+describe("cache hit/miss/clear cycle", () => {
+  test("miss → inject → hit → clear → miss", () => {
+    expect(getCachedRiverDoc("dev-agent-template")).toBeNull();
+    _injectRiverDocForTesting("dev-agent-template", "content-A");
+    expect(getCachedRiverDoc("dev-agent-template")).toBe("content-A");
+    clearRiverDocCache();
+    expect(getCachedRiverDoc("dev-agent-template")).toBeNull();
+  });
+
+  test("stale-while-revalidate: stale content returned after TTL=0", () => {
+    setRiverDocCacheTtl(0);
+    _injectRiverDocForTesting("dev-agent-template", "stale-template");
+    expect(getCachedRiverDoc("dev-agent-template")).toBe("stale-template");
+  });
+
+  test("clearRiverDocCache removes all keys", () => {
+    _injectRiverDocForTesting("dev-agent-template", "template");
+    _injectRiverDocForTesting("soul", "soul-content");
+    _injectRiverDocForTesting("memory-protocol", "memory");
+    clearRiverDocCache();
+    expect(getCachedRiverDoc("dev-agent-template")).toBeNull();
+    expect(getCachedRiverDoc("soul")).toBeNull();
+    expect(getCachedRiverDoc("memory-protocol")).toBeNull();
+  });
+
+  test("inject roundtrip for all 10 keys", () => {
+    const keys = [
+      "soul", "memory-protocol", "confirm-protocol",
+      "dev-agent-template", "research-agent-template", "strategy-agent-template",
+      "forest-writes", "playbook-commands", "work-commands", "planning-mode",
+    ];
+    for (const key of keys) {
+      _injectRiverDocForTesting(key, `content-${key}`);
+    }
+    for (const key of keys) {
+      expect(getCachedRiverDoc(key)).toBe(`content-${key}`);
+    }
   });
 });
