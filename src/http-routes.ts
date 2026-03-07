@@ -4285,6 +4285,27 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
   // Briefing endpoints (ELLIE-316) — extracted to api/routes/briefing.ts
   if (await handleBriefingRoute(req, res, url, supabase, bot)) return;
 
+  // Work Item Gardener endpoints (ELLIE-407)
+  if (url.pathname === "/api/work-item-gardener/run" && req.method === "POST") {
+    (async () => {
+      try {
+        const { workItemGardenerRunHandler } = await import("./api/work-item-gardener.ts");
+        await workItemGardenerRunHandler(req, res);
+      } catch (err) { logger.error("Work item gardener run error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/work-item-gardener/findings" && req.method === "GET") {
+    (async () => {
+      try {
+        const { workItemGardenerFindingsHandler } = await import("./api/work-item-gardener.ts");
+        await workItemGardenerFindingsHandler(req, res);
+      } catch (err) { logger.error("Work item gardener findings error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
   // Channel Gardener endpoints (ELLIE-335)
   if (url.pathname === "/api/channel-gardener/run" && req.method === "POST") {
     (async () => {

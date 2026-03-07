@@ -293,6 +293,17 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     }
   }, 15 * 60_000, "channel-gardener");
 
+  // Work Item Gardener — nightly at 3:15 AM CST (ELLIE-407)
+  periodicTask(async () => {
+    const { USER_TIMEZONE } = await import("./timezone.ts");
+    const cst = new Date(new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE }));
+    if (cst.getHours() === 3 && cst.getMinutes() >= 15 && cst.getMinutes() < 30) {
+      const { runWorkItemGardener } = await import("./api/work-item-gardener.ts");
+      const result = await runWorkItemGardener();
+      logger.info("Work item gardener complete", result);
+    }
+  }, 15 * 60_000, "work-item-gardener");
+
   // Job Intelligence — nightly at 3:30 AM CST (ELLIE-456)
   periodicTask(async () => {
     const { USER_TIMEZONE } = await import("./timezone.ts");
