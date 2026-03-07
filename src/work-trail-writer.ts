@@ -11,6 +11,7 @@
 
 import { writeFile, mkdir, readFile } from 'fs/promises'
 import { join } from 'path'
+import { spawn } from 'bun'
 import { buildWorkTrailPath } from './work-trail.ts'
 import { RIVER_ROOT, qmdReindex } from './api/bridge-river.ts'
 import { log } from './logger.ts'
@@ -113,6 +114,116 @@ export function buildWorkTrailDecisionAppend(message: string, agent?: string, ts
   return `\n### Decision — ${timestamp}\n\n${prefix}${message}\n`
 }
 
+// ── Section-aware content insertion (ELLIE-630) ──────────────────────────────
+
+/**
+ * Insert content into a specific ## section of a work trail document.
+ *
+ * Finds the section heading, then inserts content before the next ## heading
+ * (or before the `---` footer). Replaces HTML comment placeholders if present.
+ *
+ * Pure — no file system access.
+ *
+ * @param content     Full document content
+ * @param section     Section heading (e.g. "## What Was Done")
+ * @param insertText  Content to insert/append inside the section
+ * @returns           Updated document content, or null if section not found
+ */
+export function insertIntoSection(
+  content: string,
+  section: string,
+  insertText: string,
+): string | null {
+  const sectionIdx = content.indexOf(section)
+  if (sectionIdx === -1) return null
+
+  // Find the end of the section heading line
+  const headingEnd = content.indexOf('\n', sectionIdx)
+  if (headingEnd === -1) return null
+
+  // Find the next ## heading or the --- footer
+  const afterHeading = content.slice(headingEnd + 1)
+  const nextSectionMatch = afterHeading.match(/^## /m)
+  const footerIdx = afterHeading.indexOf('\n---\n')
+
+  let insertPos: number
+  if (nextSectionMatch && nextSectionMatch.index !== undefined) {
+    const nextIdx = nextSectionMatch.index
+    // If footer comes first, use that
+    if (footerIdx !== -1 && footerIdx < nextIdx) {
+      insertPos = headingEnd + 1 + footerIdx
+    } else {
+      insertPos = headingEnd + 1 + nextIdx
+    }
+  } else if (footerIdx !== -1) {
+    insertPos = headingEnd + 1 + footerIdx
+  } else {
+    // No next section or footer — append at end
+    insertPos = content.length
+  }
+
+  // Get current section body (between heading and next section)
+  let sectionBody = content.slice(headingEnd + 1, insertPos)
+
+  // Remove HTML comment placeholders
+  sectionBody = sectionBody.replace(/<!--[^>]*-->\n?/g, '')
+
+  // For the Files Changed table, keep the header row
+  const trimmed = sectionBody.trimEnd()
+
+  // Build the new section body
+  const newBody = trimmed
+    ? trimmed + '\n' + insertText + '\n\n'
+    : '\n' + insertText + '\n\n'
+
+  return content.slice(0, headingEnd + 1) + newBody + content.slice(insertPos)
+}
+
+/**
+ * Build a Files Changed markdown table from git diff data (ELLIE-630).
+ *
+ * @param files  Array of { file, change } entries
+ */
+export function buildFilesChangedTable(
+  files: Array<{ file: string; change: string }>,
+): string {
+  if (!files.length) return '| (none) | — |'
+  return files.map(f => `| \`${f.file}\` | ${f.change} |`).join('\n')
+}
+
+/**
+ * Collect recently changed files from git (ELLIE-630).
+ *
+ * Looks at the most recent commit's diff stat. Non-fatal — returns empty on error.
+ */
+export async function collectGitFilesChanged(
+  cwd: string = process.cwd(),
+): Promise<Array<{ file: string; change: string }>> {
+  try {
+    const proc = spawn({
+      cmd: ['git', 'diff', '--name-status', 'HEAD~1..HEAD'],
+      cwd,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const text = await new Response(proc.stdout).text()
+    await proc.exited
+
+    if (!text.trim()) return []
+
+    return text.trim().split('\n').map(line => {
+      const [status, ...parts] = line.split('\t')
+      const file = parts.join('\t')
+      const changeMap: Record<string, string> = {
+        A: 'Added', M: 'Modified', D: 'Deleted', R: 'Renamed',
+      }
+      return { file, change: changeMap[status?.[0] ?? ''] ?? status ?? 'Changed' }
+    }).filter(f => f.file)
+  } catch {
+    return []
+  }
+}
+
 // ── Pure frontmatter updaters ─────────────────────────────────────────────
 
 /**
@@ -212,6 +323,8 @@ export async function writeWorkTrailStart(
 /**
  * Append content to an existing work trail (for updates and completion).
  *
+ * - If `section` is provided, inserts content into the named ## section (ELLIE-630).
+ * - Otherwise, appends at the end of the file (legacy behavior).
  * - If the file doesn't exist, creates it with just the appended content.
  * - Non-fatal: catches all errors and returns false.
  * - Triggers QMD reindex after write.
@@ -219,11 +332,13 @@ export async function writeWorkTrailStart(
  * @param workItemId     Ticket identifier
  * @param appendContent  Content to append
  * @param date           YYYY-MM-DD date for path (optional, defaults to today)
+ * @param section        Section heading to insert into (e.g. "## What Was Done")
  */
 export async function appendWorkTrailProgress(
   workItemId: string,
   appendContent: string,
   date?: string,
+  section?: string,
 ): Promise<boolean> {
   try {
     const path = buildWorkTrailPath(workItemId, date)
@@ -238,8 +353,16 @@ export async function appendWorkTrailProgress(
       await mkdir(dirPath, { recursive: true })
     }
 
-    await writeFile(fullPath, existing.trimEnd() + '\n' + appendContent, 'utf-8')
-    logger.info('Work trail appended', { path })
+    let result: string
+    if (section && existing) {
+      const inserted = insertIntoSection(existing, section, appendContent)
+      result = inserted ?? (existing.trimEnd() + '\n' + appendContent)
+    } else {
+      result = existing.trimEnd() + '\n' + appendContent
+    }
+
+    await writeFile(fullPath, result, 'utf-8')
+    logger.info('Work trail appended', { path, section: section ?? 'end' })
 
     await qmdReindex()
     return true

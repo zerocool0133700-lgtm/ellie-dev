@@ -36,6 +36,8 @@ import {
   buildWorkTrailUpdateAppend,
   buildWorkTrailCompleteAppend,
   buildWorkTrailDecisionAppend,
+  buildFilesChangedTable,
+  collectGitFilesChanged,
   finalizeWorkTrail,
 } from "../work-trail-writer.ts";
 import { verifyDispatch } from "../dispatch-verifier.ts";
@@ -322,8 +324,8 @@ export async function updateWorkSession(req: ApiRequest, res: ApiResponse, bot: 
         logRiverWriteFailure("writeFindingToForest", e));
     }
 
-    // ELLIE-531: Append update to work trail (fire-and-forget, non-fatal)
-    appendWorkTrailProgress(work_item_id, buildWorkTrailUpdateAppend(message)).catch(e => logRiverWriteFailure("appendWorkTrailProgress/update", e));
+    // ELLIE-531 + ELLIE-630: Append update into ## What Was Done section (fire-and-forget, non-fatal)
+    appendWorkTrailProgress(work_item_id, buildWorkTrailUpdateAppend(message), undefined, "## What Was Done").catch(e => logRiverWriteFailure("appendWorkTrailProgress/update", e));
 
     // Notify via policy engine (Google Chat only by default — Telegram disabled for updates)
     const telegramMsg = [
@@ -426,8 +428,8 @@ export async function logDecision(req: ApiRequest, res: ApiResponse, bot: Bot) {
     writeDecisionToForest(work_item_id, message, agent, undefined, tree.id).catch(e =>
       logRiverWriteFailure("writeDecisionToForest", e));
 
-    // ELLIE-630: Append decision to work trail (fire-and-forget, non-fatal)
-    appendWorkTrailProgress(work_item_id, buildWorkTrailDecisionAppend(message, agent)).catch(e =>
+    // ELLIE-630: Append decision into ## Decisions section (fire-and-forget, non-fatal)
+    appendWorkTrailProgress(work_item_id, buildWorkTrailDecisionAppend(message, agent), undefined, "## Decisions").catch(e =>
       logRiverWriteFailure("appendWorkTrailProgress/decision", e));
 
     // ELLIE-455: J scope touchpoint — decision logged
@@ -484,8 +486,14 @@ export async function completeWorkSession(req: ApiRequest, res: ApiResponse, bot
     // Complete session in forest (merges branches, completes creatures, transitions to dormant)
     await forestCompleteSession(tree.id, summary);
 
-    // ELLIE-531 + ELLIE-630: Append completion summary then finalize frontmatter (chained, fire-and-forget)
-    appendWorkTrailProgress(work_item_id, buildWorkTrailCompleteAppend(summary))
+    // ELLIE-630: Populate ## Files Changed from git, append completion, then finalize (chained, fire-and-forget)
+    collectGitFilesChanged()
+      .then(files => {
+        if (files.length > 0) {
+          return appendWorkTrailProgress(work_item_id, buildFilesChangedTable(files), undefined, "## Files Changed");
+        }
+      })
+      .then(() => appendWorkTrailProgress(work_item_id, buildWorkTrailCompleteAppend(summary)))
       .then(() => finalizeWorkTrail(work_item_id))
       .catch(e => logRiverWriteFailure("appendWorkTrailProgress/complete+finalize", e));
 
