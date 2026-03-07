@@ -105,7 +105,7 @@ function parseWiringFrontmatter(raw: string): { frontmatter: AgentWiring; body: 
 
     if (key === 'creature') wiring.creature = val
     else if (key === 'role') wiring.role = val
-    else if (key === 'token_budget') wiring.token_budget = parseInt(val, 10) || 24000
+    else if (key === 'token_budget') wiring.token_budget = parseInt(val, 10) || 100_000
     else if (key === 'context_mode') wiring.context_mode = val
     else if (key === 'soul') wiring.soul = val === 'true'
     else if (key === 'relationship_sections') {
@@ -137,7 +137,7 @@ function defaultWiring(): AgentWiring {
   return {
     creature: 'squirrel',
     role: 'general',
-    token_budget: 24000,
+    token_budget: 100_000,
     context_mode: 'conversation',
     soul: true,
     relationship_sections: ['psych', 'health'],

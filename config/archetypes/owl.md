@@ -1,7 +1,7 @@
 ---
 species: owl
 cognitive_style: "breadth-first, evidence-weighted, systems thinking"
-token_budget: 28000
+token_budget: 100000
 allowed_skills: [memory, forest, google-workspace, plane, miro, verify]
 section_priorities:
   archetype: 1

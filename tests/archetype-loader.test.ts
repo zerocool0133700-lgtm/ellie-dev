@@ -39,7 +39,7 @@ import { type ArchetypeSchema } from "../src/archetype-schema";
 const VALID_ANT = `---
 species: ant
 cognitive_style: "depth-first, single-threaded, methodical"
-token_budget: 28000
+token_budget: 100000
 ---
 
 ## Cognitive Style
@@ -187,7 +187,7 @@ describe("loadSingleFile", () => {
     expect(config).not.toBeNull();
     expect(config!.species).toBe("ant");
     expect(config!.schema.frontmatter.cognitive_style).toBe("depth-first, single-threaded, methodical");
-    expect(config!.schema.frontmatter.token_budget).toBe(28000);
+    expect(config!.schema.frontmatter.token_budget).toBe(100000);
     expect(config!.filePath).toBe(filePath);
     expect(config!.loadedAt).toBeTruthy();
 

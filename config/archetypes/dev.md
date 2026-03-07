@@ -1,7 +1,7 @@
 ---
 species: ant
 cognitive_style: "depth-first, single-threaded, code-path tracing"
-token_budget: 28000
+token_budget: 100000
 allowed_skills: [github, plane, memory, forest, verify, context-strategy]
 section_priorities:
   archetype: 1

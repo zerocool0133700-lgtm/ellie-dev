@@ -174,7 +174,7 @@ describe("Ant archetype dispatch integration", () => {
 
   it("cached profile has correct token_budget", () => {
     const cached = getCreatureProfile("ant")!;
-    expect(cached.token_budget).toBe(28000);
+    expect(cached.token_budget).toBe(100000);
   });
 
   it("cached profile has correct allowed_skills", () => {

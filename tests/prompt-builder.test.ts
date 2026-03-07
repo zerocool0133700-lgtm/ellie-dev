@@ -393,7 +393,7 @@ describe("buildPrompt — channel profile", () => {
       undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
-      { channelName: "Research", contextMode: "strategy" as any, suppressedSections: [], tokenBudget: 24000, contextPriority: 2, sources: [] },
+      { channelName: "Research", contextMode: "strategy" as any, suppressedSections: [], tokenBudget: 100_000, contextPriority: 2, sources: [] },
     );
     expect(result).toContain("CURRENT CHANNEL: Research");
     expect(result).toContain("Channel mode: strategy");
@@ -406,7 +406,7 @@ describe("buildPrompt — channel profile", () => {
       undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined,
-      { channelName: "Test", contextMode: "general" as any, suppressedSections: ["confirm-protocol"], tokenBudget: 24000, contextPriority: 2, sources: [] },
+      { channelName: "Test", contextMode: "general" as any, suppressedSections: ["confirm-protocol"], tokenBudget: 100_000, contextPriority: 2, sources: [] },
     );
     expect(result).not.toContain("ACTION CONFIRMATIONS:");
   });

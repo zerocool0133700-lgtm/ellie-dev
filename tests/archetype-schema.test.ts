@@ -29,7 +29,7 @@ import {
 const VALID_ARCHETYPE = `---
 species: ant
 cognitive_style: "depth-first, single-threaded, methodical"
-token_budget: 28000
+token_budget: 100000
 allowed_skills: [github, plane, memory]
 ---
 
@@ -80,7 +80,7 @@ describe("parseArchetype", () => {
     expect(result).not.toBeNull();
     expect(result!.frontmatter.species).toBe("ant");
     expect(result!.frontmatter.cognitive_style).toBe("depth-first, single-threaded, methodical");
-    expect(result!.frontmatter.token_budget).toBe(28000);
+    expect(result!.frontmatter.token_budget).toBe(100000);
     expect(result!.frontmatter.allowed_skills).toEqual(["github", "plane", "memory"]);
   });
 

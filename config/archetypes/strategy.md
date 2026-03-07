@@ -1,7 +1,7 @@
 ---
 species: squirrel
 cognitive_style: "systems thinking, strategic pattern analysis"
-token_budget: 24000
+token_budget: 100000
 allowed_skills: [plane, memory, forest, miro, verify, context-strategy]
 section_priorities:
   forest-awareness: 1

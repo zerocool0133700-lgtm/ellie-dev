@@ -1,7 +1,7 @@
 ---
 species: ant
 cognitive_style: "metrics-driven, depth-first financial analysis"
-token_budget: 20000
+token_budget: 100000
 allowed_skills: [plane, memory, forest, verify]
 section_priorities:
   archetype: 1

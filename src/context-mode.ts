@@ -405,7 +405,7 @@ const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
 };
 
 const DEFAULT_MODE_TOKEN_BUDGETS: Record<ContextMode, number> = {
-  conversation: 80_000,
+  conversation: 100_000,  // ELLIE-628: raised from 80k to match 100k window
   strategy: 150_000,
   workflow: 120_000,
   "deep-work": 190_000,

@@ -159,7 +159,7 @@ The wiring file binds a creature + role into a concrete agent with runtime confi
 ---
 creature: ant
 role: dev
-token_budget: 28000
+token_budget: 100000
 context_mode: deep-work
 soul: true
 relationship_sections: [psych, health]

@@ -15,8 +15,8 @@ import { log } from "../logger.ts";
 
 const logger = log.child("session-compaction");
 
-const WARN_THRESHOLD     = 0.60;  // 60% → suggest wrapping up
-const CRITICAL_THRESHOLD = 0.80;  // 80% → auto-checkpoint + urgent notice
+const WARN_THRESHOLD     = 0.70;  // 70% → suggest wrapping up (ELLIE-628: raised from 60% for 100k window)
+const CRITICAL_THRESHOLD = 0.85;  // 85% → auto-checkpoint + urgent notice (ELLIE-628: raised from 80%)
 
 // ── Types ──────────────────────────────────────────────────────────────────
 

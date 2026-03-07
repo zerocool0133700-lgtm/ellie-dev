@@ -57,7 +57,7 @@ function makeMetrics(tokensUsed: number, budget: number): BuildMetrics {
 // ── checkContextPressure ──────────────────────────────────────────────────────
 
 describe("checkContextPressure", () => {
-  test("returns ok when below 60%", () => {
+  test("returns ok when below 70%", () => {
     const p = checkContextPressure(makeMetrics(50_000, 100_000));
     expect(p.level).toBe("ok");
     expect(p.pct).toBeCloseTo(0.5);
@@ -65,28 +65,28 @@ describe("checkContextPressure", () => {
     expect(p.budget).toBe(100_000);
   });
 
-  test("returns ok at exactly 59.9%", () => {
-    const p = checkContextPressure(makeMetrics(59_900, 100_000));
+  test("returns ok at exactly 69.9%", () => {
+    const p = checkContextPressure(makeMetrics(69_900, 100_000));
     expect(p.level).toBe("ok");
   });
 
-  test("returns warn at exactly 60%", () => {
-    const p = checkContextPressure(makeMetrics(60_000, 100_000));
+  test("returns warn at exactly 70%", () => {
+    const p = checkContextPressure(makeMetrics(70_000, 100_000));
     expect(p.level).toBe("warn");
   });
 
-  test("returns warn between 60% and 80%", () => {
+  test("returns warn between 70% and 85%", () => {
     const p = checkContextPressure(makeMetrics(75_000, 100_000));
     expect(p.level).toBe("warn");
     expect(p.pct).toBeCloseTo(0.75);
   });
 
-  test("returns critical at exactly 80%", () => {
-    const p = checkContextPressure(makeMetrics(80_000, 100_000));
+  test("returns critical at exactly 85%", () => {
+    const p = checkContextPressure(makeMetrics(85_000, 100_000));
     expect(p.level).toBe("critical");
   });
 
-  test("returns critical above 80%", () => {
+  test("returns critical above 85%", () => {
     const p = checkContextPressure(makeMetrics(95_000, 100_000));
     expect(p.level).toBe("critical");
     expect(p.pct).toBeCloseTo(0.95);

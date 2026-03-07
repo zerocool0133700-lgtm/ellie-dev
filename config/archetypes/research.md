@@ -1,7 +1,7 @@
 ---
 species: squirrel
 cognitive_style: "source-based, confidence-weighted foraging"
-token_budget: 28000
+token_budget: 100000
 allowed_skills: [memory, forest, google-workspace, verify, skill-detector]
 section_priorities:
   forest-awareness: 1

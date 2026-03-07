@@ -40,7 +40,7 @@ function writeArchetype(dir: string, species: string) {
   const content = [
     "---",
     `species: ${species}`,
-    "token_budget: 20000",
+    "token_budget: 100000",
     "allowed_skills: [memory]",
     "section_priorities:",
     "  archetype: 1",
