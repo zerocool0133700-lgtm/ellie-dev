@@ -24,7 +24,7 @@ let esAvailable = true;
 /**
  * Check if ES is reachable. Disables for 60s on failure.
  */
-async function checkHealth(): Promise<boolean> {
+export async function checkHealth(): Promise<boolean> {
   if (!ES_URL) return false;
   if (!esAvailable) return false;
 
@@ -46,7 +46,7 @@ async function checkHealth(): Promise<boolean> {
 /**
  * Send a request to Elasticsearch.
  */
-async function esRequest(
+export async function esRequest(
   method: string,
   path: string,
   body?: object

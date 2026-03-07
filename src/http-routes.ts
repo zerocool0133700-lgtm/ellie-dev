@@ -3310,6 +3310,54 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // ── ELLIE-633: Search API ───────────────────────────────────
+  if (url.pathname === "/api/search" && req.method === "GET") {
+    const { searchEndpoint } = await import("./api/search.ts");
+    const { supabase } = getRelayDeps();
+    const mockReq: ApiRequest = {
+      query: Object.fromEntries(url.searchParams.entries()),
+    };
+    const mockRes: ApiResponse = {
+      json: (data: unknown) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(data));
+      },
+      status: (code: number) => ({
+        json: (data: unknown) => {
+          res.writeHead(code, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(data));
+        },
+      }),
+    };
+    await searchEndpoint(mockReq, mockRes, supabase!);
+    return;
+  }
+
+  // ── ELLIE-633: Conversation loading API ────────────────────
+  if (url.pathname.startsWith("/api/conversations/") && req.method === "GET") {
+    const { getConversationEndpoint } = await import("./api/search.ts");
+    const { supabase } = getRelayDeps();
+    const id = url.pathname.replace("/api/conversations/", "").split("/")[0];
+    const mockReq: ApiRequest = {
+      params: { id },
+      query: Object.fromEntries(url.searchParams.entries()),
+    };
+    const mockRes: ApiResponse = {
+      json: (data: unknown) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(data));
+      },
+      status: (code: number) => ({
+        json: (data: unknown) => {
+          res.writeHead(code, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(data));
+        },
+      }),
+    };
+    await getConversationEndpoint(mockReq, mockRes, supabase!);
+    return;
+  }
+
   // Ellie Chat broadcast endpoint
   if (url.pathname === "/api/ellie-chat/send" && req.method === "POST") {
     let body = "";
