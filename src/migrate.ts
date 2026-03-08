@@ -17,6 +17,77 @@ import { join, basename } from "path";
 import { createHash } from "crypto";
 import postgres from "postgres";
 
+// ── Supabase Management API Adapter ─────────────────────────────────────────
+// Falls back to the Management API when DATABASE_URL is not set.
+// Reads SUPABASE_PROJECT_REF and SUPABASE_ACCESS_TOKEN from env.
+
+interface SupabaseApiResult {
+  unsafe(query: string): Promise<Record<string, unknown>[]>;
+  end(): Promise<void>;
+}
+
+function escapeSQL(value: unknown): string {
+  if (value === null || value === undefined) return "NULL";
+  if (typeof value === "number") return String(value);
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  // Escape single quotes by doubling them
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+function buildTaggedSQL(strings: TemplateStringsArray, ...values: unknown[]): string {
+  let sql = "";
+  for (let i = 0; i < strings.length; i++) {
+    sql += strings[i];
+    if (i < values.length) sql += escapeSQL(values[i]);
+  }
+  return sql;
+}
+
+async function supabaseApiQuery(
+  projectRef: string,
+  accessToken: string,
+  query: string,
+): Promise<Record<string, unknown>[]> {
+  const res = await fetch(
+    `https://api.supabase.com/v1/projects/${projectRef}/database/query`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query }),
+    },
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Supabase API error (${res.status}): ${text}`);
+  }
+  const data = await res.json();
+  // Management API returns an array of row objects
+  return Array.isArray(data) ? data : [];
+}
+
+function createSupabaseApiAdapter(
+  projectRef: string,
+  accessToken: string,
+): SupabaseApiResult & ((strings: TemplateStringsArray, ...values: unknown[]) => Promise<Record<string, unknown>[]>) {
+  const queryFn = async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const sql = buildTaggedSQL(strings, ...values);
+    return supabaseApiQuery(projectRef, accessToken, sql);
+  };
+
+  queryFn.unsafe = async (query: string) => {
+    return supabaseApiQuery(projectRef, accessToken, query);
+  };
+
+  queryFn.end = async () => {
+    // No-op — HTTP adapter has no persistent connection
+  };
+
+  return queryFn;
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export type DatabaseTarget = "supabase" | "forest";
@@ -151,11 +222,23 @@ export async function getSeedFiles(db: DatabaseTarget): Promise<MigrationFile[]>
 
 // ── Database Connections ───────────────────────────────────────────────────
 
-export function getConnection(db: DatabaseTarget): ReturnType<typeof postgres> | null {
+export type SqlConnection = ReturnType<typeof postgres>;
+export type SqlLike = SqlConnection | ReturnType<typeof createSupabaseApiAdapter>;
+
+export function getConnection(db: DatabaseTarget): SqlLike | null {
   if (db === "supabase") {
+    // Prefer direct Postgres connection if available
     const url = process.env.DATABASE_URL;
-    if (!url) return null;
-    return postgres(url, { max: 1, idle_timeout: 5 });
+    if (url) return postgres(url, { max: 1, idle_timeout: 5 });
+
+    // Fall back to Supabase Management API
+    const projectRef = process.env.SUPABASE_PROJECT_REF;
+    const accessToken = process.env.SUPABASE_ACCESS_TOKEN;
+    if (projectRef && accessToken) {
+      return createSupabaseApiAdapter(projectRef, accessToken) as unknown as SqlConnection;
+    }
+
+    return null;
   }
 
   // Forest — local Postgres
