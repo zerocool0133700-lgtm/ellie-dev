@@ -18,6 +18,9 @@ import {
   getScope, getChildScopes, getBreadcrumb,
   isAncestor,
   sql,
+  promoteToCore, demoteToExtended,
+  convertToGoal, updateGoalStatus, completeGoal,
+  getMemory, countByTier,
 } from '../../../ellie-forest/src/index'
 import { createQueueItemDirect } from './agent-queue'
 import { searchRiver } from './bridge-river.ts'
@@ -420,4 +423,109 @@ export async function bridgeWhoamiEndpoint(req: ApiRequest, res: ApiResponse) {
     permissions: key.permissions,
     entity_id: key.entity_id,
   })
+}
+
+// ── POST /api/bridge/promote — ELLIE-640 ────────────────────
+
+export async function bridgePromoteEndpoint(req: ApiRequest, res: ApiResponse) {
+  const key = await authenticateBridgeKey(req.bridgeKey, res, 'write')
+  if (!key) return
+
+  try {
+    const { memory_id, target_tier, goal_status, goal_deadline, goal_progress, completion_criteria } = req.body
+
+    if (!memory_id) {
+      return res.status(400).json({ error: 'Missing required field: memory_id' })
+    }
+
+    const validTiers = ['core', 'goals']
+    const tier = target_tier ?? 'core'
+    if (!validTiers.includes(tier)) {
+      return res.status(400).json({ error: `Invalid target_tier '${tier}'. Allowed: ${validTiers.join(', ')}` })
+    }
+
+    // Verify memory exists
+    const existing = await getMemory(memory_id)
+    if (!existing) {
+      return res.status(404).json({ error: `Memory ${memory_id} not found` })
+    }
+
+    let memory
+    if (tier === 'core') {
+      memory = await promoteToCore(memory_id)
+    } else {
+      memory = await convertToGoal(memory_id, {
+        goal_status: goal_status ?? 'active',
+        goal_deadline,
+        goal_progress,
+        completion_criteria,
+      })
+    }
+
+    logger.info(`${key.key_prefix} (${key.collaborator}) promoted ${memory_id.slice(0, 8)} to ${tier}`)
+
+    return res.json({
+      success: true,
+      memory_id: memory.id,
+      memory_tier: memory.memory_tier,
+      goal_status: memory.goal_status,
+    })
+  } catch (error) {
+    logger.error("Promote failed", error)
+    return res.status(500).json({ error: 'Internal server error' })
+  }
+}
+
+// ── POST /api/bridge/demote — ELLIE-640 ─────────────────────
+
+export async function bridgeDemoteEndpoint(req: ApiRequest, res: ApiResponse) {
+  const key = await authenticateBridgeKey(req.bridgeKey, res, 'write')
+  if (!key) return
+
+  try {
+    const { memory_id, complete_goal } = req.body
+
+    if (!memory_id) {
+      return res.status(400).json({ error: 'Missing required field: memory_id' })
+    }
+
+    const existing = await getMemory(memory_id)
+    if (!existing) {
+      return res.status(404).json({ error: `Memory ${memory_id} not found` })
+    }
+
+    let memory
+    if (existing.memory_tier === 'goals' && complete_goal) {
+      memory = await completeGoal(memory_id, { demote_to_extended: true })
+    } else {
+      memory = await demoteToExtended(memory_id)
+    }
+
+    logger.info(`${key.key_prefix} (${key.collaborator}) demoted ${memory_id.slice(0, 8)} to extended`)
+
+    return res.json({
+      success: true,
+      memory_id: memory.id,
+      memory_tier: memory.memory_tier,
+      goal_status: memory.goal_status,
+    })
+  } catch (error) {
+    logger.error("Demote failed", error)
+    return res.status(500).json({ error: 'Internal server error' })
+  }
+}
+
+// ── GET /api/bridge/tiers — ELLIE-640 ───────────────────────
+
+export async function bridgeTiersEndpoint(req: ApiRequest, res: ApiResponse) {
+  const key = await authenticateBridgeKey(req.bridgeKey, res, 'read')
+  if (!key) return
+
+  try {
+    const counts = await countByTier()
+    return res.json({ success: true, tiers: counts })
+  } catch (error) {
+    logger.error("Tiers count failed", error)
+    return res.status(500).json({ error: 'Internal server error' })
+  }
 }

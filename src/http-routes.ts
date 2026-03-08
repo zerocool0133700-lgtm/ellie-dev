@@ -3554,6 +3554,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           bridgeReadEndpoint, bridgeWriteEndpoint,
           bridgeListEndpoint, bridgeScopesEndpoint,
           bridgeWhoamiEndpoint, bridgeTagsEndpoint,
+          bridgePromoteEndpoint, bridgeDemoteEndpoint, bridgeTiersEndpoint,
         } = await import("./api/bridge.ts");
 
         const {
@@ -3608,6 +3609,18 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           case "tags":
             if (isPost) { res.writeHead(405); res.end(); return; }
             await bridgeTagsEndpoint(mockReq, mockRes);
+            break;
+          case "promote":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await bridgePromoteEndpoint(mockReq, mockRes);
+            break;
+          case "demote":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await bridgeDemoteEndpoint(mockReq, mockRes);
+            break;
+          case "tiers":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await bridgeTiersEndpoint(mockReq, mockRes);
             break;
           case "river/search":
             if (!isPost) { res.writeHead(405); res.end(); return; }

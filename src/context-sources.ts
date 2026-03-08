@@ -1137,7 +1137,40 @@ export async function getAgentMemoryContext(
       SELECT id FROM creatures WHERE tree_id = ${tree.id} AND entity_id = ${entity.id} AND state IN ('pending', 'dispatched', 'working') LIMIT 1
     `;
 
-    // Retrieve memories
+    // ELLIE-640: Tier-aware memory retrieval
+    const { getCoreMemories, getActiveGoals } = await import('../../ellie-forest/src/index');
+
+    // Tier 1: Core memories — always injected (identity, constraints, preferences)
+    let memoryContext = '';
+    try {
+      const coreMemories = await getCoreMemories({ limit: 50 });
+      if (coreMemories.length > 0) {
+        const coreLines = coreMemories.map((m: { content: string; category: string }) => {
+          return `  [${m.category}] ${m.content}`;
+        });
+        memoryContext = `\nCORE MEMORY (always-loaded identity & preferences — ${coreMemories.length} facts):\n${coreLines.join('\n')}`;
+      }
+    } catch (err) {
+      logger.warn("Core memory fetch failed", { agent: agentName }, err);
+    }
+
+    // Tier 3: Active goals — injected alongside Core
+    try {
+      const activeGoals = await getActiveGoals({ limit: 20 });
+      if (activeGoals.length > 0) {
+        const goalLines = activeGoals.map((g: { content: string; goal_status: string | null; goal_progress: number | null; goal_deadline: Date | null }) => {
+          const status = g.goal_status ? `[${g.goal_status}]` : '';
+          const progress = g.goal_progress != null ? ` ${Math.round(g.goal_progress * 100)}%` : '';
+          const deadline = g.goal_deadline ? ` (due: ${new Date(g.goal_deadline).toISOString().slice(0, 10)})` : '';
+          return `  ${status} ${g.content}${progress}${deadline}`;
+        });
+        memoryContext += `\n\nACTIVE GOALS (${activeGoals.length}):\n${goalLines.join('\n')}`;
+      }
+    } catch (err) {
+      logger.warn("Active goals fetch failed", { agent: agentName }, err);
+    }
+
+    // Tier 2: Extended memories — session-scoped, retrieved on-demand
     const memories = await getAgentContext({
       tree_id: tree.id,
       branch_id: branch?.id,
@@ -1146,16 +1179,14 @@ export async function getAgentMemoryContext(
       include_global: true,
     });
 
-    // Format memories for prompt
-    let memoryContext = '';
     if (memories.length > 0) {
       const lines = memories.map((m: MemorySearchResult) => {
         const scope = m.scope === 'global' ? '[global]' : m.scope === 'tree' ? '[session]' : `[${m.scope}]`;
         const conf = m.confidence ? ` (confidence: ${m.confidence.toFixed(1)})` : '';
         return `  ${scope} ${m.content}${conf}`;
       });
-      memoryContext =
-        `\nAGENT MEMORY CONTEXT (${memories.length} memories from past sessions):` +
+      memoryContext +=
+        `\n\nSESSION MEMORY (${memories.length} extended memories from past sessions):` +
         `\n${lines.join('\n')}`;
     }
 
