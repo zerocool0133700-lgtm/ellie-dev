@@ -1114,3 +1114,16 @@ function inferTags(content: string): string[] {
 
   return tags;
 }
+
+// ── Test-only exports ────────────────────────────────────────
+// These are internal functions exported for unit testing.
+// Do NOT use these in production code outside of tests.
+
+export const _testing = {
+  parseTags,
+  extractPatterns,
+  classifyFactType,
+  classifyCategory,
+  classifyConflictType,
+  inferTags,
+};
