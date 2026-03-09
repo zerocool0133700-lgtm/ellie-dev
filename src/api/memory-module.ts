@@ -18,11 +18,12 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ApiRequest, ApiResponse } from "./types.ts";
+import forestSql from "../../../ellie-forest/src/db";
 
-// ── Facts: List ───────────────────────────────────────────────
+// ── Facts: List (reads from Forest shared_memories) ──────────
 
 export async function listFacts(
-  req: ApiRequest, res: ApiResponse, supabase: SupabaseClient,
+  req: ApiRequest, res: ApiResponse, _supabase: SupabaseClient,
 ): Promise<void> {
   const limit = Math.min(Number(req.query?.limit) || 50, 200);
   const offset = Number(req.query?.offset) || 0;
@@ -30,45 +31,34 @@ export async function listFacts(
   const category = req.query?.category;
   const status = req.query?.status || "active";
   const minConfidence = req.query?.min_confidence ? Number(req.query.min_confidence) : undefined;
-  const tag = req.query?.tag;
   const sort = req.query?.sort || "created_at";
-  const order = req.query?.order === "asc" ? true : false;
+  const order = req.query?.order === "asc" ? "ASC" : "DESC";
 
   try {
-    let query = supabase
-      .from("conversation_facts")
-      .select("*", { count: "exact" })
-      .eq("status", status);
+    const types = type ? type.split(",").map((t: string) => t.trim()) : null;
 
-    if (type) {
-      const types = type.split(",").map(t => t.trim());
-      query = query.in("type", types);
-    }
-    if (category) {
-      query = query.eq("category", category);
-    }
-    if (minConfidence !== undefined) {
-      query = query.gte("confidence", minConfidence);
-    }
-    if (tag) {
-      query = query.contains("tags", [tag]);
-    }
+    const rows = await forestSql`
+      SELECT id, content, type, category, confidence, tags, scope_path,
+             cognitive_type, metadata, created_at, updated_at
+      FROM shared_memories
+      WHERE status = ${status}
+        AND archived_at IS NULL
+        ${types ? forestSql`AND type::text = ANY(${types})` : forestSql``}
+        ${category ? forestSql`AND category::text = ${category}` : forestSql``}
+        ${minConfidence !== undefined ? forestSql`AND confidence >= ${minConfidence}` : forestSql``}
+      ORDER BY ${sort === "confidence" ? forestSql`confidence` : sort === "updated_at" ? forestSql`updated_at` : forestSql`created_at`} ${order === "ASC" ? forestSql`ASC` : forestSql`DESC`}
+      LIMIT ${limit} OFFSET ${offset}
+    `;
 
-    const validSorts: Record<string, string> = {
-      created_at: "created_at",
-      updated_at: "updated_at",
-      confidence: "confidence",
-    };
-    const sortCol = validSorts[sort] || "created_at";
+    const [{ total }] = await forestSql<{ total: number }[]>`
+      SELECT count(*)::int as total FROM shared_memories
+      WHERE status = ${status} AND archived_at IS NULL
+        ${types ? forestSql`AND type::text = ANY(${types})` : forestSql``}
+        ${category ? forestSql`AND category::text = ${category}` : forestSql``}
+        ${minConfidence !== undefined ? forestSql`AND confidence >= ${minConfidence}` : forestSql``}
+    `;
 
-    query = query
-      .order(sortCol, { ascending: order })
-      .range(offset, offset + limit - 1);
-
-    const { data, count, error } = await query;
-    if (error) throw error;
-
-    res.json({ success: true, facts: data, total: count ?? 0, limit, offset });
+    res.json({ success: true, facts: rows, total, limit, offset });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "List facts failed" });
   }
@@ -77,44 +67,33 @@ export async function listFacts(
 // ── Facts: Create ─────────────────────────────────────────────
 
 export async function createFact(
-  req: ApiRequest, res: ApiResponse, supabase: SupabaseClient,
+  req: ApiRequest, res: ApiResponse, _supabase: SupabaseClient,
 ): Promise<void> {
-  const { content, type, category, confidence, tags, deadline } = req.body || {};
+  const { content, type, category, confidence, tags, scope_path } = req.body || {};
 
   if (!content || typeof content !== "string" || content.length < 2) {
     res.status(400).json({ error: "Content must be at least 2 characters" });
     return;
   }
 
-  const validTypes = ["fact", "preference", "goal", "decision", "constraint", "contact"];
+  const validTypes = ["fact", "preference", "decision", "finding", "hypothesis", "contradiction"];
   if (type && !validTypes.includes(type as string)) {
     res.status(400).json({ error: `Invalid type. Must be one of: ${validTypes.join(", ")}` });
     return;
   }
 
   try {
-    const row: Record<string, unknown> = {
+    const { writeMemory } = await import("../../../ellie-forest/src/shared-memory");
+    const result = await writeMemory({
       content,
       type: type || "fact",
-      category: category || "other",
-      confidence: Math.min(Math.max(Number(confidence) || 1.0, 0), 1),
-      extraction_method: "manual",
+      scope_path: scope_path || "2",
+      confidence: Math.min(Math.max(Number(confidence) || 0.8, 0), 1),
+      category: category || "general",
       tags: Array.isArray(tags) ? tags : [],
-    };
+    });
 
-    if (deadline) {
-      try { row.deadline = new Date(deadline as string).toISOString(); } catch { /* skip */ }
-    }
-
-    const { data, error } = await supabase
-      .from("conversation_facts")
-      .insert(row)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    res.json({ success: true, fact: data });
+    res.json({ success: true, fact: result.memory });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Create fact failed" });
   }
@@ -123,37 +102,45 @@ export async function createFact(
 // ── Facts: Update ─────────────────────────────────────────────
 
 export async function updateFact(
-  req: ApiRequest, res: ApiResponse, supabase: SupabaseClient,
+  req: ApiRequest, res: ApiResponse, _supabase: SupabaseClient,
 ): Promise<void> {
   const id = req.params?.id;
   if (!id) { res.status(400).json({ error: "Fact ID required" }); return; }
 
   const { content, type, category, confidence, tags } = req.body || {};
 
-  const update: Record<string, unknown> = {};
-  if (content !== undefined) update.content = content;
-  if (type !== undefined) update.type = type;
-  if (category !== undefined) update.category = category;
-  if (confidence !== undefined) update.confidence = Math.min(Math.max(Number(confidence), 0), 1);
-  if (tags !== undefined) update.tags = tags;
+  const updates: string[] = [];
+  const values: unknown[] = [];
 
-  if (Object.keys(update).length === 0) {
+  if (content !== undefined) { updates.push("content"); values.push(content); }
+  if (type !== undefined) { updates.push("type"); values.push(type); }
+  if (category !== undefined) { updates.push("category"); values.push(category); }
+  if (confidence !== undefined) { updates.push("confidence"); values.push(Math.min(Math.max(Number(confidence), 0), 1)); }
+  if (tags !== undefined) { updates.push("tags"); values.push(tags); }
+
+  if (updates.length === 0) {
     res.status(400).json({ error: "No fields to update" });
     return;
   }
 
   try {
-    const { data, error } = await supabase
-      .from("conversation_facts")
-      .update(update)
-      .eq("id", id)
-      .select()
-      .single();
+    // Build update object for postgres.js set helper
+    const update: Record<string, unknown> = { updated_at: new Date() };
+    if (content !== undefined) update.content = content;
+    if (confidence !== undefined) update.confidence = Math.min(Math.max(Number(confidence), 0), 1);
+    if (tags !== undefined) update.tags = tags;
 
-    if (error) throw error;
-    if (!data) { res.status(404).json({ error: "Fact not found" }); return; }
+    const result = await forestSql`
+      UPDATE shared_memories SET ${forestSql(update, ...Object.keys(update))}
+        ${type !== undefined ? forestSql`, type = ${type}::memory_type` : forestSql``}
+        ${category !== undefined ? forestSql`, category = ${category}::memory_category` : forestSql``}
+      WHERE id = ${id}
+      RETURNING *
+    `;
 
-    res.json({ success: true, fact: data });
+    if (result.length === 0) { res.status(404).json({ error: "Fact not found" }); return; }
+
+    res.json({ success: true, fact: result[0] });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Update fact failed" });
   }
@@ -162,18 +149,17 @@ export async function updateFact(
 // ── Facts: Delete (archive) ───────────────────────────────────
 
 export async function deleteFact(
-  req: ApiRequest, res: ApiResponse, supabase: SupabaseClient,
+  req: ApiRequest, res: ApiResponse, _supabase: SupabaseClient,
 ): Promise<void> {
   const id = req.params?.id;
   if (!id) { res.status(400).json({ error: "Fact ID required" }); return; }
 
   try {
-    const { error } = await supabase
-      .from("conversation_facts")
-      .update({ status: "archived", archived_at: new Date().toISOString() })
-      .eq("id", id);
-
-    if (error) throw error;
+    await forestSql`
+      UPDATE shared_memories
+      SET status = 'archived', archived_at = now(), updated_at = now()
+      WHERE id = ${id}
+    `;
 
     res.json({ success: true, archived: true });
   } catch (err) {
@@ -366,7 +352,7 @@ export async function resolveConflict(
 // ── Search ────────────────────────────────────────────────────
 
 export async function searchFacts(
-  req: ApiRequest, res: ApiResponse, supabase: SupabaseClient,
+  req: ApiRequest, res: ApiResponse, _supabase: SupabaseClient,
 ): Promise<void> {
   const q = req.query?.q;
   if (!q || q.length < 2) {
@@ -378,23 +364,18 @@ export async function searchFacts(
   const type = req.query?.type;
 
   try {
-    // Text search via ILIKE (embedding search would be better but requires Edge Function)
-    let query = supabase
-      .from("conversation_facts")
-      .select("*")
-      .eq("status", "active")
-      .ilike("content", `%${q}%`)
-      .order("confidence", { ascending: false })
-      .limit(limit);
+    const { readMemories } = await import("../../../ellie-forest/src/shared-memory");
+    const results = await readMemories({
+      query: q,
+      match_count: limit,
+      match_threshold: 0.3,
+    });
 
-    if (type) {
-      query = query.eq("type", type);
-    }
+    const filtered = type
+      ? results.filter(r => r.type === type)
+      : results;
 
-    const { data, error } = await query;
-    if (error) throw error;
-
-    res.json({ success: true, results: data, count: data?.length ?? 0, query: q });
+    res.json({ success: true, results: filtered, count: filtered.length, query: q });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Search failed" });
   }
