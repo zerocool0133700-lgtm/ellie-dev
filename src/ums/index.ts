@@ -111,6 +111,10 @@ export { documentsConnector } from "./connectors/documents.ts";
 export { microsoftGraphConnector } from "./connectors/microsoft-graph.ts";
 export { imapConnector } from "./connectors/imap.ts";
 
+// ── Domain Events (ELLIE-664) ─────────────────────────────────
+export { emitDomainEvent, _buildDomainEventMessage } from "./domain-events.ts";
+export type { DomainEventPayload, DomainEventType } from "./domain-events.ts";
+
 // ── Consumers (push) ──────────────────────────────────────────
 export { initGtdConsumer } from "./consumers/gtd.ts";
 export { initMemoryConsumer } from "./consumers/memory.ts";

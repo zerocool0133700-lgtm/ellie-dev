@@ -12,6 +12,7 @@ import type { WebSocket } from "ws";
 import { log } from "./logger.ts";
 import { indexMessage } from "./elasticsearch.ts";
 import { resilientTask } from "./resilient-task.ts";
+import { ingestMessage, type MessageChannel } from "./mountain/message-ingestion.ts";
 
 const logger = log.child("message-sender");
 import { getOrCreateConversation, attachMessage, maybeGenerateSummary } from "./conversations.ts";
@@ -79,6 +80,17 @@ export async function saveMessage(
         resilientTask("attachMessage", "critical", () => attachMessage(_supabase, data.id, conversationId!));
         resilientTask("maybeGenerateSummary", "best-effort", () => maybeGenerateSummary(_supabase, conversationId!));
       }
+
+      // Mountain ingestion — ELLIE-660
+      resilientTask("mountainIngest", "best-effort", () => ingestMessage({
+        id: data.id,
+        role,
+        content,
+        channel: channel as MessageChannel,
+        metadata: metadata || {},
+        userId,
+        timestamp: new Date(),
+      }));
     }
 
     return data?.id || null;

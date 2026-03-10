@@ -16,6 +16,7 @@ export type Provider =
   | "slack"
   | "discord"
   | "voice"
+  | "mountain"
   | (string & {});
 
 /** Content type of the normalized message. */
@@ -26,6 +27,7 @@ export type ContentType =
   | "event"
   | "task"
   | "notification"
+  | "domain_event"
   | (string & {});
 
 /** Sender identity — shape varies by provider, all fields optional. */
