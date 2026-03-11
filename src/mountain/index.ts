@@ -163,3 +163,23 @@ export {
   type ContactLookup,
   type TopicExtractor,
 } from "./interaction-scoring.ts";
+
+export {
+  GoogleContactsSyncPipeline,
+  mapRawToInput,
+  parseContactsListResponse,
+  _makeMockGoogleContactRaw,
+  _makeMockGoogleContactsFetcher,
+  _makeMockSyncStateStore,
+  _makeMockContactWriter,
+  type GoogleContactRaw,
+  type GoogleContactsPage,
+  type SyncState,
+  type GoogleContactsSyncConfig,
+  type SyncResult,
+  type SyncError,
+  type SyncProgress,
+  type SyncProgressCallback,
+  type GoogleContactsFetcher,
+  type SyncStateStore,
+} from "./google-contacts-sync.ts";
