@@ -409,7 +409,9 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
 
       const agentName = result.finalDispatch?.agent?.name || agentResult?.dispatch.agent.name || "general";
       const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, agentName, "shared", agentMemory.sessionIds);
-      const { cleanedText: playbookClean, commands: playbookCommands } = extractPlaybookCommands(pipelineResponse);
+      // ELLIE-649 Tier 2: Process response tags for conversation_facts
+      const tier2Response = await import("./response-tag-processor.ts").then(m => m.processResponseTags(supabase, pipelineResponse, "telegram"));
+      const { cleanedText: playbookClean, commands: playbookCommands } = extractPlaybookCommands(tier2Response);
       const cleanedPipelineResponse = await sendWithApprovals(ctx, playbookClean, session.sessionId, agentName);
       await saveMessage("assistant", cleanedPipelineResponse, undefined, "telegram", userId);
       resilientTask("runPostMessageAssessment", "best-effort", () => runPostMessageAssessment(text, cleanedPipelineResponse, anthropic));
@@ -438,8 +440,10 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
       if (err instanceof PipelineStepError && err.partialOutput) {
         logger.error("Pipeline step failed, sending partial results", { stepIndex: err.stepIndex, errorType: err.errorType });
         const partialResponse = await processMemoryIntents(supabase, err.partialOutput, agentResult?.dispatch.agent.name || "general", "shared", agentMemory.sessionIds);
-        await sendResponse(ctx, partialResponse + "\n\n(Execution incomplete \u2014 showing partial results.)");
-        await saveMessage("assistant", partialResponse, undefined, "telegram", userId);
+        // ELLIE-649 Tier 2: Process response tags
+        const tier2Partial = await import("./response-tag-processor.ts").then(m => m.processResponseTags(supabase, partialResponse, "telegram"));
+        await sendResponse(ctx, tier2Partial + "\n\n(Execution incomplete \u2014 showing partial results.)");
+        await saveMessage("assistant", tier2Partial, undefined, "telegram", userId);
         runPostMessageAssessment(text, partialResponse, anthropic).catch(err2 => logger.error("Post-message assessment failed", err2));
       } else {
         logger.error("Multi-step failed, falling back to single agent", err);
@@ -467,7 +471,9 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
         const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
         const fallbackAgentName = agentResult?.dispatch.agent.name || "general";
         const fallbackResponse = await processMemoryIntents(supabase, fallbackRaw, fallbackAgentName, "shared", agentMemory.sessionIds);
-        const cleaned = await sendWithApprovals(ctx, fallbackResponse, session.sessionId, fallbackAgentName);
+        // ELLIE-649 Tier 2: Process response tags
+        const tier2Fallback = await import("./response-tag-processor.ts").then(m => m.processResponseTags(supabase, fallbackResponse, "telegram"));
+        const cleaned = await sendWithApprovals(ctx, tier2Fallback, session.sessionId, fallbackAgentName);
         await saveMessage("assistant", cleaned, undefined, "telegram", userId);
         runPostMessageAssessment(text, cleaned, anthropic).catch(err2 => logger.error("Post-message assessment failed", err2));
       }
@@ -592,9 +598,11 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
 
   // Parse and save any memory intents, strip tags from response
   const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general", "shared", effectiveSessionIds);
+  // ELLIE-649 Tier 2: Process response tags for conversation_facts
+  const tier2Response = await import("./response-tag-processor.ts").then(m => m.processResponseTags(supabase, response, "telegram"));
 
   // Extract ELLIE:: playbook commands before sending to user
-  const { cleanedText: playbookCleanedResponse, commands: tgPlaybookCommands } = extractPlaybookCommands(response);
+  const { cleanedText: playbookCleanedResponse, commands: tgPlaybookCommands } = extractPlaybookCommands(tier2Response);
 
   const cleanedResponse = await sendWithApprovals(ctx, playbookCleanedResponse, session.sessionId, agentResult?.dispatch.agent.name);
 

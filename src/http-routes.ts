@@ -90,7 +90,7 @@ import {
   acknowledgeChannel,
 } from "./delivery.ts";
 import { checkMessageRate, checkHttpRateLimit, getRateLimitStatus } from "./rate-limiter.ts";
-import { getBreakerStatus } from "./resilience.ts";
+import { getBreakerStatus, breakers } from "./resilience.ts";
 import { getPlaneQueueStatus } from "./plane-queue.ts";
 import {
   routeAndDispatch,
@@ -339,15 +339,17 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
                 sessionId: pending.sessionId || undefined,
               }).then(async (followUp) => {
                 const cleanFollowUp = await processMemoryIntents(supabase, followUp, pending.agentName || getActiveAgent("google-chat"));
-                await saveMessage("assistant", cleanFollowUp, {}, "google-chat");
+                // ELLIE-649 Tier 2: Process response tags for conversation_facts
+                const tier2FollowUp = await import("./response-tag-processor.ts").then(m => m.processResponseTags(supabase, cleanFollowUp, "google-chat"));
+                await saveMessage("assistant", tier2FollowUp, {}, "google-chat");
 
                 // Send follow-up via REST API to the correct space
                 if (pending.spaceName) {
-                  await sendGoogleChatMessage(pending.spaceName, cleanFollowUp).catch((err) => {
+                  await sendGoogleChatMessage(pending.spaceName, tier2FollowUp).catch((err) => {
                     logger.error("Failed to send approval follow-up", err);
                   });
                 }
-                logger.info(`Approval follow-up sent: ${cleanFollowUp.substring(0, 80)}...`);
+                logger.info(`Approval follow-up sent: ${tier2FollowUp.substring(0, 80)}...`);
               }).catch((err) => {
                 logger.error("Approval Claude call failed", err);
                 // Try to notify the user about the error
@@ -654,7 +656,9 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
 
               const gchatOrcAgent = result.finalDispatch?.agent?.name || gchatAgentResult?.dispatch.agent.name || "general";
               const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, gchatOrcAgent, "shared", agentMemory.sessionIds);
-              const { cleanedText: gchatOrcPlaybookClean, commands: gchatOrcPlaybookCmds } = extractPlaybookCommands(pipelineResponse);
+              // ELLIE-649 Tier 2: Process response tags for conversation_facts
+              const tier2Pipeline = await import("./response-tag-processor.ts").then(m => m.processResponseTags(supabase, pipelineResponse, "google-chat"));
+              const { cleanedText: gchatOrcPlaybookClean, commands: gchatOrcPlaybookCmds } = extractPlaybookCommands(tier2Pipeline);
               const { cleanedText: gchatClean } = extractApprovalTags(gchatOrcPlaybookClean);
               await saveMessage("assistant", gchatClean, { space: parsed.spaceName }, "google-chat", parsed.senderEmail);
               broadcastExtension({ type: "message_out", channel: "google-chat", agent: gchatOrcAgent, preview: gchatClean.substring(0, 200) });
@@ -773,7 +777,9 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
             }
 
             const response = await processMemoryIntents(supabase, rawResponse, gchatAgentResult?.dispatch.agent.name || "general", "shared", agentMemory.sessionIds);
-            const { cleanedText: gchatPlaybookClean, commands: gchatPlaybookCmds } = extractPlaybookCommands(response);
+            // ELLIE-649 Tier 2: Process response tags for conversation_facts
+            const tier2Response = await import("./response-tag-processor.ts").then(m => m.processResponseTags(supabase, response, "google-chat"));
+            const { cleanedText: gchatPlaybookClean, commands: gchatPlaybookCmds } = extractPlaybookCommands(tier2Response);
 
             if (gchatAgentResult) {
               resilientTask("syncResponse", "critical", () => syncResponse(supabase, gchatAgentResult!.dispatch.session_id, gchatPlaybookClean, {
@@ -1197,6 +1203,32 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ status, service: "ellie-relay", uptime: Math.round(process.uptime()) }));
     });
+    return;
+  }
+
+  // Circuit breaker reset — manually close a breaker and let it retry
+  if (req.method === "POST" && url.pathname.startsWith("/api/circuit-breaker/")) {
+    const parts = url.pathname.split("/");
+    const serviceName = parts[3];
+    const action = parts[4];
+
+    if (action === "reset" && serviceName && serviceName in breakers) {
+      const breaker = breakers[serviceName as keyof typeof breakers];
+      breaker.reset();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        success: true,
+        service: serviceName,
+        status: breaker.getState(),
+      }));
+      return;
+    }
+
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      error: "Service not found or invalid action",
+      available: Object.keys(breakers),
+    }));
     return;
   }
 

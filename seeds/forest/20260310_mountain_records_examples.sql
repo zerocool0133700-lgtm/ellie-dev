@@ -1,80 +1,114 @@
 -- ============================================================
--- ELLIE-663: Example mountain_records rows
+-- ELLIE-667: Example mountain_records rows
 -- ============================================================
--- Documents expected payload shapes for each record type
--- from the Office Practicum source system.
+-- Documents expected payload shapes for message-oriented
+-- record types used by the relay and backfill systems.
 -- ============================================================
 
--- Billing record
+-- Standard message record (real-time ingestion via relay)
 INSERT INTO mountain_records (record_type, source_system, external_id, payload, summary, source_timestamp)
 VALUES (
-  'billing',
-  'office-practicum',
-  'INV-2026-00142',
+  'message',
+  'relay',
+  'relay:telegram:msg-001',
   '{
-    "patient_id": "PAT-1001",
-    "patient_name": "Smith, Jordan",
-    "encounter_id": "ENC-5521",
-    "cpt_codes": ["99213", "90471"],
-    "icd10_codes": ["J06.9", "Z23"],
-    "total_charge": 285.00,
-    "insurance_billed": 228.00,
-    "patient_responsibility": 57.00,
-    "payer": "Blue Cross Blue Shield",
-    "claim_status": "submitted",
-    "date_of_service": "2026-03-05"
+    "content": "Hey, can you check the deployment status?",
+    "role": "user",
+    "channel": "telegram",
+    "sender": "dave",
+    "conversation_id": "conv-abc-123",
+    "metadata": {},
+    "backfilled": false
   }'::jsonb,
-  'Jordan Smith — sick visit + immunization, $285 billed to BCBS',
-  '2026-03-05T14:30:00Z'
+  'Hey, can you check the deployment status?',
+  '2026-03-10T14:30:00Z'
 )
 ON CONFLICT (source_system, external_id) DO NOTHING;
 
--- Patient visit record
+-- Voice transcript record
 INSERT INTO mountain_records (record_type, source_system, external_id, payload, summary, source_timestamp)
 VALUES (
-  'visit',
-  'office-practicum',
-  'ENC-5521',
+  'voice_transcript',
+  'relay',
+  'relay:telegram:msg-002',
   '{
-    "patient_id": "PAT-1001",
-    "patient_name": "Smith, Jordan",
-    "patient_dob": "2020-06-15",
-    "visit_type": "sick",
-    "provider": "Dr. Martinez",
-    "chief_complaint": "Fever and cough x 3 days",
-    "diagnosis": ["Upper respiratory infection", "Immunization encounter"],
-    "vitals": {
-      "temp_f": 100.2,
-      "weight_lbs": 42,
-      "height_in": 43
+    "content": "Reminder to myself: update the forest migration before Friday.",
+    "role": "user",
+    "channel": "telegram",
+    "sender": "dave",
+    "conversation_id": "conv-abc-123",
+    "metadata": {
+      "voice_transcript": true,
+      "duration_seconds": 8,
+      "transcription_provider": "groq"
     },
-    "plan": "Supportive care, fluids, follow up if not improving in 5 days. Administered flu vaccine.",
-    "follow_up_days": 5
+    "backfilled": false
   }'::jsonb,
-  'Jordan Smith sick visit — URI + flu vaccine, follow up in 5 days',
-  '2026-03-05T14:00:00Z'
+  'Reminder to myself: update the forest migration before Friday.',
+  '2026-03-10T14:35:00Z'
 )
 ON CONFLICT (source_system, external_id) DO NOTHING;
 
--- Schedule record
+-- Contact identity record (from contact seed pipeline)
 INSERT INTO mountain_records (record_type, source_system, external_id, payload, summary, source_timestamp)
 VALUES (
-  'schedule',
-  'office-practicum',
-  'APT-2026-03-12-0900',
+  'contact_identity',
+  'contact-seed',
+  'contact:wincy',
   '{
-    "patient_id": "PAT-1002",
-    "patient_name": "Lee, Avery",
-    "patient_dob": "2024-01-20",
-    "appointment_type": "well-child",
-    "provider": "Dr. Martinez",
-    "scheduled_start": "2026-03-12T09:00:00",
-    "scheduled_end": "2026-03-12T09:30:00",
-    "location": "Main Office - Room 3",
-    "status": "confirmed",
-    "notes": "12-month well child check, immunizations due"
+    "display_name": "Wincy",
+    "identifiers": [
+      {"channel": "telegram", "id": "wincy_tg"},
+      {"channel": "email", "id": "wincy@example.com"},
+      {"channel": "discord", "id": "wincy#1234"}
+    ],
+    "sources": ["apple-contacts", "telegram"],
+    "merged_from": 2
   }'::jsonb,
-  'Avery Lee — 12-month well child check, Mar 12 at 9am',
-  '2026-03-10T08:00:00Z'
+  'Wincy — 3 channels (telegram, email, discord)',
+  '2026-03-10T10:00:00Z'
+)
+ON CONFLICT (source_system, external_id) DO NOTHING;
+
+-- Backfilled historical message (imported from Supabase)
+INSERT INTO mountain_records (record_type, source_system, external_id, payload, summary, source_timestamp)
+VALUES (
+  'message',
+  'relay',
+  'backfill:telegram:hist-msg-500',
+  '{
+    "content": "What time is the meeting tomorrow?",
+    "role": "user",
+    "channel": "telegram",
+    "sender": "dave",
+    "conversation_id": null,
+    "metadata": {},
+    "backfilled": true
+  }'::jsonb,
+  'What time is the meeting tomorrow?',
+  '2026-01-15T09:22:00Z'
+)
+ON CONFLICT (source_system, external_id) DO NOTHING;
+
+-- Conversation summary record
+INSERT INTO mountain_records (record_type, source_system, external_id, payload, summary, source_timestamp)
+VALUES (
+  'conversation_summary',
+  'relay',
+  'summary:conv-abc-123',
+  '{
+    "conversation_id": "conv-abc-123",
+    "channel": "telegram",
+    "message_count": 24,
+    "participants": ["dave", "ellie"],
+    "topics": ["deployment", "forest migration", "friday deadline"],
+    "key_decisions": ["Deploy after forest migration is complete"],
+    "time_span": {
+      "start": "2026-03-10T14:30:00Z",
+      "end": "2026-03-10T15:45:00Z"
+    }
+  }'::jsonb,
+  'Telegram conversation: deployment + forest migration (24 messages)',
+  '2026-03-10T15:45:00Z'
 )
 ON CONFLICT (source_system, external_id) DO NOTHING;

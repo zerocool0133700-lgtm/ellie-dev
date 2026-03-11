@@ -843,9 +843,11 @@ async function _handleEllieChatMessage(
 
         const orcAgent = result.finalDispatch?.agent?.name || agentResult.dispatch.agent.name || "general";
         const pipelineResponse = await processMemoryIntents(supabase, result.finalResponse, orcAgent, "shared", agentMemory.sessionIds);
+        // ELLIE-649 Tier 2: Process response tags for conversation_facts
+        const tier2Pipeline = await import("./response-tag-processor.ts").then(m => m.processResponseTags(supabase, pipelineResponse, "ellie-chat"));
         // ELLIE-592: Detect conversational commitments in orchestrated response
-        detectAndLogCommitments(pipelineResponse, session.sessionId, 0);
-        const { cleanedText: ellieChatOrcPlaybookClean, commands: ellieChatOrcPlaybookCmds } = extractPlaybookCommands(pipelineResponse);
+        detectAndLogCommitments(tier2Pipeline, session.sessionId, 0);
+        const { cleanedText: ellieChatOrcPlaybookClean, commands: ellieChatOrcPlaybookCmds } = extractPlaybookCommands(tier2Pipeline);
         // ELLIE-389: Save first to get memoryId, then send with it
         const { cleanedText: orcPreClean } = extractApprovalTags(ellieChatOrcPlaybookClean);
         const orcMemoryId = await saveMessage("assistant", orcPreClean, { agent: orcAgent }, "ellie-chat", ecUserId);
@@ -1095,9 +1097,11 @@ async function _handleEllieChatMessage(
     }
 
     const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general", "shared", effectiveSessionIds);
+    // ELLIE-649 Tier 2: Process response tags for conversation_facts
+    const tier2Response = await import("./response-tag-processor.ts").then(m => m.processResponseTags(supabase, response, "ellie-chat"));
     // ELLIE-592: Detect conversational commitments in agent response
-    detectAndLogCommitments(response, session.sessionId, 0);
-    const { cleanedText: ecPlaybookClean, commands: ecPlaybookCmds } = extractPlaybookCommands(response);
+    detectAndLogCommitments(tier2Response, session.sessionId, 0);
+    const { cleanedText: ecPlaybookClean, commands: ecPlaybookCmds } = extractPlaybookCommands(tier2Response);
     const ecAgent = agentResult?.dispatch.agent.name || "general";
     // ELLIE-389: Save first to get memoryId, then send with it
     const { cleanedText: ecPreClean } = extractApprovalTags(ecPlaybookClean);
@@ -1402,9 +1406,11 @@ export async function runSpecialistAsync(
     }
 
     const response = await processMemoryIntents(supabase, rawResponse, agentName, "shared", agentMemory.sessionIds);
+    // ELLIE-649 Tier 2: Process response tags for conversation_facts
+    const tier2Spec = await import("./response-tag-processor.ts").then(m => m.processResponseTags(supabase, response, "ellie-chat"));
     // ELLIE-592: Detect conversational commitments in specialist response
-    detectAndLogCommitments(response, session.sessionId, 0);
-    const { cleanedText: playClean, commands: playCmds } = extractPlaybookCommands(response);
+    detectAndLogCommitments(tier2Spec, session.sessionId, 0);
+    const { cleanedText: playClean, commands: playCmds } = extractPlaybookCommands(tier2Spec);
     // ELLIE-389: Save first to get memoryId, then send with it
     const { cleanedText: specPreClean } = extractApprovalTags(playClean);
     const specMemoryId = await saveMessage("assistant", specPreClean, { agent: agentName }, "ellie-chat", ecUserId);
