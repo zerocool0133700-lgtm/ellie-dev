@@ -138,7 +138,7 @@ export async function sendViaWebhook(
 
 // ── Utilities ─────────────────────────────────────────────────
 
-function chunkText(text: string): string[] {
+export function chunkText(text: string): string[] {
   if (text.length <= DISCORD_CHUNK_SIZE) return [text];
   const chunks: string[] = [];
   let remaining = text;

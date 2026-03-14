@@ -55,7 +55,7 @@ export interface SlackCommandPayload {
 
 const MENTION_RE = /<@[A-Z0-9]+>/g
 
-function stripMentions(text: string): string {
+export function stripMentions(text: string): string {
   return text.replace(MENTION_RE, '').trim()
 }
 

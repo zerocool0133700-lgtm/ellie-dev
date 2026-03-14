@@ -18,7 +18,7 @@ const SLACK_CHUNK = 3000
 
 // ── Chunking ──────────────────────────────────────────────────
 
-function chunkText(text: string): string[] {
+export function chunkText(text: string): string[] {
   if (text.length <= SLACK_CHUNK) return [text]
   const chunks: string[] = []
   let remaining = text
