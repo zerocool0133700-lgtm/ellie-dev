@@ -180,6 +180,7 @@ import { handleCalendarIntelRoute } from "./api/routes/calendar-intel.ts";
 import { handleRelationshipsRoute } from "./api/routes/relationships.ts";
 import { handleBriefingRoute } from "./api/routes/briefing.ts";
 import { handleAlertsRoute } from "./api/routes/alerts.ts";
+import { handleReactionsRoute } from "./api/routes/reactions.ts";
 // ELLIE-547: CORS whitelist (replaces wildcard *)
 import { handlePreflight, corsHeader } from "./cors.ts";
 
@@ -4453,6 +4454,9 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
 
   // Alert endpoints (ELLIE-317) — extracted to api/routes/alerts.ts
   if (await handleAlertsRoute(req, res, url, supabase)) return;
+
+  // Reactions endpoints (ELLIE-637) — emoji reactions on chat messages
+  if (await handleReactionsRoute(req, res, url, supabase)) return;
 
   // Rollup endpoints
   if (url.pathname.startsWith("/api/rollup/") && req.method === "POST") {

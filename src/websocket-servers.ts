@@ -364,6 +364,43 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
         return;
       }
 
+      // ELLIE-637: Emoji reactions on messages
+      if ((msg.type === "add_reaction" || msg.type === "remove_reaction") && msg.message_id && msg.emoji) {
+        (async () => {
+          try {
+            const { makeReactionsDeps, toggleReaction } = await import("./api/reactions.ts");
+            if (!supabase) return;
+            const deps = makeReactionsDeps(supabase);
+            const rxUser = wsAppUserMap.get(ws);
+            const rxUserId = rxUser?.id || rxUser?.anonymous_id || "system-dashboard";
+
+            if (msg.type === "add_reaction") {
+              await deps.addReaction(msg.message_id, msg.emoji, rxUserId);
+            } else {
+              await deps.removeReaction(msg.message_id, msg.emoji, rxUserId);
+            }
+
+            const summary = await deps.getReactionSummary(msg.message_id);
+
+            // Broadcast to all connected Ellie Chat clients
+            const update = JSON.stringify({
+              type: "reaction_update",
+              message_id: msg.message_id,
+              reactions: summary,
+              ts: Date.now(),
+            });
+            for (const client of ellieChatClients) {
+              if (client.readyState === WebSocket.OPEN) {
+                client.send(update);
+              }
+            }
+          } catch (err) {
+            logger.error("Reaction error", err);
+          }
+        })();
+        return;
+      }
+
       // Session upgrade: anonymous → authenticated (ELLIE-176)
       if (msg.type === "session_upgrade" && msg.token) {
         (async () => {
