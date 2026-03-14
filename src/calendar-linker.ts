@@ -179,3 +179,6 @@ export async function detectAndLinkCalendarEvents(
     logger.info("Linked event to conversation", { eventTitle: link.event_title, conversationId: conversationId.slice(0, 8), matchedOn: link.matched_on });
   }
 }
+
+// ── Test-only exports ────────────────────────────────────────
+export const _testing = { eventKeywords, findEventMentions, STOP_WORDS };

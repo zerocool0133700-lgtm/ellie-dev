@@ -626,3 +626,6 @@ export async function syncAllCalendars(
   const elapsed = Date.now() - startedAt;
   logger.info(`Synced ${totalEvents} events, deleted ${totalDeleted} stale in ${elapsed}ms`);
 }
+
+// ── Test-only exports ────────────────────────────────────────
+export const _testing = { normalizeGoogleEvent, normalizeO365Event };
