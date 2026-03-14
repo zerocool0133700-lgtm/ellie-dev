@@ -131,3 +131,8 @@ function buildSummary(sections: BriefingSection[], total: number): string {
   const parts = sections.map(s => `${s.count} ${s.title.toLowerCase()}`);
   return `${total} total messages: ${parts.join(", ")}.`;
 }
+
+// ── Test-only exports ────────────────────────────────────────
+// Do NOT use these in production code outside of tests.
+
+export const _testing = { buildSections, formatSender, buildSummary };

@@ -147,3 +147,8 @@ async function createInboxItem(supabase: SupabaseClient, item: InboxItem): Promi
     tags: item.tags,
   });
 }
+
+// ── Test-only exports ────────────────────────────────────────
+// Do NOT use these in production code outside of tests.
+
+export const _testing = { detectActionableSignals, ACTIONABLE_TYPES, ACTIONABLE_PROVIDERS };

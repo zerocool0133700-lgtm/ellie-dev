@@ -592,6 +592,11 @@ function shouldAutoSuppress(identifier: string, sender: { name?: string; email?:
   return prefs.autoSuppressPatterns.some(pattern => lower.includes(pattern));
 }
 
+// ── Test-only exports ────────────────────────────────────────
+// Do NOT use these in production code outside of tests.
+
+export const _testing = { resolveIdentifier, shouldAutoSuppress, calculateHealthScores, deriveHealthStatus, aggregateContacts };
+
 // ── Exports for Summary Bar & API ────────────────────────────
 
 export function getProfileCount(): number {

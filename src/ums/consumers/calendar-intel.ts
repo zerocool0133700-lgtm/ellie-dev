@@ -1059,3 +1059,8 @@ export function suggestFocusBlocks(): Array<{ start: string; end: string; hours:
 
   return blocks;
 }
+
+// ── Test-only exports ────────────────────────────────────────
+// Do NOT use these in production code outside of tests.
+
+export const _testing = { classifyMeeting, estimateEnergyCost, needsPrep, rebuildInsights };

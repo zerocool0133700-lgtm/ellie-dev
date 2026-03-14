@@ -401,3 +401,8 @@ export function decrementActiveCount(): void {
 export async function syncAlertCount(): Promise<void> {
   await refreshAlertCount();
 }
+
+// ── Test-only exports ────────────────────────────────────────
+// Do NOT use these in production code outside of tests.
+
+export const _testing = { matchRule, formatAlert, isDuplicate, dedupKey, markFired };

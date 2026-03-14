@@ -413,3 +413,8 @@ export function getActiveThreads(): ThreadState[] {
 export function getStaleThresholds(): Record<string, number> {
   return { ...staleThresholds };
 }
+
+// ── Test-only exports ────────────────────────────────────────
+// Do NOT use these in production code outside of tests.
+
+export const _testing = { resolveThreadId, isOwner, THREADED_PROVIDERS };

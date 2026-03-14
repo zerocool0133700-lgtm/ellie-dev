@@ -1165,3 +1165,8 @@ export async function getCommTimeBySource(
   }
   return bySource;
 }
+
+// ── Test-only exports ────────────────────────────────────────
+// Do NOT use these in production code outside of tests.
+
+export const _testing = { categorizeMessage, mapActivityType, estimateDuration, buildTitle, DURATION_ESTIMATES };

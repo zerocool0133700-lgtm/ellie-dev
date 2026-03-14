@@ -178,3 +178,8 @@ async function writeToBridge(finding: BridgeFinding): Promise<void> {
     logger.error("Forest consumer: Bridge request failed", { err });
   }
 }
+
+// ── Test-only exports ────────────────────────────────────────
+// Do NOT use these in production code outside of tests.
+
+export const _testing = { buildFinding, buildGitHubFinding, buildDocumentFinding, buildEmailFinding, buildCalendarFinding, KNOWLEDGE_SOURCES };
