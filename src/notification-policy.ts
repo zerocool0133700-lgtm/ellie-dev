@@ -40,6 +40,7 @@ export type NotificationEvent =
   | "run_stale"
   | "run_failed"
   | "error"
+  | "session_checkpoint"
   | "rollup"
   | "weekly_review";
 
@@ -89,6 +90,14 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
       telegram: { enabled: true, minIntervalSec: 0 },
       "google-chat": { enabled: true, minIntervalSec: 0 },
       slack: { enabled: true, minIntervalSec: 0 },
+    },
+  },
+  session_checkpoint: {
+    priority: "normal",
+    channels: {
+      telegram: { enabled: true, minIntervalSec: 300 },
+      "google-chat": { enabled: true, minIntervalSec: 300 },
+      slack: { enabled: true, minIntervalSec: 300 },
     },
   },
   session_pause: {
