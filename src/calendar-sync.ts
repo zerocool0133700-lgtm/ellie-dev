@@ -10,6 +10,7 @@ import { googleAccounts, getAccessTokenForAccount, type GoogleAccount } from "./
 import { isOutlookConfigured } from "./outlook.ts";
 import { log } from "./logger.ts";
 import ICAL from "ical.js";
+import { processSyncCycle, makeSyncStateDeps, type SyncStateDeps } from "./calendar-sync-state.ts";
 
 const logger = log.child("calendar");
 
@@ -207,22 +208,29 @@ async function upsertEvents(events: CalendarEvent[]): Promise<number> {
   return count;
 }
 
-async function syncGoogleAccount(account: GoogleAccount): Promise<number> {
+interface SyncResult {
+  count: number;
+  externalIds: string[];
+  calendarId: string;
+}
+
+async function syncGoogleAccount(account: GoogleAccount): Promise<SyncResult> {
   const token = await getAccessTokenForAccount(account);
   if (!token) {
     logger.error("No token for Google account", { account: account.label });
-    return 0;
+    return { count: 0, externalIds: [], calendarId: "primary" };
   }
 
   const rawEvents = await fetchGoogleEvents(token);
-  if (!rawEvents.length) return 0;
+  if (!rawEvents.length) return { count: 0, externalIds: [], calendarId: "primary" };
 
   const normalized = rawEvents
     .filter((e: GoogleCalendarEvent) => e.status !== "cancelled")
     .map((e: GoogleCalendarEvent) => normalizeGoogleEvent(e, account.label, "primary"));
 
-  if (!normalized.length) return 0;
-  return upsertEvents(normalized);
+  if (!normalized.length) return { count: 0, externalIds: [], calendarId: "primary" };
+  const count = await upsertEvents(normalized);
+  return { count, externalIds: normalized.map((e) => e.external_id), calendarId: "primary" };
 }
 
 // ============================================================
@@ -349,20 +357,21 @@ function normalizeO365Event(event: O365CalendarEvent): CalendarEvent {
   };
 }
 
-async function syncO365Calendar(): Promise<number> {
-  if (!isOutlookConfigured()) return 0;
+async function syncO365Calendar(): Promise<SyncResult> {
+  if (!isOutlookConfigured()) return { count: 0, externalIds: [], calendarId: "primary" };
 
   const token = await getMsCalendarToken();
   if (!token) {
     logger.error("O365 token refresh failed");
-    return 0;
+    return { count: 0, externalIds: [], calendarId: "primary" };
   }
 
   const rawEvents = await fetchO365Events(token);
-  if (!rawEvents.length) return 0;
+  if (!rawEvents.length) return { count: 0, externalIds: [], calendarId: "primary" };
 
   const normalized = rawEvents.map(normalizeO365Event);
-  return upsertEvents(normalized);
+  const count = await upsertEvents(normalized);
+  return { count, externalIds: normalized.map((e) => e.external_id), calendarId: "primary" };
 }
 
 // ============================================================
@@ -508,16 +517,30 @@ function parseICalEvents(icalData: string, calendarName: string): CalendarEvent[
   return results;
 }
 
-async function syncAppleCalendar(): Promise<number> {
-  if (!isAppleConfigured()) return 0;
+async function syncAppleCalendar(): Promise<SyncResult[]> {
+  if (!isAppleConfigured()) return [];
 
   try {
     const events = await fetchAppleEvents();
-    if (!events.length) return 0;
-    return upsertEvents(events);
+    if (!events.length) return [];
+    const count = await upsertEvents(events);
+
+    // Group by calendar_id for sync state tracking
+    const byCalendar = new Map<string, string[]>();
+    for (const e of events) {
+      const ids = byCalendar.get(e.calendar_id) || [];
+      ids.push(e.external_id);
+      byCalendar.set(e.calendar_id, ids);
+    }
+
+    return Array.from(byCalendar.entries()).map(([calendarId, externalIds]) => ({
+      count: externalIds.length,
+      externalIds,
+      calendarId,
+    }));
   } catch (err: unknown) {
     logger.error("Apple CalDAV error", err instanceof Error ? err.message : String(err));
-    return 0;
+    return [];
   }
 }
 
@@ -525,15 +548,30 @@ async function syncAppleCalendar(): Promise<number> {
 // MASTER SYNC
 // ============================================================
 
-export async function syncAllCalendars(): Promise<void> {
+export async function syncAllCalendars(
+  syncStateDeps?: SyncStateDeps
+): Promise<void> {
   const startedAt = Date.now();
   let totalEvents = 0;
+  let totalDeleted = 0;
+  const stateDeps = syncStateDeps || makeSyncStateDeps();
 
   // Google accounts
   for (const account of googleAccounts) {
     try {
-      const count = await syncGoogleAccount(account);
-      totalEvents += count;
+      const result = await syncGoogleAccount(account);
+      totalEvents += result.count;
+
+      // Track sync state for deletion detection
+      if (result.externalIds.length > 0) {
+        const cycleResult = await processSyncCycle(
+          stateDeps,
+          "google",
+          result.calendarId,
+          result.externalIds
+        );
+        totalDeleted += cycleResult.deleted;
+      }
     } catch (err: unknown) {
       logger.error("Google sync error", { account: account.label }, err instanceof Error ? err.message : String(err));
     }
@@ -541,16 +579,38 @@ export async function syncAllCalendars(): Promise<void> {
 
   // O365
   try {
-    const count = await syncO365Calendar();
-    totalEvents += count;
+    const result = await syncO365Calendar();
+    totalEvents += result.count;
+
+    if (result.externalIds.length > 0) {
+      const cycleResult = await processSyncCycle(
+        stateDeps,
+        "outlook",
+        result.calendarId,
+        result.externalIds
+      );
+      totalDeleted += cycleResult.deleted;
+    }
   } catch (err: unknown) {
     logger.error("O365 error", err instanceof Error ? err.message : String(err));
   }
 
   // Apple (iCloud CalDAV)
   try {
-    const count = await syncAppleCalendar();
-    totalEvents += count;
+    const results = await syncAppleCalendar();
+    for (const result of results) {
+      totalEvents += result.count;
+
+      if (result.externalIds.length > 0) {
+        const cycleResult = await processSyncCycle(
+          stateDeps,
+          "apple",
+          result.calendarId,
+          result.externalIds
+        );
+        totalDeleted += cycleResult.deleted;
+      }
+    }
   } catch (err: unknown) {
     logger.error("Apple error", err instanceof Error ? err.message : String(err));
   }
@@ -558,11 +618,11 @@ export async function syncAllCalendars(): Promise<void> {
   // Clean up old events (ended > 7 days ago)
   try {
     const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    await sql`DELETE FROM calendar_events WHERE end_time < ${cutoff}`;
+    await sql`DELETE FROM calendar_events WHERE end_time < ${cutoff} OR deleted_at IS NOT NULL`;
   } catch {
     // Non-critical
   }
 
   const elapsed = Date.now() - startedAt;
-  logger.info(`Synced ${totalEvents} events in ${elapsed}ms`);
+  logger.info(`Synced ${totalEvents} events, deleted ${totalDeleted} stale in ${elapsed}ms`);
 }
