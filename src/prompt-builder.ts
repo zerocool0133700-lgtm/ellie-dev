@@ -42,6 +42,24 @@ import { getWorkflowProgressForPrompt } from "./workflow-progress-tracker.ts";
 import { getIdentityPromptSections } from "./prompt-identity-injector.ts";
 export { setWorkingMemoryCache, getCachedWorkingMemory, clearWorkingMemoryCache, _injectWorkingMemoryForTesting };
 
+// ELLIE-639: Emoji guidance cache — set by relay on startup / pref change
+let _emojiGuidanceCache: string | null = null;
+
+/** Set emoji guidance for prompt injection. Call with null to disable. */
+export function setEmojiGuidanceCache(guidance: string | null): void {
+  _emojiGuidanceCache = guidance;
+}
+
+/** Get current emoji guidance (for testing). */
+export function getEmojiGuidanceCache(): string | null {
+  return _emojiGuidanceCache;
+}
+
+/** Inject emoji guidance for testing without going through the preference system. */
+export function _injectEmojiGuidanceForTesting(guidance: string | null): void {
+  _emojiGuidanceCache = guidance;
+}
+
 const PROJECT_ROOT = dirname(dirname(import.meta.path));
 
 // ── ELLIE-383: Build metrics (last prompt's section breakdown) ──
@@ -1055,6 +1073,12 @@ export function buildPrompt(
 
   // Priority 4: Skills prompt block (ELLIE-217 — eligible skills from SKILL.md files)
   if (skillsPrompt) sections.push({ label: "skills", content: `\n${skillsPrompt}`, priority: 4 });
+
+  // Priority 4: Emoji guidance (ELLIE-639 — contextual emoji in responses)
+  {
+    const emojiGuidance = _emojiGuidanceCache;
+    if (emojiGuidance) sections.push({ label: "emoji-guidance", content: `\n${emojiGuidance}`, priority: 4 });
+  }
 
   // Priority 4: Queue items for this agent (ELLIE-201 — injected on new session)
   if (queueContext) sections.push({ label: "queue", content: `\n${queueContext}`, priority: 4 });

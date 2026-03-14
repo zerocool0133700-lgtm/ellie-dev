@@ -181,6 +181,7 @@ import { handleRelationshipsRoute } from "./api/routes/relationships.ts";
 import { handleBriefingRoute } from "./api/routes/briefing.ts";
 import { handleAlertsRoute } from "./api/routes/alerts.ts";
 import { handleReactionsRoute } from "./api/routes/reactions.ts";
+import { handleEmojiPrefsRoute } from "./api/routes/emoji-prefs.ts";
 // ELLIE-547: CORS whitelist (replaces wildcard *)
 import { handlePreflight, corsHeader } from "./cors.ts";
 
@@ -4457,6 +4458,9 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
 
   // Reactions endpoints (ELLIE-637) — emoji reactions on chat messages
   if (await handleReactionsRoute(req, res, url, supabase)) return;
+
+  // Emoji preferences (ELLIE-639) — contextual emoji in agent responses
+  if (await handleEmojiPrefsRoute(req, res, url, supabase)) return;
 
   // Rollup endpoints
   if (url.pathname.startsWith("/api/rollup/") && req.method === "POST") {
