@@ -357,3 +357,8 @@ async function handleGatewayCalendarSync(
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ ok: true }));
 }
+
+// ── Test-only exports ────────────────────────────────────────
+// Do NOT use these in production code outside of tests.
+
+export const _testing = { validateEventPayload, validateAlertPayload, validateEmailPayload, sanitize, errorMessage };

@@ -61,3 +61,8 @@ function formatElapsed(ms: number): string {
   const hr = Math.floor(min / 60);
   return `${hr}h ${min % 60}m`;
 }
+
+// ── Test-only exports ────────────────────────────────────────
+// Do NOT use these in production code outside of tests.
+
+export const _testing = { formatElapsed };
