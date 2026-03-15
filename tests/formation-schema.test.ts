@@ -562,10 +562,15 @@ describe("type shapes", () => {
       protocol: { pattern: "free-form", maxTurns: 0, requiresApproval: false },
       participating_agents: ["dev", "critic"],
       metadata: {},
+      checked_out_by: null,
+      checked_out_at: null,
+      status: "pending",
     };
     expect(session.id).toBe("test-id");
     expect(session.state).toBe("active");
     expect(session.participating_agents).toHaveLength(2);
+    expect(session.checked_out_by).toBeNull();
+    expect(session.status).toBe("pending");
   });
 
   test("FormationMessage has all expected fields", () => {

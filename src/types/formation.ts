@@ -111,6 +111,12 @@ export interface FormationSession {
   protocol: InteractionProtocol;
   participating_agents: string[];
   metadata: Record<string, unknown>;
+  /** UUID of the agent that currently holds the checkout (FK to agents.id). */
+  checked_out_by: string | null;
+  /** When the checkout was acquired. */
+  checked_out_at: Date | null;
+  /** Checkout lifecycle status (separate from conversational `state`). */
+  status: FormationCheckoutStatus;
 }
 
 export type FormationSessionState =
@@ -119,6 +125,14 @@ export type FormationSessionState =
   | "completed"
   | "failed"
   | "timed_out";
+
+/** Checkout lifecycle status for formation sessions. */
+export type FormationCheckoutStatus =
+  | "pending"
+  | "checked_out"
+  | "in_progress"
+  | "completed"
+  | "failed";
 
 /** A message within a formation session (maps to formation_messages table). */
 export interface FormationMessage {
@@ -172,6 +186,15 @@ export const VALID_SESSION_STATES = [
   "completed",
   "failed",
   "timed_out",
+] as const;
+
+/** Valid checkout statuses. */
+export const VALID_CHECKOUT_STATUSES = [
+  "pending",
+  "checked_out",
+  "in_progress",
+  "completed",
+  "failed",
 ] as const;
 
 /** Valid formation message types. */
