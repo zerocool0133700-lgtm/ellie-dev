@@ -157,6 +157,14 @@ import {
 } from "./tool-approval.ts";
 import { handleGatewayRoute } from "./api/gateway-intake.ts";
 import { handleGtdRoute } from "./api/gtd.ts";
+import {
+  isAgentMailEnabled,
+  getAgentMailConfig,
+  verifyWebhookSignature,
+  parseWebhookPayload,
+  replyToEmail,
+  type AgentMailWebhookPayload,
+} from "./agentmail.ts";
 import { getSummaryState } from "./ums/consumers/summary.ts";
 import { log } from "./logger.ts";
 import { resilientTask } from "./resilient-task.ts";
@@ -195,6 +203,7 @@ const logger = log.child("http");
  *   - /api/auth/token     — issues tokens, must be reachable unauthenticated
  *   - /api/bridge/*       — uses its own x-bridge-key scheme
  *   - /api/app-auth/*     — handles its own auth flow
+ *   - /api/agentmail/webhooks — uses HMAC signature verification
  *   - Localhost IPs       — on-machine agents bypass auth
  */
 export function requiresApiAuth(pathname: string, clientIp: string): boolean {
@@ -202,6 +211,7 @@ export function requiresApiAuth(pathname: string, clientIp: string): boolean {
   if (pathname === "/api/auth/token") return false;
   if (pathname.startsWith("/api/bridge/")) return false;
   if (pathname.startsWith("/api/app-auth/")) return false;
+  if (pathname === "/api/agentmail/webhooks") return false;
   const isLocalhost = clientIp === "127.0.0.1" || clientIp === "::1" || clientIp === "::ffff:127.0.0.1";
   if (isLocalhost) return false;
   return true;
@@ -935,6 +945,108 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
       }
 
       return;
+    });
+    return;
+  }
+
+  // ── AgentMail Email Webhook (ELLIE-785) ─────────────────────────────
+  if (url.pathname === "/api/agentmail/webhooks" && req.method === "POST") {
+    let rawBody = "";
+    req.on("data", (chunk: Buffer) => { rawBody += chunk.toString(); });
+    req.on("end", async () => {
+      const config = getAgentMailConfig();
+      if (!config) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "AgentMail not configured" }));
+        return;
+      }
+
+      // Verify webhook signature
+      const signature = req.headers["x-agentmail-signature"] as string | undefined;
+      if (!verifyWebhookSignature(rawBody, signature, config.webhookSecret)) {
+        logger.warn("AgentMail webhook signature verification failed");
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid signature" }));
+        return;
+      }
+
+      // Acknowledge immediately — process async
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+
+      try {
+        const payload: AgentMailWebhookPayload = JSON.parse(rawBody);
+        const parsed = parseWebhookPayload(payload);
+        if (!parsed) {
+          logger.info("AgentMail webhook ignored (not a message.received or empty text)");
+          return;
+        }
+
+        // Skip messages from our own inbox (echo prevention)
+        if (parsed.from === config.inboxEmail) {
+          logger.info("AgentMail ignoring echo from own inbox");
+          return;
+        }
+
+        logger.info("AgentMail inbound email", {
+          from: parsed.from,
+          subject: parsed.subject,
+          threadId: parsed.threadId,
+          preview: parsed.text.substring(0, 80),
+        });
+
+        // Rate limit
+        const rateLimited = checkMessageRate(parsed.from, "email");
+        if (rateLimited) {
+          logger.info("AgentMail rate limited", { from: parsed.from });
+          return;
+        }
+
+        acknowledgeChannel("email");
+
+        // Save inbound message
+        await saveMessage("user", parsed.text, {
+          sender: parsed.from,
+          subject: parsed.subject,
+          thread_id: parsed.threadId,
+          message_id: parsed.messageId,
+        }, "email", parsed.from);
+        broadcastExtension({ type: "message_in", channel: "email", preview: parsed.text.substring(0, 200) });
+
+        // Build prompt with email context
+        const emailContext = `[Email from ${parsed.from}]\nSubject: ${parsed.subject}\n\n${parsed.text}`;
+        const agentMemory = await getAgentMemoryContext(supabase, "email");
+        const relevantContext = await getRelevantContext(supabase, parsed.text);
+
+        const prompt = buildPrompt(
+          emailContext,
+          getContextDocket(),
+          relevantContext,
+          undefined,
+          "email",
+        );
+
+        // Call Claude
+        const rawResponse = await callClaude(prompt);
+        const response = await processMemoryIntents(supabase, rawResponse, getActiveAgent("email"));
+
+        // Process response tags
+        const { processResponseTags } = await import("./response-tag-processor.ts");
+        const cleanResponse = await processResponseTags(supabase, response, "email");
+
+        // Save assistant response
+        await saveMessage("assistant", cleanResponse, {
+          thread_id: parsed.threadId,
+          in_reply_to: parsed.messageId,
+        }, "email", parsed.from);
+
+        // Reply via AgentMail API (threaded)
+        await replyToEmail(parsed.messageId, cleanResponse, config);
+        logger.info("AgentMail reply sent", { threadId: parsed.threadId, preview: cleanResponse.substring(0, 80) });
+
+      } catch (err) {
+        logger.error("AgentMail webhook error", err);
+      }
     });
     return;
   }
@@ -3916,6 +4028,308 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
       json(data: unknown) { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); },
     };
     archetypesEndpoint(mockReq, mockRes);
+    return;
+  }
+
+  // River agent-doc map endpoint (ELLIE-761)
+  if (url.pathname === "/api/river/agent-map" && req.method === "GET") {
+    (async () => {
+      try {
+        const { buildAgentMap } = await import("./river-agent-map.ts");
+        const map = buildAgentMap();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(map));
+      } catch (err: any) {
+        logger.error("river-agent-map error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    })();
+    return;
+  }
+
+  // Workflow capture queue endpoint (ELLIE-766)
+  if (url.pathname === "/api/river/workflow-queue" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getQueue } = await import("./workflow-capture.ts");
+        const status = url.searchParams.get("status") ?? undefined;
+        const queue = getQueue({ status: status as any });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(queue));
+      } catch (err: any) {
+        logger.error("workflow-queue error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/river/workflow-queue" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body);
+        const { updateWorkflowStatus } = await import("./workflow-capture.ts");
+        if (data.id && data.status) {
+          const ok = updateWorkflowStatus(data.id, data.status);
+          res.writeHead(ok ? 200 : 404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ success: ok }));
+        } else {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "id and status required" }));
+        }
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    });
+    return;
+  }
+
+  // Capture refinement preview endpoint (ELLIE-772)
+  if (url.pathname === "/api/capture/refine" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { refineCapture } = await import("./capture/refinement-engine.ts");
+        const data = JSON.parse(body);
+        if (!data.raw_content || typeof data.raw_content !== "string") {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "raw_content is required" }));
+          return;
+        }
+        const result = refineCapture({
+          raw_content: data.raw_content,
+          channel: data.channel ?? "ellie-chat",
+          hint_content_type: data.content_type,
+          existing_paths: data.existing_paths,
+        });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err: any) {
+        logger.error("capture-refine error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    });
+    return;
+  }
+
+  // Capture queue endpoints (ELLIE-769)
+  if (url.pathname === "/api/capture/add" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { validateAddInput, addCapture } = await import("./capture-queue.ts");
+        const data = JSON.parse(body);
+        const validation = validateAddInput(data);
+        if (!validation.valid) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: validation.error }));
+          return;
+        }
+        const { sql } = await import("../../ellie-forest/src/index.ts");
+        const item = await addCapture(sql, data);
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(item));
+      } catch (err: any) {
+        logger.error("capture-add error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/capture/queue" && req.method === "GET") {
+    (async () => {
+      try {
+        const { listQueue } = await import("./capture-queue.ts");
+        const filters: any = {};
+        if (url.searchParams.get("status")) filters.status = url.searchParams.get("status");
+        if (url.searchParams.get("channel")) filters.channel = url.searchParams.get("channel");
+        if (url.searchParams.get("content_type")) filters.content_type = url.searchParams.get("content_type");
+        if (url.searchParams.get("from_date")) filters.from_date = url.searchParams.get("from_date");
+        if (url.searchParams.get("to_date")) filters.to_date = url.searchParams.get("to_date");
+        if (url.searchParams.get("limit")) filters.limit = parseInt(url.searchParams.get("limit")!);
+        if (url.searchParams.get("offset")) filters.offset = parseInt(url.searchParams.get("offset")!);
+        const { sql } = await import("../../ellie-forest/src/index.ts");
+        const result = await listQueue(sql, filters);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err: any) {
+        logger.error("capture-queue error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/capture/stats" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getStats } = await import("./capture-queue.ts");
+        const { sql } = await import("../../ellie-forest/src/index.ts");
+        const stats = await getStats(sql);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(stats));
+      } catch (err: any) {
+        logger.error("capture-stats error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    })();
+    return;
+  }
+
+  // Capture funnel metrics endpoint (ELLIE-783)
+  if (url.pathname === "/api/capture/metrics" && req.method === "GET") {
+    (async () => {
+      try {
+        const { fetchMetrics } = await import("./capture/capture-metrics.ts");
+        const { sql } = await import("../../ellie-forest/src/index.ts");
+        const range = (url.searchParams.get("range") ?? "7d") as "7d" | "30d" | "all";
+        const metrics = await fetchMetrics(sql, range);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(metrics));
+      } catch (err: any) {
+        logger.error("capture-metrics error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    })();
+    return;
+  }
+
+  // PATCH /api/capture/:id
+  if (url.pathname.startsWith("/api/capture/") && req.method === "PATCH") {
+    const id = url.pathname.split("/api/capture/")[1];
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { validateUpdateInput, updateCapture, getCapture } = await import("./capture-queue.ts");
+        const data = JSON.parse(body);
+        const validation = validateUpdateInput(data);
+        if (!validation.valid) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: validation.error }));
+          return;
+        }
+        const { sql } = await import("../../ellie-forest/src/index.ts");
+        const item = await updateCapture(sql, id, data);
+        if (!item) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Capture item not found" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(item));
+      } catch (err: any) {
+        logger.error("capture-update error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    });
+    return;
+  }
+
+  // POST /api/capture/:id/approve
+  if (url.pathname.match(/^\/api\/capture\/[^/]+\/approve$/) && req.method === "POST") {
+    const id = url.pathname.split("/")[3];
+    (async () => {
+      try {
+        const { approveCapture } = await import("./capture-queue.ts");
+        const { sql } = await import("../../ellie-forest/src/index.ts");
+        const item = await approveCapture(sql, id);
+        if (!item) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Capture item not found or not in approvable state" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(item));
+      } catch (err: any) {
+        logger.error("capture-approve error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    })();
+    return;
+  }
+
+  // POST /api/capture/:id/dismiss
+  if (url.pathname.match(/^\/api\/capture\/[^/]+\/dismiss$/) && req.method === "POST") {
+    const id = url.pathname.split("/")[3];
+    (async () => {
+      try {
+        const { dismissCapture } = await import("./capture-queue.ts");
+        const { sql } = await import("../../ellie-forest/src/index.ts");
+        const item = await dismissCapture(sql, id);
+        if (!item) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Capture item not found or not in dismissable state" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(item));
+      } catch (err: any) {
+        logger.error("capture-dismiss error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    })();
+    return;
+  }
+
+  // River inventory endpoint (ELLIE-760)
+  if (url.pathname === "/api/river/inventory" && req.method === "GET") {
+    (async () => {
+      try {
+        const { buildInventory } = await import("./river-inventory.ts");
+        const inventory = buildInventory();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(inventory));
+      } catch (err: any) {
+        logger.error("river-inventory error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    })();
+    return;
+  }
+
+  // River prompt preview endpoint (ELLIE-759)
+  if (url.pathname === "/api/river/prompt-preview" && req.method === "GET") {
+    (async () => {
+      try {
+        const { buildPromptPreview, validatePreviewParams } = await import("./prompt-preview.ts");
+        const agent = url.searchParams.get("agent") ?? undefined;
+        const channel = url.searchParams.get("channel") ?? "telegram";
+
+        const errors = validatePreviewParams(agent, channel);
+        if (errors.length > 0) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: errors.join("; ") }));
+          return;
+        }
+
+        const includeContent = url.searchParams.get("include_content") === "true";
+        const preview = buildPromptPreview(agent!, channel, { include_content: includeContent });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(preview));
+      } catch (err: any) {
+        logger.error("prompt-preview error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    })();
     return;
   }
 

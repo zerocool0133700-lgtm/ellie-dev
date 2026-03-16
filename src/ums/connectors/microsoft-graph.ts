@@ -221,7 +221,7 @@ function normalizeCalendar(event: GraphCalendarEvent): UnifiedMessageInsert | nu
 
   const startTime = event.start?.dateTime;
   const timeStr = startTime
-    ? new Date(startTime).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })
+    ? new Date(startTime).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short", timeZone: process.env.USER_TIMEZONE || "America/Chicago" })
     : "TBD";
 
   const parts = [`Meeting: ${event.subject || "Untitled"}`];

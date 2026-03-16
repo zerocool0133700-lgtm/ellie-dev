@@ -701,7 +701,7 @@ export async function getMemoryContext(
           goalsResult.data
             .map((g: GoalRow) => {
               const deadline = g.deadline
-                ? ` (by ${new Date(g.deadline).toLocaleDateString()})`
+                ? ` (by ${new Date(g.deadline).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: process.env.USER_TIMEZONE || "America/Chicago" })})`
                 : "";
               return `- ${g.content}${deadline}`;
             })

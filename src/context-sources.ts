@@ -163,6 +163,7 @@ export async function getRecentWorkSessions(
       const date = new Date(d.completedAt).toLocaleDateString("en-US", {
         month: "short",
         day: "numeric",
+        timeZone: USER_TIMEZONE,
       });
       const parts = [`- ${d.workItemId}: ${d.title} (${date}, ${d.durationMin}min)`];
 
@@ -220,7 +221,7 @@ export async function getGoalsAndFacts(
     if (goalsResult.data?.length) {
       const goalLines = goalsResult.data.map((g: Record<string, unknown>) => {
         const deadline = g.deadline
-          ? ` (by ${new Date(g.deadline as string).toLocaleDateString("en-US", { month: "short", day: "numeric" })})`
+          ? ` (by ${new Date(g.deadline as string).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: USER_TIMEZONE })})`
           : "";
         return `- ${g.content}${deadline}`;
       });
@@ -766,7 +767,7 @@ export async function getPendingActionItems(
     if (actionItems?.length) {
       const lines = actionItems.map((a: Record<string, unknown>) => {
         const date = new Date(a.created_at as string).toLocaleDateString("en-US", {
-          month: "short", day: "numeric",
+          month: "short", day: "numeric", timeZone: USER_TIMEZONE,
         });
         return `- ${a.content} (${date})`;
       });
@@ -776,7 +777,7 @@ export async function getPendingActionItems(
     if (blockers?.length) {
       const lines = blockers.map((b: Record<string, unknown>) => {
         const date = new Date(b.created_at as string).toLocaleDateString("en-US", {
-          month: "short", day: "numeric",
+          month: "short", day: "numeric", timeZone: USER_TIMEZONE,
         });
         const msg = b.message as string;
         const short = msg.length > 100 ? msg.substring(0, 100) + "..." : msg;

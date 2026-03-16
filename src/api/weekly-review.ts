@@ -143,7 +143,7 @@ function formatReviewText(data: WeeklyReviewData): string {
   if (data.overdueTodos.length) {
     lines.push(`🚨 Overdue (${data.overdueTodos.length})`);
     for (const t of data.overdueTodos) {
-      const due = new Date(t.due_date!).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      const due = new Date(t.due_date!).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: process.env.USER_TIMEZONE || "America/Chicago" });
       lines.push(`  • ${t.content} (due ${due})`);
     }
     lines.push("");

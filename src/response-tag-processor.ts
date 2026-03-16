@@ -219,6 +219,10 @@ export async function processResponseTags(
   // Clean up any double spaces or trailing whitespace from tag removal
   cleaned = cleaned.replace(/\s{2,}/g, " ").trim();
 
+  // Fix markdown formatting (ELLIE-787)
+  const { fixMarkdown } = await import("./markdown-fixer.ts");
+  cleaned = fixMarkdown(cleaned);
+
   return cleaned;
 }
 

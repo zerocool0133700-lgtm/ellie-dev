@@ -1,0 +1,109 @@
+/**
+ * Markdown Fixer — ELLIE-787
+ * Post-processing step that fixes common markdown formatting issues
+ * in agent responses, particularly missing blank lines before lists.
+ */
+
+const LIST_ITEM_RE = /^(\d+[\.\)]\s|[-*+]\s)/;
+const HEADING_RE = /^#{1,6}\s/;
+const CODE_FENCE_RE = /^```/;
+
+function isBlank(line: string): boolean {
+  return line.trim() === "";
+}
+
+function isListItem(line: string): boolean {
+  return LIST_ITEM_RE.test(line);
+}
+
+function isHeading(line: string): boolean {
+  return HEADING_RE.test(line);
+}
+
+function isCodeFence(line: string): boolean {
+  return CODE_FENCE_RE.test(line);
+}
+
+/**
+ * Ensure blank lines exist before the start of a list block.
+ * Only adds before the first item — not between consecutive list items.
+ */
+export function fixListSpacing(text: string): string {
+  const lines = text.split("\n");
+  const result: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const prev = i > 0 ? lines[i - 1] : undefined;
+
+    if (isListItem(line) && prev !== undefined && !isBlank(prev) && !isListItem(prev)) {
+      result.push("");
+    }
+    result.push(line);
+  }
+
+  return result.join("\n");
+}
+
+/**
+ * Ensure blank lines exist before headings (## etc.)
+ */
+export function fixHeadingSpacing(text: string): string {
+  const lines = text.split("\n");
+  const result: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const prev = i > 0 ? lines[i - 1] : undefined;
+
+    if (isHeading(line) && prev !== undefined && !isBlank(prev)) {
+      result.push("");
+    }
+    result.push(line);
+  }
+
+  return result.join("\n");
+}
+
+/**
+ * Ensure blank lines exist before code blocks (```)
+ */
+export function fixCodeBlockSpacing(text: string): string {
+  const lines = text.split("\n");
+  const result: string[] = [];
+  let inCodeBlock = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const prev = i > 0 ? lines[i - 1] : undefined;
+
+    if (isCodeFence(line)) {
+      if (!inCodeBlock && prev !== undefined && !isBlank(prev)) {
+        result.push("");
+      }
+      inCodeBlock = !inCodeBlock;
+    }
+    result.push(line);
+  }
+
+  return result.join("\n");
+}
+
+/**
+ * Collapse triple+ blank lines to double blank lines
+ */
+export function collapseExcessiveBlankLines(text: string): string {
+  return text.replace(/\n{4,}/g, "\n\n\n");
+}
+
+/**
+ * Full markdown fix pipeline — apply all fixes in order.
+ */
+export function fixMarkdown(text: string): string {
+  let result = text;
+  result = fixListSpacing(result);
+  result = fixHeadingSpacing(result);
+  result = fixCodeBlockSpacing(result);
+  result = collapseExcessiveBlankLines(result);
+  return result;
+}

@@ -42,7 +42,7 @@ export const calendarConnector: UMSConnector = {
       .slice(0, 5);
 
     const timeStr = event.start_time
-      ? new Date(event.start_time).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })
+      ? new Date(event.start_time).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short", timeZone: process.env.USER_TIMEZONE || "America/Chicago" })
       : "TBD";
 
     const parts = [`Meeting: ${event.title || "Untitled"}`];
