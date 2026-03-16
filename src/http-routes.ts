@@ -4089,6 +4089,169 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Permission management API (ELLIE-797)
+  if (url.pathname === "/api/permissions/entities" && req.method === "GET") {
+    (async () => {
+      try {
+        const { listEntities } = await import("./permission-api.ts");
+        const { sql } = await import("../../ellie-forest/src/index.ts");
+        const entities = await listEntities(sql);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(entities));
+      } catch (err: any) {
+        logger.error("permissions-list error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    })();
+    return;
+  }
+
+  if (url.pathname.match(/^\/api\/permissions\/entities\/[^/]+$/) && req.method === "GET") {
+    const id = url.pathname.split("/").pop()!;
+    (async () => {
+      try {
+        const { getEntity } = await import("./permission-api.ts");
+        const { sql } = await import("../../ellie-forest/src/index.ts");
+        const entity = await getEntity(sql, id);
+        if (!entity) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Entity not found" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(entity));
+      } catch (err: any) {
+        logger.error("permissions-get error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/permissions/entities" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { validateCreateEntity, createEntity } = await import("./permission-api.ts");
+        const { sql } = await import("../../ellie-forest/src/index.ts");
+        const data = JSON.parse(body);
+        const validation = validateCreateEntity(data);
+        if (!validation.valid) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: validation.error }));
+          return;
+        }
+        const entity = await createEntity(sql, data);
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(entity));
+      } catch (err: any) {
+        logger.error("permissions-create error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    });
+    return;
+  }
+
+  if (url.pathname.match(/^\/api\/permissions\/entities\/[^/]+$/) && req.method === "PATCH") {
+    const id = url.pathname.split("/").pop()!;
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { validateUpdateEntity, updateEntity } = await import("./permission-api.ts");
+        const { sql } = await import("../../ellie-forest/src/index.ts");
+        const data = JSON.parse(body);
+        const validation = validateUpdateEntity(data);
+        if (!validation.valid) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: validation.error }));
+          return;
+        }
+        await updateEntity(sql, id, data);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ success: true }));
+      } catch (err: any) {
+        logger.error("permissions-update error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/permissions/roles" && req.method === "GET") {
+    (async () => {
+      try {
+        const { listRoles } = await import("./permission-api.ts");
+        const { sql } = await import("../../ellie-forest/src/index.ts");
+        const roles = await listRoles(sql);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(roles));
+      } catch (err: any) {
+        logger.error("permissions-roles error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/permissions/roles" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { validateCreateRole, createRole } = await import("./permission-api.ts");
+        const { sql } = await import("../../ellie-forest/src/index.ts");
+        const data = JSON.parse(body);
+        const validation = validateCreateRole(data);
+        if (!validation.valid) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: validation.error }));
+          return;
+        }
+        const role = await createRole(sql, data);
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(role));
+      } catch (err: any) {
+        logger.error("permissions-create-role error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/permissions/check" && req.method === "GET") {
+    (async () => {
+      try {
+        const { checkPermission } = await import("./permission-api.ts");
+        const { sql } = await import("../../ellie-forest/src/index.ts");
+        const entityId = url.searchParams.get("entity_id");
+        const resource = url.searchParams.get("resource");
+        const action = url.searchParams.get("action");
+        const scope = url.searchParams.get("scope") ?? undefined;
+        if (!entityId || !resource || !action) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "entity_id, resource, and action are required" }));
+          return;
+        }
+        const result = await checkPermission(sql, entityId, resource, action, scope);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err: any) {
+        logger.error("permissions-check error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message ?? "Internal error" }));
+      }
+    })();
+    return;
+  }
+
   // Capture refinement preview endpoint (ELLIE-772)
   if (url.pathname === "/api/capture/refine" && req.method === "POST") {
     let body = "";
