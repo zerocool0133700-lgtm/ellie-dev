@@ -3,6 +3,8 @@ species: bee
 cognitive_style: "failure-mode analysis, cross-pollination"
 token_budget: 100000
 allowed_skills: [plane, memory, forest, verify]
+produces: [review, finding, recommendation, rejection, escalation]
+consumes: [direction, question, handoff, checkpoint]
 section_priorities:
   archetype: 1
   forest-awareness: 2

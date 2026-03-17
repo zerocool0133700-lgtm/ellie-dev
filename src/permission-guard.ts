@@ -229,6 +229,34 @@ export function guardAgentDispatchPure(
   return { allowed: true };
 }
 
+// RBAC entity resolution — map agent name to RBAC entity ID
+
+const rbacEntityCache = new Map<string, { id: string; expiresAt: number }>();
+const RBAC_ENTITY_CACHE_TTL = 60_000; // 1 minute
+
+/**
+ * Resolve an agent name (e.g. "dev", "critic") to its RBAC entity ID.
+ * Looks up rbac_entities by archetype matching the agent name.
+ * Returns null if no matching entity found (guard should allow by default).
+ */
+export async function resolveRbacEntityId(sql: any, agentName: string): Promise<string | null> {
+  const cached = rbacEntityCache.get(agentName);
+  if (cached && Date.now() < cached.expiresAt) return cached.id;
+
+  const rows = await sql`
+    SELECT id FROM rbac_entities WHERE archetype = ${agentName} LIMIT 1
+  `;
+  if (rows.length === 0) return null;
+
+  rbacEntityCache.set(agentName, { id: rows[0].id, expiresAt: Date.now() + RBAC_ENTITY_CACHE_TTL });
+  return rows[0].id;
+}
+
+/** Clear RBAC entity cache (for testing). */
+export function clearRbacEntityCache(): void {
+  rbacEntityCache.clear();
+}
+
 // Format denial for user display
 
 export function formatDenialMessage(denial: PermissionDenial): string {

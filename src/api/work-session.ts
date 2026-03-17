@@ -42,6 +42,8 @@ import {
 } from "../work-trail-writer.ts";
 import { verifyDispatch } from "../dispatch-verifier.ts";
 import { journalDispatchStart, journalDispatchEnd } from "../dispatch-journal.ts";
+import { guardWorkSession, resolveRbacEntityId, formatDenialMessage } from "../permission-guard.ts";
+import { logCheck } from "../permission-audit.ts";
 import { getTrackedMemoryIds, clearTrackedMemoryIds } from "../dispatch-memory-tracker.ts";
 import { dashboardOnStart, dashboardOnComplete, dashboardOnPause, dashboardOnBlocked } from "../active-tickets-dashboard.ts";
 import { ensureContextCard, appendWorkHistory, appendHandoffNote } from "../ticket-context-card.ts";
@@ -185,6 +187,24 @@ export async function startWorkSession(req: ApiRequest, res: ApiResponse, bot: B
       }
     }
 
+    // ELLIE-803: RBAC guard — check work session start permission
+    if (agent) {
+      try {
+        const { default: forestSql } = await import('../../../ellie-forest/src/db');
+        const rbacEntityId = await resolveRbacEntityId(forestSql, agent);
+        if (rbacEntityId) {
+          const guard = await guardWorkSession(forestSql, rbacEntityId, "start");
+          logCheck(rbacEntityId, "plane", "update_issue", guard.allowed ? "allow" : "deny", undefined, agent);
+          if (!guard.allowed && guard.denial) {
+            logger.warn(`[rbac] ${formatDenialMessage(guard.denial)}`);
+            return res.status(403).json({ error: formatDenialMessage(guard.denial) });
+          }
+        }
+      } catch (err) {
+        logger.error("[rbac] Guard check failed on session start, allowing", err);
+      }
+    }
+
     const entityName = agent ? resolveEntityName(agent) : undefined;
     const entityNames = entityName ? [entityName] : undefined;
 
@@ -304,6 +324,24 @@ export async function updateWorkSession(req: ApiRequest, res: ApiResponse, bot: 
       return res.status(400).json({
         error: 'Missing required fields: work_item_id, message'
       });
+    }
+
+    // ELLIE-803: RBAC guard — check work session update permission
+    if (agent) {
+      try {
+        const { default: forestSql } = await import('../../../ellie-forest/src/db');
+        const rbacEntityId = await resolveRbacEntityId(forestSql, agent);
+        if (rbacEntityId) {
+          const guard = await guardWorkSession(forestSql, rbacEntityId, "update");
+          logCheck(rbacEntityId, "plane", "read_issue", guard.allowed ? "allow" : "deny", undefined, agent);
+          if (!guard.allowed && guard.denial) {
+            logger.warn(`[rbac] ${formatDenialMessage(guard.denial)}`);
+            return res.status(403).json({ error: formatDenialMessage(guard.denial) });
+          }
+        }
+      } catch (err) {
+        logger.error("[rbac] Guard check failed on session update, allowing", err);
+      }
     }
 
     // Find active forest tree (replaces Supabase lookup)
@@ -476,6 +514,25 @@ export async function completeWorkSession(req: ApiRequest, res: ApiResponse, bot
 
     // ELLIE-594: Parse optional workflow for chaining
     const workflow = workflowRaw as WorkflowDefinition | undefined;
+
+    // ELLIE-803: RBAC guard — check work session complete permission
+    const resolvedAgent = agent as string | undefined;
+    if (resolvedAgent) {
+      try {
+        const { default: forestSql } = await import('../../../ellie-forest/src/db');
+        const rbacEntityId = await resolveRbacEntityId(forestSql, resolvedAgent);
+        if (rbacEntityId) {
+          const guard = await guardWorkSession(forestSql, rbacEntityId, "complete");
+          logCheck(rbacEntityId, "plane", "update_issue", guard.allowed ? "allow" : "deny", undefined, resolvedAgent);
+          if (!guard.allowed && guard.denial) {
+            logger.warn(`[rbac] ${formatDenialMessage(guard.denial)}`);
+            return res.status(403).json({ error: formatDenialMessage(guard.denial) });
+          }
+        }
+      } catch (err) {
+        logger.error("[rbac] Guard check failed on session complete, allowing", err);
+      }
+    }
 
     // Find active forest tree
     const tree = await getWorkSessionByPlaneId(work_item_id);
@@ -715,6 +772,24 @@ export async function pauseWorkSession(req: ApiRequest, res: ApiResponse, bot: B
       });
     }
 
+    // ELLIE-803: RBAC guard — check work session pause permission (same as update)
+    if (agent) {
+      try {
+        const { default: forestSql } = await import('../../../ellie-forest/src/db');
+        const rbacEntityId = await resolveRbacEntityId(forestSql, agent);
+        if (rbacEntityId) {
+          const guard = await guardWorkSession(forestSql, rbacEntityId, "update");
+          logCheck(rbacEntityId, "plane", "read_issue", guard.allowed ? "allow" : "deny", undefined, agent);
+          if (!guard.allowed && guard.denial) {
+            logger.warn(`[rbac] ${formatDenialMessage(guard.denial)}`);
+            return res.status(403).json({ error: formatDenialMessage(guard.denial) });
+          }
+        }
+      } catch (err) {
+        logger.error("[rbac] Guard check failed on session pause, allowing", err);
+      }
+    }
+
     // Find active forest tree
     const tree = await getWorkSessionByPlaneId(work_item_id);
     if (!tree) {
@@ -842,6 +917,24 @@ export async function resumeWorkSession(req: ApiRequest, res: ApiResponse, bot: 
       return res.status(400).json({
         error: 'Missing required field: work_item_id'
       });
+    }
+
+    // ELLIE-803: RBAC guard — check work session resume permission (same as start)
+    if (agent) {
+      try {
+        const { default: forestSql } = await import('../../../ellie-forest/src/db');
+        const rbacEntityId = await resolveRbacEntityId(forestSql, agent);
+        if (rbacEntityId) {
+          const guard = await guardWorkSession(forestSql, rbacEntityId, "start");
+          logCheck(rbacEntityId, "plane", "update_issue", guard.allowed ? "allow" : "deny", undefined, agent);
+          if (!guard.allowed && guard.denial) {
+            logger.warn(`[rbac] ${formatDenialMessage(guard.denial)}`);
+            return res.status(403).json({ error: formatDenialMessage(guard.denial) });
+          }
+        }
+      } catch (err) {
+        logger.error("[rbac] Guard check failed on session resume, allowing", err);
+      }
     }
 
     // Find dormant forest tree — getWorkSessionByPlaneId excludes archived/composted,

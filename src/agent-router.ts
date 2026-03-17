@@ -11,6 +11,8 @@ import { classifyIntent, type ExecutionMode } from "./intent-classifier.ts";
 import { log } from "./logger.ts";
 import { RELAY_EPOCH } from "./relay-epoch.ts";
 import { breakers } from "./resilience.ts";
+import { guardAgentDispatch, resolveRbacEntityId, formatDenialMessage, type GuardConfig, DEFAULT_GUARD_CONFIG } from "./permission-guard.ts";
+import { logCheck } from "./permission-audit.ts";
 
 const logger = log.child("agent-router");
 
@@ -390,6 +392,23 @@ export async function routeAndDispatch(
     logger.info(`[routing] Agent override: ${route.agent_name} → ${agentOverride} (mode-based)`);
     route.agent_name = agentOverride;
     route.rule_name = "mode_override";
+  }
+
+  // ELLIE-803: RBAC guard — check permissions before dispatch
+  try {
+    const { default: forestSql } = await import('../../ellie-forest/src/db');
+    const entityId = await resolveRbacEntityId(forestSql, route.agent_name);
+    if (entityId) {
+      const guard = await guardAgentDispatch(forestSql, entityId, route.agent_name);
+      logCheck(entityId, "agents", "dispatch", guard.allowed ? "allow" : "deny", undefined, route.agent_name);
+      if (!guard.allowed && guard.denial) {
+        logger.warn(`[rbac] ${formatDenialMessage(guard.denial)}`);
+        return null;
+      }
+    }
+  } catch (err) {
+    // RBAC check failure should not block dispatch — log and continue
+    logger.error("[rbac] Guard check failed, allowing dispatch", err);
   }
 
   const effectiveWorkItemId = workItemId;

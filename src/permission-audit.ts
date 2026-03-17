@@ -194,21 +194,38 @@ export async function queryAuditLog(
   sql: any,
   filters: AuditQueryFilters = {},
 ): Promise<{ entries: AuditLogRow[]; total: number }> {
-  const conditions: string[] = ["1=1"];
-  if (filters.entity_id) conditions.push(`entity_id = '${filters.entity_id}'`);
-  if (filters.event_type) conditions.push(`event_type = '${filters.event_type}'`);
-  if (filters.resource) conditions.push(`resource = '${filters.resource}'`);
-  if (filters.result) conditions.push(`result = '${filters.result}'`);
-  if (filters.from_date) conditions.push(`created_at >= '${filters.from_date}'`);
-  if (filters.to_date) conditions.push(`created_at <= '${filters.to_date}'`);
-
-  const where = conditions.join(" AND ");
   const limit = Math.min(filters.limit ?? 50, 200);
   const offset = filters.offset ?? 0;
 
+  // Build parameterized filter values
+  const entityId = filters.entity_id ?? null;
+  const eventType = filters.event_type ?? null;
+  const resource = filters.resource ?? null;
+  const result = filters.result ?? null;
+  const fromDate = filters.from_date ?? null;
+  const toDate = filters.to_date ?? null;
+
   const [countRows, entries] = await Promise.all([
-    sql.unsafe(`SELECT COUNT(*)::int as total FROM permission_audit_log WHERE ${where}`),
-    sql.unsafe(`SELECT * FROM permission_audit_log WHERE ${where} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`),
+    sql`
+      SELECT COUNT(*)::int as total FROM permission_audit_log
+      WHERE (${entityId}::uuid IS NULL OR entity_id = ${entityId}::uuid)
+      AND (${eventType}::text IS NULL OR event_type = ${eventType}::audit_event_type)
+      AND (${resource}::text IS NULL OR resource = ${resource})
+      AND (${result}::text IS NULL OR result = ${result})
+      AND (${fromDate}::timestamptz IS NULL OR created_at >= ${fromDate}::timestamptz)
+      AND (${toDate}::timestamptz IS NULL OR created_at <= ${toDate}::timestamptz)
+    `,
+    sql`
+      SELECT * FROM permission_audit_log
+      WHERE (${entityId}::uuid IS NULL OR entity_id = ${entityId}::uuid)
+      AND (${eventType}::text IS NULL OR event_type = ${eventType}::audit_event_type)
+      AND (${resource}::text IS NULL OR resource = ${resource})
+      AND (${result}::text IS NULL OR result = ${result})
+      AND (${fromDate}::timestamptz IS NULL OR created_at >= ${fromDate}::timestamptz)
+      AND (${toDate}::timestamptz IS NULL OR created_at <= ${toDate}::timestamptz)
+      ORDER BY created_at DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `,
   ]);
 
   return { entries, total: countRows[0]?.total ?? 0 };

@@ -3,6 +3,8 @@ species: owl
 cognitive_style: "breadth-first, evidence-weighted, systems thinking"
 token_budget: 100000
 allowed_skills: [memory, forest, google-workspace, plane, miro, verify]
+produces: [finding, recommendation, report, question, escalation, status_update]
+consumes: [direction, approval, rejection, answer, handoff]
 section_priorities:
   archetype: 1
   forest-awareness: 1

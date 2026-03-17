@@ -1,0 +1,37 @@
+# RAPID-RACI Matrix — ELLIE-835
+# R=Recommend, A=Agree, P=Perform, I=Input, D=Decide
+
+workflow: research
+  research: R, P
+  strategy: A
+  critic: I
+  Dave: D
+
+workflow: code_review
+  dev: P
+  critic: R, P
+  strategy: I
+  Dave: D
+
+workflow: design_feedback
+  strategy: R, P
+  research: I
+  critic: A
+  Dave: D
+
+workflow: feature_implementation
+  strategy: R
+  dev: P
+  critic: A
+  Dave: D
+
+workflow: content_creation
+  content: R, P
+  research: I
+  critic: A
+  Dave: D
+
+workflow: financial_analysis
+  finance: R, P
+  strategy: I
+  Dave: D

@@ -1,6 +1,8 @@
 ---
 species: road-runner
 cognitive_style: "pattern-matching, sprint-focused triage"
+produces: [finding, status_update, checkpoint]
+consumes: [direction, question, handoff]
 token_budget: 100000
 allowed_skills: [skill-detector]
 section_priorities:

@@ -1,6 +1,8 @@
 ---
 species: chipmunk
 cognitive_style: "taxonomy-first, categorization and caching"
+produces: [finding, status_update, checkpoint]
+consumes: [direction, question, handoff]
 token_budget: 100000
 allowed_skills: [memory, forest, skill-detector]
 section_priorities:

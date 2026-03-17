@@ -4130,13 +4130,25 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // ELLIE-819: Max body size for permission endpoints (64KB)
+  const PERM_MAX_BODY = 65536;
+
   if (url.pathname === "/api/permissions/entities" && req.method === "POST") {
     let body = "";
-    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    let bodyOverflow = false;
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); if (body.length > PERM_MAX_BODY) bodyOverflow = true; });
     req.on("end", async () => {
       try {
-        const { validateCreateEntity, createEntity } = await import("./permission-api.ts");
+        if (bodyOverflow) { res.writeHead(413, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Request body too large" })); return; }
+        const { guardPermissionWrite } = await import("./permission-auth.ts");
         const { sql } = await import("../../ellie-forest/src/index.ts");
+        const auth = await guardPermissionWrite(sql, { "x-entity-id": req.headers["x-entity-id"] as string, "x-bridge-key": req.headers["x-bridge-key"] as string });
+        if (!auth.authorized) {
+          res.writeHead(auth.status_code, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: auth.error }));
+          return;
+        }
+        const { validateCreateEntity, createEntity } = await import("./permission-api.ts");
         const data = JSON.parse(body);
         const validation = validateCreateEntity(data);
         if (!validation.valid) {
@@ -4159,11 +4171,20 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
   if (url.pathname.match(/^\/api\/permissions\/entities\/[^/]+$/) && req.method === "PATCH") {
     const id = url.pathname.split("/").pop()!;
     let body = "";
-    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    let bodyOverflow = false;
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); if (body.length > PERM_MAX_BODY) bodyOverflow = true; });
     req.on("end", async () => {
       try {
-        const { validateUpdateEntity, updateEntity } = await import("./permission-api.ts");
+        if (bodyOverflow) { res.writeHead(413, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Request body too large" })); return; }
+        const { guardPermissionWrite } = await import("./permission-auth.ts");
         const { sql } = await import("../../ellie-forest/src/index.ts");
+        const auth = await guardPermissionWrite(sql, { "x-entity-id": req.headers["x-entity-id"] as string, "x-bridge-key": req.headers["x-bridge-key"] as string });
+        if (!auth.authorized) {
+          res.writeHead(auth.status_code, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: auth.error }));
+          return;
+        }
+        const { validateUpdateEntity, updateEntity } = await import("./permission-api.ts");
         const data = JSON.parse(body);
         const validation = validateUpdateEntity(data);
         if (!validation.valid) {
@@ -4202,11 +4223,20 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
 
   if (url.pathname === "/api/permissions/roles" && req.method === "POST") {
     let body = "";
-    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    let bodyOverflow = false;
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); if (body.length > PERM_MAX_BODY) bodyOverflow = true; });
     req.on("end", async () => {
       try {
-        const { validateCreateRole, createRole } = await import("./permission-api.ts");
+        if (bodyOverflow) { res.writeHead(413, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Request body too large" })); return; }
+        const { guardPermissionWrite } = await import("./permission-auth.ts");
         const { sql } = await import("../../ellie-forest/src/index.ts");
+        const auth = await guardPermissionWrite(sql, { "x-entity-id": req.headers["x-entity-id"] as string, "x-bridge-key": req.headers["x-bridge-key"] as string });
+        if (!auth.authorized) {
+          res.writeHead(auth.status_code, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: auth.error }));
+          return;
+        }
+        const { validateCreateRole, createRole } = await import("./permission-api.ts");
         const data = JSON.parse(body);
         const validation = validateCreateRole(data);
         if (!validation.valid) {
@@ -4229,8 +4259,16 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
   if (url.pathname === "/api/permissions/check" && req.method === "GET") {
     (async () => {
       try {
+        const { resolveCallerEntity } = await import("./permission-auth.ts");
         const { checkPermission } = await import("./permission-api.ts");
         const { sql } = await import("../../ellie-forest/src/index.ts");
+        // ELLIE-819: Auth required — must be an authenticated entity to query permissions
+        const caller = await resolveCallerEntity(sql, { "x-entity-id": req.headers["x-entity-id"] as string, "x-bridge-key": req.headers["x-bridge-key"] as string });
+        if (!caller.authorized) {
+          res.writeHead(caller.status_code, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: caller.error }));
+          return;
+        }
         const entityId = url.searchParams.get("entity_id");
         const resource = url.searchParams.get("resource");
         const action = url.searchParams.get("action");

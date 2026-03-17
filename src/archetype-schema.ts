@@ -24,6 +24,25 @@
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+/** Valid message types that agents can produce or consume. */
+export const MESSAGE_TYPES = [
+  "finding",
+  "recommendation",
+  "direction",
+  "approval",
+  "rejection",
+  "question",
+  "answer",
+  "report",
+  "review",
+  "escalation",
+  "checkpoint",
+  "handoff",
+  "status_update",
+] as const;
+
+export type MessageType = typeof MESSAGE_TYPES[number];
+
 /** Frontmatter fields for an archetype file. */
 export interface ArchetypeFrontmatter {
   species: string;
@@ -32,6 +51,10 @@ export interface ArchetypeFrontmatter {
   allowed_skills?: string[];
   section_priorities?: Record<string, number>;
   compliance_thresholds?: Record<string, number>;
+  /** ELLIE-832: Message types this archetype can emit. */
+  produces?: MessageType[];
+  /** ELLIE-832: Message types this archetype can accept. */
+  consumes?: MessageType[];
 }
 
 /** A parsed markdown section (H2 heading + content). */
@@ -98,6 +121,7 @@ export const KNOWN_SPECIES = [
   "ant",
   "owl",
   "bee",
+  "bird",
   "chipmunk",
   "deer",
   "road-runner",
@@ -165,6 +189,14 @@ export function parseArchetype(raw: string, speciesHint?: string): ArchetypeSche
     frontmatter.compliance_thresholds = fm.compliance_thresholds as Record<string, number>;
   }
 
+  // ELLIE-832: Parse produces/consumes message contracts
+  if (Array.isArray(fm.produces)) {
+    frontmatter.produces = fm.produces as MessageType[];
+  }
+  if (Array.isArray(fm.consumes)) {
+    frontmatter.consumes = fm.consumes as MessageType[];
+  }
+
   const sections = parseSections(body);
 
   return { frontmatter, sections, body };
@@ -208,11 +240,23 @@ export function parseSections(body: string): ArchetypeSection[] {
 
 // ── Validation ───────────────────────────────────────────────────────────────
 
+/** Options for archetype validation. */
+export interface ArchetypeValidateOptions {
+  /**
+   * When true (default), produces/consumes must use MESSAGE_TYPES enum values.
+   * When false, any non-empty string is accepted (for creature domain-specific types).
+   */
+  strict?: boolean;
+}
+
 /**
  * Validate an archetype schema against requirements.
  * Checks frontmatter fields and required sections.
+ *
+ * Pass `{ strict: false }` for creature files that use domain-specific
+ * message types instead of the protocol-level MESSAGE_TYPES enum.
  */
-export function validateArchetype(schema: ArchetypeSchema): ArchetypeValidationResult {
+export function validateArchetype(schema: ArchetypeSchema, options?: ArchetypeValidateOptions): ArchetypeValidationResult {
   const errors: ArchetypeValidationError[] = [];
 
   // Frontmatter validation
@@ -226,6 +270,43 @@ export function validateArchetype(schema: ArchetypeSchema): ArchetypeValidationR
 
   if (schema.frontmatter.token_budget !== undefined && schema.frontmatter.token_budget <= 0) {
     errors.push({ field: "frontmatter.token_budget", message: "token_budget must be positive" });
+  }
+
+  // ELLIE-832: Validate produces/consumes message types
+  const strict = options?.strict !== false; // default true
+  if (strict) {
+    // Protocol-layer validation: must use MESSAGE_TYPES enum
+    const validTypes = new Set<string>(MESSAGE_TYPES);
+    if (schema.frontmatter.produces) {
+      for (const t of schema.frontmatter.produces) {
+        if (!validTypes.has(t)) {
+          errors.push({ field: "frontmatter.produces", message: `Invalid message type "${t}" in produces. Valid types: ${MESSAGE_TYPES.join(", ")}` });
+        }
+      }
+    }
+    if (schema.frontmatter.consumes) {
+      for (const t of schema.frontmatter.consumes) {
+        if (!validTypes.has(t)) {
+          errors.push({ field: "frontmatter.consumes", message: `Invalid message type "${t}" in consumes. Valid types: ${MESSAGE_TYPES.join(", ")}` });
+        }
+      }
+    }
+  } else {
+    // Domain-layer validation: any non-empty string is valid
+    if (schema.frontmatter.produces) {
+      for (const t of schema.frontmatter.produces) {
+        if (!t || typeof t !== "string" || !t.trim()) {
+          errors.push({ field: "frontmatter.produces", message: "produces entries must be non-empty strings" });
+        }
+      }
+    }
+    if (schema.frontmatter.consumes) {
+      for (const t of schema.frontmatter.consumes) {
+        if (!t || typeof t !== "string" || !t.trim()) {
+          errors.push({ field: "frontmatter.consumes", message: "consumes entries must be non-empty strings" });
+        }
+      }
+    }
   }
 
   // Section validation — uses prefix matching to handle variations
@@ -457,10 +538,12 @@ function parseSimpleYaml(yaml: string): Record<string, unknown> {
       continue;
     }
 
-    // No value — check for nested object on next lines
+    // No value — check for dash-list array or nested object on next lines
     if (!rawValue || rawValue === "") {
       const nested: Record<string, unknown> = {};
       let isNested = false;
+      const listItems: string[] = [];
+      let isList = false;
       i++;
 
       while (i < lines.length) {
@@ -473,7 +556,19 @@ function parseSimpleYaml(yaml: string): Record<string, unknown> {
         }
 
         const indent = nextLine.length - nextLine.trimStart().length;
-        if (indent > 0 && nextTrimmed.includes(":")) {
+        if (indent <= 0) break;
+
+        // Dash-list item: "  - value"
+        if (nextTrimmed.startsWith("- ")) {
+          isList = true;
+          const itemVal = nextTrimmed.substring(2).trim().replace(/^["']|["']$/g, "");
+          if (itemVal) listItems.push(itemVal);
+          i++;
+          continue;
+        }
+
+        // Nested object: "  subkey: value"
+        if (nextTrimmed.includes(":")) {
           isNested = true;
           const nColonIdx = nextTrimmed.indexOf(":");
           const nKey = nextTrimmed.substring(0, nColonIdx).trim();
@@ -486,7 +581,9 @@ function parseSimpleYaml(yaml: string): Record<string, unknown> {
         break;
       }
 
-      if (isNested) {
+      if (isList && listItems.length > 0) {
+        result[key] = listItems;
+      } else if (isNested) {
         result[key] = nested;
       }
       continue;

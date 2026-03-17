@@ -3,6 +3,8 @@ species: squirrel
 cognitive_style: "breadth-first, foraging coordinator"
 token_budget: 100000
 allowed_skills: [plane, memory, forest, github, briefing, google-workspace, verify, context-strategy, skill-detector]
+produces: [direction, question, status_update, escalation, handoff]
+consumes: [finding, recommendation, report, review, answer, checkpoint]
 section_priorities:
   conversation: 1
   forest-awareness: 2

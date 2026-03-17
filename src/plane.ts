@@ -86,6 +86,7 @@ function parseWorkItemId(workItemId: string) {
 /** Find a project UUID by its short identifier (e.g. "ELLIE") */
 async function getProjectByIdentifier(identifier: string): Promise<string | null> {
   const data = await planeRequest("/projects/");
+  if (!data) return null;
   const project = data.results?.find((p: Record<string, unknown>) => p.identifier === identifier);
   return project?.id ?? null;
 }
@@ -93,12 +94,14 @@ async function getProjectByIdentifier(identifier: string): Promise<string | null
 /** Find an issue by sequence number within a project (returns full issue data) */
 async function getIssueBySequenceId(projectId: string, sequenceId: number): Promise<Record<string, unknown> | null> {
   const data = await planeRequest(`/projects/${projectId}/issues/?sequence_id=${sequenceId}`);
+  if (!data) return null;
   return data.results?.find((i: Record<string, unknown>) => i.sequence_id === sequenceId) ?? null;
 }
 
 /** Get the state UUID for a given group (e.g. "started" for In Progress) */
 export async function getStateIdByGroup(projectId: string, group: string): Promise<string | null> {
   const data = await planeRequest(`/projects/${projectId}/states/`);
+  if (!data) return null;
   const state = data.results?.find((s: Record<string, unknown>) => s.group === group);
   return state?.id ?? null;
 }
@@ -160,6 +163,7 @@ export async function addIssueComment(projectId: string, issueId: string, commen
 async function listIssueComments(projectId: string, issueId: string): Promise<Array<{ comment_html: string }>> {
   try {
     const data = await planeRequest(`/projects/${projectId}/issues/${issueId}/comments/`);
+    if (!data) return [];
     return data.results || data || [];
   } catch {
     return [];
@@ -581,6 +585,7 @@ export async function listOpenIssues(projectIdentifier: string, limit: number = 
     if (!projectId) return [];
 
     const data = await planeRequest(`/projects/${projectId}/issues/`);
+    if (!data) return [];
     const issues = (data.results || [])
       .filter((i: Record<string, unknown>) => !["completed", "cancelled"].includes((i.state_detail as Record<string, string>)?.group || ""))
       .slice(0, limit)

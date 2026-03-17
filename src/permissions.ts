@@ -35,7 +35,21 @@ const roleTreeCache = new Map<string, CacheEntry<string[]>>();
 const entityRolesCache = new Map<string, CacheEntry<string[]>>();
 const allRolesCache: { value: Role[] | null; expires_at: number } = { value: null, expires_at: 0 };
 
-const CACHE_TTL_MS = 60_000; // 1 minute
+const MAX_CACHE_ENTRIES = 500; // LRU eviction cap — prevents unbounded growth from random UUID probing
+
+function evictIfNeeded(cache: Map<string, CacheEntry<any>>): void {
+  if (cache.size <= MAX_CACHE_ENTRIES) return;
+  // Evict oldest entries (Map preserves insertion order)
+  const excess = cache.size - MAX_CACHE_ENTRIES;
+  let removed = 0;
+  for (const key of cache.keys()) {
+    if (removed >= excess) break;
+    cache.delete(key);
+    removed++;
+  }
+}
+
+const CACHE_TTL_MS = 5_000; // 5 seconds — short TTL to minimize stale-permission window after revocation
 
 function isFresh<T>(entry: CacheEntry<T> | { value: T | null; expires_at: number }): boolean {
   return entry.value !== null && Date.now() < entry.expires_at;
@@ -130,6 +144,7 @@ export async function canEntityDo(
     `;
     directRoleIds = rows.map((r: any) => r.role_id);
     entityRolesCache.set(entityId, { value: directRoleIds, expires_at: Date.now() + CACHE_TTL_MS });
+    evictIfNeeded(entityRolesCache);
   }
 
   if (directRoleIds.length === 0) return false;
@@ -154,6 +169,7 @@ export async function canEntityDo(
     } else {
       const tree = resolveRoleTree(roleId, allRoles);
       roleTreeCache.set(cacheKey, { value: tree, expires_at: Date.now() + CACHE_TTL_MS });
+      evictIfNeeded(roleTreeCache);
       for (const id of tree) allRoleIds.add(id);
     }
   }

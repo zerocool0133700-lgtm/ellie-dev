@@ -138,14 +138,14 @@ export async function createEntity(sql: any, input: CreateEntityInput): Promise<
 }
 
 export async function updateEntity(sql: any, entityId: string, input: UpdateEntityInput): Promise<boolean> {
-  if (input.name || input.archetype !== undefined || input.metadata) {
-    const sets: string[] = [];
-    if (input.name) sets.push(`name = '${input.name.replace(/'/g, "''")}'`);
-    if (input.archetype !== undefined) sets.push(input.archetype ? `archetype = '${input.archetype}'` : "archetype = NULL");
-    if (input.metadata) sets.push(`metadata = '${JSON.stringify(input.metadata)}'::jsonb`);
-    if (sets.length > 0) {
-      await sql.unsafe(`UPDATE rbac_entities SET ${sets.join(", ")} WHERE id = '${entityId}'`);
-    }
+  if (input.name) {
+    await sql`UPDATE rbac_entities SET name = ${input.name} WHERE id = ${entityId}`;
+  }
+  if (input.archetype !== undefined) {
+    await sql`UPDATE rbac_entities SET archetype = ${input.archetype || null} WHERE id = ${entityId}`;
+  }
+  if (input.metadata) {
+    await sql`UPDATE rbac_entities SET metadata = ${JSON.stringify(input.metadata)}::jsonb WHERE id = ${entityId}`;
   }
 
   if (input.add_roles?.length) {

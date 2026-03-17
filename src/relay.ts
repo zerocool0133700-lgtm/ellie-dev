@@ -413,6 +413,30 @@ logger.info("Starting Claude Telegram Relay...", {
 // Set up WebSocket servers (voice, extension, ellie-chat)
 { const _done = startPhase("websocket-servers"); createWebSocketServers(httpServer); _done(); }
 
+// ELLIE-803: Wire permission audit flush callback
+{
+  const { setFlushCallback } = await import("./permission-audit.ts");
+  const { default: forestSql } = await import("../../ellie-forest/src/db");
+  setFlushCallback(async (entries) => {
+    if (entries.length === 0) return;
+    const values = entries.map(e => ({
+      event_type: e.event_type,
+      entity_id: e.entity_id,
+      entity_name: e.entity_name ?? null,
+      resource: e.resource ?? null,
+      action: e.action ?? null,
+      scope: e.scope ?? null,
+      result: e.result ?? null,
+      changed_by: e.changed_by ?? null,
+      metadata: e.metadata ? JSON.stringify(e.metadata) : null,
+    }));
+    await forestSql`
+      INSERT INTO permission_audit_log ${forestSql(values, 'event_type', 'entity_id', 'entity_name', 'resource', 'action', 'scope', 'result', 'changed_by', 'metadata')}
+    `;
+  });
+  logger.info("[rbac] Audit flush callback registered");
+}
+
 // Start HTTP + WebSocket server
 const _doneHttpListen = startPhase("http-listen");
 httpServer.listen(HTTP_PORT, () => {
