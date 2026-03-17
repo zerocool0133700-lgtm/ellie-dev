@@ -52,6 +52,8 @@ export interface DispatchResult {
     name: string;
     description: string;
   };
+  /** ELLIE-839: Resolved boot packet for prompt injection. */
+  boot_packet?: string;
 }
 
 export interface SyncResult {
@@ -411,6 +413,28 @@ export async function routeAndDispatch(
     logger.error("[rbac] Guard check failed, allowing dispatch", err);
   }
 
+  // ELLIE-839: Boot-up packet resolution
+  let bootPacket: string | undefined;
+  try {
+    const { getCreature, resolveBootRequirements, formatBootPacket, canDispatch } = await import("./boot-resolver.ts");
+    const creature = getCreature(route.agent_name);
+    if (creature?.boot_requirements) {
+      const resolution = resolveBootRequirements(creature, {
+        workItemId: workItemId,
+        channel,
+      });
+      const dispatchCheck = canDispatch(resolution);
+      if (!dispatchCheck.allowed) {
+        logger.warn(`[boot] ${dispatchCheck.reason}`);
+        // Don't block — boot failures are soft (except identity which is logged)
+      }
+      bootPacket = formatBootPacket(resolution);
+      logger.info(`[boot] ${route.agent_name}: ${resolution.summary}`);
+    }
+  } catch (err) {
+    logger.error("[boot] Boot resolution failed, continuing without packet", err);
+  }
+
   const effectiveWorkItemId = workItemId;
 
   const dispatchMessage = route.strippedMessage || message;
@@ -432,6 +456,11 @@ export async function routeAndDispatch(
       name: route.skill_name,
       description: route.skill_description,
     };
+  }
+
+  // ELLIE-839: Attach boot packet to dispatch result
+  if (bootPacket) {
+    dispatch.boot_packet = bootPacket;
   }
 
   return { route, dispatch };
