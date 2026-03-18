@@ -248,7 +248,7 @@ async function _handleEllieChatMessage(
 
   // Send typing indicator
   if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId, agent: agentResult?.dispatch?.agent?.name || "general" }));
+    ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId, agent: "general" }));
   }
 
   // /plan on|off — toggle planning mode
