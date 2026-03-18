@@ -519,7 +519,20 @@ async function handleDelegate(req: ApiRequest, res: ApiResponse, supabase: Supab
   }
 
   const agentType = String(to_agent);
-  const displayName = AGENT_DISPLAY_NAMES[agentType] || agentType;
+
+  // ELLIE-909: Validate agent type is known
+  if (!AGENT_DISPLAY_NAMES[agentType]) {
+    res.status(400).json({ error: `Unknown agent type: ${agentType}. Valid: ${Object.keys(AGENT_DISPLAY_NAMES).join(", ")}` });
+    return;
+  }
+
+  // ELLIE-912: Validate todo_id is a UUID
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(todo_id))) {
+    res.status(400).json({ error: "Invalid todo_id format" });
+    return;
+  }
+
+  const displayName = AGENT_DISPLAY_NAMES[agentType];
 
   // Validate todo exists
   const { data: todo, error: fetchErr } = await supabase
@@ -530,10 +543,19 @@ async function handleDelegate(req: ApiRequest, res: ApiResponse, supabase: Supab
 
   if (fetchErr || !todo) { res.status(404).json({ error: "Todo not found" }); return; }
 
+  // ELLIE-909: Validate todo is in a delegatable state
+  if (todo.status === "done" || todo.status === "cancelled") {
+    res.status(400).json({ error: `Cannot delegate a ${todo.status} todo` });
+    return;
+  }
+
+  // ELLIE-913: Use provided delegated_by, don't hardcode "Dave"
+  const delegator = typeof delegated_by === "string" && delegated_by.trim() ? delegated_by.trim() : "Dave";
+
   const updates: Record<string, unknown> = {
     assigned_agent: agentType,
     assigned_to: displayName,
-    delegated_by: delegated_by || "Dave",
+    delegated_by: delegator,
     delegated_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
@@ -636,7 +658,7 @@ async function handleSnapshotCapture(req: ApiRequest, res: ApiResponse, supabase
 }
 
 async function handleSnapshotList(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
-  const days = parseInt(req.query?.days || "30");
+  const days = Math.min(Math.max(parseInt(req.query?.days || "30"), 1), 365); // ELLIE-912: bounds check
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
 
   const { data, error } = await supabase
@@ -652,28 +674,37 @@ async function handleSnapshotList(req: ApiRequest, res: ApiResponse, supabase: S
 // ── ELLIE-906: GET /api/gtd/reports/velocity ───────────────
 
 async function handleVelocityReport(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
-  const weeks = parseInt(req.query?.weeks || "4");
+  // ELLIE-910: Single query instead of N+1 (one query per week)
+  const weeks = Math.min(Math.max(parseInt(req.query?.weeks || "4"), 1), 12); // ELLIE-912: bounds check
+  const since = new Date(Date.now() - weeks * 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  const { data, error } = await supabase
+    .from("todos")
+    .select("assigned_agent, completed_at")
+    .eq("status", "done")
+    .gte("completed_at", since);
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+
+  // Group by week + agent in memory
   const results: Array<{ week_start: string; agent: string; done_count: number }> = [];
+  const buckets: Record<string, Record<string, number>> = {};
 
-  for (let w = 0; w < weeks; w++) {
-    const weekStart = new Date(Date.now() - (w + 1) * 7 * 24 * 60 * 60 * 1000);
-    const weekEnd = new Date(Date.now() - w * 7 * 24 * 60 * 60 * 1000);
+  for (const t of data ?? []) {
+    const completedAt = new Date(t.completed_at);
+    // Find which week bucket this falls into
+    const weekOffset = Math.floor((Date.now() - completedAt.getTime()) / (7 * 24 * 60 * 60 * 1000));
+    const weekStart = new Date(Date.now() - (weekOffset + 1) * 7 * 24 * 60 * 60 * 1000);
+    const weekKey = weekStart.toISOString().split("T")[0];
+    const agent = t.assigned_agent || "unassigned";
 
-    const { data } = await supabase
-      .from("todos")
-      .select("assigned_agent")
-      .eq("status", "done")
-      .gte("completed_at", weekStart.toISOString())
-      .lt("completed_at", weekEnd.toISOString());
+    if (!buckets[weekKey]) buckets[weekKey] = {};
+    buckets[weekKey][agent] = (buckets[weekKey][agent] || 0) + 1;
+  }
 
-    const counts: Record<string, number> = {};
-    for (const t of data ?? []) {
-      const agent = t.assigned_agent || "unassigned";
-      counts[agent] = (counts[agent] || 0) + 1;
-    }
-
-    for (const [agent, count] of Object.entries(counts)) {
-      results.push({ week_start: weekStart.toISOString().split("T")[0], agent, done_count: count });
+  for (const [weekStart, agents] of Object.entries(buckets)) {
+    for (const [agent, count] of Object.entries(agents)) {
+      results.push({ week_start: weekStart, agent, done_count: count });
     }
   }
 
