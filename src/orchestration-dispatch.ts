@@ -285,7 +285,8 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       `Title: ${details.name}\nPriority: ${details.priority}\nDescription: ${details.description}\n`;
 
     // ELLIE-571: Check for post-mortem advice before dispatch (fire-and-forget safe)
-    const [archetype, roleContext, psy, phase, health, riverContext, dispatchAdvice] = await Promise.all([
+    // Use allSettled so a single failing context source doesn't block dispatch
+    const contextResults = await Promise.allSettled([
       getAgentArchetype(agentType),
       getAgentRoleContext(agentType),
       getPsyContext(),
@@ -294,6 +295,8 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       getRiverContextForAgent(agentType, details.description),  // ELLIE-150
       getAdviceForDispatch(workItemId),  // ELLIE-571
     ]);
+    const [archetype, roleContext, psy, phase, health, riverContext, dispatchAdvice] =
+      contextResults.map(r => r.status === "fulfilled" ? r.value : null) as [any, any, any, any, any, any, any];
 
     // ELLIE-571: Inject post-mortem advice into prompt context if found
     if (dispatchAdvice) {
@@ -349,7 +352,7 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
           resume: false,
           model: dispatch.agent.model,
           allowedTools: dispatch.agent.tools_enabled,
-          timeoutMs: 600_000, // 10 min — dispatched agents need time for multi-step work
+          timeoutMs: 900_000, // 15 min — dispatched agents need time for multi-step work
         }),
         retryOpts,
       );
@@ -451,7 +454,7 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       });
       // ELLIE-455: J scope touchpoint — job completed/responded
       writeJobTouchpointForAgent(jobId, agentType, sessionIds?.creature_id,
-        finalStatus === "completed" ? "completed" : "completed",
+        finalStatus === "completed" ? "completed" : "responded",
         `${agentType} ${finalStatus} ${workItemId} in ${durationMin}min`,
         { workItemId, duration_ms: durationMs, cost_usd: costUsd, tokens: tokensIn + tokensOut },
       ).catch(err => logger.warn("[touchpoint] completed failed", { err: err.message }));
