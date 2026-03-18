@@ -429,6 +429,58 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
         return;
       }
 
+      // ELLIE-877/878: WebRTC call signaling
+      if (msg.type === "call_start" || msg.type === "call_accept" || msg.type === "call_decline" ||
+          msg.type === "call_end" || msg.type === "call_offer" || msg.type === "call_answer" || msg.type === "call_ice") {
+        (async () => {
+          try {
+            const { startCall, acceptCall, endCall, getActiveCall, saveCallRecord } = await import("./api/calls.ts");
+            const callUser = wsAppUserMap.get(ws);
+            const callUserId = callUser?.id || callUser?.anonymous_id || "anonymous";
+
+            if (msg.type === "call_start") {
+              const callId = `call-${Date.now().toString(36)}`;
+              const call = startCall(callId, msg.channel_id || "general", callUserId, msg.call_type || "voice");
+              // Broadcast ringing to all clients
+              const ringing = JSON.stringify({ type: "call_incoming", call, ts: Date.now() });
+              for (const client of ellieChatClients) {
+                if (client !== ws && client.readyState === WebSocket.OPEN) client.send(ringing);
+              }
+              ws.send(JSON.stringify({ type: "call_started", call, ts: Date.now() }));
+            } else if (msg.type === "call_accept" && msg.call_id) {
+              const call = acceptCall(msg.call_id, callUserId);
+              if (call) {
+                const accepted = JSON.stringify({ type: "call_accepted", call, participant: callUserId, ts: Date.now() });
+                for (const client of ellieChatClients) {
+                  if (client.readyState === WebSocket.OPEN) client.send(accepted);
+                }
+              }
+            } else if (msg.type === "call_decline" && msg.call_id) {
+              ws.send(JSON.stringify({ type: "call_declined", call_id: msg.call_id, ts: Date.now() }));
+            } else if (msg.type === "call_end" && msg.call_id) {
+              const call = endCall(msg.call_id);
+              if (call) {
+                const ended = JSON.stringify({ type: "call_ended", call, ts: Date.now() });
+                for (const client of ellieChatClients) {
+                  if (client.readyState === WebSocket.OPEN) client.send(ended);
+                }
+                // Save call record (ELLIE-879)
+                if (supabase) saveCallRecord(supabase, call).catch(() => {});
+              }
+            } else if ((msg.type === "call_offer" || msg.type === "call_answer" || msg.type === "call_ice") && msg.call_id) {
+              // Relay SDP/ICE to all other participants
+              const relay = JSON.stringify({ ...msg, from: callUserId, ts: Date.now() });
+              for (const client of ellieChatClients) {
+                if (client !== ws && client.readyState === WebSocket.OPEN) client.send(relay);
+              }
+            }
+          } catch (err) {
+            logger.error("Call signaling error", err);
+          }
+        })();
+        return;
+      }
+
       // New chat: close current conversation + agent sessions so next message starts fresh
       if (msg.type === "new_chat") {
         (async () => {
