@@ -16,7 +16,7 @@ import {
 import {
   getActiveAgent, setActiveAgent,
   wsAppUserMap, ellieChatPhoneHistories, ellieChatClients,
-  broadcastExtension, getRelayDeps, getNotifyCtx, touchPhoneHistory,
+  broadcastExtension, broadcastToEllieChatClients, getRelayDeps, getNotifyCtx, touchPhoneHistory,
 } from "./relay-state.ts";
 import { resolveEntityName } from "./agent-entity-map.ts";
 import { resetEllieChatIdleTimer, resetTelegramIdleTimer, resetGchatIdleTimer } from "./relay-idle.ts";
@@ -664,13 +664,13 @@ async function _handleEllieChatMessage(
         : await supabase.from("channel_members").select("member_id").eq("channel_id", channelId || "a0000000-0000-0000-0000-000000000001").eq("member_type", "agent").then(r => r.data?.map(m => m.member_id) || []);
       logger.info(`Broadcast ${broadcast.here ? "@here" : "@channel"} → ${presenceAgents.length} agents`, { agents: presenceAgents });
       // Broadcast notification to WS clients
-      broadcastToEllieChatClients(JSON.stringify({
+      broadcastToEllieChatClients({
         type: "mention_notification",
         mention_type: broadcast.here ? "here" : "channel",
         agents: presenceAgents,
         channel_id: channelId,
         ts: Date.now(),
-      }));
+      });
     }
 
     // ELLIE-381: Pre-routing mode check — skill-only → road-runner override
@@ -693,13 +693,13 @@ async function _handleEllieChatMessage(
       setActiveAgent("ellie-chat", agentResult.dispatch.agent.name);
       // ELLIE-846: Update agent presence to busy + broadcast
       updateAgentPresence(supabase, agentResult.dispatch.agent.name, "busy", channelId, `Processing message`).catch(() => {});
-      broadcastToEllieChatClients(JSON.stringify({
+      broadcastToEllieChatClients({
         type: "presence_update",
         agent_name: agentResult.dispatch.agent.name,
         status: "busy",
         channel_id: channelId,
         ts: Date.now(),
-      }));
+      });
       // ELLIE-383: Include contextMode from pre-route detection in route broadcast
       broadcastExtension({
         type: "route", channel: "ellie-chat",
@@ -1171,13 +1171,13 @@ async function _handleEllieChatMessage(
     if (agentResult) {
       const dispatchedAgent = agentResult.dispatch.agent.name;
       updateAgentPresence(supabase, dispatchedAgent, "idle").catch(() => {});
-      broadcastToEllieChatClients(JSON.stringify({
+      broadcastToEllieChatClients({
         type: "presence_update",
         agent_name: dispatchedAgent,
         status: "idle",
         channel_id: channelId,
         ts: Date.now(),
-      }));
+      });
     }
 
     if (agentResult) {
