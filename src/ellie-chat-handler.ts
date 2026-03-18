@@ -708,6 +708,11 @@ async function _handleEllieChatMessage(
         contextMode: preRouteDetection?.mode || undefined,
       });
 
+      // ELLIE-853: Update typing indicator with actual routed agent name
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId, agent: agentResult.dispatch.agent.name }));
+      }
+
       // Dispatch notification (ELLIE-80 pattern from Google Chat)
       if (agentResult.dispatch.agent.name !== "general" && agentResult.dispatch.is_new) {
         notify(getNotifyCtx(), {
