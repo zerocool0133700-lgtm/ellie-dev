@@ -163,6 +163,8 @@ import {
   verifyWebhookSignature,
   parseWebhookPayload,
   replyToEmail,
+  isInterAgentMessage,
+  buildAgentHeaders,
   type AgentMailWebhookPayload,
 } from "./agentmail.ts";
 import { getSummaryState } from "./ums/consumers/summary.ts";
@@ -990,10 +992,74 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
 
         logger.info("AgentMail inbound email", {
           from: parsed.from,
+          to: parsed.to,
           subject: parsed.subject,
           threadId: parsed.threadId,
           preview: parsed.text.substring(0, 80),
         });
+
+        // Route based on recipient address (agent inbox)
+        const recipientEmail = parsed.to[0]?.toLowerCase(); // Primary recipient
+        let agentName = "general"; // Default to general agent
+        let agentType = "general"; // Default agent type
+
+        if (recipientEmail === "brian-ellie-os@agentmail.to") {
+          agentName = "brian";
+          agentType = "critic";
+        } else if (recipientEmail === "amy-ellie-os@agentmail.to") {
+          agentName = "amy";
+          agentType = "content";
+        }
+
+        // Check if this is an inter-agent message
+        const isInterAgent = isInterAgentMessage(parsed.headers);
+        if (isInterAgent) {
+          const senderAgent = parsed.headers?.["X-Sent-By-Agent"] || "unknown";
+          const senderType = parsed.headers?.["X-Agent-Type"] || "unknown";
+          const messageType = parsed.headers?.["X-Message-Type"] || "inter-agent";
+          logger.info(`Inter-agent email detected`, {
+            from: senderAgent,
+            type: senderType,
+            messageType,
+            to: agentName,
+          });
+
+          // This is an agent response, not a task assignment
+          // Save as assistant message from the sender agent
+          await saveMessage("assistant", parsed.text, {
+            agent: senderAgent,
+            sender: parsed.from,
+            subject: parsed.subject,
+            thread_id: parsed.threadId,
+            message_id: parsed.messageId,
+          }, "email", parsed.from);
+
+          // Forward to Dave via notification system
+          const forwardMessage = `📧 ${senderAgent} (${parsed.subject}):\n\n${parsed.text}`;
+          const gchatForward = `📧 **From ${senderAgent}**\n**Subject:** ${parsed.subject}\n\n${parsed.text}`;
+
+          // Use custom session_complete event since agent finished their work
+          const { notify } = await import("./notification-policy.ts");
+          await notify(getNotifyCtx(), {
+            event: "session_complete",
+            workItemId: senderAgent,
+            telegramMessage: forwardMessage,
+            gchatMessage: gchatForward,
+          });
+
+          // Also broadcast to Ellie Chat
+          broadcastExtension({
+            type: "agent_response",
+            channel: "email",
+            agent: senderAgent,
+            preview: parsed.text.substring(0, 200),
+          });
+
+          logger.info(`Agent response forwarded to Dave`, { from: senderAgent });
+          return; // Done - no Claude call needed
+        }
+
+        logger.info(`Routing email to ${agentName} agent`, { recipient: recipientEmail });
 
         // Rate limit
         const rateLimited = checkMessageRate(parsed.from, "email");
@@ -1015,20 +1081,52 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
 
         // Build prompt with email context
         const emailContext = `[Email from ${parsed.from}]\nSubject: ${parsed.subject}\n\n${parsed.text}`;
-        const agentMemory = await getAgentMemoryContext(supabase, "email");
-        const relevantContext = await getRelevantContext(supabase, parsed.text);
 
-        const prompt = buildPrompt(
-          emailContext,
-          getContextDocket(),
-          relevantContext,
-          undefined,
-          "email",
-        );
+        let prompt: string;
+        let response: string;
 
-        // Call Claude
-        const rawResponse = await callClaude(prompt);
-        const response = await processMemoryIntents(supabase, rawResponse, getActiveAgent("email"));
+        if (agentName === "general") {
+          // General agent flow (existing logic)
+          const agentMemory = await getAgentMemoryContext(supabase, "email");
+          const relevantContext = await getRelevantContext(supabase, parsed.text);
+
+          prompt = buildPrompt(
+            emailContext,
+            getContextDocket(),
+            relevantContext,
+            undefined,
+            "email",
+          );
+
+          const rawResponse = await callClaude(prompt);
+          response = await processMemoryIntents(supabase, rawResponse, getActiveAgent("email"));
+        } else {
+          // Specific agent flow (Brian, Amy, etc.)
+          const { getAgentArchetype, getAgentRoleContext } = await import("./prompt-builder.ts");
+          const archetypeContext = await getAgentArchetype(agentName);
+          const roleContext = await getAgentRoleContext(agentName);
+
+          prompt = buildPrompt(
+            emailContext,
+            getContextDocket(),
+            undefined, // relevantContext
+            undefined, // elasticContext
+            "email",
+            { name: agentName }, // agentConfig
+            undefined, // workItemContext
+            undefined, // structuredContext
+            undefined, // recentMessages
+            undefined, // skillContext
+            undefined, // forestContext
+            undefined, // agentMemoryContext
+            undefined, // sessionIds
+            archetypeContext,
+            roleContext,
+          );
+
+          const rawResponse = await callClaude(prompt);
+          response = await processMemoryIntents(supabase, rawResponse, agentName);
+        }
 
         // Process response tags
         const { processResponseTags } = await import("./response-tag-processor.ts");
@@ -1040,9 +1138,10 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
           in_reply_to: parsed.messageId,
         }, "email", parsed.from);
 
-        // Reply via AgentMail API (threaded)
-        await replyToEmail(parsed.messageId, cleanResponse, config);
-        logger.info("AgentMail reply sent", { threadId: parsed.threadId, preview: cleanResponse.substring(0, 80) });
+        // Reply via AgentMail API (threaded) with agent headers
+        const replyHeaders = buildAgentHeaders(agentName, agentType, "inter-agent");
+        await replyToEmail(parsed.messageId, cleanResponse, config, replyHeaders);
+        logger.info(`${agentName} agent reply sent`, { threadId: parsed.threadId, preview: cleanResponse.substring(0, 80) });
 
       } catch (err) {
         logger.error("AgentMail webhook error", err);
@@ -4534,6 +4633,25 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Agent presence endpoint (ELLIE-846) — must be before /api/agents catch-all
+  if (url.pathname === "/api/agents/presence" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getAgentPresence } = await import("./api/channels.ts");
+        let _statusCode = 200;
+        const mockRes: ApiResponse = {
+          status(code: number) { _statusCode = code; return { json: (d: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); } }; },
+          json(d: unknown) { res.writeHead(_statusCode, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); },
+        };
+        await getAgentPresence({}, mockRes, supabase);
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
   // Agent registry endpoints (ELLIE-91)
   if (url.pathname.startsWith("/api/agents") || url.pathname === "/api/capabilities") {
     (async () => {
@@ -4592,6 +4710,63 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
     })();
+    return;
+  }
+
+  // Channel API endpoints (ELLIE-842)
+  if (url.pathname.startsWith("/api/channels")) {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        let data: Record<string, unknown> = {};
+        if (body) try { data = JSON.parse(body); } catch { /* ignore */ }
+
+        const pathParts = url.pathname.replace("/api/channels", "").split("/").filter(Boolean);
+        const channelId = pathParts[0] || undefined;
+        const subResource = pathParts[1] || undefined;
+        const subId = pathParts[2] || undefined;
+        const subSubId = pathParts[3] || undefined;
+
+        const queryParams: Record<string, string> = {};
+        for (const [k, v] of url.searchParams.entries()) queryParams[k] = v;
+
+        const mockReq: ApiRequest = { body: data, query: queryParams, params: { id: channelId || null, memberType: subId || null, memberId: subSubId || null } };
+        let _statusCode = 200;
+        const mockRes: ApiResponse = {
+          status(code: number) { _statusCode = code; return { json: (d: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); } }; },
+          json(d: unknown) { res.writeHead(_statusCode, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); },
+        };
+
+        const { listChannels, getChannel, createChannel, updateChannel, archiveChannel, listMembers, addMember, removeMember } =
+          await import("./api/channels.ts");
+
+        if (!channelId && req.method === "GET") {
+          await listChannels(mockReq, mockRes, supabase);
+        } else if (!channelId && req.method === "POST") {
+          await createChannel(mockReq, mockRes, supabase);
+        } else if (channelId && subResource === "archive" && req.method === "POST") {
+          await archiveChannel(mockReq, mockRes, supabase);
+        } else if (channelId && subResource === "members" && req.method === "GET") {
+          await listMembers(mockReq, mockRes, supabase);
+        } else if (channelId && subResource === "members" && req.method === "POST") {
+          await addMember(mockReq, mockRes, supabase);
+        } else if (channelId && subResource === "members" && req.method === "DELETE") {
+          await removeMember(mockReq, mockRes, supabase);
+        } else if (channelId && req.method === "GET") {
+          await getChannel(mockReq, mockRes, supabase);
+        } else if (channelId && req.method === "PATCH") {
+          await updateChannel(mockReq, mockRes, supabase);
+        } else {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Unknown channels endpoint" }));
+        }
+      } catch (err) {
+        logger.error("Channels API error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
     return;
   }
 

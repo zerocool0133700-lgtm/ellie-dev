@@ -89,7 +89,14 @@ export async function consolidateNow(
  * Uses Max subscription (no API credits consumed).
  */
 async function callClaudeCLI(prompt: string): Promise<string> {
-  const args = [CLAUDE_PATH, "-p", "--output-format", "text"];
+  const args = [
+    CLAUDE_PATH,
+    "-p",
+    "--output-format", "text",
+    "--no-session-persistence",
+    "--allowedTools", "",
+    "--model", "haiku",
+  ];
 
   const proc = spawn(args, {
     stdin: new Blob([prompt]),
