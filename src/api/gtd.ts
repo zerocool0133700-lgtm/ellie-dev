@@ -16,6 +16,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { IncomingMessage, ServerResponse } from "http";
 import type { ApiRequest, ApiResponse } from "./types.ts";
 import type { TodoRow } from "./gtd-types.ts";
+import { AGENT_DISPLAY_NAMES } from "./gtd-types.ts";
 import { log } from "../logger.ts";
 
 const logger = log.child("gtd-api");
@@ -97,14 +98,20 @@ async function handleInbox(req: ApiRequest, res: ApiResponse, supabase: Supabase
  */
 async function handleNextActions(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
   const context = req.query?.context || null;
+  const agentFilter = req.query?.agent || null; // ELLIE-886
   const limit = Math.min(Number(req.query?.limit) || 10, 50);
 
-  const { data, error } = await supabase
+  let query = supabase
     .from("todos")
     .select("*")
     .eq("status", "open")
     .order("created_at", { ascending: true })
     .limit(50);
+
+  // ELLIE-886: Filter by assigned agent
+  if (agentFilter) query = query.eq("assigned_agent", agentFilter);
+
+  const { data, error } = await query;
 
   if (error) {
     res.status(500).json({ error: error.message });
@@ -457,6 +464,222 @@ function readBody(req: IncomingMessage, res: ServerResponse): Promise<string | n
   });
 }
 
+// ── ELLIE-888: GET /api/gtd/team — Team overview ────────────
+
+async function handleTeamOverview(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
+  const { data: todos, error } = await supabase
+    .from("todos")
+    .select("status, assigned_agent")
+    .not("status", "in", "(cancelled)");
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const { data: doneThisWeek } = await supabase
+    .from("todos")
+    .select("assigned_agent")
+    .eq("status", "done")
+    .gte("completed_at", weekAgo);
+
+  const agentTypes = Object.keys(AGENT_DISPLAY_NAMES);
+  const agents = agentTypes.map(agent => {
+    const agentTodos = (todos ?? []).filter(t => t.assigned_agent === agent);
+    const doneCount = (doneThisWeek ?? []).filter(t => t.assigned_agent === agent).length;
+    return {
+      agent,
+      display_name: AGENT_DISPLAY_NAMES[agent] || agent,
+      open: agentTodos.filter(t => t.status === "open").length,
+      waiting: agentTodos.filter(t => t.status === "waiting_for").length,
+      inbox: agentTodos.filter(t => t.status === "inbox").length,
+      done_this_week: doneCount,
+    };
+  });
+
+  const unassigned = (todos ?? []).filter(t => !t.assigned_agent);
+  res.json({
+    success: true,
+    agents,
+    unassigned: {
+      inbox: unassigned.filter(t => t.status === "inbox").length,
+      open: unassigned.filter(t => t.status === "open").length,
+      waiting: unassigned.filter(t => t.status === "waiting_for").length,
+    },
+    total_open: (todos ?? []).filter(t => t.status === "open").length,
+  });
+}
+
+// ── ELLIE-892: POST /api/gtd/delegate — Delegate task ──────
+
+async function handleDelegate(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
+  const { todo_id, to_agent, delegated_by, note } = req.body ?? {};
+
+  if (!todo_id || !to_agent) {
+    res.status(400).json({ error: "todo_id and to_agent required" });
+    return;
+  }
+
+  const agentType = String(to_agent);
+  const displayName = AGENT_DISPLAY_NAMES[agentType] || agentType;
+
+  // Validate todo exists
+  const { data: todo, error: fetchErr } = await supabase
+    .from("todos")
+    .select("*")
+    .eq("id", todo_id)
+    .single();
+
+  if (fetchErr || !todo) { res.status(404).json({ error: "Todo not found" }); return; }
+
+  const updates: Record<string, unknown> = {
+    assigned_agent: agentType,
+    assigned_to: displayName,
+    delegated_by: delegated_by || "Dave",
+    delegated_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  // Transition inbox → open on delegation
+  if (todo.status === "inbox") updates.status = "open";
+
+  const { data: updated, error: updateErr } = await supabase
+    .from("todos")
+    .update(updates)
+    .eq("id", todo_id)
+    .select()
+    .single();
+
+  if (updateErr) { res.status(500).json({ error: updateErr.message }); return; }
+
+  logger.info("Task delegated", { todoId: todo_id, agent: agentType, by: delegated_by });
+
+  // ELLIE-896: Delegation notification (fire and forget)
+  try {
+    const { getNotifyCtx } = await import("../relay-state.ts");
+    const { notify } = await import("../notifications.ts");
+    notify(getNotifyCtx(), {
+      event: "delegation",
+      workItemId: todo_id,
+      telegramMessage: `📋 Task delegated to ${displayName}: ${todo.content.substring(0, 100)}`,
+      gchatMessage: `📋 Task delegated to ${displayName}: ${todo.content.substring(0, 100)}`,
+    }).catch(() => {});
+  } catch {}
+
+  res.json({ success: true, todo: updated });
+}
+
+// ── ELLIE-893: POST /api/gtd/delegate/complete ─────────────
+
+async function handleDelegateComplete(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
+  const { todo_id, agent, result } = req.body ?? {};
+
+  if (!todo_id) { res.status(400).json({ error: "todo_id required" }); return; }
+
+  const { data: updated, error } = await supabase
+    .from("todos")
+    .update({
+      status: "done",
+      completed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", todo_id)
+    .select()
+    .single();
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+
+  logger.info("Delegated task completed", { todoId: todo_id, agent });
+
+  // Notify delegator
+  if (updated?.delegated_by) {
+    try {
+      const { getNotifyCtx } = await import("../relay-state.ts");
+      const { notify } = await import("../notifications.ts");
+      const agentDisplay = AGENT_DISPLAY_NAMES[String(agent)] || String(agent);
+      notify(getNotifyCtx(), {
+        event: "delegation_complete",
+        workItemId: todo_id,
+        telegramMessage: `✅ ${agentDisplay} completed: ${updated.content?.substring(0, 100)}${result ? `\nResult: ${result}` : ""}`,
+        gchatMessage: `✅ ${agentDisplay} completed delegated task`,
+      }).catch(() => {});
+    } catch {}
+  }
+
+  res.json({ success: true, todo: updated });
+}
+
+// ── ELLIE-903: Workload snapshots ──────────────────────────
+
+async function handleSnapshotCapture(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
+  const agentTypes = Object.keys(AGENT_DISPLAY_NAMES);
+  const { data: todos } = await supabase
+    .from("todos")
+    .select("status, assigned_agent")
+    .not("status", "in", "(cancelled)");
+
+  const today = new Date().toISOString().split("T")[0];
+  const rows = agentTypes.map(agent => {
+    const agentTodos = (todos ?? []).filter(t => t.assigned_agent === agent);
+    return {
+      agent_type: agent,
+      snapshot_date: today,
+      open_count: agentTodos.filter(t => t.status === "open").length,
+      waiting_count: agentTodos.filter(t => t.status === "waiting_for").length,
+      done_count: agentTodos.filter(t => t.status === "done").length,
+    };
+  });
+
+  const { error } = await supabase.from("gtd_workload_snapshots").upsert(rows, { onConflict: "agent_type,snapshot_date" });
+  if (error) { res.status(500).json({ error: error.message }); return; }
+
+  logger.info("Workload snapshot captured", { date: today, agents: agentTypes.length });
+  res.json({ success: true, date: today, snapshots: rows });
+}
+
+async function handleSnapshotList(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
+  const days = parseInt(req.query?.days || "30");
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+
+  const { data, error } = await supabase
+    .from("gtd_workload_snapshots")
+    .select("*")
+    .gte("snapshot_date", since)
+    .order("snapshot_date", { ascending: true });
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true, snapshots: data ?? [] });
+}
+
+// ── ELLIE-906: GET /api/gtd/reports/velocity ───────────────
+
+async function handleVelocityReport(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
+  const weeks = parseInt(req.query?.weeks || "4");
+  const results: Array<{ week_start: string; agent: string; done_count: number }> = [];
+
+  for (let w = 0; w < weeks; w++) {
+    const weekStart = new Date(Date.now() - (w + 1) * 7 * 24 * 60 * 60 * 1000);
+    const weekEnd = new Date(Date.now() - w * 7 * 24 * 60 * 60 * 1000);
+
+    const { data } = await supabase
+      .from("todos")
+      .select("assigned_agent")
+      .eq("status", "done")
+      .gte("completed_at", weekStart.toISOString())
+      .lt("completed_at", weekEnd.toISOString());
+
+    const counts: Record<string, number> = {};
+    for (const t of data ?? []) {
+      const agent = t.assigned_agent || "unassigned";
+      counts[agent] = (counts[agent] || 0) + 1;
+    }
+
+    for (const [agent, count] of Object.entries(counts)) {
+      results.push({ week_start: weekStart.toISOString().split("T")[0], agent, done_count: count });
+    }
+  }
+
+  res.json({ success: true, velocity: results });
+}
+
 /** Build ApiRequest/ApiResponse from raw HTTP objects, then dispatch to handler */
 export function handleGtdRoute(
   req: IncomingMessage,
@@ -530,6 +753,54 @@ export function handleGtdRoute(
       let data: Record<string, unknown>;
       try { data = JSON.parse(raw); } catch { jsonRes(res, 400, { error: "Invalid JSON" }); return; }
       await handleUpdateTodo({ body: data, query: queryParams, params: { id: todoMatch[1] } }, mockRes, supabase);
+    })());
+    return true;
+  }
+
+  // ELLIE-888: GET /api/gtd/team — team overview
+  if (req.method === "GET" && pathname === "/api/gtd/team") {
+    safeAsync(handleTeamOverview({ query: queryParams }, mockRes, supabase));
+    return true;
+  }
+
+  // ELLIE-903: POST /api/gtd/snapshots/capture — capture workload snapshot
+  if (req.method === "POST" && pathname === "/api/gtd/snapshots/capture") {
+    safeAsync(handleSnapshotCapture({ query: queryParams }, mockRes, supabase));
+    return true;
+  }
+
+  // ELLIE-903: GET /api/gtd/snapshots — list snapshots
+  if (req.method === "GET" && pathname === "/api/gtd/snapshots") {
+    safeAsync(handleSnapshotList({ query: queryParams }, mockRes, supabase));
+    return true;
+  }
+
+  // ELLIE-906: GET /api/gtd/reports/velocity — done per agent per week
+  if (req.method === "GET" && pathname === "/api/gtd/reports/velocity") {
+    safeAsync(handleVelocityReport({ query: queryParams }, mockRes, supabase));
+    return true;
+  }
+
+  // ELLIE-892: POST /api/gtd/delegate — delegate task to agent
+  if (req.method === "POST" && pathname === "/api/gtd/delegate") {
+    safeAsync((async () => {
+      const raw = await readBody(req, res);
+      if (raw === null) return;
+      let data: Record<string, unknown>;
+      try { data = JSON.parse(raw); } catch { jsonRes(res, 400, { error: "Invalid JSON" }); return; }
+      await handleDelegate({ body: data, query: queryParams }, mockRes, supabase);
+    })());
+    return true;
+  }
+
+  // ELLIE-893: POST /api/gtd/delegate/complete — complete delegated task
+  if (req.method === "POST" && pathname === "/api/gtd/delegate/complete") {
+    safeAsync((async () => {
+      const raw = await readBody(req, res);
+      if (raw === null) return;
+      let data: Record<string, unknown>;
+      try { data = JSON.parse(raw); } catch { jsonRes(res, 400, { error: "Invalid JSON" }); return; }
+      await handleDelegateComplete({ body: data, query: queryParams }, mockRes, supabase);
     })());
     return true;
   }
