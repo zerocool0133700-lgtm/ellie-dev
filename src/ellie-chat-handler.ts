@@ -58,6 +58,8 @@ import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
 const logger = log.child("ellie-chat");
 import { getForestContext } from "./elasticsearch/context.ts";
 import { acknowledgeChannel } from "./delivery.ts";
+import { parseMentions, extractMentionedAgents, hasBroadcastMention, storeMentions } from "./mention-parser.ts";
+import { updateAgentPresence } from "./api/channels.ts";
 import {
   routeAndDispatch,
   syncResponse,
@@ -246,7 +248,7 @@ async function _handleEllieChatMessage(
 
   // Send typing indicator
   if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId }));
+    ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId, agent: agentResult?.dispatch?.agent?.name || "general" }));
   }
 
   // /plan on|off — toggle planning mode
@@ -645,6 +647,32 @@ async function _handleEllieChatMessage(
 
     const ellieChatWorkItem = extractWorkItemId(text);
 
+    // ELLIE-849: Parse @mentions before routing
+    const mentions = parseMentions(text);
+    const mentionedAgents = extractMentionedAgents(text);
+    const broadcast = hasBroadcastMention(text);
+    if (mentions.length > 0) {
+      logger.info("Mentions detected", { mentions: mentions.map(m => m.raw), broadcast });
+      // Store mentions in DB (fire and forget)
+      storeMentions(supabase, clientId || "unknown", channelId || null, mentions).catch(() => {});
+    }
+
+    // ELLIE-852: @here/@channel broadcast — notify all online/all channel agents
+    if (broadcast.here || broadcast.channel) {
+      const presenceAgents = broadcast.here
+        ? await supabase.from("agent_presence").select("agent_name").neq("status", "offline").then(r => r.data?.map(p => p.agent_name) || [])
+        : await supabase.from("channel_members").select("member_id").eq("channel_id", channelId || "a0000000-0000-0000-0000-000000000001").eq("member_type", "agent").then(r => r.data?.map(m => m.member_id) || []);
+      logger.info(`Broadcast ${broadcast.here ? "@here" : "@channel"} → ${presenceAgents.length} agents`, { agents: presenceAgents });
+      // Broadcast notification to WS clients
+      broadcastToEllieChatClients(JSON.stringify({
+        type: "mention_notification",
+        mention_type: broadcast.here ? "here" : "channel",
+        agents: presenceAgents,
+        channel_id: channelId,
+        ts: Date.now(),
+      }));
+    }
+
     // ELLIE-381: Pre-routing mode check — skill-only → road-runner override
     const preRouteDetection = detectMode(text);
     const skillOnlyOverride = preRouteDetection?.mode === "skill-only" ? "road-runner" : undefined;
@@ -652,7 +680,10 @@ async function _handleEllieChatMessage(
       logger.info("Skill-only mode detected — routing to road-runner");
     }
 
-    const agentResult = await routeAndDispatch(supabase, text, "ellie-chat", "dashboard", ellieChatWorkItem, skillOnlyOverride);
+    // ELLIE-849: If a specific agent is @mentioned, override routing to that agent
+    const mentionOverride = mentionedAgents.length === 1 ? mentionedAgents[0] : skillOnlyOverride;
+
+    const agentResult = await routeAndDispatch(supabase, text, "ellie-chat", "dashboard", ellieChatWorkItem, mentionOverride || skillOnlyOverride);
     let effectiveText = agentResult?.route.strippedMessage || text;
     // Prepend image file reference so Claude Code CLI can see the image
     if (imagePath) {
@@ -660,6 +691,15 @@ async function _handleEllieChatMessage(
     }
     if (agentResult) {
       setActiveAgent("ellie-chat", agentResult.dispatch.agent.name);
+      // ELLIE-846: Update agent presence to busy + broadcast
+      updateAgentPresence(supabase, agentResult.dispatch.agent.name, "busy", channelId, `Processing message`).catch(() => {});
+      broadcastToEllieChatClients(JSON.stringify({
+        type: "presence_update",
+        agent_name: agentResult.dispatch.agent.name,
+        status: "busy",
+        channel_id: channelId,
+        ts: Date.now(),
+      }));
       // ELLIE-383: Include contextMode from pre-route detection in route broadcast
       broadcastExtension({
         type: "route", channel: "ellie-chat",
@@ -985,7 +1025,7 @@ async function _handleEllieChatMessage(
     // Send typing heartbeat every 4s so the user knows we're still working
     const typingInterval = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId }));
+        ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId, agent: agentResult?.dispatch?.agent?.name || "general" }));
       }
     }, 4_000);
 
@@ -995,7 +1035,7 @@ async function _handleEllieChatMessage(
         resume: true,
         allowedTools: agentTools?.length ? agentTools : undefined,
         model: agentModel || undefined,
-        timeoutMs: 600_000, // 10 min — async coordinator needs time for multi-step work
+        timeoutMs: 900_000, // 15 min — async coordinator needs time for multi-step work
         // ELLIE-482: compose WS-disconnect signal (ELLIE-461) with queue-timeout signal
         abortSignal: abortSignal ? AbortSignal.any([abortSignal, queueSignal]) : queueSignal,
       });
@@ -1127,6 +1167,19 @@ async function _handleEllieChatMessage(
     }
     clearProcessing(ecUserId || "anonymous");
 
+    // ELLIE-846: Set agent back to idle after dispatch
+    if (agentResult) {
+      const dispatchedAgent = agentResult.dispatch.agent.name;
+      updateAgentPresence(supabase, dispatchedAgent, "idle").catch(() => {});
+      broadcastToEllieChatClients(JSON.stringify({
+        type: "presence_update",
+        agent_name: dispatchedAgent,
+        status: "idle",
+        channel_id: channelId,
+        ts: Date.now(),
+      }));
+    }
+
     if (agentResult) {
       resilientTask("syncResponse", "critical", () => syncResponse(supabase, agentResult!.dispatch.session_id, cleanedText, {
         duration_ms: durationMs,
@@ -1209,7 +1262,7 @@ export async function runSpecialistAsync(
     // Typing heartbeat while specialist works; also touches job updated_at for orphan detection
     const heartbeat = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId }));
+        ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId, agent: agentResult?.dispatch?.agent?.name || "general" }));
       } else {
         clearInterval(heartbeat);
       }
@@ -1325,7 +1378,7 @@ export async function runSpecialistAsync(
         resume: false, // own session — doesn't pollute the general agent's context
         allowedTools: agentTools?.length ? agentTools : undefined,
         model: agentModel || undefined,
-        timeoutMs: 600_000, // 10 min — specialists may do multi-step tool use
+        timeoutMs: 900_000, // 15 min — specialists may do multi-step tool use
         // ELLIE-479: No WS-disconnect abort — specialist work survives WS close
         // ELLIE-482: but DO abort on queue timeout to prevent double responses
         abortSignal: queueSignal,

@@ -387,6 +387,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
               type: "reaction_update",
               message_id: msg.message_id,
               reactions: summary,
+              channel_id: msg.channel_id || null,
               ts: Date.now(),
             });
             for (const client of ellieChatClients) {
