@@ -178,7 +178,7 @@ async function _handleEllieChatMessage(
   const ecUser = wsAppUserMap.get(ws);
   const ecUserId = ecUser?.id || ecUser?.anonymous_id || undefined;
 
-  await saveMessage("user", text, image ? { image_name: image.name, image_mime: image.mime_type } : {}, "ellie-chat", ecUserId, clientId);
+  await saveMessage("user", text, image ? { image_name: image.name, image_mime: image.mime_type } : {}, "ellie-chat", ecUserId, clientId, "user");
   broadcastExtension({ type: "message_in", channel: "ellie-chat", preview: text.substring(0, 200) });
 
   // ELLIE-426: Resolve archetype profile from mode

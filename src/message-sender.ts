@@ -50,10 +50,13 @@ export async function saveMessage(
   channel: string = "telegram",
   userId?: string,
   clientId?: string,
+  initiatedBy: "user" | "system" | "agent" = "system",
 ): Promise<string | null> {
   if (!_supabase) return null;
   try {
-    const conversationId = await getOrCreateConversation(_supabase, channel);
+    // ELLIE-908: Pass user context for conversation isolation
+    const agent = _getActiveAgent?.(channel) || "general";
+    const conversationId = await getOrCreateConversation(_supabase, channel, agent, undefined, userId || undefined, initiatedBy);
 
     const row: Record<string, unknown> = {
       role,

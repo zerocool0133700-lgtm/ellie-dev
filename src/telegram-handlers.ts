@@ -145,7 +145,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   await ctx.replyWithChatAction("typing");
   acknowledgeChannel("telegram"); // User responded — clear pending responses
 
-  await saveMessage("user", text, undefined, "telegram", userId);
+  await saveMessage("user", text, undefined, "telegram", userId, undefined, "user");
   broadcastExtension({ type: "message_in", channel: "telegram", preview: text.substring(0, 200) });
 
   // Correction detection + calendar linking (ELLIE-250)
