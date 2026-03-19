@@ -157,6 +157,13 @@ describe("Compaction Safeguard — ELLIE-922", () => {
         agent: testAgent,
       });
 
+      // ELLIE-922: Unlock safeguard to simulate compaction modifying memory
+      const { unlockSafeguard } = await import("../src/working-memory.ts");
+      await unlockSafeguard({
+        session_id: testSessionId + "-lost-anchors",
+        agent: testAgent,
+      });
+
       // Simulate compaction loss: remove context_anchors
       await updateWorkingMemory({
         session_id: testSessionId + "-lost-anchors",
@@ -191,6 +198,13 @@ describe("Compaction Safeguard — ELLIE-922", () => {
         agent: testAgent,
       });
 
+      // ELLIE-922: Unlock safeguard to simulate compaction modifying memory
+      const { unlockSafeguard } = await import("../src/working-memory.ts");
+      await unlockSafeguard({
+        session_id: testSessionId + "-lost-log",
+        agent: testAgent,
+      });
+
       // Simulate loss
       await updateWorkingMemory({
         session_id: testSessionId + "-lost-log",
@@ -220,6 +234,13 @@ describe("Compaction Safeguard — ELLIE-922", () => {
       });
 
       await snapshotWorkingMemoryToForest({
+        session_id: testSessionId + "-lost-ids",
+        agent: testAgent,
+      });
+
+      // ELLIE-922: Unlock safeguard to simulate compaction modifying memory
+      const { unlockSafeguard } = await import("../src/working-memory.ts");
+      await unlockSafeguard({
         session_id: testSessionId + "-lost-ids",
         agent: testAgent,
       });
@@ -315,6 +336,13 @@ describe("Compaction Safeguard — ELLIE-922", () => {
         agent: testAgent,
       });
 
+      // ELLIE-922: Unlock safeguard to simulate compaction corruption
+      const { unlockSafeguard } = await import("../src/working-memory.ts");
+      await unlockSafeguard({
+        session_id: testSessionId + "-rollback-ok",
+        agent: testAgent,
+      });
+
       // Simulate corruption: overwrite with garbage
       await updateWorkingMemory({
         session_id: testSessionId + "-rollback-ok",
@@ -355,6 +383,13 @@ describe("Compaction Safeguard — ELLIE-922", () => {
       });
 
       await snapshotWorkingMemoryToForest({
+        session_id: testSessionId + "-audit",
+        agent: testAgent,
+      });
+
+      // ELLIE-922: Unlock safeguard to simulate compaction corruption
+      const { unlockSafeguard } = await import("../src/working-memory.ts");
+      await unlockSafeguard({
         session_id: testSessionId + "-audit",
         agent: testAgent,
       });
@@ -448,6 +483,13 @@ describe("Compaction Safeguard — ELLIE-922", () => {
         agent: testAgent,
       });
 
+      // ELLIE-922: Unlock safeguard to simulate compaction corruption
+      const { unlockSafeguard } = await import("../src/working-memory.ts");
+      await unlockSafeguard({
+        session_id: testSessionId + "-all-sections",
+        agent: testAgent,
+      });
+
       // Corrupt everything
       await updateWorkingMemory({
         session_id: testSessionId + "-all-sections",
@@ -510,15 +552,25 @@ describe("Compaction Safeguard — ELLIE-922", () => {
 
       expect(snapshotId).toBeTruthy();
 
-      // 3. Simulate compaction loss
-      await updateWorkingMemory({
-        session_id: testSessionId + "-e2e",
-        agent: testAgent,
-        sections: {
-          context_anchors: "ELLIE-922, file.ts", // Lost specific identifiers
-          decision_log: "", // Lost completely
-        },
-      });
+      // 3. Simulate compaction loss (bypass safeguard lock using direct SQL to test verification)
+      // This simulates database-level corruption or bugs in compaction logic
+      await sql`
+        UPDATE working_memory
+        SET
+          sections = jsonb_set(
+            jsonb_set(
+              sections,
+              '{context_anchors}',
+              '"ELLIE-922, file.ts"'
+            ),
+            '{decision_log}',
+            '""'
+          ),
+          turn_number = turn_number + 1
+        WHERE session_id = ${testSessionId + "-e2e"}
+          AND agent = ${testAgent}
+          AND archived_at IS NULL
+      `;
 
       // 4. Verify — should fail
       const verifyResult1 = await verifyWorkingMemorySurvived({

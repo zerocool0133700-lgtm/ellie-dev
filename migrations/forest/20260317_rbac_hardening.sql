@@ -1,8 +1,15 @@
 -- ELLIE-819: RBAC schema hardening
 -- Fixes critical review findings from ELLIE-788 epic.
 
--- 1. Add UNIQUE constraint on rbac_entities.name
-ALTER TABLE rbac_entities ADD CONSTRAINT rbac_entities_name_unique UNIQUE (name);
+-- 1. Add UNIQUE constraint on rbac_entities.name (idempotent)
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'rbac_entities_name_unique'
+  ) THEN
+    ALTER TABLE rbac_entities ADD CONSTRAINT rbac_entities_name_unique UNIQUE (name);
+  END IF;
+END $$;
 
 -- 2. Missing indexes for reverse lookups and audit queries
 CREATE INDEX IF NOT EXISTS idx_rbac_role_permissions_permission ON rbac_role_permissions(permission_id);

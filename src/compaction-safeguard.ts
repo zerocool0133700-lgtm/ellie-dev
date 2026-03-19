@@ -120,14 +120,18 @@ export function extractCriticalIdentifiers(text: string | undefined): string[] {
  * 2. decision_log section exists if it existed before compaction
  * 3. Critical identifiers from context_anchors are preserved
  *
+ * ELLIE-922 Critical Issue #2: Fails verification if snapshot is missing when expected.
+ * This catches partial Forest write failures and forces rollback from the last known good state.
+ *
  * Returns verification result with details of any lost sections/identifiers.
  */
 export async function verifyWorkingMemorySurvived(opts: {
   session_id: string;
   agent: string;
   pre_snapshot_memory_id?: string;
+  require_snapshot?: boolean;
 }): Promise<SafeguardVerificationResult> {
-  const { session_id, agent, pre_snapshot_memory_id } = opts;
+  const { session_id, agent, pre_snapshot_memory_id, require_snapshot = false } = opts;
 
   // Fetch the pre-compaction snapshot from Forest
   const preSnapshot = await getLatestSnapshot({
@@ -136,7 +140,20 @@ export async function verifyWorkingMemorySurvived(opts: {
     memory_id: pre_snapshot_memory_id,
   });
 
+  // ELLIE-922 Critical Issue #2: Non-atomic snapshot creation fix
+  // If snapshot was expected but missing, fail verification to prevent silent data loss
   if (!preSnapshot) {
+    if (require_snapshot || pre_snapshot_memory_id) {
+      logger.error("CRITICAL: Expected snapshot not found in Forest — failing verification", {
+        session_id,
+        agent,
+        pre_snapshot_memory_id,
+      });
+      return {
+        ok: false,
+        lost_sections: ["snapshot_missing"],
+      };
+    }
     logger.warn("No pre-compaction snapshot found — skipping verification", {
       session_id,
       agent,
@@ -213,6 +230,9 @@ export async function verifyWorkingMemorySurvived(opts: {
  * Called when post-compaction verification detects lost sections or identifiers.
  * Parses the snapshot content back into working memory sections and updates the DB.
  *
+ * ELLIE-922 Critical Issue #3: Temporarily unlocks safeguard to perform rollback,
+ * but caller is responsible for final unlock state management.
+ *
  * Returns true if rollback succeeded, false if no snapshot found.
  */
 export async function rollbackWorkingMemoryFromSnapshot(opts: {
@@ -235,12 +255,22 @@ export async function rollbackWorkingMemoryFromSnapshot(opts: {
     return false;
   }
 
-  // Restore sections to working memory
-  const restored = await updateWorkingMemory({
-    session_id,
-    agent,
-    sections: snapshot.sections,
-  });
+  // Import sql to directly update bypassing the safeguard lock check
+  const { default: sql } = await import("../../ellie-forest/src/db.ts");
+
+  // ELLIE-922 Critical Issue #3: Rollback must bypass safeguard_locked check
+  // We use direct SQL update instead of updateWorkingMemory() to force the restoration
+  const [restored] = await sql<{ id: string }[]>`
+    UPDATE working_memory
+    SET
+      sections = ${sql.json(snapshot.sections)},
+      turn_number = turn_number + 1,
+      updated_at = NOW()
+    WHERE session_id = ${session_id}
+      AND agent = ${agent}
+      AND archived_at IS NULL
+    RETURNING id
+  `;
 
   if (!restored) {
     logger.error("Rollback failed — working memory record not found", {
