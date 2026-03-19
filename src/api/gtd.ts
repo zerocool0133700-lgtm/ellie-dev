@@ -63,6 +63,20 @@ async function handleInbox(req: ApiRequest, res: ApiResponse, supabase: Supabase
       continue;
     }
 
+    // Auto-assign sequence: max+1 within the project group
+    const projectId = (item as Record<string, unknown>).project_id || null;
+    let nextSeq = 1;
+    {
+      let seqQuery = supabase.from("todos").select("sequence").order("sequence", { ascending: false }).limit(1);
+      if (projectId) seqQuery = seqQuery.eq("project_id", projectId as string);
+      else seqQuery = seqQuery.is("project_id", null);
+      const { data: seqRow } = await seqQuery;
+      if (seqRow?.[0]?.sequence != null) nextSeq = seqRow[0].sequence + 1;
+    }
+
+    // ELLIE-917: Auto-classify effort when agents create todos
+    const autoEffort = (item as Record<string, unknown>).effort || classifyEffort(content);
+
     const { data, error } = await supabase
       .from("todos")
       .insert({
@@ -73,8 +87,13 @@ async function handleInbox(req: ApiRequest, res: ApiResponse, supabase: Supabase
         source_type: (item as Record<string, unknown>).source_type || "agent",
         source_ref: (item as Record<string, unknown>).source_ref || null,
         source_conversation_id: (item as Record<string, unknown>).conversation_id || null,
+        project_id: projectId,
+        sequence: nextSeq,
+        effort: autoEffort,
+        context: (item as Record<string, unknown>).context || null,
+        is_reference: (item as Record<string, unknown>).is_reference || false,
       })
-      .select("id, content")
+      .select("id, content, sequence")
       .single();
 
     if (error) {
@@ -99,13 +118,14 @@ async function handleInbox(req: ApiRequest, res: ApiResponse, supabase: Supabase
 async function handleNextActions(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
   const context = req.query?.context || null;
   const agentFilter = req.query?.agent || null; // ELLIE-886
+  const sortMode = req.query?.sort || "score"; // "score" (default) or "sequence"
   const limit = Math.min(Number(req.query?.limit) || 10, 50);
 
   let query = supabase
     .from("todos")
     .select("*")
     .eq("status", "open")
-    .order("created_at", { ascending: true })
+    .order(sortMode === "sequence" ? "sequence" : "created_at", { ascending: true })
     .limit(50);
 
   // ELLIE-886: Filter by assigned agent
@@ -119,6 +139,13 @@ async function handleNextActions(req: ApiRequest, res: ApiResponse, supabase: Su
   }
 
   const todos = (data || []) as TodoRow[];
+
+  // When sort=sequence, return in sequence order without scoring
+  if (sortMode === "sequence") {
+    const topItems = todos.slice(0, limit);
+    res.json({ next_actions: topItems, context, total_open: todos.length, sort: "sequence" });
+    return;
+  }
 
   // Simple scoring (mirrors dashboard logic)
   const scored = todos.map((t) => {
@@ -164,6 +191,7 @@ async function handleNextActions(req: ApiRequest, res: ApiResponse, supabase: Su
     next_actions: topItems,
     context,
     total_open: todos.length,
+    sort: "score",
   });
 }
 
@@ -362,6 +390,14 @@ async function handleUpdateTodo(req: ApiRequest, res: ApiResponse, supabase: Sup
   if (parsed.waiting_on !== undefined) updates.waiting_on = parsed.waiting_on;
   if (parsed.project_id !== undefined) updates.project_id = parsed.project_id;
   if (parsed.content !== undefined) updates.content = parsed.content;
+  if (parsed.sequence !== undefined) {
+    const seq = Number(parsed.sequence);
+    if (!Number.isInteger(seq) || seq < 0) {
+      res.status(400).json({ error: "sequence must be a non-negative integer" });
+      return;
+    }
+    updates.sequence = seq;
+  }
 
   const { data, error } = await supabase
     .from("todos")
@@ -629,6 +665,152 @@ async function handleDelegateComplete(req: ApiRequest, res: ApiResponse, supabas
   res.json({ success: true, todo: updated });
 }
 
+// ── POST /api/gtd/reorder — Batch reorder todos within a project ──
+
+async function handleReorder(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
+  const { project_id, order } = req.body ?? {};
+
+  if (!Array.isArray(order) || order.length === 0) {
+    res.status(400).json({ error: "order must be a non-empty array of todo IDs" });
+    return;
+  }
+
+  // Validate all entries are UUID strings
+  for (const id of order) {
+    if (typeof id !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      res.status(400).json({ error: `Invalid todo ID in order array: ${id}` });
+      return;
+    }
+  }
+
+  // Update each todo's sequence based on position in the array
+  const updates = order.map((id: string, idx: number) => ({
+    id,
+    sequence: idx + 1,
+    updated_at: new Date().toISOString(),
+  }));
+
+  // Supabase upsert with onConflict on id
+  const { error } = await supabase.from("todos").upsert(updates, { onConflict: "id" });
+
+  if (error) {
+    res.status(500).json({ error: error.message });
+    return;
+  }
+
+  logger.info("Todos reordered", { project_id: project_id || "unassigned", count: order.length });
+  res.json({ success: true, reordered: order.length });
+}
+
+// ── ELLIE-916: Context management ───────────────────────────
+
+async function handleListContexts(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
+  const { data, error } = await supabase
+    .from("gtd_contexts")
+    .select("*")
+    .order("sort_order", { ascending: true });
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true, contexts: data ?? [] });
+}
+
+async function handleCreateContext(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
+  const { name, label, icon, color, calendar_enabled } = req.body ?? {};
+  if (!name || !label) { res.status(400).json({ error: "name and label required" }); return; }
+
+  const { data: existing } = await supabase.from("gtd_contexts").select("sort_order").order("sort_order", { ascending: false }).limit(1);
+  const nextOrder = ((existing?.[0]?.sort_order as number) ?? 0) + 1;
+
+  const { data, error } = await supabase
+    .from("gtd_contexts")
+    .insert({ tag: String(name), name: String(name), label, icon: icon || null, color: color || null, calendar_enabled: calendar_enabled || false, sort_order: nextOrder })
+    .select()
+    .single();
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true, context: data });
+}
+
+async function handleUpdateContext(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
+  const name = req.params?.name;
+  if (!name) { res.status(400).json({ error: "Missing context name" }); return; }
+
+  const updates: Record<string, unknown> = {};
+  for (const key of ["label", "icon", "color", "calendar_enabled", "calendar_id", "sort_order"]) {
+    if (req.body?.[key] !== undefined) updates[key] = req.body[key];
+  }
+  if (Object.keys(updates).length === 0) { res.status(400).json({ error: "No fields to update" }); return; }
+
+  const { data, error } = await supabase
+    .from("gtd_contexts")
+    .update(updates)
+    .eq("name", name)
+    .select()
+    .single();
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true, context: data });
+}
+
+async function handleDeleteContext(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
+  const name = req.params?.name;
+  if (!name) { res.status(400).json({ error: "Missing context name" }); return; }
+
+  const { error } = await supabase.from("gtd_contexts").delete().eq("name", name);
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  res.json({ success: true });
+}
+
+// ── ELLIE-917: Auto effort classification ──────────────────
+
+import { EFFORT_RULES } from "./gtd-types.ts";
+
+function classifyEffort(content: string): "quick" | "medium" | "deep" {
+  const lower = content.toLowerCase();
+  // Check deep first (most specific)
+  for (const kw of EFFORT_RULES.deep.keywords) {
+    if (lower.includes(kw)) return "deep";
+  }
+  for (const kw of EFFORT_RULES.medium.keywords) {
+    if (lower.includes(kw)) return "medium";
+  }
+  for (const kw of EFFORT_RULES.quick.keywords) {
+    if (lower.includes(kw)) return "quick";
+  }
+  // Default to medium if no keywords match
+  return "medium";
+}
+
+// ── ELLIE-918: Waiting-for auto-creation ───────────────────
+
+async function handleAutoWaitingFor(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
+  const { content, work_item_id, agent, context } = req.body ?? {};
+  if (!content) { res.status(400).json({ error: "content required" }); return; }
+
+  const effort = classifyEffort(String(content));
+
+  const { data, error } = await supabase
+    .from("todos")
+    .insert({
+      content: String(content),
+      status: "waiting_for",
+      waiting_on: agent || "external",
+      waiting_since: new Date().toISOString(),
+      source_type: "agent",
+      source_ref: work_item_id || null,
+      context: context || "plane",
+      effort,
+      assigned_agent: agent || null,
+      assigned_to: agent ? (AGENT_DISPLAY_NAMES[String(agent)] || String(agent)) : null,
+    })
+    .select()
+    .single();
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
+  logger.info("Auto waiting-for created", { todoId: data.id, workItem: work_item_id, agent });
+  res.json({ success: true, todo: data });
+}
+
 // ── ELLIE-903: Workload snapshots ──────────────────────────
 
 async function handleSnapshotCapture(req: ApiRequest, res: ApiResponse, supabase: SupabaseClient): Promise<void> {
@@ -788,6 +970,55 @@ export function handleGtdRoute(
     return true;
   }
 
+  // ELLIE-916: GET /api/gtd/contexts — list contexts
+  if (req.method === "GET" && pathname === "/api/gtd/contexts") {
+    safeAsync(handleListContexts({ query: queryParams }, mockRes, supabase));
+    return true;
+  }
+
+  // ELLIE-916: POST /api/gtd/contexts — create context
+  if (req.method === "POST" && pathname === "/api/gtd/contexts") {
+    safeAsync((async () => {
+      const raw = await readBody(req, res);
+      if (raw === null) return;
+      let data: Record<string, unknown>;
+      try { data = JSON.parse(raw); } catch { jsonRes(res, 400, { error: "Invalid JSON" }); return; }
+      await handleCreateContext({ body: data, query: queryParams }, mockRes, supabase);
+    })());
+    return true;
+  }
+
+  // ELLIE-916: PATCH /api/gtd/contexts/:name — update context
+  const ctxMatch = pathname.match(/^\/api\/gtd\/contexts\/([a-z][a-z0-9-]*)$/);
+  if (ctxMatch && req.method === "PATCH") {
+    safeAsync((async () => {
+      const raw = await readBody(req, res);
+      if (raw === null) return;
+      let data: Record<string, unknown>;
+      try { data = JSON.parse(raw); } catch { jsonRes(res, 400, { error: "Invalid JSON" }); return; }
+      await handleUpdateContext({ body: data, query: queryParams, params: { name: ctxMatch[1] } }, mockRes, supabase);
+    })());
+    return true;
+  }
+
+  // ELLIE-916: DELETE /api/gtd/contexts/:name
+  if (ctxMatch && req.method === "DELETE") {
+    safeAsync(handleDeleteContext({ params: { name: ctxMatch[1] } }, mockRes, supabase));
+    return true;
+  }
+
+  // ELLIE-918: POST /api/gtd/waiting-for — auto-create waiting-for from ticket work
+  if (req.method === "POST" && pathname === "/api/gtd/waiting-for") {
+    safeAsync((async () => {
+      const raw = await readBody(req, res);
+      if (raw === null) return;
+      let data: Record<string, unknown>;
+      try { data = JSON.parse(raw); } catch { jsonRes(res, 400, { error: "Invalid JSON" }); return; }
+      await handleAutoWaitingFor({ body: data, query: queryParams }, mockRes, supabase);
+    })());
+    return true;
+  }
+
   // ELLIE-888: GET /api/gtd/team — team overview
   if (req.method === "GET" && pathname === "/api/gtd/team") {
     safeAsync(handleTeamOverview({ query: queryParams }, mockRes, supabase));
@@ -809,6 +1040,18 @@ export function handleGtdRoute(
   // ELLIE-906: GET /api/gtd/reports/velocity — done per agent per week
   if (req.method === "GET" && pathname === "/api/gtd/reports/velocity") {
     safeAsync(handleVelocityReport({ query: queryParams }, mockRes, supabase));
+    return true;
+  }
+
+  // POST /api/gtd/reorder — batch reorder todos within a project
+  if (req.method === "POST" && pathname === "/api/gtd/reorder") {
+    safeAsync((async () => {
+      const raw = await readBody(req, res);
+      if (raw === null) return;
+      let data: Record<string, unknown>;
+      try { data = JSON.parse(raw); } catch { jsonRes(res, 400, { error: "Invalid JSON" }); return; }
+      await handleReorder({ body: data, query: queryParams }, mockRes, supabase);
+    })());
     return true;
   }
 

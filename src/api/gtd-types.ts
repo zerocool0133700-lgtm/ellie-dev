@@ -25,6 +25,12 @@ export interface TodoRow {
   assigned_agent: string | null;
   delegated_by: string | null;
   delegated_at: string | null;
+  sequence: number;
+  // ELLIE-915: Enhanced GTD
+  effort: "quick" | "medium" | "deep" | null;
+  context: string | null;
+  scheduled_at: string | null;
+  is_reference: boolean;
 }
 
 export interface TodoProject {
@@ -62,6 +68,25 @@ export interface WorkloadSnapshot {
   waiting_count: number;
   done_count: number;
 }
+
+// ELLIE-916: GTD context
+export interface GtdContext {
+  id: string;
+  name: string;
+  label: string;
+  icon: string | null;
+  color: string | null;
+  calendar_enabled: boolean;
+  calendar_id: string | null;
+  sort_order: number;
+}
+
+// ELLIE-917: Effort classification rules
+export const EFFORT_RULES = {
+  quick: { maxMinutes: 15, keywords: ["check", "reply", "send", "update", "fix typo", "rename", "ping"] },
+  medium: { maxMinutes: 60, keywords: ["review", "implement", "write", "create", "investigate", "configure"] },
+  deep: { maxMinutes: Infinity, keywords: ["design", "architect", "refactor", "migrate", "build", "research deeply"] },
+} as const;
 
 // Agent display name mapping
 export const AGENT_DISPLAY_NAMES: Record<string, string> = {
