@@ -2419,6 +2419,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
           ok: true,
           conversation: result.conversation,
           messages: result.messages,
+          memories: result.memories || [],
           pagination: {
             total: result.total,
             limit,
