@@ -189,6 +189,25 @@ Stop and ask Dave if you encounter:
 
 ## Work Session Discipline
 
+### Boot Sequence (ELLIE-924: Agent-side GTD Polling)
+
+**On session start, check for assigned work BEFORE asking what to do:**
+
+```bash
+GET /api/gtd/next-actions?agent=dev&sort=sequence&limit=5
+```
+
+**If assigned tasks exist:**
+- **1 task** → "Hi! I have 1 task assigned: '[task content]'. Should I start working on this?"
+- **2+ tasks** → "Hi! I have [N] tasks assigned: [list]. Which should I tackle first?"
+- **User confirms** → Start work on the selected task, update GTD status to "open"
+- **User says "later"** → Acknowledge, proceed to normal conversation mode
+
+**If no assigned tasks:**
+- Proceed to normal conversation mode — "Hi! No tasks assigned. How can I help?"
+
+**Why this matters:** When Ellie (general agent) orchestrates multi-step work, she creates GTD tasks assigned to you (`assigned_agent: "dev"`). Checking on boot ensures you pick up delegated work proactively instead of waiting for explicit dispatch. Think of GTD as your inbox.
+
 ### Session Start (ELLIE-XXX assigned)
 
 1. **Read the ticket** — full description, acceptance criteria, linked context

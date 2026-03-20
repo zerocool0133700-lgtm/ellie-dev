@@ -1613,6 +1613,91 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
     return;
   }
 
+  // ── Orchestration Health Dashboard — GET /api/orchestration/health ──
+  // ELLIE-924: Comprehensive health view combining runs, GTD tasks, and work sessions
+  if (url.pathname === "/api/orchestration/health" && req.method === "GET") {
+    (async () => {
+      try {
+        const activeRuns = getActiveRunStates();
+        const { supabase } = getRelayDeps();
+
+        // Get assigned GTD tasks
+        let assignedTasks: any[] = [];
+        if (supabase) {
+          const { data } = await supabase
+            .from("todos")
+            .select("*")
+            .not("assigned_agent", "is", null)
+            .in("status", ["inbox", "open"])
+            .order("created_at", { ascending: true });
+          assignedTasks = data || [];
+        }
+
+        // Get active work sessions
+        let activeSessions: any[] = [];
+        if (supabase) {
+          const { data } = await supabase
+            .from("work_sessions")
+            .select("*")
+            .in("status", ["started", "active"])
+            .order("started_at", { ascending: false })
+            .limit(20);
+          activeSessions = data || [];
+        }
+
+        const health = {
+          timestamp: new Date().toISOString(),
+          active_runs: {
+            count: activeRuns.length,
+            runs: activeRuns.map(r => ({
+              run_id: r.runId.slice(0, 8),
+              agent_type: r.agentType,
+              work_item_id: r.workItemId,
+              status: r.status,
+              started_at: new Date(r.startedAt).toISOString(),
+              last_heartbeat: new Date(r.lastHeartbeat).toISOString(),
+              silence_seconds: Math.floor((Date.now() - r.lastHeartbeat) / 1000),
+            })),
+          },
+          assigned_tasks: {
+            count: assignedTasks.length,
+            by_agent: assignedTasks.reduce((acc, t) => {
+              const agent = t.assigned_agent || "unknown";
+              acc[agent] = (acc[agent] || 0) + 1;
+              return acc;
+            }, {} as Record<string, number>),
+            tasks: assignedTasks.map(t => ({
+              id: t.id.slice(0, 8),
+              content: t.content.slice(0, 100),
+              assigned_agent: t.assigned_agent,
+              status: t.status,
+              created_at: t.created_at,
+              age_minutes: Math.floor((Date.now() - new Date(t.created_at).getTime()) / 60_000),
+            })),
+          },
+          active_sessions: {
+            count: activeSessions.length,
+            sessions: activeSessions.map(s => ({
+              id: s.id.slice(0, 8),
+              work_item_id: s.work_item_id,
+              agent: s.agent,
+              status: s.status,
+              started_at: s.started_at,
+              duration_minutes: Math.floor((Date.now() - new Date(s.started_at).getTime()) / 60_000),
+            })),
+          },
+        };
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(health, null, 2));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Failed to get orchestration health" }));
+      }
+    })();
+    return;
+  }
+
   // ── Orchestration Run Detail — GET /api/orchestration/status/:runId ──
   if (url.pathname.startsWith("/api/orchestration/status/") && req.method === "GET") {
     const runId = url.pathname.split("/api/orchestration/status/")[1];
@@ -1636,6 +1721,9 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
   }
 
   // ── Orchestration Dispatch — POST /api/orchestration/dispatch ──
+  // WARNING (ELLIE-924): This endpoint is DEPRECATED for interactive orchestration workflows.
+  // Use the Agent tool instead for all user-initiated or orchestrated work.
+  // This endpoint should only be used for background/async tasks (cron, webhooks, events).
   if (url.pathname === "/api/orchestration/dispatch" && req.method === "POST") {
     let body = "";
     req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
@@ -1648,6 +1736,13 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
           res.end(JSON.stringify({ error: "agent_type and work_item_id are required" }));
           return;
         }
+
+        // ELLIE-924: Log deprecation warning
+        logger.warn("DEPRECATED: /api/orchestration/dispatch called. Use Agent tool for interactive work.", {
+          agent_type,
+          work_item_id,
+          caller: "api",
+        });
 
         // Build a minimal playbook context from relay deps
         const { bot: relayBot, supabase: relaySb } = getRelayDeps();
