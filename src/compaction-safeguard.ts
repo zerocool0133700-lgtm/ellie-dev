@@ -14,7 +14,6 @@
  */
 
 import { readWorkingMemory, updateWorkingMemory, type WorkingMemoryRecord } from "./working-memory.ts";
-import { writeMemory } from "../../ellie-forest/src/index.ts";
 import { log } from "./logger.ts";
 
 const logger = log.child("compaction-safeguard");
@@ -122,6 +121,24 @@ export function extractCriticalIdentifiers(text: string | undefined): string[] {
  *
  * ELLIE-922 Critical Issue #2: Fails verification if snapshot is missing when expected.
  * This catches partial Forest write failures and forces rollback from the last known good state.
+ *
+ * ELLIE-925 Known Limitation: Verification timing vs compaction
+ * This function verifies working memory state immediately after checkpointSessionToForest
+ * returns, but Claude's actual context compression happens asynchronously in the LLM's
+ * next turn. The verification currently checks working memory state BEFORE Claude has
+ * actually compressed context, not after. This means:
+ * - Snapshot is taken correctly before compression
+ * - Verification runs before compression (premature)
+ * - If compression loses data, verification won't detect it until the NEXT checkpoint
+ *
+ * To properly verify post-compaction state, we would need to:
+ * - Trigger verification from the NEXT message handler (after Claude returns)
+ * - Store a flag like "pending_verification" on the working memory record
+ * - Run verification before processing the next user message
+ *
+ * Current behavior is conservative: we snapshot correctly, and rollback capability exists,
+ * but verification runs one turn early. This is acceptable for now since the snapshot
+ * preserves state regardless of when verification runs.
  *
  * Returns verification result with details of any lost sections/identifiers.
  */
@@ -287,6 +304,9 @@ export async function rollbackWorkingMemoryFromSnapshot(opts: {
     snapshot_turn: snapshot.turn_number,
     snapshot_timestamp: snapshot.snapshot_timestamp,
   });
+
+  // ELLIE-925: Dynamic import to avoid circular dependency (consistent with working-memory.ts)
+  const { writeMemory } = await import("../../ellie-forest/src/index.ts");
 
   // Write rollback event to Forest for audit trail
   await writeMemory({

@@ -20,6 +20,8 @@
  */
 
 import { sql } from "../../ellie-forest/src/index.ts";
+import { log } from "./logger.ts";
+import { hashToInt64 } from "./advisory-lock-hash.ts";
 
 /** Normalize a record returned from postgres.js: parse sections if still a string. */
 function normalize(record: WorkingMemoryRecord): WorkingMemoryRecord {
@@ -30,7 +32,6 @@ function normalize(record: WorkingMemoryRecord): WorkingMemoryRecord {
       : record.sections,
   };
 }
-import { log } from "./logger.ts";
 
 const logger = log.child("working-memory");
 
@@ -187,6 +188,10 @@ export async function readWorkingMemory(opts: {
  *
  * ELLIE-922 Critical Issue #1: Uses PostgreSQL advisory locks to prevent
  * concurrent checkpoint race conditions that could corrupt turn_number.
+ *
+ * ELLIE-925 Fix: Wrapped in sql.begin() transaction to ensure advisory lock
+ * is held for the duration of the UPDATE query. Previously used pg_advisory_xact_lock
+ * in a separate query which auto-committed and released the lock before the UPDATE ran.
  */
 export async function checkpointWorkingMemory(opts: {
   session_id: string;
@@ -195,40 +200,31 @@ export async function checkpointWorkingMemory(opts: {
   const { session_id, agent } = opts;
 
   // Generate a stable lock key from session_id + agent
-  // Use hashCode to convert string to int64 for pg_advisory_xact_lock
-  const lockKey = hashLockKey(session_id, agent);
+  // ELLIE-925: Use consolidated FNV-1a hash for consistency with session-compaction.ts
+  const lockKey = hashToInt64(`${session_id}:${agent}`);
 
-  // Acquire advisory lock first (must be separate query)
-  await sql`SELECT pg_advisory_xact_lock(${lockKey})`;
+  // ELLIE-925 Fix: Wrap lock + update in a single transaction
+  // pg_advisory_xact_lock is transaction-scoped and auto-releases on commit/rollback
+  return await sql.begin(async (txn) => {
+    // Acquire advisory lock (held until transaction completes)
+    await txn`SELECT pg_advisory_xact_lock(${lockKey})`;
 
-  // Then update (lock is held for the transaction)
-  const [record] = await sql<WorkingMemoryRecord[]>`
-    UPDATE working_memory
-    SET
-      turn_number = turn_number + 1,
-      updated_at  = NOW()
-    WHERE session_id = ${session_id}
-      AND agent      = ${agent}
-      AND archived_at IS NULL
-    RETURNING *
-  `;
+    // Update with lock held
+    const [record] = await txn<WorkingMemoryRecord[]>`
+      UPDATE working_memory
+      SET
+        turn_number = turn_number + 1,
+        updated_at  = NOW()
+      WHERE session_id = ${session_id}
+        AND agent      = ${agent}
+        AND archived_at IS NULL
+      RETURNING *
+    `;
 
-  return record ? normalize(record) : null;
+    return record ? normalize(record) : null;
+  });
 }
 
-/**
- * Generate a stable 64-bit integer lock key from session_id + agent.
- * PostgreSQL advisory locks require bigint keys.
- */
-function hashLockKey(session_id: string, agent: string): bigint {
-  const combined = `${session_id}:${agent}`;
-  let hash = 0n;
-  for (let i = 0; i < combined.length; i++) {
-    hash = ((hash << 5n) - hash) + BigInt(combined.charCodeAt(i));
-    hash = hash & 0x7FFFFFFFFFFFFFFFn; // Keep it positive and within int64 range
-  }
-  return hash;
-}
 
 /**
  * Archive the active working memory record.
@@ -294,29 +290,33 @@ export async function snapshotWorkingMemoryToForest(opts: {
 }): Promise<string | null> {
   const { session_id, agent, work_item_id, scope_path = "2/1" } = opts;
 
-  // ELLIE-922 Critical Issue #3: Lock working memory to prevent updates during verification
-  // This prevents the verification race where agent updates working memory while
-  // snapshot → verify → rollback is in progress, which would cause rollback to destroy fresh data.
-  await sql`
-    UPDATE working_memory
-    SET safeguard_locked = TRUE
-    WHERE session_id = ${session_id}
-      AND agent = ${agent}
-      AND archived_at IS NULL
-  `;
-
-  // Read the current active working memory
-  const record = await readWorkingMemory({ session_id, agent });
-  if (!record) {
-    logger.warn("Snapshot skipped — no active working memory", { session_id, agent });
-    // Unlock the safeguard since we're not proceeding with the snapshot
-    await sql`
+  // ELLIE-925 Fix: Wrap lock + read in transaction to prevent TOCTOU race
+  // Lock working memory and read it atomically to prevent updates between lock and read
+  const record = await sql.begin(async (txn) => {
+    // Lock the working memory record
+    await txn`
       UPDATE working_memory
-      SET safeguard_locked = FALSE
+      SET safeguard_locked = TRUE
       WHERE session_id = ${session_id}
         AND agent = ${agent}
         AND archived_at IS NULL
     `;
+
+    // Read the locked record (same transaction, atomic with the UPDATE)
+    const [rec] = await txn<WorkingMemoryRecord[]>`
+      SELECT *
+      FROM working_memory
+      WHERE session_id = ${session_id}
+        AND agent = ${agent}
+        AND archived_at IS NULL
+    `;
+
+    return rec ? normalize(rec) : null;
+  });
+
+  if (!record) {
+    logger.warn("Snapshot skipped — no active working memory", { session_id, agent });
+    // No need to unlock — the transaction rolled back and lock wasn't committed
     return null;
   }
 
@@ -486,6 +486,7 @@ export function _injectWorkingMemoryForTesting(
     created_at: new Date(),
     updated_at: new Date(),
     archived_at: null,
+    safeguard_locked: false, // ELLIE-925: Added missing field
   };
   _workingMemoryCache.set(agent, record);
 }

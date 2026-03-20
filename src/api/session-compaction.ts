@@ -12,23 +12,9 @@
 import type { BuildMetrics } from "../prompt-builder.ts";
 import { writeMemory } from "../../../ellie-forest/src/index";
 import { log } from "../logger.ts";
+import { hashToInt32 } from "../advisory-lock-hash.ts";
 
 const logger = log.child("session-compaction");
-
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-/**
- * Hash a string to a 32-bit signed integer for PostgreSQL advisory locks.
- * Uses a simple FNV-1a hash algorithm.
- */
-function hashStringToInt32(str: string): number {
-  let hash = 2166136261; // FNV offset basis
-  for (let i = 0; i < str.length; i++) {
-    hash ^= str.charCodeAt(i);
-    hash = Math.imul(hash, 16777619); // FNV prime
-  }
-  return hash | 0; // Convert to signed 32-bit int
-}
 
 const WARN_THRESHOLD     = 0.70;  // 70% → suggest wrapping up (ELLIE-628: raised from 60% for 100k window)
 const CRITICAL_THRESHOLD = 0.85;  // 85% → auto-checkpoint + urgent notice (ELLIE-628: raised from 80%)
@@ -126,15 +112,17 @@ export function getCompactionNotice(pressure: ContextPressure): string {
 export async function checkpointSessionToForest(opts: CheckpointOpts): Promise<void> {
   const { conversationId, agentName, mode, workItemId, pressure, sections, lastUserMessage } = opts;
 
-  // ELLIE-922 Critical Issue #1: Acquire advisory lock to prevent concurrent checkpoints
+  // ELLIE-925 Fix: Use transaction-scoped advisory lock to prevent connection pool issues
   // Lock key = hash of (session_id + agent) to ensure per-session locking
   const { default: sql } = await import("../../../ellie-forest/src/db.ts");
-  const lockKey = hashStringToInt32(`checkpoint:${conversationId}:${agentName}`);
+  const lockKey = hashToInt32(`checkpoint:${conversationId}:${agentName}`);
 
-  try {
-    // Try to acquire advisory lock (non-blocking). Returns true if acquired, false if already held.
-    const [lockResult] = await sql<{ acquired: boolean }[]>`
-      SELECT pg_try_advisory_lock(${lockKey}) as acquired
+  // Wrap checkpoint in transaction with pg_try_advisory_xact_lock
+  // Transaction-scoped locks auto-release on commit/rollback (no manual unlock needed)
+  await sql.begin(async (txn) => {
+    // Try to acquire transaction-scoped advisory lock (non-blocking)
+    const [lockResult] = await txn<{ acquired: boolean }[]>`
+      SELECT pg_try_advisory_xact_lock(${lockKey}) as acquired
     `;
 
     if (!lockResult?.acquired) {
@@ -142,16 +130,10 @@ export async function checkpointSessionToForest(opts: CheckpointOpts): Promise<v
         conversationId,
         agentName,
       });
-      return; // Another checkpoint is already running for this session
+      return; // Lock not acquired, another checkpoint is running
     }
 
-    // Lock acquired — proceed with checkpoint (will be released in finally block)
-  } catch (lockErr) {
-    logger.error("[compaction] Failed to acquire advisory lock", { conversationId, agentName }, lockErr);
-    return;
-  }
-
-  try {
+    // Lock acquired — proceed with checkpoint
     // ELLIE-923: Snapshot working memory to Forest before compaction
   // This preserves all 7 sections of working memory state
   let snapshotMemoryId: string | null = null;
@@ -314,12 +296,8 @@ export async function checkpointSessionToForest(opts: CheckpointOpts): Promise<v
       }
     }
   }
-  } finally {
-    // ELLIE-922 Critical Issue #1: Always release advisory lock
-    try {
-      await sql`SELECT pg_advisory_unlock(${lockKey})`;
-    } catch (unlockErr) {
-      logger.error("[compaction] Failed to release advisory lock", { conversationId, agentName }, unlockErr);
-    }
-  }
+
+    // ELLIE-925: Transaction-scoped lock auto-releases on commit
+    // No manual unlock needed
+  });
 }
