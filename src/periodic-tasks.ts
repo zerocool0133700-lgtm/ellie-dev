@@ -235,6 +235,40 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     if (archived > 0) logger.info(`Archived ${archived} idle session(s)`);
   }, 2 * 60 * 60_000, "working-memory-archive");
 
+  // ELLIE-933: Auto-promote qualifying memories to Core tier (every 6 hours)
+  periodicTask(async () => {
+    const { autoPromoteToCore } = await import("../../ellie-forest/src/shared-memory.ts");
+    const promoted = await autoPromoteToCore();
+    if (promoted > 0) logger.info(`Promoted ${promoted} memory(s) to Core tier`);
+  }, 6 * 60 * 60_000, "memory-tier-promotion");
+
+  // ELLIE-936: Memory graduation — promote Supabase facts to Forest (daily)
+  periodicTask(async () => {
+    if (!supabase) return;
+    const { graduateMemories } = await import("./periodic-tasks-helpers.ts");
+    const graduated = await graduateMemories(supabase);
+    if (graduated > 0) logger.info(`Graduated ${graduated} Supabase fact(s) to Forest`);
+  }, 24 * 60 * 60_000, "memory-graduation");
+
+  // ELLIE-934: Memory arc auto-detection — chains + clusters (every 12 hours)
+  periodicTask(async () => {
+    const { detectArcsFromChains, detectArcsFromClusters } = await import("../../ellie-forest/src/arcs.ts");
+    const chains = await detectArcsFromChains();
+    const clusters = await detectArcsFromClusters();
+    if (chains > 0 || clusters > 0) {
+      logger.info(`Memory arcs: ${chains} from chains, ${clusters} from clusters`);
+    }
+  }, 12 * 60 * 60_000, "memory-arc-detection");
+
+  // ELLIE-937: Backfill memory categories + cognitive types (daily, runs until caught up)
+  periodicTask(async () => {
+    const { backfillClassifications } = await import("../../ellie-forest/src/shared-memory.ts");
+    const result = await backfillClassifications();
+    if (result.categories > 0 || result.cognitiveTypes > 0) {
+      logger.info(`Backfill: reclassified ${result.categories} categories, ${result.cognitiveTypes} cognitive types`);
+    }
+  }, 24 * 60 * 60_000, "memory-classification-backfill");
+
   // ELLIE-457: Oak Catalog — daily QMD scan → R/1 manifest (every 24 hours)
   periodicTask(async () => {
     const { syncOakCatalog } = await import("./api/bridge-river.ts");

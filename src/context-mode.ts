@@ -301,6 +301,7 @@ const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
   conversation: {
     "soul": 2,
     "archetype": 2,
+    "psy": 4,
     "phase": 3,
     "profile": 3,
     "structured-context": 4,
@@ -321,7 +322,7 @@ const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
   strategy: {
     "soul": 5,
     "archetype": 7,
-    "psy": 7,
+    "psy": 5,
     "phase": 8,
     "profile": 4,
     "structured-context": 3,

@@ -1138,8 +1138,8 @@ export async function getAgentMemoryContext(
       SELECT id FROM creatures WHERE tree_id = ${tree.id} AND entity_id = ${entity.id} AND state IN ('pending', 'dispatched', 'working') LIMIT 1
     `;
 
-    // ELLIE-640: Tier-aware memory retrieval
-    const { getCoreMemories, getActiveGoals } = await import('../../ellie-forest/src/index');
+    // ELLIE-640: Tier-aware memory retrieval + ELLIE-939: Adaptive Response Memory
+    const { getCoreMemories, getActiveGoals, getPreferences } = await import('../../ellie-forest/src/index');
 
     // Tier 1: Core memories — always injected (identity, constraints, preferences)
     let memoryContext = '';
@@ -1153,6 +1153,17 @@ export async function getAgentMemoryContext(
       }
     } catch (err) {
       logger.warn("Core memory fetch failed", { agent: agentName }, err);
+    }
+
+    // ELLIE-939: Communication preferences — Fix #13: timeout protection
+    try {
+      const preferences = await withTimeout(getPreferences({ limit: 10 }), 3000, []);
+      if (preferences.length > 0) {
+        const prefLines = preferences.map((p: { content: string }) => `  - ${p.content}`);
+        memoryContext += `\n\nCOMMUNICATION PREFERENCES (adapt your responses accordingly):\n${prefLines.join('\n')}`;
+      }
+    } catch (err) {
+      logger.warn("Preferences fetch failed", { agent: agentName }, err);
     }
 
     // Tier 3: Active goals — injected alongside Core
@@ -1171,6 +1182,21 @@ export async function getAgentMemoryContext(
       logger.warn("Active goals fetch failed", { agent: agentName }, err);
     }
 
+    // ELLIE-940: Growth Surfacing — inject active memory arcs
+    try {
+      const { listArcs } = await import('../../ellie-forest/src/index');
+      const arcs = await withTimeout(listArcs({ limit: 5 }), 3000, []);
+      if (arcs.length > 0) {
+        const arcLines = arcs.map((a: { name: string; direction: string; category: string; memory_ids: string[]; summary: string | null }) => {
+          const arrow = a.direction === 'growing' ? '↑' : a.direction === 'declining' ? '↓' : a.direction === 'exploring' ? '?' : '→';
+          return `  ${arrow} [${a.category}] ${a.name} (${a.memory_ids.length} memories, ${a.direction})${a.summary ? ` — ${a.summary}` : ''}`;
+        });
+        memoryContext += `\n\nKNOWLEDGE EVOLUTION (active arcs — how understanding is developing):\n${arcLines.join('\n')}`;
+      }
+    } catch (err) {
+      logger.warn("Memory arcs fetch failed", { agent: agentName }, err);
+    }
+
     // Tier 2: Extended memories — session-scoped, retrieved on-demand
     const memories = await getAgentContext({
       tree_id: tree.id,
@@ -1181,10 +1207,14 @@ export async function getAgentMemoryContext(
     });
 
     if (memories.length > 0) {
-      const lines = memories.map((m: MemorySearchResult) => {
+      const lines = memories.map((m: any) => {
         const scope = m.scope === 'global' ? '[global]' : m.scope === 'tree' ? '[session]' : `[${m.scope}]`;
         const conf = m.confidence ? ` (confidence: ${m.confidence.toFixed(1)})` : '';
-        return `  ${scope} ${m.content}${conf}`;
+        // ELLIE-926: Annotate emotionally significant memories
+        const emotional = m.emotional_intensity && m.emotional_intensity > 0.5
+          ? ` [emotionally significant${m.emotional_valence != null ? (m.emotional_valence < -0.3 ? ' — negative' : m.emotional_valence > 0.3 ? ' — positive' : '') : ''}]`
+          : '';
+        return `  ${scope} ${m.content}${conf}${emotional}`;
       });
       memoryContext +=
         `\n\nSESSION MEMORY (${memories.length} extended memories from past sessions):` +

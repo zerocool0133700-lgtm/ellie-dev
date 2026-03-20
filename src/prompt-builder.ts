@@ -244,7 +244,7 @@ interface RiverDocEntry {
 
 const _riverDocs = new Map<string, RiverDocEntry>();
 /** Default TTL — overridable via setRiverDocCacheTtl(). */
-let _riverDocCacheTtlMs = 60_000;
+let _riverDocCacheTtlMs = 300_000; // 5 min
 let _riverRefreshInFlight = false;
 
 /** Maps prompt section keys to River vault paths. */
@@ -261,6 +261,7 @@ const RIVER_DOC_PATHS: Record<string, string> = {
   "playbook-commands": "prompts/protocols/playbook-commands.md",
   "work-commands": "prompts/protocols/work-commands.md",
   "planning-mode": "prompts/protocols/planning-mode.md",
+  "commitment-framework": "frameworks/commitment-framework.md",
 };
 
 /**
@@ -419,6 +420,8 @@ const AGENT_PROFILE_MAP: Record<string, string> = {
   dev: "dev-ant",
   research: "research-squirrel",
   strategy: "strategy-squirrel",
+  brian: "brian-owl",
+  amy: "amy-ant",
 };
 
 /**
@@ -492,6 +495,8 @@ const AGENT_ROLE_MAP: Record<string, string> = {
   general: "general",
   research: "researcher",
   strategy: "strategy",
+  brian: "critic",
+  amy: "content",
   critic: "critic",
   content: "content",
   finance: "finance",
@@ -798,8 +803,24 @@ export async function runPostMessageAssessment(
       }
     }
 
+    // ELLIE-941: Record phase transitions as episodic memories
     if (newPhase.phase !== phase.phase) {
       logger.info(`Phase transition: ${phase.phase_name} -> ${newPhase.phase_name}`);
+      try {
+        const { writeMemory } = await import('../../ellie-forest/src/shared-memory');
+        await writeMemory({
+          content: `Relationship phase advanced: ${phase.phase_name} → ${newPhase.phase_name}. Message count: ${newPhase.message_count}, trust signals: ${newPhase.trust_signals.count}.`,
+          type: 'finding',
+          scope: 'global',
+          confidence: 0.9,
+          tags: ['phase-transition', 'relationship'],
+          metadata: { source: 'phase_engine', from_phase: phase.phase, to_phase: newPhase.phase },
+          cognitive_type: 'episodic',
+          category: 'relationships',
+        });
+      } catch (err: unknown) {
+        logger.warn("Phase transition memory write failed", err);
+      }
     }
 
     logger.info(`Completed in ${Date.now() - start}ms` +
@@ -842,7 +863,7 @@ export function buildPrompt(
   commandBarContext?: string,
   fullWorkingMemory?: boolean,
 ): string {
-  const channelLabel = channel === "google-chat" ? "Google Chat" : channel === "ellie-chat" ? "Ellie Chat (dashboard)" : "Telegram";
+  const channelLabel = channel === "google-chat" ? "Google Chat" : channel === "ellie-chat" ? "Ellie Chat (dashboard)" : channel === "email" ? "Email (via AgentMail — replies are sent back as email to the sender)" : "Telegram";
 
   // ELLIE-534: Snapshot River cache counters at build start to compute per-build delta
   const _riverHitsAtStart = _riverDocMetrics.cacheHits;
@@ -1187,6 +1208,15 @@ export function buildPrompt(
     const riverPlanningMode = getCachedRiverDoc("planning-mode");
     if (riverPlanningMode) {
       sections.push({ label: "planning-mode", content: `\nPLANNING MODE ACTIVE:\n${riverPlanningMode}`, priority: getRiverDocPriority("planning-mode", 3) });
+    }
+  }
+
+  // Commitment Framework — River-backed routing system for how the general agent handles commitments.
+  // Injected at P3 for general agent only. Use cases loaded on-demand via QMD/file read.
+  if (isGeneralAgent) {
+    const riverCommitmentFramework = getCachedRiverDoc("commitment-framework");
+    if (riverCommitmentFramework) {
+      sections.push({ label: "commitment-framework", content: `\nCOMMITMENT FRAMEWORK:\n${riverCommitmentFramework}`, priority: getRiverDocPriority("commitment-framework", 3) });
     }
   }
 
