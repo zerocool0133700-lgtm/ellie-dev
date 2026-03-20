@@ -256,6 +256,33 @@ describe("checkpointWorkingMemory", () => {
     const result = await checkpointWorkingMemory(ids);
     expect(result!.turn_number).toBe(3);
   });
+
+  test("concurrent checkpoints produce correct turn_number (ELLIE-925)", async () => {
+    // This tests the ELLIE-925 fix: pg_advisory_xact_lock now runs in the same
+    // transaction as the UPDATE, preventing concurrent checkpoint race conditions.
+    const ids = makeIds("checkpoint-concurrent");
+    await initWorkingMemory(ids);
+
+    // Launch 5 concurrent checkpoints
+    const results = await Promise.all([
+      checkpointWorkingMemory(ids),
+      checkpointWorkingMemory(ids),
+      checkpointWorkingMemory(ids),
+      checkpointWorkingMemory(ids),
+      checkpointWorkingMemory(ids),
+    ]);
+
+    // All should succeed (non-null)
+    expect(results.every((r) => r !== null)).toBe(true);
+
+    // The final turn_number should be exactly 5 (no lost increments due to race)
+    const final = await readWorkingMemory(ids);
+    expect(final!.turn_number).toBe(5);
+
+    // All results should have sequential turn numbers (1, 2, 3, 4, 5 in some order)
+    const turnNumbers = results.map((r) => r!.turn_number).sort((a, b) => a - b);
+    expect(turnNumbers).toEqual([1, 2, 3, 4, 5]);
+  });
 });
 
 // ── Core: archiveWorkingMemory ────────────────────────────────────────────────
