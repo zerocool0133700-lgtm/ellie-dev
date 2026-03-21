@@ -17,6 +17,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { startWatchdog, recoverActiveRuns } from "./orchestration-tracker.ts";
 import { reconcileOnStartup, startReconciler } from "./orchestration-reconciler.ts";
 import { cleanupOrphanedJobs } from "./jobs-ledger.ts";
+import { recoverSpawnRegistry } from "./session-spawn.ts";
 import { log } from "./logger.ts";
 
 const logger = log.child("orchestration-init");
@@ -34,6 +35,12 @@ export async function initOrchestration(supabase: SupabaseClient | null): Promis
   // Step 1: Recover active runs from previous session
   await recoverActiveRuns();
 
+  // Step 1b: ELLIE-954 — Recover spawn registry from DB
+  const spawnRecovery = await recoverSpawnRegistry().catch((err) => {
+    logger.warn("Spawn registry recovery failed (non-fatal)", { err: err instanceof Error ? err.message : String(err) });
+    return { recovered: 0, staleMarked: 0 };
+  });
+
   // Step 2: Cleanup orphaned jobs
   const orphanCount = await cleanupOrphanedJobs();
   if (orphanCount > 0) {
@@ -49,5 +56,5 @@ export async function initOrchestration(supabase: SupabaseClient | null): Promis
 
   logger.info("Orchestration initialization complete");
 
-  return { recoveredRuns: undefined, orphanedJobs: orphanCount };
+  return { recoveredRuns: undefined, orphanedJobs: orphanCount, spawnRecovery };
 }

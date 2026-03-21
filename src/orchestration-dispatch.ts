@@ -36,6 +36,8 @@ import {
   buildAnnouncement,
   getSpawnRecord,
   captureDeliveryContext,
+  killChildrenForParent,
+  resolveArcForSpawn,
 } from "./session-spawn.ts";
 import type { SpawnOpts } from "./types/session-spawn.ts";
 
@@ -422,6 +424,8 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       trace_id: getTraceId(),
     });
     endRun(runId, "completed");
+    // ELLIE-949: Cascade kill any active sub-agent spawns when parent completes
+    killChildrenForParent(workItemId, "Parent dispatch completed");
     // ELLIE-447: Complete creature with meaningful result data (response preview + timing)
     if (sessionIds?.creature_id) {
       const responsePreview = rawResponse.replace(/\[MEMORY:[^\]]*\]/gi, "").trim().slice(0, 1000);
@@ -522,6 +526,8 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       trace_id: getTraceId(),
     });
     endRun(runId, "failed");
+    // ELLIE-949: Cascade kill any active sub-agent spawns when parent fails
+    killChildrenForParent(workItemId, `Parent dispatch failed: ${errMsg.slice(0, 200)}`);
     // ELLIE-440: Update job to failed
     if (jobId) {
       await updateJob(jobId, { status: "failed", error_count: 1, current_step: null });
@@ -633,6 +639,15 @@ async function runSpawnedDispatch(spawnId: string, opts: SpawnedDispatchOpts): P
 
     // 2. Mark spawn running with real session ID
     markSpawnRunning(spawnId, dispatch.session_id);
+
+    // 2b. ELLIE-942: Resolve memory arc for this spawn (inherit or fork)
+    const arcId = await resolveArcForSpawn(spawnId, async (arcOpts) => {
+      const { createArc } = await import("../../ellie-forest/src/arcs.ts");
+      return createArc(arcOpts as any);
+    });
+    if (arcId) {
+      logger.info("Spawn arc resolved", { spawnId, arcId, mode: opts.arcMode || "inherit" });
+    }
 
     // 3. Build prompt and call Claude
     // ELLIE-953: Use named positions instead of positional undefineds
