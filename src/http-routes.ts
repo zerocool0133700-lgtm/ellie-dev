@@ -1785,7 +1785,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
     req.on("end", async () => {
       try {
         const data = JSON.parse(body);
-        const { parent_session_id, parent_agent_name, target_agent_name, task, work_item_id, arc_mode, thread_bind, depth } = data;
+        const { parent_session_id, parent_agent_name, target_agent_name, task, work_item_id, arc_mode, thread_bind, depth, channel: spawnChannel } = data;
         if (!parent_session_id || !target_agent_name || !task) {
           res.writeHead(400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "parent_session_id, target_agent_name, and task are required" }));
@@ -1799,22 +1799,29 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
           return;
         }
 
+        // ELLIE-955: Accept channel from caller (e.g. "ellie-chat") for thread-bound delivery
+        const effectiveChannel = spawnChannel || "api";
+
         const { executeSpawnedDispatch } = await import("./orchestration-dispatch.ts");
         const result = executeSpawnedDispatch({
           parentSessionId: parent_session_id,
           parentAgentName: parent_agent_name || "general",
           targetAgentName: target_agent_name,
           task,
-          channel: "api",
+          channel: effectiveChannel,
           userId: ALLOWED_USER_ID,
           workItemId: work_item_id,
           arcMode: arc_mode,
           threadBind: thread_bind,
+          // ELLIE-955: Set delivery context for ellie-chat thread binding
+          deliveryContext: effectiveChannel === "ellie-chat"
+            ? { channel: "ellie-chat" }
+            : undefined,
           playbookCtx: {
             bot: relayBot,
             supabase: relaySb,
             telegramUserId: ALLOWED_USER_ID,
-            channel: "api",
+            channel: effectiveChannel,
             callClaudeFn: callClaude,
             buildPromptFn: buildPrompt,
           },

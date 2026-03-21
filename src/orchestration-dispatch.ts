@@ -40,7 +40,8 @@ import {
   resolveArcForSpawn,
   buildCostRollup,
 } from "./session-spawn.ts";
-import type { SpawnOpts } from "./types/session-spawn.ts";
+import type { SpawnOpts, SpawnAnnouncement } from "./types/session-spawn.ts";
+import { broadcastToEllieChatClients } from "./relay-state.ts";
 
 const logger = log.child("orchestration-dispatch");
 
@@ -651,6 +652,18 @@ async function runSpawnedDispatch(spawnId: string, opts: SpawnedDispatchOpts): P
     // 2. Mark spawn running with real session ID
     markSpawnRunning(spawnId, dispatch.session_id);
 
+    // ELLIE-955: Notify ellie-chat that a sub-agent has started
+    if (opts.deliveryContext?.channel === "ellie-chat") {
+      broadcastToEllieChatClients({
+        type: "spawn_status",
+        spawnId,
+        agent: targetAgentName,
+        status: "running",
+        task: task.slice(0, 200),
+        ts: Date.now(),
+      });
+    }
+
     // 2b. ELLIE-942: Resolve memory arc for this spawn (inherit or fork)
     const arcId = await resolveArcForSpawn(spawnId, async (arcOpts) => {
       const { createArc } = await import("../../ellie-forest/src/arcs.ts");
@@ -755,6 +768,9 @@ async function runSpawnedDispatch(spawnId: string, opts: SpawnedDispatchOpts): P
         workItemId: workItemId || "",
         telegramMessage: `Sub-agent ${targetAgentName} finished (${durationMin}min):\n${resultPreview.slice(0, 300)}`,
       });
+
+      // ELLIE-955: Deliver to ellie-chat via WebSocket if thread-bound
+      deliverSpawnAnnouncementToChat(announcement, opts.deliveryContext?.channel);
     }
 
     logger.info("Spawned dispatch completed", {
@@ -767,5 +783,42 @@ async function runSpawnedDispatch(spawnId: string, opts: SpawnedDispatchOpts): P
     const errMsg = err instanceof Error ? err.message : String(err);
     markSpawnFailed(spawnId, errMsg.slice(0, 500));
     logger.error("Spawned dispatch error", { spawnId, target: targetAgentName, error: errMsg.slice(0, 300) });
+
+    // ELLIE-955: Deliver failure announcement to ellie-chat
+    const failAnnouncement = buildAnnouncement(spawnId);
+    if (failAnnouncement) {
+      deliverSpawnAnnouncementToChat(failAnnouncement, opts.deliveryContext?.channel);
+    }
   }
+}
+
+// ── ELLIE-955: Ellie Chat spawn announcement delivery ───────
+
+/**
+ * Push a spawn announcement to all connected ellie-chat WebSocket clients.
+ * Only fires when the spawn's delivery context channel is "ellie-chat".
+ */
+function deliverSpawnAnnouncementToChat(
+  announcement: SpawnAnnouncement,
+  deliveryChannel?: string,
+): void {
+  if (deliveryChannel !== "ellie-chat") return;
+
+  const durationSec = Math.round(announcement.durationMs / 1000);
+  const status = announcement.state === "completed" ? "completed"
+    : announcement.state === "failed" ? "failed"
+    : announcement.state === "timed_out" ? "timed out"
+    : announcement.state;
+
+  broadcastToEllieChatClients({
+    type: "spawn_announcement",
+    spawnId: announcement.spawnId,
+    agent: announcement.targetAgentName,
+    status,
+    resultPreview: announcement.resultText?.slice(0, 300) ?? null,
+    error: announcement.error ?? null,
+    costCents: announcement.costCents,
+    durationSec,
+    ts: Date.now(),
+  });
 }
