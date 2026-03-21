@@ -585,8 +585,7 @@ export interface SpawnedDispatchOpts {
  *
  * Returns the spawnId immediately; child work runs async.
  *
- * Currently exported but not called — waiting for ELLIE-946 (HTTP API + Agent Tool)
- * to provide the trigger surface (POST /api/spawn or agent tool invocation).
+ * Called via POST /api/spawn (ELLIE-946) or programmatically.
  */
 export function executeSpawnedDispatch(opts: SpawnedDispatchOpts): { spawnId: string; success: boolean; error?: string; promise: Promise<void> } {
   const spawnResult = spawnSession({

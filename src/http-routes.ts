@@ -1778,6 +1778,88 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
     return;
   }
 
+  // ── ELLIE-946: Spawn Sub-Agent — POST /api/spawn ──
+  if (url.pathname === "/api/spawn" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body);
+        const { parent_session_id, parent_agent_name, target_agent_name, task, work_item_id, arc_mode, thread_bind, depth } = data;
+        if (!parent_session_id || !target_agent_name || !task) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "parent_session_id, target_agent_name, and task are required" }));
+          return;
+        }
+
+        const { bot: relayBot, supabase: relaySb } = getRelayDeps();
+        if (!relayBot) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Relay not fully initialized" }));
+          return;
+        }
+
+        const { executeSpawnedDispatch } = await import("./orchestration-dispatch.ts");
+        const result = executeSpawnedDispatch({
+          parentSessionId: parent_session_id,
+          parentAgentName: parent_agent_name || "general",
+          targetAgentName: target_agent_name,
+          task,
+          channel: "api",
+          userId: ALLOWED_USER_ID,
+          workItemId: work_item_id,
+          arcMode: arc_mode,
+          threadBind: thread_bind,
+          playbookCtx: {
+            bot: relayBot,
+            supabase: relaySb,
+            telegramUserId: ALLOWED_USER_ID,
+            channel: "api",
+            callClaudeFn: callClaude,
+            buildPromptFn: buildPrompt,
+          },
+          ...(depth !== undefined ? { depth } : {}),
+        } as any);
+
+        res.writeHead(result.success ? 200 : 429, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          success: result.success,
+          spawn_id: result.spawnId || undefined,
+          error: result.error,
+        }));
+      } catch (err: any) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Invalid request body" }));
+      }
+    });
+    return;
+  }
+
+  // ── ELLIE-946: Get Spawn Record — GET /api/spawn/:id ──
+  const spawnIdMatch = url.pathname.match(/^\/api\/spawn\/([0-9a-f-]+)$/);
+  if (spawnIdMatch && req.method === "GET") {
+    const { getSpawnRecord } = await import("./session-spawn.ts");
+    const record = getSpawnRecord(spawnIdMatch[1]);
+    if (!record) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Spawn not found" }));
+    } else {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(record));
+    }
+    return;
+  }
+
+  // ── ELLIE-946: List Children — GET /api/spawn/children/:parentSessionId ──
+  const spawnChildrenMatch = url.pathname.match(/^\/api\/spawn\/children\/(.+)$/);
+  if (spawnChildrenMatch && req.method === "GET") {
+    const { getChildrenForParent } = await import("./session-spawn.ts");
+    const children = getChildrenForParent(decodeURIComponent(spawnChildrenMatch[1]));
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ children, count: children.length }));
+    return;
+  }
+
   // ── Orchestration Cancel — POST /api/orchestration/:runId/cancel ──
   const cancelMatch = url.pathname.match(/^\/api\/orchestration\/([0-9a-f-]+)\/cancel$/);
   if (cancelMatch && req.method === "POST") {
