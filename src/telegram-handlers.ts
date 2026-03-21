@@ -51,6 +51,7 @@ import {
 import {
   processMemoryIntents,
   getRelevantContext,
+  getRelevantFacts,
 } from "./memory.ts";
 import { searchElastic } from "./elasticsearch.ts";
 import { getForestContext } from "./elasticsearch/context.ts";
@@ -289,7 +290,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   if (modeChanged) {
     logger.info("context mode changed", { mode: contextMode });
   }
-  const [conversationContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext, liveForest] = await Promise.all([
+  const [conversationContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext, liveForest, factsContext] = await Promise.all([
     activeConvoId && supabase ? getConversationMessages(supabase, activeConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
     getContextDocket(),
     getRelevantContext(supabase, effectiveText, "telegram", activeAgent, activeConvoId),
@@ -299,6 +300,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
     getAgentMemoryContext(activeAgent, detectedWorkItem, getMaxMemoriesForModel(agentResult?.dispatch.agent.model)),
     agentResult?.dispatch.is_new ? getQueueContext(activeAgent) : Promise.resolve(""),
     getLiveForestContext(effectiveText),
+    getRelevantFacts(supabase, effectiveText),  // ELLIE-967: Tier 2 fact retrieval
   ]);
   const recentMessages = conversationContext.text;
   // Auto-acknowledge queue items on new session (ELLIE-479: resilient)
@@ -334,7 +336,9 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   );
 
   // ELLIE-327: Apply auto-refresh results
-  const tgStructured = tgRefreshResults["structured-context"] || structuredContext;
+  const _tgStructuredBase = tgRefreshResults["structured-context"] || structuredContext;
+  // ELLIE-967: Merge Tier 2 conversation facts into structured context
+  const tgStructured = factsContext ? [_tgStructuredBase, factsContext].filter(Boolean).join("\n\n") : _tgStructuredBase;
   const tgDocket = tgRefreshResults["context-docket"] || contextDocket;
   const tgForestAwareness = tgRefreshResults["forest-awareness"] || liveForest.awareness;
   const tgAgentMem = tgRefreshResults["agent-memory"] || agentMemory.memoryContext;

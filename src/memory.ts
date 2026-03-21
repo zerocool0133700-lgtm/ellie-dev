@@ -551,6 +551,27 @@ export async function flushPendingMemoryInserts(
  * Parse Claude's response for memory intent tags.
  * Saves facts/goals to Supabase and returns the cleaned response.
  */
+// ELLIE-968: Write [REMEMBER:] facts directly to Forest for immediate prompt availability
+async function _writeFactToForest(
+  forestSessionIds: { tree_id: string; branch_id?: string; creature_id?: string; entity_id?: string },
+  content: string,
+  sourceAgent: string,
+  type: "fact" | "preference" = "fact",
+): Promise<void> {
+  const { writeCreatureMemory } = await import("../../ellie-forest/src/index");
+  await writeCreatureMemory({
+    creature_id: forestSessionIds.creature_id ?? undefined,
+    tree_id: forestSessionIds.tree_id,
+    branch_id: forestSessionIds.branch_id,
+    entity_id: forestSessionIds.entity_id,
+    content,
+    type,
+    confidence: 0.8,
+    scope_path: "2",
+  });
+  logger.info(`[REMEMBER:] → Forest: ${content.slice(0, 60)}...`);
+}
+
 export async function processMemoryIntents(
   supabase: SupabaseClient | null,
   response: string,
@@ -570,6 +591,12 @@ export async function processMemoryIntents(
       source_agent: sourceAgent,
       visibility: defaultVisibility,
     });
+    // ELLIE-968: Also write to Forest immediately so facts appear in prompts without waiting for daily sync
+    if (forestSessionIds?.tree_id) {
+      _writeFactToForest(forestSessionIds, match[1], sourceAgent, "fact").catch(err =>
+        logger.warn("Forest fact write failed (non-fatal)", { err: err instanceof Error ? err.message : String(err) })
+      );
+    }
     clean = clean.replace(match[0], "");
   }
 
@@ -592,6 +619,12 @@ export async function processMemoryIntents(
       source_agent: sourceAgent,
       visibility: "global",
     });
+    // ELLIE-968: Global facts also go to Forest immediately
+    if (forestSessionIds?.tree_id) {
+      _writeFactToForest(forestSessionIds, match[1], sourceAgent, "fact").catch(err =>
+        logger.warn("Forest fact write failed (non-fatal)", { err: err instanceof Error ? err.message : String(err) })
+      );
+    }
     clean = clean.replace(match[0], "");
   }
 
@@ -820,6 +853,54 @@ export async function getRelevantContext(
     );
   } catch {
     // Search not available yet (Edge Functions not deployed) — that's fine
+    return "";
+  }
+}
+
+// ── ELLIE-967: Tier 2 fact retrieval ────────────────────────
+
+/**
+ * Retrieve relevant personal facts from the Supabase `memory` table.
+ * These are facts stored via [REMEMBER:] tags — personal knowledge about
+ * the user, their preferences, goals, and context.
+ *
+ * Unlike getRelevantContext() which searches messages, this searches the
+ * curated memory table for higher-signal, deduplicated knowledge.
+ */
+export async function getRelevantFacts(
+  supabase: SupabaseClient | null,
+  query: string,
+): Promise<string> {
+  if (!supabase) return "";
+  if (query.trim().length < 10) return "";
+
+  try {
+    const invoked = await breakers.edgeFn.call(
+      async () => {
+        const r = await supabase.functions.invoke("search", {
+          body: { query, table: "memory", match_count: 8, match_threshold: 0.7 },
+        });
+        if (r.error) throw r.error;
+        return r;
+      },
+      null,
+    );
+
+    if (!invoked || !invoked.data?.length) return "";
+    const data = invoked.data as SearchMemoryResult[];
+
+    // Filter to active facts/preferences/goals — skip archived or low-relevance
+    const facts = data
+      .filter((m) => m.type !== "archived" && m.similarity >= 0.7)
+      .slice(0, 5);
+
+    if (facts.length === 0) return "";
+
+    return (
+      "PERSONAL KNOWLEDGE (remembered facts):\n" +
+      facts.map((m) => `- [${m.type}] ${m.content}`).join("\n")
+    );
+  } catch {
     return "";
   }
 }

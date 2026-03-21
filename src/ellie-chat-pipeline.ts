@@ -13,7 +13,7 @@ import { processMessageMode, getModeSectionPriorities } from "./context-mode.ts"
 import { getCreatureProfile } from "./creature-profile.ts";
 import { getConversationMessages } from "./conversations.ts";
 import { getContextDocket } from "./relay-config.ts";
-import { getRelevantContext } from "./memory.ts";
+import { getRelevantContext, getRelevantFacts } from "./memory.ts";
 import { searchElastic } from "./elasticsearch.ts";
 import {
   getAgentStructuredContext,
@@ -80,7 +80,7 @@ export async function _gatherContextSources(
   workItemId: string | undefined,
   shouldFetch: (label: string) => boolean,
 ) {
-  const [convoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext, liveForest] = await Promise.all([
+  const [convoContext, contextDocket, relevantContext, elasticContext, _structuredBase, forestContext, agentMemory, queueContext, liveForest, factsContext] = await Promise.all([
     convoId && supabase ? getConversationMessages(supabase, convoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
     shouldFetch("context-docket") ? getContextDocket() : Promise.resolve(""),
     getRelevantContext(supabase, effectiveText, "ellie-chat", activeAgent, convoId),
@@ -90,6 +90,9 @@ export async function _gatherContextSources(
     getAgentMemoryContext(activeAgent, workItemId, getMaxMemoriesForModel(agentDispatch?.agent.model)),
     shouldFetch("queue") && agentDispatch?.is_new ? getQueueContext(activeAgent) : Promise.resolve(""),
     getLiveForestContext(effectiveText),
+    getRelevantFacts(supabase, effectiveText),  // ELLIE-967: Tier 2 fact retrieval
   ]);
+  // ELLIE-967: Merge Tier 2 conversation facts into structured context
+  const structuredContext = factsContext ? [_structuredBase, factsContext].filter(Boolean).join("\n\n") : _structuredBase;
   return { convoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext, liveForest };
 }

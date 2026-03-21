@@ -895,6 +895,13 @@ export function buildPrompt(
   // ELLIE-611: Inject agent role context (WHAT the agent does) at priority 5
   if (roleContext) sections.push({ label: "identity-role", content: `# Agent Role\n${roleContext}\n---\n`, priority: 5 });
 
+  // ELLIE-963: Phase-aware behavioral instructions — inject phaseContext and psyContext
+  // These were computed and passed in but never pushed to sections (critical wiring bug).
+  // Phase context (priority 3): defines behavioral mode — how to interact with the user right now.
+  // Psy context (priority 4): cognitive profile — informs tone/framing but is secondary to phase.
+  if (phaseContext) sections.push({ label: "relationship-phase", content: `\n${phaseContext}`, priority: 3 });
+  if (psyContext) sections.push({ label: "psy-profile", content: `\n## Cognitive Profile\n${psyContext}`, priority: 4 });
+
   // ELLIE-616: Inject ODS identity sections (archetype at priority 3, role at priority 5)
   // Only inject when legacy params are absent — avoids duplicate content during migration.
   if (!archetypeContext || !roleContext) {

@@ -49,6 +49,7 @@ import { extractApprovalTags } from "./approval.ts";
 import {
   processMemoryIntents,
   getRelevantContext,
+  getRelevantFacts,
 } from "./memory.ts";
 import { searchElastic } from "./elasticsearch.ts";
 import { log } from "./logger.ts";
