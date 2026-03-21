@@ -28,6 +28,16 @@ import { estimateTokens } from "./relay-utils.ts";
 import { startCreature, failCreature, completeCreature, dispatchPushCreature, writeJobCompletionMetric } from "../../ellie-forest/src/index";
 import { postCreatureEvent, postJobEvent } from "./channels/discord/observation.ts";
 import { RELAY_BASE_URL } from "./relay-config.ts";
+import {
+  spawnSession,
+  markRunning as markSpawnRunning,
+  markCompleted as markSpawnCompleted,
+  markFailed as markSpawnFailed,
+  buildAnnouncement,
+  getSpawnRecord,
+  captureDeliveryContext,
+} from "./session-spawn.ts";
+import type { SpawnOpts } from "./types/session-spawn.ts";
 
 const logger = log.child("orchestration-dispatch");
 
@@ -530,5 +540,159 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       workItemId,
       telegramMessage: `${agentType} dispatch failed for ${workItemId}: ${errMsg.slice(0, 100)}`,
     }).catch(() => {});
+  }
+}
+
+// ── ELLIE-942: Spawned sub-agent dispatch ──────────────────────────
+
+export interface SpawnedDispatchOpts {
+  parentSessionId: string;
+  parentAgentName: string;
+  targetAgentName: string;
+  task: string;
+  channel: string;
+  userId: string;
+  workItemId?: string;
+  arcMode?: "inherit" | "fork";
+  parentArcId?: string;
+  threadBind?: boolean;
+  deliveryContext?: {
+    channel: string;
+    chatId?: number | string;
+    threadId?: string;
+    webhookId?: string;
+    webhookToken?: string;
+    guildId?: string;
+  };
+  playbookCtx: PlaybookContext;
+}
+
+/**
+ * Spawn a sub-agent session from a parent dispatch.
+ *
+ * 1. Creates a SpawnRecord in the registry
+ * 2. Dispatches the child agent via the normal agent-router
+ * 3. Marks spawn running
+ * 4. On completion, marks spawn completed + builds announcement
+ * 5. Notifies the parent's channel via the delivery context
+ *
+ * Returns the spawnId immediately; child work runs async.
+ */
+export function executeSpawnedDispatch(opts: SpawnedDispatchOpts): { spawnId: string; success: boolean; error?: string; promise: Promise<void> } {
+  const spawnResult = spawnSession({
+    parentSessionId: opts.parentSessionId,
+    parentAgentName: opts.parentAgentName,
+    targetAgentName: opts.targetAgentName,
+    task: opts.task,
+    channel: opts.channel,
+    userId: opts.userId,
+    workItemId: opts.workItemId,
+    arcMode: opts.arcMode,
+    parentArcId: opts.parentArcId,
+    threadBind: opts.threadBind,
+    deliveryContext: opts.deliveryContext,
+  });
+
+  if (!spawnResult.success) {
+    return { spawnId: "", success: false, error: spawnResult.error, promise: Promise.resolve() };
+  }
+
+  const promise = runSpawnedDispatch(spawnResult.spawnId, opts).catch((err) => {
+    logger.error("Spawned dispatch failed", { spawnId: spawnResult.spawnId, error: err.message });
+  });
+
+  return { spawnId: spawnResult.spawnId, success: true, promise };
+}
+
+async function runSpawnedDispatch(spawnId: string, opts: SpawnedDispatchOpts): Promise<void> {
+  const { targetAgentName, task, channel, playbookCtx: ctx, workItemId } = opts;
+  const notifyCtx: NotifyContext = {
+    bot: ctx.bot,
+    telegramUserId: ctx.telegramUserId,
+    gchatSpaceName: ctx.gchatSpaceName,
+  };
+
+  try {
+    // 1. Dispatch child agent session
+    const dispatch = await dispatchAgent(
+      ctx.supabase,
+      targetAgentName,
+      ctx.telegramUserId,
+      channel,
+      task,
+      workItemId,
+    );
+
+    if (!dispatch) {
+      markSpawnFailed(spawnId, "Agent dispatch returned null");
+      return;
+    }
+
+    // 2. Mark spawn running with real session ID
+    markSpawnRunning(spawnId, dispatch.session_id);
+
+    // 3. Build prompt and call Claude
+    const prompt = ctx.buildPromptFn(
+      task,
+      undefined, undefined, undefined,
+      channel, dispatch.agent,
+      workItemId ? `\nSUB-AGENT TASK for ${workItemId}:\n${task}\n\nYou are a spawned sub-agent. Complete this task and report results clearly.` : undefined,
+    );
+
+    enterDispatchMode();
+    let claudeResult;
+    const startTime = Date.now();
+    try {
+      claudeResult = await ctx.callClaudeFn(prompt, {
+        resume: false,
+        model: dispatch.agent.model,
+        allowedTools: dispatch.agent.tools_enabled,
+        timeoutMs: 600_000, // 10 min for sub-agents
+      });
+    } finally {
+      exitDispatchMode();
+    }
+
+    const durationMs = Date.now() - startTime;
+
+    if (!claudeResult || typeof claudeResult !== "string") {
+      markSpawnFailed(spawnId, "Claude call returned empty");
+      return;
+    }
+
+    // 4. Sync response to agent session
+    if (dispatch.session_id) {
+      await syncResponse(ctx.supabase, dispatch.session_id, claudeResult, {
+        duration_ms: durationMs,
+        status: "completed",
+        agent_name: targetAgentName,
+      });
+    }
+
+    // 5. Mark spawn completed
+    const resultPreview = claudeResult.replace(/\[MEMORY:[^\]]*\]/gi, "").trim().slice(0, 500);
+    markSpawnCompleted(spawnId, resultPreview);
+
+    // 6. Build and deliver announcement to parent's channel
+    const announcement = buildAnnouncement(spawnId);
+    if (announcement) {
+      const durationMin = Math.round(announcement.durationMs / 1000 / 60);
+      await notify(notifyCtx, {
+        event: "session_complete",
+        workItemId: workItemId || "",
+        telegramMessage: `Sub-agent ${targetAgentName} finished (${durationMin}min):\n${resultPreview.slice(0, 300)}`,
+      });
+    }
+
+    logger.info("Spawned dispatch completed", {
+      spawnId,
+      target: targetAgentName,
+      durationMs,
+    });
+
+  } catch (err: unknown) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    markSpawnFailed(spawnId, errMsg.slice(0, 500));
+    logger.error("Spawned dispatch error", { spawnId, target: targetAgentName, error: errMsg.slice(0, 300) });
   }
 }

@@ -160,6 +160,27 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     sweepPhoneHistories();
   }, 60 * 60_000, "phone-history-sweep");
 
+  // ELLIE-942: Spawn timeout check — mark timed-out sub-agent spawns (every 30 seconds)
+  periodicTask(async () => {
+    const { checkTimeouts, getSpawnRecord, buildAnnouncement } = await import("./session-spawn.ts");
+    const timedOut = checkTimeouts();
+    if (timedOut.length > 0) {
+      logger.info(`Spawn timeout: ${timedOut.length} sub-agent(s) timed out`);
+      const { notify } = await import("./notification-policy.ts");
+      const { getNotifyCtx } = await import("./relay-state.ts");
+      for (const spawnId of timedOut) {
+        const record = getSpawnRecord(spawnId);
+        if (record) {
+          notify(getNotifyCtx(), {
+            event: "run_failed",
+            workItemId: record.workItemId || "",
+            telegramMessage: `Sub-agent ${record.targetAgentName} timed out after ${record.timeoutSeconds}s`,
+          }).catch(() => {});
+        }
+      }
+    }
+  }, 30_000, "spawn-timeout-check");
+
   // ELLIE-447/499/500: Creature reaper — mark timed-out, exhausted-retry, and preempted creatures as failed (every 5 minutes)
   periodicTask(async () => {
     const { reapTimedOutCreatures, reapExhaustedRetryCreatures } = await import("../../ellie-forest/src/work-sessions");

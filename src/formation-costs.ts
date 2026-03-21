@@ -250,6 +250,47 @@ export async function getFormationCosts(
   `;
 }
 
+// ── ELLIE-942: Child Session Cost Rollup ─────────────────────
+
+/**
+ * Fetch costs for a list of child session IDs.
+ * Used by session-spawn's buildCostRollup() to aggregate sub-agent costs
+ * back to the parent session.
+ */
+export async function fetchChildCosts(
+  childSessionIds: string[],
+): Promise<Array<{
+  sessionId: string;
+  costCents: number;
+  inputTokens: number;
+  outputTokens: number;
+}>> {
+  if (childSessionIds.length === 0) return [];
+
+  const rows = await sql<{
+    formation_session_id: string;
+    total_cost_cents: number;
+    total_input_tokens: number;
+    total_output_tokens: number;
+  }[]>`
+    SELECT
+      formation_session_id,
+      COALESCE(SUM(cost_cents), 0)::int AS total_cost_cents,
+      COALESCE(SUM(input_tokens), 0)::int AS total_input_tokens,
+      COALESCE(SUM(output_tokens), 0)::int AS total_output_tokens
+    FROM formation_costs
+    WHERE formation_session_id = ANY(${childSessionIds}::uuid[])
+    GROUP BY formation_session_id
+  `;
+
+  return rows.map((r) => ({
+    sessionId: r.formation_session_id,
+    costCents: r.total_cost_cents,
+    inputTokens: r.total_input_tokens,
+    outputTokens: r.total_output_tokens,
+  }));
+}
+
 /**
  * Get an agent's total spend across all formations in the current budget period.
  */

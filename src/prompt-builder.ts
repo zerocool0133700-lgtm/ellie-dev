@@ -31,6 +31,7 @@ import type { ChannelContextProfile } from "./api/mode-profile.ts";
 import { sanitizeUserMessage } from "./sanitize.ts";
 import { buildSourceHierarchyInstruction } from "./source-hierarchy.ts";
 import { getActiveRunStates } from "./orchestration-tracker.ts";
+import { getChildrenForParent } from "./session-spawn.ts";
 import {
   getCachedWorkingMemory,
   setWorkingMemoryCache,
@@ -1119,6 +1120,24 @@ export function buildPrompt(
         lines.push(`- ${r.agentType} agent${workItem} (running ${elapsedStr}, last heartbeat ${hbStr})${stale}`);
       }
       sections.push({ label: "orchestration-status", content: `\n${lines.join("\n")}`, priority: 4 });
+    }
+  }
+
+  // ELLIE-942: Active sub-agent spawns — show parent what children are doing
+  if (sessionIds?.tree_id) {
+    // Use tree_id as a proxy for session identification in spawn context
+    // The parent session can see its spawned children's status
+    const spawnChildren = getChildrenForParent(sessionIds.tree_id);
+    if (spawnChildren.length > 0) {
+      const lines = ["SPAWNED SUB-AGENTS:"];
+      for (const child of spawnChildren) {
+        const elapsed = Math.floor((Date.now() - child.createdAt) / 1000);
+        const elapsedStr = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m`;
+        const stateIcon = child.state === "completed" ? "done" : child.state === "failed" ? "FAILED" : child.state === "timed_out" ? "TIMED OUT" : "running";
+        const result = child.resultText ? ` — ${child.resultText.slice(0, 100)}` : "";
+        lines.push(`- ${child.targetAgentName}: ${stateIcon} (${elapsedStr})${result}`);
+      }
+      sections.push({ label: "spawn-status", content: `\n${lines.join("\n")}`, priority: 4 });
     }
   }
 
