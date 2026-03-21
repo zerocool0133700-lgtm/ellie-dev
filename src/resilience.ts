@@ -81,16 +81,19 @@ export class CircuitBreaker {
       return fallback;
     }
 
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const result = await Promise.race([
         fn(),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`${this.name} circuit breaker timeout`)), this.callTimeoutMs)
-        ),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${this.name} circuit breaker timeout`)), this.callTimeoutMs);
+        }),
       ]);
       this.recordSuccess();
+      if (timer !== undefined) clearTimeout(timer);
       return result;
     } catch (err) {
+      if (timer !== undefined) clearTimeout(timer);
       this.recordFailure();
       if (state === "half_open") {
         logger.warn(`${this.name} half-open test failed — re-opening`, { service: this.name });
@@ -154,7 +157,7 @@ export function isTransientError(err: unknown): boolean {
     // HTTP status codes
     const statusMatch = msg.match(/(\d{3})/);
     if (statusMatch) {
-      const status = parseInt(statusMatch[1]);
+      const status = parseInt(statusMatch[1], 10);
       return status === 429 || status >= 500;
     }
   }

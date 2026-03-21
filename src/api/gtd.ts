@@ -18,8 +18,19 @@ import type { ApiRequest, ApiResponse } from "./types.ts";
 import type { TodoRow } from "./gtd-types.ts";
 import { AGENT_DISPLAY_NAMES } from "./gtd-types.ts";
 import { log } from "../logger.ts";
+import postgres from "postgres";
 
 const logger = log.child("gtd-api");
+
+// Lazy-load direct Postgres connection for atomic operations
+let _pgSql: ReturnType<typeof postgres> | null = null;
+function getPgSql(): ReturnType<typeof postgres> {
+  if (_pgSql) return _pgSql;
+  const url = process.env.DATABASE_URL;
+  if (!url) throw new Error("DATABASE_URL not set");
+  _pgSql = postgres(url, { max: 2 });
+  return _pgSql;
+}
 
 // ELLIE-290: Context tag validation — tags starting with @ must match this pattern
 const CONTEXT_TAG_PATTERN = /^@[a-z][a-z0-9-]*$/;
@@ -63,43 +74,56 @@ async function handleInbox(req: ApiRequest, res: ApiResponse, supabase: Supabase
       continue;
     }
 
-    // Auto-assign sequence: max+1 within the project group
+    // Auto-assign sequence: max+1 within the project group (atomic query)
     const projectId = (item as Record<string, unknown>).project_id || null;
-    let nextSeq = 1;
-    {
-      let seqQuery = supabase.from("todos").select("sequence").order("sequence", { ascending: false }).limit(1);
-      if (projectId) seqQuery = seqQuery.eq("project_id", projectId as string);
-      else seqQuery = seqQuery.is("project_id", null);
-      const { data: seqRow } = await seqQuery;
-      if (seqRow?.[0]?.sequence != null) nextSeq = seqRow[0].sequence + 1;
-    }
 
     // ELLIE-917: Auto-classify effort when agents create todos
     const autoEffort = (item as Record<string, unknown>).effort || classifyEffort(content);
 
-    const { data, error } = await supabase
-      .from("todos")
-      .insert({
-        content: content.trim(),
-        status: "inbox",
-        priority: (item as Record<string, unknown>).priority || null,
-        tags: Array.isArray((item as Record<string, unknown>).tags) ? (item as Record<string, unknown>).tags : [],
-        source_type: (item as Record<string, unknown>).source_type || "agent",
-        source_ref: (item as Record<string, unknown>).source_ref || null,
-        source_conversation_id: (item as Record<string, unknown>).conversation_id || null,
-        project_id: projectId,
-        sequence: nextSeq,
-        effort: autoEffort,
-        context: (item as Record<string, unknown>).context || null,
-        is_reference: (item as Record<string, unknown>).is_reference || false,
-      })
-      .select("id, content, sequence")
-      .single();
+    // ELLIE-924: Support agent assignment on task creation for orchestration
+    const assignedAgent = (item as Record<string, unknown>).assigned_agent || (item as Record<string, unknown>).delegated_to || null;
+    const delegatedBy = (item as Record<string, unknown>).delegated_by || null;
 
-    if (error) {
-      errors.push(`Insert failed: ${error.message}`);
-    } else if (data) {
-      results.push(data as { id: string; content: string });
+    // Validation: If assigned_agent is set, verify it's a valid agent type
+    if (assignedAgent && typeof assignedAgent === "string") {
+      const validAgents = ["general", "dev", "research", "content", "critic", "strategy", "ops"];
+      if (!validAgents.includes(assignedAgent)) {
+        errors.push(`Invalid assigned_agent "${assignedAgent}" — must be one of: ${validAgents.join(", ")}`);
+        continue;
+      }
+    }
+
+    // Use raw SQL for atomic sequence assignment (ELLIE-914 fix #1)
+    try {
+      const sql = getPgSql();
+      const delegatedAt = assignedAgent && delegatedBy ? new Date().toISOString() : null;
+      const priority = (item as Record<string, unknown>).priority || null;
+      const sourceType = (item as Record<string, unknown>).source_type || "agent";
+      const sourceRef = (item as Record<string, unknown>).source_ref || null;
+      const sourceConvId = (item as Record<string, unknown>).conversation_id || null;
+      const tags = Array.isArray((item as Record<string, unknown>).tags) ? (item as Record<string, unknown>).tags : [];
+      const context = (item as Record<string, unknown>).context || null;
+      const isReference = (item as Record<string, unknown>).is_reference || false;
+
+      const inserted = await sql`
+        INSERT INTO todos (
+          content, status, priority, tags, source_type, source_ref, source_conversation_id,
+          project_id, sequence, effort, context, is_reference, assigned_agent, delegated_by, delegated_at
+        )
+        VALUES (
+          ${content.trim()}, 'inbox', ${priority}, ${sql.array(tags)}, ${sourceType}, ${sourceRef}, ${sourceConvId},
+          ${projectId},
+          (SELECT COALESCE(MAX(sequence), 0) + 1 FROM todos WHERE ${projectId ? sql`project_id = ${projectId}` : sql`project_id IS NULL`}),
+          ${autoEffort}, ${context}, ${isReference}, ${assignedAgent}, ${delegatedBy}, ${delegatedAt}
+        )
+        RETURNING id, content, sequence, assigned_agent, delegated_by
+      `;
+
+      if (inserted[0]) {
+        results.push(inserted[0] as { id: string; content: string });
+      }
+    } catch (err) {
+      errors.push(`Insert failed: ${(err as Error).message}`);
     }
   }
 
@@ -119,7 +143,8 @@ async function handleNextActions(req: ApiRequest, res: ApiResponse, supabase: Su
   const context = req.query?.context || null;
   const agentFilter = req.query?.agent || null; // ELLIE-886
   const sortMode = req.query?.sort || "score"; // "score" (default) or "sequence"
-  const limit = Math.min(Number(req.query?.limit) || 10, 50);
+  const limitNum = Number(req.query?.limit);
+  const limit = Math.min(Number.isFinite(limitNum) && limitNum > 0 ? limitNum : 10, 50);
 
   let query = supabase
     .from("todos")
@@ -166,8 +191,8 @@ async function handleNextActions(req: ApiRequest, res: ApiResponse, supabase: Su
       else score += 5;
     }
 
-    // Context match
-    if (context && t.tags?.includes(context)) score += 15;
+    // Context match (ELLIE-914 fix #5: use new context field, not old tags array)
+    if (context && t.context === context) score += 15;
 
     // Age bonus
     const ageInDays = Math.floor((Date.now() - new Date(t.created_at).getTime()) / (1000 * 60 * 60 * 24));
@@ -619,8 +644,8 @@ async function handleDelegate(req: ApiRequest, res: ApiResponse, supabase: Supab
       workItemId: todo_id,
       telegramMessage: `📋 Task delegated to ${displayName}: ${todo.content.substring(0, 100)}`,
       gchatMessage: `📋 Task delegated to ${displayName}: ${todo.content.substring(0, 100)}`,
-    }).catch(() => {});
-  } catch {}
+    }).catch(err => logger.error("[gtd] Delegation notification failed", err));
+  } catch (err) { logger.error("[gtd] Delegation notification setup failed", err); }
 
   res.json({ success: true, todo: updated });
 }
@@ -683,23 +708,28 @@ async function handleReorder(req: ApiRequest, res: ApiResponse, supabase: Supaba
     }
   }
 
-  // Update each todo's sequence based on position in the array
-  const updates = order.map((id: string, idx: number) => ({
-    id,
-    sequence: idx + 1,
-    updated_at: new Date().toISOString(),
-  }));
+  // Use raw SQL for batch UPDATE to avoid partial record creation (ELLIE-914 fix #2)
+  try {
+    const sql = getPgSql();
+    const now = new Date().toISOString();
 
-  // Supabase upsert with onConflict on id
-  const { error } = await supabase.from("todos").upsert(updates, { onConflict: "id" });
+    // Build a single UPDATE using CASE for batch updates
+    await sql`
+      UPDATE todos
+      SET
+        sequence = CASE id
+          ${sql(order.map((id: string, idx: number) => sql`WHEN ${id}::uuid THEN ${idx + 1}`))}
+          ELSE sequence
+        END,
+        updated_at = ${now}
+      WHERE id = ANY(${sql.array(order)}::uuid[])
+    `;
 
-  if (error) {
-    res.status(500).json({ error: error.message });
-    return;
+    logger.info("Todos reordered", { project_id: project_id || "unassigned", count: order.length });
+    res.json({ success: true, reordered: order.length });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
   }
-
-  logger.info("Todos reordered", { project_id: project_id || "unassigned", count: order.length });
-  res.json({ success: true, reordered: order.length });
 }
 
 // ── ELLIE-916: Context management ───────────────────────────
@@ -718,12 +748,19 @@ async function handleCreateContext(req: ApiRequest, res: ApiResponse, supabase: 
   const { name, label, icon, color, calendar_enabled } = req.body ?? {};
   if (!name || !label) { res.status(400).json({ error: "name and label required" }); return; }
 
-  const { data: existing } = await supabase.from("gtd_contexts").select("sort_order").order("sort_order", { ascending: false }).limit(1);
-  const nextOrder = ((existing?.[0]?.sort_order as number) ?? 0) + 1;
+  // ELLIE-914 fix #3: Validate name format to match URL regex for update/delete endpoints
+  if (!/^[a-z][a-z0-9-]*$/.test(String(name))) {
+    res.status(400).json({ error: "Context name must start with lowercase letter and contain only lowercase letters, numbers, and hyphens" });
+    return;
+  }
 
+  const { data: existing } = await supabase.from("gtd_contexts").select("sort_order").order("sort_order", { ascending: false }).limit(1);
+  const nextOrder = (Number(existing?.[0]?.sort_order) || 0) + 1;
+
+  // ELLIE-914 fix #4: Removed ghost 'tag' field that doesn't exist in schema
   const { data, error } = await supabase
     .from("gtd_contexts")
-    .insert({ tag: String(name), name: String(name), label, icon: icon || null, color: color || null, calendar_enabled: calendar_enabled || false, sort_order: nextOrder })
+    .insert({ name: String(name), label, icon: icon || null, color: color || null, calendar_enabled: calendar_enabled || false, sort_order: nextOrder })
     .select()
     .single();
 

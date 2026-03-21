@@ -33,6 +33,8 @@ import {
   getPsyContext,
   getPhaseContext,
   getHealthContext,
+  getCommitmentFollowUpContext,
+  getCognitiveLoadContext,
   getLastBuildMetrics,
 } from "./prompt-builder.ts";
 import {
@@ -302,6 +304,10 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
     getLiveForestContext(effectiveText),
     getRelevantFacts(supabase, effectiveText),  // ELLIE-967: Tier 2 fact retrieval
   ]);
+  // Prime commitment follow-up cache so buildPrompt can inject it (ELLIE-339)
+  getCommitmentFollowUpContext(supabase).catch(() => {});
+  // Prime cognitive load cache so buildPrompt can inject it (ELLIE-338)
+  getCognitiveLoadContext(supabase).catch(() => {});
   const recentMessages = conversationContext.text;
   // Auto-acknowledge queue items on new session (ELLIE-479: resilient)
   if (agentResult?.dispatch.is_new && queueContext) {
@@ -471,6 +477,12 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
           liveForest.awareness || undefined,
           (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills)).prompt || undefined,
           contextMode,
+          undefined, // refreshedSources
+          undefined, // channelProfile
+          undefined, // groundTruthConflicts
+          undefined, // crossChannelCorrections
+          undefined, // commandBarContext
+          true,      // fullWorkingMemory — inject all 7 sections
         );
         const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
         const fallbackAgentName = agentResult?.dispatch.agent.name || "general";
@@ -526,6 +538,8 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
     undefined, // channelProfile (Telegram doesn't use channels yet)
     tgGroundTruthConflicts || undefined,
     tgCrossChannel || undefined,
+    undefined, // commandBarContext
+    true,      // fullWorkingMemory — inject all 7 sections
   );
 
   // ── ELLIE-383: Context snapshot logging (journal only, not broadcast) ──
@@ -820,6 +834,12 @@ bot.on("message:voice", withQueue(async (ctx) => {
             liveForest.awareness || undefined,
             (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills)).prompt || undefined,
             voiceContextMode,
+            undefined, // refreshedSources
+            undefined, // channelProfile
+            undefined, // groundTruthConflicts
+            undefined, // crossChannelCorrections
+            undefined, // commandBarContext
+            true,      // fullWorkingMemory — inject all 7 sections
           );
           const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
           const voiceFallbackAgent = agentResult?.dispatch.agent.name || "general";
@@ -864,6 +884,11 @@ bot.on("message:voice", withQueue(async (ctx) => {
       (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills)).prompt || undefined,
       voiceContextMode,
       voiceRefreshed,
+      undefined, // channelProfile
+      undefined, // groundTruthConflicts
+      undefined, // crossChannelCorrections
+      undefined, // commandBarContext
+      true,      // fullWorkingMemory — inject all 7 sections
     );
 
     // ── ELLIE-383: Context snapshot logging for voice ──
@@ -960,6 +985,10 @@ bot.on("message:photo", withQueue(async (ctx) => {
   try {
     // Get highest resolution photo
     const photos = ctx.message.photo;
+    if (photos.length === 0) {
+      await ctx.reply("Hmm, I received an empty photo message. Could you try sending that again?");
+      return;
+    }
     const photo = photos[photos.length - 1];
     const file = await ctx.api.getFile(photo.file_id);
 

@@ -104,35 +104,35 @@ class SlidingWindowLimiter {
 /** Per-user message rate limit (30 messages per minute). */
 export const messageLimiter = new SlidingWindowLimiter({
   name: "message",
-  maxRequests: parseInt(process.env.RATE_LIMIT_MESSAGES || "30"),
+  maxRequests: parseInt(process.env.RATE_LIMIT_MESSAGES || "30", 10),
   windowMs: 60_000,
 });
 
 /** Per-channel rate limit — voice is more expensive. */
 export const voiceLimiter = new SlidingWindowLimiter({
   name: "voice",
-  maxRequests: parseInt(process.env.RATE_LIMIT_VOICE || "10"),
+  maxRequests: parseInt(process.env.RATE_LIMIT_VOICE || "10", 10),
   windowMs: 60_000,
 });
 
 /** Per-user API rate limit for HTTP endpoints (60 req/min). */
 export const apiLimiter = new SlidingWindowLimiter({
   name: "api",
-  maxRequests: parseInt(process.env.RATE_LIMIT_API || "60"),
+  maxRequests: parseInt(process.env.RATE_LIMIT_API || "60", 10),
   windowMs: 60_000,
 });
 
 /** MCP tool call rate limit (100 calls per minute per tool). */
 export const toolLimiter = new SlidingWindowLimiter({
   name: "tool",
-  maxRequests: parseInt(process.env.RATE_LIMIT_TOOLS || "100"),
+  maxRequests: parseInt(process.env.RATE_LIMIT_TOOLS || "100", 10),
   windowMs: 60_000,
 });
 
 /** Per-IP HTTP rate limit for all inbound requests (120 req/min). */
 export const httpLimiter = new SlidingWindowLimiter({
   name: "http",
-  maxRequests: parseInt(process.env.RATE_LIMIT_HTTP || "120"),
+  maxRequests: parseInt(process.env.RATE_LIMIT_HTTP || "120", 10),
   windowMs: 60_000,
 });
 

@@ -157,8 +157,16 @@ export class StartupDAG {
 
     // Process phases in waves until all are resolved
     const pending = new Set(this.phases.keys());
+    const maxIterations = this.phases.size * 2; // Safety guard: 2x phase count
+    let iterations = 0;
 
     while (pending.size > 0 && !aborted) {
+      iterations++;
+      if (iterations > maxIterations) {
+        const remaining = [...pending].join(", ");
+        throw new Error(`Startup loop detected after ${iterations} iterations — stuck phases: ${remaining}`);
+      }
+
       // Find phases whose deps are all done
       const ready: PhaseEntry[] = [];
       for (const name of pending) {
