@@ -500,6 +500,25 @@ async function gracefulShutdown(signal: string): Promise<void> {
   stopPlaneQueueWorker(); // plane-queue
   logger.info("Background tasks stopped");
 
+  // 2b. Kill all active sub-agent spawns (ELLIE-949: graceful shutdown cascade kill)
+  try {
+    const { _getRegistryForTesting, killChildrenForParent } = await import("./session-spawn.ts");
+    const registry = _getRegistryForTesting();
+    const parentIds = new Set<string>();
+    for (const record of registry.values()) {
+      if (record.state === "pending" || record.state === "running") {
+        parentIds.add(record.parentSessionId);
+      }
+    }
+    let totalKilled = 0;
+    for (const parentId of parentIds) {
+      totalKilled += killChildrenForParent(parentId, "Relay shutting down").length;
+    }
+    if (totalKilled > 0) logger.info(`Shutdown: killed ${totalKilled} active spawn(s)`);
+  } catch (err) {
+    logger.warn("Shutdown spawn kill failed (non-fatal)", err);
+  }
+
   // 3. Wait for active queue tasks to finish (ELLIE-460: graceful drain)
   logger.info("Draining message queues...");
   const drained = await drainQueues(20_000); // 20s max wait

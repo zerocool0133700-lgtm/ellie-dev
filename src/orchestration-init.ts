@@ -29,6 +29,7 @@ const logger = log.child("orchestration-init");
 export async function initOrchestration(supabase: SupabaseClient | null): Promise<{
   recoveredRuns: void;
   orphanedJobs: number;
+  spawnRecovery: { recovered: number; staleMarked: number };
 }> {
   logger.info("Starting orchestration initialization");
 

@@ -38,6 +38,7 @@ import {
   captureDeliveryContext,
   killChildrenForParent,
   resolveArcForSpawn,
+  buildCostRollup,
 } from "./session-spawn.ts";
 import type { SpawnOpts } from "./types/session-spawn.ts";
 
@@ -583,6 +584,9 @@ export interface SpawnedDispatchOpts {
  * 5. Notifies the parent's channel via the delivery context
  *
  * Returns the spawnId immediately; child work runs async.
+ *
+ * Currently exported but not called — waiting for ELLIE-946 (HTTP API + Agent Tool)
+ * to provide the trigger surface (POST /api/spawn or agent tool invocation).
  */
 export function executeSpawnedDispatch(opts: SpawnedDispatchOpts): { spawnId: string; success: boolean; error?: string; promise: Promise<void> } {
   const spawnResult = spawnSession({
@@ -698,8 +702,21 @@ async function runSpawnedDispatch(spawnId: string, opts: SpawnedDispatchOpts): P
     const resultPreview = claudeResult.replace(/\[MEMORY:[^\]]*\]/gi, "").trim().slice(0, 500);
     markSpawnCompleted(spawnId, resultPreview);
 
+    // 5b. Cost rollup — attribute child costs back to parent
+    let spawnCostCents = 0;
+    try {
+      const { fetchChildCosts } = await import("./formation-costs.ts");
+      const rollup = await buildCostRollup(opts.parentSessionId, fetchChildCosts);
+      spawnCostCents = rollup.totalCostCents;
+      if (spawnCostCents > 0) {
+        logger.info("Spawn cost rollup", { spawnId, parentSessionId: opts.parentSessionId, totalCostCents: spawnCostCents });
+      }
+    } catch (err) {
+      logger.warn("Spawn cost rollup failed (non-fatal)", { spawnId, err: (err as Error).message });
+    }
+
     // 6. Build and deliver announcement to parent's channel
-    const announcement = buildAnnouncement(spawnId);
+    const announcement = buildAnnouncement(spawnId, spawnCostCents);
     if (announcement) {
       const durationMin = Math.round(announcement.durationMs / 1000 / 60);
       await notify(notifyCtx, {
