@@ -206,6 +206,8 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
 
   // ELLIE-447: Hoisted so catch block can call failCreature on any failure path
   let sessionIds: { tree_id: string; branch_id: string; creature_id: string; entity_id: string } | undefined;
+  // ELLIE-949: Hoisted so cascade kill in catch block can use the agent session ID
+  let dispatchSessionId: string | undefined;
 
   try {
     // 1. Fetch ticket details (with retry for transient Plane API failures)
@@ -292,6 +294,7 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       return;
     }
     const dispatch = dispatchResult.result;
+    dispatchSessionId = dispatch.session_id;
 
     // 5. Build prompt with personality context
     let workItemContext = `\nACTIVE WORK ITEM: ${workItemId}\n` +
@@ -425,7 +428,9 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       trace_id: getTraceId(),
     });
     endRun(runId, "completed");
-    // ELLIE-949: Cascade kill any active sub-agent spawns when parent completes
+    // ELLIE-949: Cascade kill any active sub-agent spawns when parent completes.
+    // Try both session_id and workItemId — spawns may be indexed by either depending on caller.
+    if (dispatchSessionId) killChildrenForParent(dispatchSessionId, "Parent dispatch completed");
     killChildrenForParent(workItemId, "Parent dispatch completed");
     // ELLIE-447: Complete creature with meaningful result data (response preview + timing)
     if (sessionIds?.creature_id) {
@@ -527,8 +532,11 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       trace_id: getTraceId(),
     });
     endRun(runId, "failed");
-    // ELLIE-949: Cascade kill any active sub-agent spawns when parent fails
-    killChildrenForParent(workItemId, `Parent dispatch failed: ${errMsg.slice(0, 200)}`);
+    // ELLIE-949: Cascade kill any active sub-agent spawns when parent fails.
+    // Try both session_id and workItemId — spawns may be indexed by either.
+    const failReason = `Parent dispatch failed: ${errMsg.slice(0, 200)}`;
+    if (dispatchSessionId) killChildrenForParent(dispatchSessionId, failReason);
+    killChildrenForParent(workItemId, failReason);
     // ELLIE-440: Update job to failed
     if (jobId) {
       await updateJob(jobId, { status: "failed", error_count: 1, current_step: null });
@@ -697,11 +705,35 @@ async function runSpawnedDispatch(spawnId: string, opts: SpawnedDispatchOpts): P
       });
     }
 
-    // 5. Mark spawn completed
+    // 5. Record cost for this spawn
+    try {
+      const { recordCost } = await import("./formation-costs.ts");
+      const { calculateCostCents } = await import("./types/formation-costs.ts");
+      const { estimateTokens } = await import("./relay-utils.ts");
+      const model = dispatch.agent.model || "claude-sonnet-4-6";
+      const inputTokens = estimateTokens(prompt, model);
+      const outputTokens = estimateTokens(claudeResult, model);
+      const costCents = calculateCostCents(inputTokens, outputTokens, model);
+      if (dispatch.session_id) {
+        await recordCost({
+          formation_session_id: dispatch.session_id,
+          agent_id: dispatch.session_id, // Use session as agent proxy
+          input_tokens: inputTokens,
+          output_tokens: outputTokens,
+          cost_cents: costCents,
+          model,
+          metadata: { spawn_id: spawnId, parent_session_id: opts.parentSessionId },
+        });
+      }
+    } catch (err) {
+      logger.warn("Spawn cost recording failed (non-fatal)", { spawnId, err: (err as Error).message });
+    }
+
+    // 6. Mark spawn completed
     const resultPreview = claudeResult.replace(/\[MEMORY:[^\]]*\]/gi, "").trim().slice(0, 500);
     markSpawnCompleted(spawnId, resultPreview);
 
-    // 5b. Cost rollup — attribute child costs back to parent
+    // 6b. Cost rollup — attribute child costs back to parent
     let spawnCostCents = 0;
     try {
       const { fetchChildCosts } = await import("./formation-costs.ts");

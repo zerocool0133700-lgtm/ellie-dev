@@ -54,7 +54,6 @@ beforeEach(async () => {
 
 afterAll(async () => {
   await cleanTable();
-  await sql.end();
 });
 
 // ── persistSpawnRecord ───────────────────────────────────────

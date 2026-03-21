@@ -173,7 +173,7 @@ export function spawnSession(opts: SpawnOpts): SpawnResult {
   addToRegistry(record);
 
   // ELLIE-954: Write-through to DB (fire-and-forget)
-  persistSpawnRecord(record).catch(() => {});
+  persistSpawnRecord(record).catch((err) => logger.warn("DB write-through failed", { err: (err as Error).message }));
 
   logger.info("Session spawned", {
     spawnId,
@@ -197,7 +197,7 @@ export function markRunning(spawnId: string, childSessionId?: string): SpawnReco
   const updates: Partial<SpawnRecord> = { state: "running" };
   if (childSessionId) updates.childSessionId = childSessionId;
   const record = updateRecord(spawnId, updates);
-  if (record) updateSpawnState(spawnId, "running", { childSessionId }).catch(() => {});
+  if (record) updateSpawnState(spawnId, "running", { childSessionId }).catch((err) => logger.warn("DB write-through failed", { err: (err as Error).message }));
   return record;
 }
 
@@ -211,7 +211,7 @@ export function markCompleted(
     endedAt,
     resultText: resultText ?? null,
   });
-  if (record) updateSpawnState(spawnId, "completed", { resultText: resultText ?? null, endedAt }).catch(() => {});
+  if (record) updateSpawnState(spawnId, "completed", { resultText: resultText ?? null, endedAt }).catch((err) => logger.warn("DB write-through failed", { err: (err as Error).message }));
   return record;
 }
 
@@ -222,7 +222,7 @@ export function markFailed(spawnId: string, error: string): SpawnRecord | null {
     endedAt,
     error,
   });
-  if (record) updateSpawnState(spawnId, "failed", { error, endedAt }).catch(() => {});
+  if (record) updateSpawnState(spawnId, "failed", { error, endedAt }).catch((err) => logger.warn("DB write-through failed", { err: (err as Error).message }));
   return record;
 }
 
@@ -233,7 +233,7 @@ export function markTimedOut(spawnId: string): SpawnRecord | null {
     endedAt,
     error: "Session spawn timed out",
   });
-  if (record) updateSpawnState(spawnId, "timed_out", { error: "Session spawn timed out", endedAt }).catch(() => {});
+  if (record) updateSpawnState(spawnId, "timed_out", { error: "Session spawn timed out", endedAt }).catch((err) => logger.warn("DB write-through failed", { err: (err as Error).message }));
   return record;
 }
 
@@ -341,7 +341,7 @@ export function pruneCompletedSpawns(maxAgeMs: number = GC_AGE_MS): number {
   if (pruned > 0) {
     logger.info("Registry GC: pruned completed spawns", { pruned, remaining: registry.size });
     // ELLIE-954: Also prune from DB
-    pruneDbSpawnRecords(maxAgeMs).catch(() => {});
+    pruneDbSpawnRecords(maxAgeMs).catch((err) => logger.warn("DB write-through failed", { err: (err as Error).message }));
   }
 
   return pruned;
