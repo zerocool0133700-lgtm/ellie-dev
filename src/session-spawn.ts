@@ -30,6 +30,13 @@ import type {
   DeliveryContext,
   ArcMode,
 } from "./types/session-spawn.ts";
+import {
+  persistSpawnRecord,
+  updateSpawnState,
+  pruneDbSpawnRecords,
+  loadActiveSpawnRecords,
+  recoverStaleSpawns,
+} from "./spawn-registry-db.ts";
 
 const logger = log.child("session-spawn");
 
@@ -165,6 +172,9 @@ export function spawnSession(opts: SpawnOpts): SpawnResult {
 
   addToRegistry(record);
 
+  // ELLIE-954: Write-through to DB (fire-and-forget)
+  persistSpawnRecord(record).catch(() => {});
+
   logger.info("Session spawned", {
     spawnId,
     parent: opts.parentAgentName,
@@ -186,34 +196,45 @@ export function spawnSession(opts: SpawnOpts): SpawnResult {
 export function markRunning(spawnId: string, childSessionId?: string): SpawnRecord | null {
   const updates: Partial<SpawnRecord> = { state: "running" };
   if (childSessionId) updates.childSessionId = childSessionId;
-  return updateRecord(spawnId, updates);
+  const record = updateRecord(spawnId, updates);
+  if (record) updateSpawnState(spawnId, "running", { childSessionId }).catch(() => {});
+  return record;
 }
 
 export function markCompleted(
   spawnId: string,
   resultText?: string,
 ): SpawnRecord | null {
-  return updateRecord(spawnId, {
+  const endedAt = Date.now();
+  const record = updateRecord(spawnId, {
     state: "completed",
-    endedAt: Date.now(),
+    endedAt,
     resultText: resultText ?? null,
   });
+  if (record) updateSpawnState(spawnId, "completed", { resultText: resultText ?? null, endedAt }).catch(() => {});
+  return record;
 }
 
 export function markFailed(spawnId: string, error: string): SpawnRecord | null {
-  return updateRecord(spawnId, {
+  const endedAt = Date.now();
+  const record = updateRecord(spawnId, {
     state: "failed",
-    endedAt: Date.now(),
+    endedAt,
     error,
   });
+  if (record) updateSpawnState(spawnId, "failed", { error, endedAt }).catch(() => {});
+  return record;
 }
 
 export function markTimedOut(spawnId: string): SpawnRecord | null {
-  return updateRecord(spawnId, {
+  const endedAt = Date.now();
+  const record = updateRecord(spawnId, {
     state: "timed_out",
-    endedAt: Date.now(),
+    endedAt,
     error: "Session spawn timed out",
   });
+  if (record) updateSpawnState(spawnId, "timed_out", { error: "Session spawn timed out", endedAt }).catch(() => {});
+  return record;
 }
 
 // ── Queries ─────────────────────────────────────────────────
@@ -319,9 +340,41 @@ export function pruneCompletedSpawns(maxAgeMs: number = GC_AGE_MS): number {
 
   if (pruned > 0) {
     logger.info("Registry GC: pruned completed spawns", { pruned, remaining: registry.size });
+    // ELLIE-954: Also prune from DB
+    pruneDbSpawnRecords(maxAgeMs).catch(() => {});
   }
 
   return pruned;
+}
+
+// ── ELLIE-954: Startup Recovery ──────────────────────────────
+
+/**
+ * Recover spawn registry from the database on relay startup.
+ * 1. Marks stale spawns (past timeout) as failed in DB
+ * 2. Loads remaining active spawns into the in-memory registry
+ * Returns the number of records recovered.
+ */
+export async function recoverSpawnRegistry(): Promise<{ recovered: number; staleMarked: number }> {
+  const staleMarked = await recoverStaleSpawns();
+  const activeRecords = await loadActiveSpawnRecords();
+
+  for (const record of activeRecords) {
+    // Only add if not already in registry (idempotent)
+    if (!registry.has(record.id)) {
+      addToRegistry(record);
+    }
+  }
+
+  if (activeRecords.length > 0 || staleMarked > 0) {
+    logger.info("Spawn registry recovered from DB", {
+      recovered: activeRecords.length,
+      staleMarked,
+      registrySize: registry.size,
+    });
+  }
+
+  return { recovered: activeRecords.length, staleMarked };
 }
 
 // ── Announcement Builder ────────────────────────────────────
