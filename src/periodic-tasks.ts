@@ -459,6 +459,16 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
 export function runStartupTasks(deps: PeriodicTaskDeps): void {
   const { supabase } = deps;
 
+  // ELLIE-954: Recover spawn registry from DB on startup (immediate)
+  (async () => {
+    try {
+      const { recoverSpawnRegistry } = await import("./session-spawn.ts");
+      await recoverSpawnRegistry();
+    } catch (err) {
+      logger.error("Spawn registry recovery error", err);
+    }
+  })();
+
   // Initial calendar sync (10s delay)
   setTimeout(async () => {
     try {
