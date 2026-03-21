@@ -12,6 +12,11 @@
  *   - Thread binding reuses existing DeliveryContext from parent
  *   - Cost rollup queries formation_costs by child session IDs
  *   - Announcement is push-based: child completion triggers parent notification
+ *
+ * Refinements (ELLIE-948–953):
+ *   - ELLIE-948: Depth enforcement (max depth 2)
+ *   - ELLIE-949: killChildrenForParent() cascade kill
+ *   - ELLIE-951: Registry GC (prune completed spawns)
  */
 
 import { log } from "./logger.ts";
@@ -32,6 +37,8 @@ const logger = log.child("session-spawn");
 
 const DEFAULT_TIMEOUT_SECONDS = 300; // 5 minutes
 const MAX_CHILDREN_PER_PARENT = 5;
+const MAX_SPAWN_DEPTH = 2; // ELLIE-948: max nesting depth (0=child, 1=grandchild)
+const GC_AGE_MS = 10 * 60_000; // ELLIE-951: prune completed spawns older than 10 minutes
 
 // ── In-Memory Registry ──────────────────────────────────────
 
@@ -59,6 +66,17 @@ function addToRegistry(record: SpawnRecord): void {
   children.add(record.id);
 }
 
+function removeFromRegistry(id: string): void {
+  const record = registry.get(id);
+  if (!record) return;
+  registry.delete(id);
+  const children = parentIndex.get(record.parentSessionId);
+  if (children) {
+    children.delete(id);
+    if (children.size === 0) parentIndex.delete(record.parentSessionId);
+  }
+}
+
 function updateRecord(id: string, updates: Partial<SpawnRecord>): SpawnRecord | null {
   const record = registry.get(id);
   if (!record) return null;
@@ -71,14 +89,31 @@ function updateRecord(id: string, updates: Partial<SpawnRecord>): SpawnRecord | 
 /**
  * Spawn a sub-agent session.
  *
- * Creates a SpawnRecord, enforces concurrency limits, and returns
- * a result the parent can use to track the child.
+ * Creates a SpawnRecord, enforces concurrency limits and depth limits,
+ * and returns a result the parent can use to track the child.
  *
  * Does NOT dispatch the child agent — the caller (orchestration-dispatch)
  * is responsible for actually creating the agent session using dispatchAgent().
  * This separation keeps session-spawn focused on bookkeeping.
  */
 export function spawnSession(opts: SpawnOpts): SpawnResult {
+  const depth = opts.depth ?? 0;
+
+  // ELLIE-948: Enforce max spawn depth
+  if (depth > MAX_SPAWN_DEPTH) {
+    logger.warn("Spawn rejected: max depth exceeded", {
+      parentSessionId: opts.parentSessionId,
+      depth,
+      maxDepth: MAX_SPAWN_DEPTH,
+    });
+    return {
+      success: false,
+      spawnId: "",
+      childSessionKey: "",
+      error: `Max spawn depth (${MAX_SPAWN_DEPTH}) exceeded (depth=${depth})`,
+    };
+  }
+
   // Enforce max children per parent
   const existingChildren = parentIndex.get(opts.parentSessionId);
   const activeCount = existingChildren
@@ -125,6 +160,7 @@ export function spawnSession(opts: SpawnOpts): SpawnResult {
     resultText: null,
     error: null,
     timeoutSeconds: opts.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
+    depth,
   };
 
   addToRegistry(record);
@@ -134,6 +170,7 @@ export function spawnSession(opts: SpawnOpts): SpawnResult {
     parent: opts.parentAgentName,
     child: opts.targetAgentName,
     arcMode,
+    depth,
     threadBound: record.threadBound,
   });
 
@@ -198,6 +235,41 @@ export function getActiveChildCount(parentSessionId: string): number {
   return children.filter((r) => r.state === "pending" || r.state === "running").length;
 }
 
+export function getRegistrySize(): number {
+  return registry.size;
+}
+
+// ── ELLIE-949: Cascade Kill ─────────────────────────────────
+
+/**
+ * Kill all active children for a parent session.
+ * Marks pending/running spawns as failed with a cascade kill reason.
+ * Returns the IDs of killed spawns.
+ */
+export function killChildrenForParent(parentSessionId: string, reason?: string): string[] {
+  const children = getChildrenForParent(parentSessionId);
+  const killed: string[] = [];
+  const killReason = reason || "Parent session terminated (cascade kill)";
+
+  for (const child of children) {
+    if (child.state === "pending" || child.state === "running") {
+      markFailed(child.id, killReason);
+      killed.push(child.id);
+      logger.info("Cascade kill: child terminated", {
+        spawnId: child.id,
+        target: child.targetAgentName,
+        parent: parentSessionId,
+      });
+    }
+  }
+
+  if (killed.length > 0) {
+    logger.info("Cascade kill complete", { parent: parentSessionId, killed: killed.length });
+  }
+
+  return killed;
+}
+
 // ── Timeout Check ───────────────────────────────────────────
 
 /**
@@ -223,6 +295,33 @@ export function checkTimeouts(): string[] {
   }
 
   return timedOut;
+}
+
+// ── ELLIE-951: Registry GC ──────────────────────────────────
+
+/**
+ * Prune completed, failed, and timed_out spawns older than GC_AGE_MS.
+ * Prevents unbounded memory growth in the in-memory registry.
+ * Returns the number of records pruned.
+ */
+export function pruneCompletedSpawns(maxAgeMs: number = GC_AGE_MS): number {
+  const now = Date.now();
+  let pruned = 0;
+
+  for (const [id, record] of registry) {
+    if (record.state === "pending" || record.state === "running") continue;
+    const age = now - (record.endedAt ?? record.createdAt);
+    if (age >= maxAgeMs) {
+      removeFromRegistry(id);
+      pruned++;
+    }
+  }
+
+  if (pruned > 0) {
+    logger.info("Registry GC: pruned completed spawns", { pruned, remaining: registry.size });
+  }
+
+  return pruned;
 }
 
 // ── Announcement Builder ────────────────────────────────────

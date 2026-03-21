@@ -597,8 +597,11 @@ export function executeSpawnedDispatch(opts: SpawnedDispatchOpts): { spawnId: st
     return { spawnId: "", success: false, error: spawnResult.error, promise: Promise.resolve() };
   }
 
+  // ELLIE-950: outer .catch must mark spawn failed — otherwise uncaught errors leave it stuck in pending/running
   const promise = runSpawnedDispatch(spawnResult.spawnId, opts).catch((err) => {
-    logger.error("Spawned dispatch failed", { spawnId: spawnResult.spawnId, error: err.message });
+    const errMsg = err instanceof Error ? err.message : String(err);
+    markSpawnFailed(spawnResult.spawnId, `Unhandled spawn error: ${errMsg.slice(0, 500)}`);
+    logger.error("Spawned dispatch failed", { spawnId: spawnResult.spawnId, error: errMsg.slice(0, 300) });
   });
 
   return { spawnId: spawnResult.spawnId, success: true, promise };
@@ -632,11 +635,18 @@ async function runSpawnedDispatch(spawnId: string, opts: SpawnedDispatchOpts): P
     markSpawnRunning(spawnId, dispatch.session_id);
 
     // 3. Build prompt and call Claude
+    // ELLIE-953: Use named positions instead of positional undefineds
+    const subAgentContext = workItemId
+      ? `\nSUB-AGENT TASK for ${workItemId}:\n${task}\n\nYou are a spawned sub-agent. Complete this task and report results clearly.`
+      : `\nSUB-AGENT TASK:\n${task}\n\nYou are a spawned sub-agent. Complete this task and report results clearly.`;
     const prompt = ctx.buildPromptFn(
       task,
-      undefined, undefined, undefined,
-      channel, dispatch.agent,
-      workItemId ? `\nSUB-AGENT TASK for ${workItemId}:\n${task}\n\nYou are a spawned sub-agent. Complete this task and report results clearly.` : undefined,
+      /* contextDocket */ undefined,
+      /* relevantContext */ undefined,
+      /* elasticContext */ undefined,
+      /* channel */ channel,
+      /* agentConfig */ dispatch.agent,
+      /* workItemContext */ subAgentContext,
     );
 
     enterDispatchMode();

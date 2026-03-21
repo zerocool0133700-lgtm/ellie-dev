@@ -16,11 +16,14 @@ import {
   getSpawnRecord,
   getChildrenForParent,
   getActiveChildCount,
+  getRegistrySize,
   checkTimeouts,
   buildAnnouncement,
   buildCostRollup,
   resolveArcForSpawn,
   captureDeliveryContext,
+  killChildrenForParent,
+  pruneCompletedSpawns,
   _clearRegistryForTesting,
 } from "../src/session-spawn.ts";
 import type { SpawnOpts, DeliveryContext } from "../src/types/session-spawn.ts";
@@ -625,5 +628,164 @@ describe("integration scenarios", () => {
 
     // Now we can spawn again
     expect(spawnSession(makeSpawnOpts()).success).toBe(true);
+  });
+});
+
+// ── ELLIE-948: Depth Enforcement ─────────────────────────────
+
+describe("depth enforcement (ELLIE-948)", () => {
+  test("allows depth 0 (direct child)", () => {
+    const result = spawnSession(makeSpawnOpts({ depth: 0 }));
+    expect(result.success).toBe(true);
+    const record = getSpawnRecord(result.spawnId);
+    expect(record!.depth).toBe(0);
+  });
+
+  test("allows depth 1 (grandchild)", () => {
+    const result = spawnSession(makeSpawnOpts({ depth: 1 }));
+    expect(result.success).toBe(true);
+  });
+
+  test("allows depth 2 (max allowed)", () => {
+    const result = spawnSession(makeSpawnOpts({ depth: 2 }));
+    expect(result.success).toBe(true);
+  });
+
+  test("rejects depth 3 (exceeds max)", () => {
+    const result = spawnSession(makeSpawnOpts({ depth: 3 }));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("Max spawn depth");
+    expect(result.error).toContain("depth=3");
+  });
+
+  test("defaults to depth 0 when not specified", () => {
+    const result = spawnSession(makeSpawnOpts());
+    const record = getSpawnRecord(result.spawnId);
+    expect(record!.depth).toBe(0);
+  });
+});
+
+// ── ELLIE-949: Cascade Kill ──────────────────────────────────
+
+describe("killChildrenForParent (ELLIE-949)", () => {
+  test("kills all active children for a parent", () => {
+    const r1 = spawnSession(makeSpawnOpts({ targetAgentName: "research" }));
+    const r2 = spawnSession(makeSpawnOpts({ targetAgentName: "critic" }));
+    markRunning(r1.spawnId);
+    // r2 stays pending
+
+    const killed = killChildrenForParent("parent-session-1");
+    expect(killed).toHaveLength(2);
+
+    expect(getSpawnRecord(r1.spawnId)!.state).toBe("failed");
+    expect(getSpawnRecord(r2.spawnId)!.state).toBe("failed");
+    expect(getSpawnRecord(r1.spawnId)!.error).toContain("cascade kill");
+  });
+
+  test("skips already completed/failed children", () => {
+    const r1 = spawnSession(makeSpawnOpts({ targetAgentName: "research" }));
+    const r2 = spawnSession(makeSpawnOpts({ targetAgentName: "critic" }));
+    markCompleted(r1.spawnId, "done");
+    markRunning(r2.spawnId);
+
+    const killed = killChildrenForParent("parent-session-1");
+    expect(killed).toHaveLength(1);
+    expect(killed[0]).toBe(r2.spawnId);
+
+    // r1 should still be completed, not overwritten
+    expect(getSpawnRecord(r1.spawnId)!.state).toBe("completed");
+  });
+
+  test("returns empty array when no active children", () => {
+    const killed = killChildrenForParent("nonexistent-parent");
+    expect(killed).toEqual([]);
+  });
+
+  test("uses custom reason when provided", () => {
+    const r1 = spawnSession(makeSpawnOpts());
+    markRunning(r1.spawnId);
+
+    killChildrenForParent("parent-session-1", "Budget exceeded");
+    expect(getSpawnRecord(r1.spawnId)!.error).toBe("Budget exceeded");
+  });
+
+  test("frees concurrency slots after cascade kill", () => {
+    // Fill to capacity
+    for (let i = 0; i < 5; i++) {
+      spawnSession(makeSpawnOpts());
+    }
+    expect(spawnSession(makeSpawnOpts()).success).toBe(false);
+
+    // Cascade kill
+    killChildrenForParent("parent-session-1");
+    expect(getActiveChildCount("parent-session-1")).toBe(0);
+
+    // Can spawn again
+    expect(spawnSession(makeSpawnOpts()).success).toBe(true);
+  });
+});
+
+// ── ELLIE-951: Registry GC ───────────────────────────────────
+
+describe("pruneCompletedSpawns (ELLIE-951)", () => {
+  test("prunes completed spawns older than maxAge", () => {
+    const r1 = spawnSession(makeSpawnOpts());
+    markCompleted(r1.spawnId, "done");
+
+    // Force endedAt to be old
+    const record = getSpawnRecord(r1.spawnId)!;
+    record.endedAt = Date.now() - 20 * 60_000; // 20 minutes ago
+
+    const pruned = pruneCompletedSpawns(10 * 60_000); // 10 min threshold
+    expect(pruned).toBe(1);
+    expect(getSpawnRecord(r1.spawnId)).toBeNull();
+  });
+
+  test("does not prune recent completed spawns", () => {
+    const r1 = spawnSession(makeSpawnOpts());
+    markCompleted(r1.spawnId, "done");
+
+    const pruned = pruneCompletedSpawns(10 * 60_000);
+    expect(pruned).toBe(0);
+    expect(getSpawnRecord(r1.spawnId)).not.toBeNull();
+  });
+
+  test("does not prune active spawns", () => {
+    const r1 = spawnSession(makeSpawnOpts());
+    markRunning(r1.spawnId);
+
+    // Force createdAt to be old
+    const record = getSpawnRecord(r1.spawnId)!;
+    record.createdAt = Date.now() - 60 * 60_000;
+
+    const pruned = pruneCompletedSpawns(1); // 1ms threshold — should still skip running
+    expect(pruned).toBe(0);
+    expect(getSpawnRecord(r1.spawnId)).not.toBeNull();
+  });
+
+  test("prunes failed and timed_out spawns too", () => {
+    const r1 = spawnSession(makeSpawnOpts({ targetAgentName: "a" }));
+    const r2 = spawnSession(makeSpawnOpts({ targetAgentName: "b" }));
+    markFailed(r1.spawnId, "err");
+    markTimedOut(r2.spawnId);
+
+    // Make both old
+    getSpawnRecord(r1.spawnId)!.endedAt = Date.now() - 20 * 60_000;
+    getSpawnRecord(r2.spawnId)!.endedAt = Date.now() - 20 * 60_000;
+
+    const pruned = pruneCompletedSpawns(10 * 60_000);
+    expect(pruned).toBe(2);
+    expect(getRegistrySize()).toBe(0);
+  });
+
+  test("cleans up parentIndex when all children pruned", () => {
+    const r1 = spawnSession(makeSpawnOpts());
+    markCompleted(r1.spawnId, "done");
+    getSpawnRecord(r1.spawnId)!.endedAt = Date.now() - 20 * 60_000;
+
+    pruneCompletedSpawns(10 * 60_000);
+
+    // Parent should have no children
+    expect(getChildrenForParent("parent-session-1")).toEqual([]);
   });
 });

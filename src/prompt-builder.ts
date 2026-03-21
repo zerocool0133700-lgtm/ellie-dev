@@ -1123,11 +1123,16 @@ export function buildPrompt(
     }
   }
 
-  // ELLIE-942: Active sub-agent spawns — show parent what children are doing
-  if (sessionIds?.tree_id) {
-    // Use tree_id as a proxy for session identification in spawn context
-    // The parent session can see its spawned children's status
-    const spawnChildren = getChildrenForParent(sessionIds.tree_id);
+  // ELLIE-942/952: Active sub-agent spawns — show parent what children are doing.
+  // Check multiple ID candidates since parentSessionId in spawn records may be
+  // a Forest tree_id, agent session_id, or work_item_id depending on the caller.
+  {
+    const candidateIds = [sessionIds?.tree_id, sessionIds?.work_item_id].filter(Boolean) as string[];
+    let spawnChildren: ReturnType<typeof getChildrenForParent> = [];
+    for (const id of candidateIds) {
+      spawnChildren = getChildrenForParent(id);
+      if (spawnChildren.length > 0) break;
+    }
     if (spawnChildren.length > 0) {
       const lines = ["SPAWNED SUB-AGENTS:"];
       for (const child of spawnChildren) {

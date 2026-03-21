@@ -162,7 +162,7 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
 
   // ELLIE-942: Spawn timeout check — mark timed-out sub-agent spawns (every 30 seconds)
   periodicTask(async () => {
-    const { checkTimeouts, getSpawnRecord, buildAnnouncement } = await import("./session-spawn.ts");
+    const { checkTimeouts, getSpawnRecord, pruneCompletedSpawns } = await import("./session-spawn.ts");
     const timedOut = checkTimeouts();
     if (timedOut.length > 0) {
       logger.info(`Spawn timeout: ${timedOut.length} sub-agent(s) timed out`);
@@ -179,6 +179,8 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
         }
       }
     }
+    // ELLIE-951: Prune completed spawns to prevent unbounded memory growth
+    pruneCompletedSpawns();
   }, 30_000, "spawn-timeout-check");
 
   // ELLIE-447/499/500: Creature reaper — mark timed-out, exhausted-retry, and preempted creatures as failed (every 5 minutes)

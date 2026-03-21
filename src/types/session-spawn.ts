@@ -46,6 +46,8 @@ export interface SpawnOpts {
   threadBind?: boolean;
   /** Optional timeout in seconds for the child session. */
   timeoutSeconds?: number;
+  /** Current spawn depth (0 = top-level parent). ELLIE-948 */
+  depth?: number;
 }
 
 // ── Spawn Records ───────────────────────────────────────────
@@ -91,6 +93,8 @@ export interface SpawnRecord {
   error: string | null;
   /** Timeout threshold. */
   timeoutSeconds: number;
+  /** Spawn depth (0 = direct child of top-level, 1 = grandchild). ELLIE-948 */
+  depth: number;
 }
 
 // ── Spawn Result ────────────────────────────────────────────
