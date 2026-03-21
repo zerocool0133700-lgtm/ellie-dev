@@ -32,6 +32,18 @@ export interface PeriodicTaskDeps {
 export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
   const { supabase, bot, anthropic, botRestart } = deps;
 
+  // ── UMS Connector Registration (ELLIE-300) ──────────────────
+  // One-time registration at startup
+  (async () => {
+    try {
+      const { registerConnector, googleTasksConnector } = await import("./ums/index.ts");
+      registerConnector(googleTasksConnector);
+      logger.info("UMS connectors registered");
+    } catch (err) {
+      logger.error("UMS connector registration failed", err);
+    }
+  })();
+
   // ── 5-minute cycle: conversation expiry + recovery probe + action cleanup + health ──
 
   periodicTask(async () => {
@@ -380,6 +392,35 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     }
   }, 5 * 60_000, "cognitive-load-monitor");
 
+  // ELLIE-300: Google Tasks poll — check for new/updated tasks every 5 minutes
+  periodicTask(async () => {
+    if (!supabase) return;
+    try {
+      const { callMcpTool } = await import("./mcp.ts");
+      const { ingest } = await import("./ums/index.ts");
+
+      // Fetch all task lists
+      const tasksResult = await callMcpTool("mcp__google-workspace__list_tasks", {
+        user_google_email: "zerocool0133700@gmail.com",
+        max_results: 100,
+      });
+
+      if (!tasksResult?.tasks || !Array.isArray(tasksResult.tasks)) return;
+
+      let ingested = 0;
+      for (const task of tasksResult.tasks) {
+        const message = await ingest(supabase, "google-tasks", task);
+        if (message) ingested++;
+      }
+
+      if (ingested > 0) {
+        logger.info("Google Tasks poll complete", { ingested });
+      }
+    } catch (err) {
+      logger.error("Google Tasks poll failed", err);
+    }
+  }, 5 * 60_000, "google-tasks-poll");
+
   // ELLIE-543: Check-in monitor — proactive notifications for long-running agent sessions (every 5 minutes)
   periodicTask(async () => {
     const { getActiveRunStates } = await import("./orchestration-tracker.ts");
@@ -487,6 +528,15 @@ export function runStartupTasks(deps: PeriodicTaskDeps): void {
 }
 
 async function initUmsConsumers(supabase: SupabaseClient, bot: Bot): Promise<void> {
+  // GTD consumer (ELLIE-303)
+  try {
+    const { initGtdConsumer } = await import("./ums/consumers/gtd.ts");
+    initGtdConsumer(supabase);
+    logger.info("GTD consumer initialized with task ingestion");
+  } catch (err) {
+    logger.error("GTD consumer init failed", err);
+  }
+
   // Comms consumer (ELLIE-318)
   try {
     const { initCommsConsumer } = await import("./ums/consumers/comms.ts");
