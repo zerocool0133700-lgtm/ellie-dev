@@ -417,12 +417,17 @@ const ARCHETYPES_DIR = join(PROJECT_ROOT, "config", "archetypes");
 
 /** Maps short agent names to their Forest profile names. */
 const AGENT_PROFILE_MAP: Record<string, string> = {
-  general: "general-squirrel",
-  dev: "dev-ant",
-  research: "research-squirrel",
-  strategy: "strategy-squirrel",
+  general: "ellie",
+  dev: "james-ant",
+  research: "kate-squirrel",
+  strategy: "alan-bird",
   brian: "brian-owl",
   amy: "amy-ant",
+  james: "james-ant",
+  kate: "kate-squirrel",
+  alan: "alan-bird",
+  jason: "jason-ant",
+  marcus: "marcus-ant",
 };
 
 /**
@@ -498,6 +503,11 @@ const AGENT_ROLE_MAP: Record<string, string> = {
   strategy: "strategy",
   brian: "critic",
   amy: "content",
+  james: "dev",
+  kate: "researcher",
+  alan: "strategy",
+  jason: "ops",
+  marcus: "finance",
   critic: "critic",
   content: "content",
   finance: "finance",
@@ -669,6 +679,14 @@ export function _getCommitmentFollowUpCache(): { _commitmentFollowUpContext: str
     return { _commitmentFollowUpContext: "" };
   }
   return { _commitmentFollowUpContext: _commitmentFollowUpCtx };
+}
+
+/** Expose cognitive load cache for injection. Internal use only. */
+export function _getCognitiveLoadCache(): { _cognitiveLoadHint: string } {
+  if (Date.now() - _cognitiveLoadLastChecked > COGNITIVE_LOAD_CACHE_MS) {
+    return { _cognitiveLoadHint: "" };
+  }
+  return { _cognitiveLoadHint };
 }
 
 export async function getCommitmentFollowUpContext(supabase?: unknown): Promise<string> {
@@ -1048,14 +1066,18 @@ export function buildPrompt(
   }
 
   // ELLIE-339: Commitment follow-ups — gentle reminders for stated intentions
-  if (healthContext) {
-    // healthContext is reused for cognitive load (ELLIE-338) above;
-    // commitment follow-ups are injected separately via getCommitmentContext()
-  }
   {
     const { _commitmentFollowUpContext } = _getCommitmentFollowUpCache();
     if (_commitmentFollowUpContext) {
       sections.push({ label: "commitment-followups", content: `\n${_commitmentFollowUpContext}`, priority: 4 });
+    }
+  }
+
+  // ELLIE-338: Cognitive load awareness — inject when load is moderate or higher
+  {
+    const { _cognitiveLoadHint } = _getCognitiveLoadCache();
+    if (_cognitiveLoadHint) {
+      sections.push({ label: "cognitive-load-hint", content: `\n${_cognitiveLoadHint}`, priority: 4 });
     }
   }
 
@@ -1251,9 +1273,9 @@ export function buildPrompt(
     }
   }
 
-  // ELLIE-338: Cognitive load awareness hint — injected when load is moderate or higher
+  // Health context (chain owner health profile) — distinct from cognitive load
   if (healthContext) {
-    sections.push({ label: "cognitive-load-hint", content: `\n${healthContext}`, priority: 4 });
+    sections.push({ label: "health-context", content: `\n${healthContext}`, priority: 4 });
   }
 
   // ── ELLIE-261: Apply strategy mode section filtering + budget ──
