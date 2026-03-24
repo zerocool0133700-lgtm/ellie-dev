@@ -23,9 +23,16 @@ config/wida*.json
 # Build artifacts
 dist/
 
+# Coverage reports
+coverage/
+
 # Work session / scratch artifacts
 work-space/
 supabase/.temp/
+
+# ML model data (large binary files)
+data/empathy-model/
+data/empathy-training/
 
 # Runtime files
 *.lock

@@ -1666,23 +1666,33 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
   // ── Empathy Model Management — ELLIE-990 ──
 
   if (url.pathname === "/api/empathy/reload" && req.method === "POST") {
-    try {
-      const { reloadBertModel, getBertModelInfo } = await import("./empathy-detector-bert.ts");
-      const loaded = await reloadBertModel();
-      const info = getBertModelInfo();
-      return Response.json({ ok: loaded, model: info });
-    } catch (err) {
-      return Response.json({ ok: false, error: String(err) }, { status: 500 });
-    }
+    (async () => {
+      try {
+        const { reloadBertModel, getBertModelInfo } = await import("./empathy-detector-bert.ts");
+        const loaded = await reloadBertModel();
+        const info = getBertModelInfo();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: loaded, model: info }));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: String(err) }));
+      }
+    })();
+    return;
   }
 
   if (url.pathname === "/api/empathy/status" && req.method === "GET") {
-    try {
-      const { getBertModelInfo } = await import("./empathy-detector-bert.ts");
-      return Response.json(getBertModelInfo());
-    } catch (err) {
-      return Response.json({ ready: false, error: String(err) }, { status: 500 });
-    }
+    (async () => {
+      try {
+        const { getBertModelInfo } = await import("./empathy-detector-bert.ts");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(getBertModelInfo()));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ready: false, error: String(err) }));
+      }
+    })();
+    return;
   }
 
   // ── Orchestration Health Dashboard — GET /api/orchestration/health ──
