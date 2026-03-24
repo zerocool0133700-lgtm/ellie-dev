@@ -562,6 +562,16 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
                   gchatMessage: `🤖 ${agentName} agent dispatched`,
                 }).catch((err) => logger.error("dispatch_confirm failed", err));
               }
+            } else {
+              // Routing failed — notify user and fall back to general agent
+              logger.error("routeAndDispatch returned null (google-chat), falling back to general agent");
+              setActiveAgent("google-chat", "general");
+              notify(getNotifyCtx(), {
+                event: "dispatch_confirm",
+                workItemId: "routing_failure",
+                telegramMessage: "⚠️ Routing failed — falling back to general agent",
+                gchatMessage: "⚠️ Routing failed — using general agent",
+              }).catch((err) => logger.error("Routing failure notification failed", err));
             }
 
             const gchatActiveAgent = getActiveAgent("google-chat");
@@ -575,7 +585,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
               logger.info(`Context mode changed`, { mode: gchatContextMode, channel: "gchat" });
             }
 
-            const [gchatConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, gchatQueueContext, liveForest] = await Promise.all([
+            const gchatResults = await Promise.allSettled([
               gchatConvoId && supabase ? getConversationMessages(supabase, gchatConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
               getContextDocket(),
               getRelevantContext(supabase, effectiveGchatText, "google-chat", gchatActiveAgent, gchatConvoId),
@@ -586,6 +596,22 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
               gchatAgentResult?.dispatch.is_new ? getQueueContext(gchatActiveAgent) : Promise.resolve(""),
               getLiveForestContext(effectiveGchatText),
             ]);
+            const gchatConvoContext = gchatResults[0].status === "fulfilled" ? gchatResults[0].value : { text: "", messageCount: 0, conversationId: "" };
+            const contextDocket = gchatResults[1].status === "fulfilled" ? gchatResults[1].value : "";
+            const relevantContext = gchatResults[2].status === "fulfilled" ? gchatResults[2].value : "";
+            const elasticContext = gchatResults[3].status === "fulfilled" ? gchatResults[3].value : "";
+            const structuredContext = gchatResults[4].status === "fulfilled" ? gchatResults[4].value : "";
+            const forestContext = gchatResults[5].status === "fulfilled" ? gchatResults[5].value : "";
+            const agentMemory = gchatResults[6].status === "fulfilled" ? gchatResults[6].value : "";
+            const gchatQueueContext = gchatResults[7].status === "fulfilled" ? gchatResults[7].value : "";
+            const liveForest = gchatResults[8].status === "fulfilled" ? gchatResults[8].value : { awareness: "", agentMap: "" };
+            // Log any failures
+            gchatResults.forEach((r, i) => {
+              if (r.status === "rejected") {
+                const sources = ["gchatConvoContext", "contextDocket", "relevantContext", "elasticContext", "structuredContext", "forestContext", "agentMemory", "gchatQueueContext", "liveForest"];
+                logger.warn(`[google-chat] Context source ${sources[i]} failed — using fallback`, { error: r.reason });
+              }
+            });
             const recentMessages = gchatConvoContext.text;
             if (gchatAgentResult?.dispatch.is_new && gchatQueueContext) {
               resilientTask("acknowledgeQueueItems", "critical", () => acknowledgeQueueItems(gchatActiveAgent));
@@ -715,10 +741,14 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
               { label: "work-item", content: workItemContext || "" },
               { label: "forest-awareness", content: gchatForestAwareness || "" },
             ];
-            const [gchatGroundTruthConflicts, gchatCrossChannel] = await Promise.all([
+            const gchatGroundTruthResults = await Promise.allSettled([
               checkGroundTruthConflicts(effectiveGchatText, gchatContextSections),
               buildCrossChannelSection(supabase, "google-chat"),
             ]);
+            const gchatGroundTruthConflicts = gchatGroundTruthResults[0].status === "fulfilled" ? gchatGroundTruthResults[0].value : "";
+            const gchatCrossChannel = gchatGroundTruthResults[1].status === "fulfilled" ? gchatGroundTruthResults[1].value : "";
+            if (gchatGroundTruthResults[0].status === "rejected") logger.warn("[google-chat] Ground truth check failed", { error: gchatGroundTruthResults[0].reason });
+            if (gchatGroundTruthResults[1].status === "rejected") logger.warn("[google-chat] Cross-channel check failed", { error: gchatGroundTruthResults[1].reason });
 
             // ELLIE-541: Populate working memory cache so buildPrompt can inject session context
             const _gchatAgentName = gchatAgentResult?.dispatch.agent?.name || "general";
@@ -1240,13 +1270,17 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
             if (agentResult) {
               setActiveAgent("alexa", agentResult.dispatch.agent.name);
               broadcastExtension({ type: "route", channel: "alexa", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode, confidence: agentResult.route.confidence, contextMode: alexaPreRoute?.mode || undefined });
+            } else {
+              // Routing failed — fall back to general agent
+              logger.error("routeAndDispatch returned null (alexa), falling back to general agent");
+              setActiveAgent("alexa", "general");
             }
             const effectiveQuery = agentResult?.route.strippedMessage || query;
 
             // Gather context with correct active agent
             const alexaActiveAgent = getActiveAgent("alexa");
             const alexaConvoId = await getOrCreateConversation(supabase!, "alexa") || undefined;
-            const [alexaConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, alexaQueueContext, liveForest] = await Promise.all([
+            const alexaResults = await Promise.allSettled([
               alexaConvoId && supabase ? getConversationMessages(supabase, alexaConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
               getContextDocket(),
               getRelevantContext(supabase, effectiveQuery, "alexa", alexaActiveAgent, alexaConvoId),
@@ -1257,6 +1291,22 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
               agentResult?.dispatch.is_new ? getQueueContext(alexaActiveAgent) : Promise.resolve(""),
               getLiveForestContext(effectiveQuery),
             ]);
+            const alexaConvoContext = alexaResults[0].status === "fulfilled" ? alexaResults[0].value : { text: "", messageCount: 0, conversationId: "" };
+            const contextDocket = alexaResults[1].status === "fulfilled" ? alexaResults[1].value : "";
+            const relevantContext = alexaResults[2].status === "fulfilled" ? alexaResults[2].value : "";
+            const elasticContext = alexaResults[3].status === "fulfilled" ? alexaResults[3].value : "";
+            const structuredContext = alexaResults[4].status === "fulfilled" ? alexaResults[4].value : "";
+            const forestContext = alexaResults[5].status === "fulfilled" ? alexaResults[5].value : "";
+            const agentMemory = alexaResults[6].status === "fulfilled" ? alexaResults[6].value : "";
+            const alexaQueueContext = alexaResults[7].status === "fulfilled" ? alexaResults[7].value : "";
+            const liveForest = alexaResults[8].status === "fulfilled" ? alexaResults[8].value : { awareness: "", agentMap: "" };
+            // Log any failures
+            alexaResults.forEach((r, i) => {
+              if (r.status === "rejected") {
+                const sources = ["alexaConvoContext", "contextDocket", "relevantContext", "elasticContext", "structuredContext", "forestContext", "agentMemory", "alexaQueueContext", "liveForest"];
+                logger.warn(`[alexa] Context source ${sources[i]} failed — using fallback`, { error: r.reason });
+              }
+            });
             const recentMessages = alexaConvoContext.text;
             if (agentResult?.dispatch.is_new && alexaQueueContext) {
               resilientTask("acknowledgeQueueItems", "critical", () => acknowledgeQueueItems(alexaActiveAgent));
@@ -1611,6 +1661,28 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
       }
     })();
     return;
+  }
+
+  // ── Empathy Model Management — ELLIE-990 ──
+
+  if (url.pathname === "/api/empathy/reload" && req.method === "POST") {
+    try {
+      const { reloadBertModel, getBertModelInfo } = await import("./empathy-detector-bert.ts");
+      const loaded = await reloadBertModel();
+      const info = getBertModelInfo();
+      return Response.json({ ok: loaded, model: info });
+    } catch (err) {
+      return Response.json({ ok: false, error: String(err) }, { status: 500 });
+    }
+  }
+
+  if (url.pathname === "/api/empathy/status" && req.method === "GET") {
+    try {
+      const { getBertModelInfo } = await import("./empathy-detector-bert.ts");
+      return Response.json(getBertModelInfo());
+    } catch (err) {
+      return Response.json({ ready: false, error: String(err) }, { status: 500 });
+    }
   }
 
   // ── Orchestration Health Dashboard — GET /api/orchestration/health ──

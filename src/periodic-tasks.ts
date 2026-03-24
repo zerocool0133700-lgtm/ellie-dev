@@ -521,6 +521,17 @@ export function runStartupTasks(deps: PeriodicTaskDeps): void {
     }
   }, 10_000);
 
+  // Preload BERT empathy model (15s delay — non-blocking)
+  setTimeout(async () => {
+    try {
+      const { preloadBertModel } = await import("./empathy-detector-bert.ts");
+      const loaded = await preloadBertModel();
+      logger.info(loaded ? "BERT empathy model preloaded" : "BERT empathy model unavailable, using keyword fallback");
+    } catch (err) {
+      logger.warn("BERT model preload failed (non-critical)", { error: err instanceof Error ? err.message : String(err) });
+    }
+  }, 15_000);
+
   // UMS consumers — only if supabase is available
   if (supabase) {
     initUmsConsumers(supabase, deps.bot);
