@@ -490,6 +490,18 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     }
   }, 30 * 60_000, "es-reconciliation");
 
+  // ELLIE-975: User-configurable scheduled tasks — evaluate cron schedules (every 60 seconds)
+  periodicTask(async () => {
+    const { schedulerTick, getDefaultExecutors } = await import("./scheduled-tasks.ts");
+    const result = await schedulerTick(getDefaultExecutors());
+    if (result.triggered.length > 0 || result.failed.length > 0) {
+      logger.info("Scheduled tasks tick", {
+        triggered: result.triggered,
+        failed: result.failed.map(f => f.name),
+      });
+    }
+  }, 60_000, "scheduled-tasks-tick");
+
   logger.info("All background tasks registered");
 }
 

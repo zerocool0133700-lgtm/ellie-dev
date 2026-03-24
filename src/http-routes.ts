@@ -1860,6 +1860,13 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
     return;
   }
 
+  // ── ELLIE-975/976: Scheduled Tasks CRUD + tick ──
+  if (url.pathname.startsWith("/api/scheduled-tasks")) {
+    const { handleScheduledTasksRoute } = await import("./api/scheduled-tasks.ts");
+    const handled = await handleScheduledTasksRoute(req, res, url.pathname);
+    if (handled) return;
+  }
+
   // ── ELLIE-946: Spawn Sub-Agent — POST /api/spawn ──
   if (url.pathname === "/api/spawn" && req.method === "POST") {
     let body = "";
