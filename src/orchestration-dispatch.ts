@@ -28,6 +28,7 @@ import { estimateTokens } from "./relay-utils.ts";
 import { startCreature, failCreature, completeCreature, dispatchPushCreature, writeJobCompletionMetric } from "../../ellie-forest/src/index";
 import { postCreatureEvent, postJobEvent } from "./channels/discord/observation.ts";
 import { RELAY_BASE_URL } from "./relay-config.ts";
+import { logToolUsage } from "./tool-usage-audit.ts";
 import {
   spawnSession,
   markRunning as markSpawnRunning,
@@ -51,6 +52,15 @@ export interface TrackedDispatchOpts {
   channel: string;
   message?: string;
   playbookCtx: PlaybookContext;
+  /** ELLIE-979: Run agent in a Docker sandbox container. */
+  sandbox?: {
+    enabled: boolean;
+    image?: string;
+    memoryLimit?: number;
+    cpuQuota?: number;
+    env?: string[];
+    binds?: string[];
+  };
 }
 
 export interface TrackedDispatchResult {
@@ -403,12 +413,43 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
         workItemId,
         telegramMessage: `${agentType} Claude call failed for ${workItemId}${retryNote}: ${claudeResult.error?.message?.slice(0, 100) || "unknown"}`,
       });
+      // ELLIE-970: Log dispatch failure for audit
+      logToolUsage(ctx.supabase, {
+        agent_name: agentType,
+        agent_type: agentType,
+        tool_name: "claude_dispatch",
+        tool_category: "agent_execution",
+        operation: "dispatch",
+        session_id: dispatch.session_id,
+        user_id: ctx.userId,
+        channel: ctx.channel,
+        success: false,
+        error_message: claudeResult.error?.message?.slice(0, 500),
+        duration_ms: Date.now() - startTime,
+        metadata: { work_item_id: workItemId, run_id: runId, model: dispatch.agent.model },
+      }).catch(() => {}); // Fire-and-forget
       return;
     }
     const rawResponse = claudeResult.result;
     const durationMs = Date.now() - startTime;
     const durationMin = Math.round(durationMs / 1000 / 60);
     if (heartbeatInterval) clearInterval(heartbeatInterval);
+
+    // ELLIE-970: Log successful dispatch for audit
+    logToolUsage(ctx.supabase, {
+      agent_name: agentType,
+      agent_type: agentType,
+      tool_name: "claude_dispatch",
+      tool_category: "agent_execution",
+      operation: "dispatch",
+      session_id: dispatch.session_id,
+      user_id: ctx.userId,
+      channel: ctx.channel,
+      success: true,
+      duration_ms: durationMs,
+      result_summary: `${rawResponse.length} chars response`,
+      metadata: { work_item_id: workItemId, run_id: runId, model: dispatch.agent.model, attempts: claudeResult.attempts },
+    }).catch(() => {}); // Fire-and-forget
 
     // 7. Process memory intents
     await processMemoryIntents(ctx.supabase, rawResponse, agentType, "shared", sessionIds);
@@ -706,8 +747,39 @@ async function runSpawnedDispatch(spawnId: string, opts: SpawnedDispatchOpts): P
 
     if (!claudeResult || typeof claudeResult !== "string") {
       markSpawnFailed(spawnId, "Claude call returned empty");
+      // ELLIE-970: Log spawn failure for audit
+      logToolUsage(ctx.supabase, {
+        agent_name: targetAgentName,
+        agent_type: targetAgentName,
+        tool_name: "claude_spawn",
+        tool_category: "agent_execution",
+        operation: "spawn",
+        session_id: dispatch.session_id,
+        user_id: ctx.userId,
+        channel: ctx.channel,
+        success: false,
+        error_message: "Claude call returned empty",
+        duration_ms: durationMs,
+        metadata: { spawn_id: spawnId, parent_session_id: opts.parentSessionId, model: dispatch.agent.model },
+      }).catch(() => {});
       return;
     }
+
+    // ELLIE-970: Log successful spawn for audit
+    logToolUsage(ctx.supabase, {
+      agent_name: targetAgentName,
+      agent_type: targetAgentName,
+      tool_name: "claude_spawn",
+      tool_category: "agent_execution",
+      operation: "spawn",
+      session_id: dispatch.session_id,
+      user_id: ctx.userId,
+      channel: ctx.channel,
+      success: true,
+      duration_ms: durationMs,
+      result_summary: `${claudeResult.length} chars response`,
+      metadata: { spawn_id: spawnId, parent_session_id: opts.parentSessionId, model: dispatch.agent.model },
+    }).catch(() => {});
 
     // 4. Sync response to agent session
     if (dispatch.session_id) {

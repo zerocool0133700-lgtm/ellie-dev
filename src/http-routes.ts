@@ -1876,6 +1876,13 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
     if (handled) return;
   }
 
+  // ── ELLIE-979/980: Docker Sandbox API ──
+  if (url.pathname.startsWith("/api/sandbox")) {
+    const { handleSandboxRoute } = await import("./api/docker-sandbox.ts");
+    const handled = await handleSandboxRoute(req, res, url.pathname);
+    if (handled) return;
+  }
+
   // ── ELLIE-975/976: Scheduled Tasks CRUD + tick ──
   if (url.pathname.startsWith("/api/scheduled-tasks")) {
     const { handleScheduledTasksRoute } = await import("./api/scheduled-tasks.ts");

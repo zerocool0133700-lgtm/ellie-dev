@@ -502,6 +502,14 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     }
   }, 60_000, "scheduled-tasks-tick");
 
+  // ELLIE-979: Docker sandbox cleanup — remove expired containers (every 15 minutes)
+  periodicTask(async () => {
+    const { cleanupExpiredContainers, isDockerAvailable } = await import("./docker-sandbox.ts");
+    if (!(await isDockerAvailable())) return;
+    const removed = await cleanupExpiredContainers();
+    if (removed > 0) logger.info(`Sandbox cleanup: removed ${removed} expired container(s)`);
+  }, 15 * 60_000, "sandbox-cleanup");
+
   logger.info("All background tasks registered");
 }
 
