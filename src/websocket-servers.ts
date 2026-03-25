@@ -16,6 +16,7 @@ import {
 import { getUndeliveredMessages, markDelivered, getProcessingState, getRecentHistory, drainMemoryBuffer } from "./ws-delivery.ts";
 import { resetEllieChatIdleTimer } from "./relay-idle.ts";
 import { handleVoiceConnection } from "./voice-pipeline.ts";
+import { createTerminalWss } from "./web-terminal.ts";
 import {
   callClaude,
   session,
@@ -83,6 +84,7 @@ voiceWss.on("connection", handleVoiceConnection);
 // ============================================================
 
 const extensionWss = new WebSocketServer({ noServer: true });
+const terminalWss = createTerminalWss();
 
 // Route WebSocket upgrades to the correct WSS
 httpServer.on("upgrade", (req, socket, head) => {
@@ -98,6 +100,10 @@ httpServer.on("upgrade", (req, socket, head) => {
   } else if (pathname === "/ws/ellie-chat" || pathname === "/ws/la-comms") {
     ellieChatWss.handleUpgrade(req, socket, head, (ws) => {
       ellieChatWss.emit("connection", ws, req);
+    });
+  } else if (pathname === "/ws/terminal") {
+    terminalWss.handleUpgrade(req, socket, head, (ws) => {
+      terminalWss.emit("connection", ws, req);
     });
   } else {
     socket.destroy();

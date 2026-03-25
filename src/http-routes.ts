@@ -1860,6 +1860,14 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
     return;
   }
 
+  // ── ELLIE-981: Terminal status ──
+  if (url.pathname === "/api/terminals" && req.method === "GET") {
+    const { getTerminalStatus, getTerminalCount } = await import("./web-terminal.ts");
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ count: getTerminalCount(), terminals: getTerminalStatus() }));
+    return;
+  }
+
   // ── ELLIE-977: Webhook Triggers — public trigger + management ──
   if (url.pathname.startsWith("/api/webhooks")) {
     const { handleWebhookRoutes } = await import("./api/webhook-triggers.ts");
