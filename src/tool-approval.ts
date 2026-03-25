@@ -200,6 +200,7 @@ const DISPATCH_APPROVAL_TIMEOUT_MS = 5 * 60_000; // 5 minutes for re-requests du
 // ── WebSocket broadcaster (set by relay.ts at startup) ───────
 
 let _broadcastToEllieChat: (msg: Record<string, unknown>) => void = () => {};
+let _lastToolCallId: string = "";
 export function setBroadcastToEllieChat(fn: typeof _broadcastToEllieChat): void {
   _broadcastToEllieChat = fn;
 }
@@ -208,6 +209,21 @@ export function setBroadcastToEllieChat(fn: typeof _broadcastToEllieChat): void 
 
 export async function checkToolApproval(req: ToolApprovalRequest): Promise<{ approved: boolean; reason?: string }> {
   const { tool_name, tool_input } = req;
+
+  // Broadcast tool_call_start for ALL tool calls (ELLIE-985)
+  const callId = randomUUID();
+  const shortDescription = formatToolDescription(tool_name, tool_input);
+  _broadcastToEllieChat({
+    type: "tool_call",
+    callId,
+    tool_name,
+    tool_input,
+    description: shortDescription,
+    status: "running",
+    ts: Date.now(),
+  });
+  // Store callId for the PostToolUse hook to reference
+  _lastToolCallId = callId;
 
   // Fast-path: auto-approved tools
   if (isAutoApproved(tool_name)) {
@@ -365,4 +381,49 @@ function formatToolDescription(toolName: string, input: Record<string, unknown>)
 
   const paramStr = params.length > 0 ? `\n${params.join("\n")}` : "";
   return `${shortName}${paramStr}`;
+}
+
+// ── ELLIE-985: PostToolUse handler — broadcasts completion to frontend ──
+
+export interface ToolCallCompleteRequest {
+  tool_name: string;
+  tool_input?: Record<string, unknown>;
+  tool_response?: string;
+  error?: string;
+  duration_ms?: number;
+}
+
+export async function handleToolCallComplete(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let body = "";
+  req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+  req.on("end", () => {
+    try {
+      const data = JSON.parse(body) as ToolCallCompleteRequest;
+
+      // Truncate response for frontend display
+      const preview = data.tool_response
+        ? data.tool_response.length > 500
+          ? data.tool_response.substring(0, 497) + "..."
+          : data.tool_response
+        : undefined;
+
+      _broadcastToEllieChat({
+        type: "tool_call",
+        callId: _lastToolCallId || randomUUID(),
+        tool_name: data.tool_name,
+        status: data.error ? "failed" : "completed",
+        result_preview: preview,
+        error: data.error,
+        duration_ms: data.duration_ms,
+        ts: Date.now(),
+      });
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    } catch (err: unknown) {
+      logger.error("PostToolUse HTTP error", err);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false }));
+    }
+  });
 }

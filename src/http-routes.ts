@@ -152,6 +152,7 @@ import {
 } from "./api/agent-queue.ts";
 import {
   handleToolApprovalHTTP,
+  handleToolCallComplete,
   resolveToolApproval,
   clearSessionApprovals,
 } from "./tool-approval.ts";
@@ -3158,6 +3159,12 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
   // Tool approval endpoint (called by PreToolUse hook — ELLIE-213)
   if (url.pathname === "/internal/tool-approval" && req.method === "POST") {
     handleToolApprovalHTTP(req, res);
+    return;
+  }
+
+  // Tool call complete endpoint (called by PostToolUse hook — ELLIE-985)
+  if (url.pathname === "/internal/tool-complete" && req.method === "POST") {
+    handleToolCallComplete(req, res);
     return;
   }
 
