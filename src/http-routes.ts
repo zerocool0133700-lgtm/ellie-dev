@@ -1860,6 +1860,13 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
     return;
   }
 
+  // ── ELLIE-977: Webhook Triggers — public trigger + management ──
+  if (url.pathname.startsWith("/api/webhooks")) {
+    const { handleWebhookRoutes } = await import("./api/webhook-triggers.ts");
+    const handled = await handleWebhookRoutes(req, res, url.pathname);
+    if (handled) return;
+  }
+
   // ── ELLIE-975/976: Scheduled Tasks CRUD + tick ──
   if (url.pathname.startsWith("/api/scheduled-tasks")) {
     const { handleScheduledTasksRoute } = await import("./api/scheduled-tasks.ts");
