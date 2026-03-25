@@ -2,7 +2,8 @@
  * Web Terminal — ELLIE-981
  *
  * WebSocket-based PTY handler for xterm.js in the dashboard.
- * Spawns a real shell (bash) and bridges stdin/stdout over WebSocket.
+ * Uses a Node.js subprocess bridge (scripts/pty-bridge.cjs) because
+ * Bun's runtime doesn't support node-pty's native PTY file descriptors.
  *
  * Security:
  * - Only authenticated dashboard users can connect (same auth as ellie-chat)
@@ -12,8 +13,8 @@
  */
 
 import { WebSocket, WebSocketServer } from "ws";
-import type { Server as HttpServer } from "node:http";
-import * as pty from "node-pty";
+import { spawn, type Subprocess } from "bun";
+import { join } from "node:path";
 import { log } from "./logger.ts";
 import { EXTENSION_API_KEY } from "./relay-config.ts";
 
@@ -24,10 +25,13 @@ const IDLE_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_COLS = 120;
 const DEFAULT_ROWS = 30;
 const DEFAULT_CWD = "/home/ellie";
+const BRIDGE_SCRIPT = join(import.meta.dir, "../scripts/pty-bridge.cjs");
+const NODE_PATH = "/usr/local/bin/node";
 
 interface TerminalSession {
   id: string;
-  ptyProcess: pty.IPty;
+  bridge: Subprocess;
+  pid: number;
   ws: WebSocket;
   createdAt: number;
   lastActivityAt: number;
@@ -45,7 +49,7 @@ export function getTerminalCount(): number {
 export function getTerminalStatus(): { id: string; pid: number; createdAt: number; idleMs: number }[] {
   return Array.from(terminals.values()).map(t => ({
     id: t.id,
-    pid: t.ptyProcess.pid,
+    pid: t.pid,
     createdAt: t.createdAt,
     idleMs: Date.now() - t.lastActivityAt,
   }));
@@ -60,7 +64,9 @@ function killTerminal(id: string, reason: string): void {
   if (!session) return;
 
   clearTimeout(session.idleTimer);
-  try { session.ptyProcess.kill(); } catch { /* already dead */ }
+  // Send kill to bridge
+  try { sendToBridge(session, { type: "kill" }); } catch { /* bridge already dead */ }
+  try { session.bridge.kill(); } catch { /* already dead */ }
   try {
     if (session.ws.readyState === WebSocket.OPEN) {
       session.ws.send(JSON.stringify({ type: "terminal_closed", reason }));
@@ -77,6 +83,13 @@ function resetIdleTimer(session: TerminalSession): void {
   session.idleTimer = setTimeout(() => {
     killTerminal(session.id, "idle timeout");
   }, IDLE_TIMEOUT_MS);
+}
+
+function sendToBridge(session: TerminalSession, msg: Record<string, unknown>): void {
+  const writer = session.bridge.stdin;
+  if (writer) {
+    writer.write(JSON.stringify(msg) + "\n");
+  }
 }
 
 /** Handle a new terminal WebSocket connection. */
@@ -97,7 +110,6 @@ function handleTerminalConnection(ws: WebSocket): void {
         const msg = JSON.parse(raw);
         if (msg.type !== "auth") { ws.close(4003, "Expected auth"); return; }
 
-        // Same auth as ellie-chat: shared key
         if (msg.key && msg.key === EXTENSION_API_KEY && EXTENSION_API_KEY) {
           authenticated = true;
           clearTimeout(authTimer);
@@ -106,69 +118,102 @@ function handleTerminalConnection(ws: WebSocket): void {
           return;
         }
 
-        // Check terminal limit
         if (terminals.size >= MAX_TERMINALS) {
           ws.send(JSON.stringify({ type: "error", message: `Max ${MAX_TERMINALS} terminals reached` }));
           ws.close(4004, "Terminal limit");
           return;
         }
 
-        // Spawn PTY
         const cols = msg.cols || DEFAULT_COLS;
         const rows = msg.rows || DEFAULT_ROWS;
         const cwd = msg.cwd || DEFAULT_CWD;
 
-        const shell = process.env.SHELL || "/bin/bash";
-        const ptyProcess = pty.spawn(shell, [], {
-          name: "xterm-256color",
-          cols,
-          rows,
-          cwd,
-          env: {
-            ...process.env,
-            TERM: "xterm-256color",
-            COLORTERM: "truecolor",
-          } as Record<string, string>,
+        // Spawn Node.js bridge subprocess
+        const bridge = spawn([NODE_PATH, BRIDGE_SCRIPT], {
+          stdin: "pipe",
+          stdout: "pipe",
+          stderr: "pipe",
         });
 
         termId = generateId();
         const session: TerminalSession = {
           id: termId,
-          ptyProcess,
+          bridge,
+          pid: 0,
           ws,
           createdAt: Date.now(),
           lastActivityAt: Date.now(),
-          idleTimer: setTimeout(() => {}, 0), // placeholder
+          idleTimer: setTimeout(() => {}, 0),
         };
 
         terminals.set(termId, session);
         resetIdleTimer(session);
 
-        // PTY output → WebSocket
-        ptyProcess.onData((output: string) => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(output);
+        // Read bridge stdout line by line
+        const reader = bridge.stdout.getReader();
+        const decoder = new TextDecoder();
+        let lineBuffer = "";
+
+        (async () => {
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              lineBuffer += decoder.decode(value, { stream: true });
+
+              let newline;
+              while ((newline = lineBuffer.indexOf("\n")) !== -1) {
+                const line = lineBuffer.slice(0, newline);
+                lineBuffer = lineBuffer.slice(newline + 1);
+                if (!line.trim()) continue;
+
+                try {
+                  const msg = JSON.parse(line);
+
+                  if (msg.type === "ready") {
+                    session.pid = msg.pid;
+                    if (ws.readyState === WebSocket.OPEN) {
+                      ws.send(JSON.stringify({
+                        type: "terminal_ready",
+                        id: termId,
+                        pid: msg.pid,
+                      }));
+                    }
+                    logger.info(`Terminal spawned: ${termId} (pid ${msg.pid})`, { active: terminals.size });
+                  } else if (msg.type === "output") {
+                    if (ws.readyState === WebSocket.OPEN) {
+                      ws.send(msg.data);
+                    }
+                  } else if (msg.type === "exit") {
+                    if (ws.readyState === WebSocket.OPEN) {
+                      ws.send(JSON.stringify({ type: "terminal_exit", exitCode: msg.exitCode }));
+                    }
+                    killTerminal(termId!, "process exited");
+                  } else if (msg.type === "error") {
+                    logger.error(`Bridge error: ${msg.message}`);
+                    if (ws.readyState === WebSocket.OPEN) {
+                      ws.send(JSON.stringify({ type: "error", message: msg.message }));
+                    }
+                  }
+                } catch {
+                  // Malformed JSON from bridge — ignore
+                }
+              }
+            }
+          } catch (err) {
+            // Bridge stdout closed
+            if (termId && terminals.has(termId)) {
+              killTerminal(termId, "bridge disconnected");
+            }
           }
-        });
+        })();
 
-        ptyProcess.onExit(({ exitCode }) => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "terminal_exit", exitCode }));
-          }
-          killTerminal(termId!, "process exited");
-        });
-
-        ws.send(JSON.stringify({
-          type: "terminal_ready",
-          id: termId,
-          pid: ptyProcess.pid,
-        }));
-
-        logger.info(`Terminal spawned: ${termId} (pid ${ptyProcess.pid})`, { active: terminals.size });
+        // Send spawn command to bridge
+        sendToBridge(session, { type: "spawn", cols, rows, cwd });
         return;
       }
 
-      // After auth: raw data goes to PTY stdin
+      // After auth: handle input
       if (termId) {
         const session = terminals.get(termId);
         if (session) {
@@ -177,7 +222,7 @@ function handleTerminalConnection(ws: WebSocket): void {
             try {
               const ctrl = JSON.parse(raw);
               if (ctrl.type === "resize" && ctrl.cols && ctrl.rows) {
-                session.ptyProcess.resize(ctrl.cols, ctrl.rows);
+                sendToBridge(session, { type: "resize", cols: ctrl.cols, rows: ctrl.rows });
                 resetIdleTimer(session);
                 return;
               }
@@ -190,7 +235,7 @@ function handleTerminalConnection(ws: WebSocket): void {
             }
           }
 
-          session.ptyProcess.write(raw);
+          sendToBridge(session, { type: "input", data: raw });
           resetIdleTimer(session);
         }
       }
