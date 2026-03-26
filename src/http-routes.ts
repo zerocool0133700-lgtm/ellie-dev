@@ -170,6 +170,8 @@ import {
   type AgentMailWebhookPayload,
 } from "./agentmail.ts";
 import { getSummaryState } from "./ums/consumers/summary.ts";
+import { getAllWatermarks } from "./ums/consumer-watermark.ts";
+import { getAllConsumerStates, resetConsumer } from "./ums/consumer-backoff.ts";
 import { log } from "./logger.ts";
 import { resilientTask } from "./resilient-task.ts";
 import { detectAndCaptureCorrection } from "./correction-detector.ts";
@@ -2245,6 +2247,28 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
         res.end(JSON.stringify({ error: "Failed to build summary" }));
       }
     })();
+    return;
+  }
+
+  // UMS Consumer Health — backoff states (ELLIE-1034)
+  if (url.pathname === "/api/ums/consumers/health" && req.method === "GET") {
+    const states = getAllConsumerStates();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(states));
+    return;
+  }
+
+  // UMS Consumer Reset — manually re-enable a backed-off consumer (ELLIE-1034)
+  if (url.pathname.startsWith("/api/ums/consumers/") && url.pathname.endsWith("/reset") && req.method === "POST") {
+    const name = url.pathname.slice("/api/ums/consumers/".length, -"/reset".length);
+    if (!name) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Missing consumer name" }));
+      return;
+    }
+    resetConsumer(name);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, consumer: name }));
     return;
   }
 
@@ -5920,6 +5944,27 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         logger.error("Status line failed", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Status line unavailable" }));
+      }
+    })();
+    return;
+  }
+
+  // ELLIE-1032: Consumer watermark tracking for UMS
+  if (url.pathname === "/api/ums/watermarks" && req.method === "GET") {
+    (async () => {
+      try {
+        if (!supabase) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Supabase not configured" }));
+          return;
+        }
+        const watermarks = await getAllWatermarks(supabase);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(watermarks));
+      } catch (err) {
+        logger.error("UMS watermarks endpoint error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Failed to fetch watermarks" }));
       }
     })();
     return;

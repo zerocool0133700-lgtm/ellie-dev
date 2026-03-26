@@ -28,6 +28,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { UnifiedMessage } from "../types.ts";
 import { subscribe } from "../events.ts";
 import { log } from "../../logger.ts";
+import { contentHash } from "../content-hash.ts";
 
 const logger = log.child("ums-consumer-memory");
 
@@ -390,8 +391,43 @@ async function storeFact(
   source: UnifiedMessage,
 ): Promise<boolean> {
   const content = fact.content.trim().slice(0, 2000);
+  const hash = contentHash(content);
 
-  // Phase 2: Check for similar existing facts before insert
+  // ELLIE-1031: O(1) content-hash dedup before embedding-based conflict check
+  const { data: hashMatch } = await supabase
+    .from("conversation_facts")
+    .select("id, alt_sources, source_channel, confidence")
+    .eq("content_hash", hash)
+    .eq("status", "active")
+    .limit(1)
+    .maybeSingle();
+
+  if (hashMatch) {
+    // Cross-channel corroboration — merge sources, boost confidence
+    const altSources: string[] = Array.isArray(hashMatch.alt_sources) ? hashMatch.alt_sources : [];
+    if (source.provider && !altSources.includes(source.provider)) {
+      altSources.push(source.provider);
+    }
+    const boostedConfidence = Math.min(1.0, (hashMatch.confidence || 0.7) + 0.1);
+
+    await supabase
+      .from("conversation_facts")
+      .update({
+        alt_sources: altSources,
+        confidence: boostedConfidence,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", hashMatch.id);
+
+    logger.info("Cross-channel dedup: merged duplicate fact", {
+      hash: hash.slice(0, 12),
+      existingId: hashMatch.id,
+      newChannel: source.provider,
+    });
+    return true;
+  }
+
+  // Phase 2: Check for similar existing facts before insert (embedding-based)
   const conflict = await checkForConflict(supabase, content, fact.type, source.provider);
   if (conflict) {
     // Conflict was handled (merged, auto-resolved, or flagged) — skip insert
@@ -400,6 +436,7 @@ async function storeFact(
 
   const row: Record<string, unknown> = {
     content,
+    content_hash: hash,
     type: fact.type,
     category: fact.category,
     confidence: fact.confidence,

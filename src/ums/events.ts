@@ -12,6 +12,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { UnifiedMessage, MessageQueryFilters, Provider, ContentType } from "./types.ts";
 import { log } from "../logger.ts";
+import { advanceWatermark, recordWatermarkError } from "./consumer-watermark.ts";
+import { shouldProcess, recordSuccess, recordFailure } from "./consumer-backoff.ts";
 
 const logger = log.child("ums-events");
 
@@ -64,13 +66,27 @@ export function listSubscribers(): string[] {
  * Called internally by the ingest function after a successful insert.
  * Each handler runs independently — one failure doesn't block others.
  */
-export async function notify(message: UnifiedMessage): Promise<void> {
+export async function notify(message: UnifiedMessage, supabase?: SupabaseClient | null): Promise<void> {
   for (const sub of subscriptions) {
     if (!matchesFilter(message, sub.filter)) continue;
+
+    // ELLIE-1034: Check backoff state before calling handler
+    const check = shouldProcess(sub.name);
+    if (!check.allowed) {
+      logger.debug("Consumer skipped (backoff)", { name: sub.name, reason: check.reason });
+      continue;
+    }
+
     try {
       await sub.handler(message);
+      recordSuccess(sub.name);
+      // ELLIE-1032: Track successful processing
+      if (supabase) advanceWatermark(supabase, sub.name, message.id).catch(() => {});
     } catch (err) {
+      recordFailure(sub.name, String(err));
       logger.error("UMS subscriber handler failed", { subscriber: sub.name, messageId: message.id, err });
+      // ELLIE-1032: Track consumer errors
+      if (supabase) recordWatermarkError(supabase, sub.name, String(err)).catch(() => {});
     }
   }
 }

@@ -14,6 +14,9 @@ import { consolidateNow } from "./consolidate-inline.ts";
 
 const logger = log.child("consolidate-memory");
 
+// ELLIE-1037: Batch window scoping — only process messages within this window
+const BATCH_WINDOW_DAYS = parseInt(process.env.UMS_BATCH_WINDOW_DAYS || "7", 10);
+
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_ANON_KEY!

@@ -87,7 +87,7 @@ export async function ingestNormalized(
   });
 
   // Notify push subscribers (fire-and-forget — failures logged, not propagated)
-  notify(message).catch(() => {});
+  notify(message, supabase).catch(() => {});
 
   return message;
 }

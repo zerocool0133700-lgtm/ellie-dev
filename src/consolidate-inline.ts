@@ -16,8 +16,23 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { log } from "./logger.ts";
 import { indexConversation, indexMemory, classifyDomain } from "./elasticsearch.ts";
 import { insertMemoryWithDedup } from "./memory.ts";
+import { contentHash } from "./ums/content-hash.ts";
+import { tryAcquireConsolidationLock, releaseConsolidationLock } from "./ums/consolidation-lock.ts";
+import forestSql from "../../ellie-forest/src/db";
 
 const logger = log.child("consolidate");
+
+const CHUNK_SIZE = 15; // messages per chunk for chunked consolidation (ELLIE-1033)
+const INLINE_WINDOW_HOURS = parseInt(process.env.UMS_INLINE_WINDOW_HOURS || "24", 10); // ELLIE-1037
+
+/** Split an array of messages into chunks of the given size. */
+export function chunkMessages<T>(messages: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < messages.length; i += size) {
+    chunks.push(messages.slice(i, i + size));
+  }
+  return chunks;
+}
 
 interface RawMessage {
   id: string;
@@ -47,10 +62,13 @@ export async function consolidateNow(
   options?: { channel?: string; onComplete?: () => void }
 ): Promise<boolean> {
   // Fetch unprocessed messages, optionally filtered by channel
+  // ELLIE-1037: Bound query to inline time window to avoid reprocessing ancient messages
+  const windowStart = new Date(Date.now() - INLINE_WINDOW_HOURS * 60 * 60_000).toISOString();
   let query = supabase
     .from("messages")
     .select("id, role, content, channel, created_at")
     .eq("summarized", false)
+    .gte("created_at", windowStart)
     .order("created_at", { ascending: true })
     .limit(50);
 
@@ -165,6 +183,14 @@ async function processBlock(
   supabase: SupabaseClient,
   block: ConversationBlock
 ): Promise<void> {
+  // ELLIE-1035: Acquire distributed lock to prevent duplicate consolidation
+  const lockAcquired = await tryAcquireConsolidationLock(forestSql, block.channel, block.startedAt);
+  if (!lockAcquired) {
+    logger.info("Skipping block — consolidation lock held by another process", { channel: block.channel });
+    return;
+  }
+
+  try {
   // Resolve which agent handled this conversation block
   const blockAgent = await resolveAgentForBlock(supabase, block);
 
@@ -195,17 +221,27 @@ async function processBlock(
     .update({ conversation_id: conversationId })
     .in("id", block.messageIds);
 
-  // 3. Ask Claude to extract memories
-  const transcript = block.messages
-    .map((m) => `[${m.role}]: ${m.content}`)
-    .join("\n");
-
+  // 3. Ask Claude to extract memories — chunked for large blocks (ELLIE-1033)
   const timeRange = `${formatTime(block.startedAt)} – ${formatTime(block.endedAt)}`;
+  const chunks = chunkMessages(block.messages, CHUNK_SIZE);
+  const allMemories: Array<{ type: string; content: string }> = [];
+  let fullSummary = "";
+  let chunkFailures = 0;
 
-  const prompt = `You are a memory extraction system. You process a single conversation transcript and extract structured data.
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const chunkTranscript = chunk.map((m) => `[${m.role}]: ${m.content}`).join("\n");
+
+    const chunkContext = chunks.length > 1
+      ? `\nThis is chunk ${i + 1} of ${chunks.length} from a longer conversation.${
+          i > 0 && fullSummary ? `\nPrevious chunks summary: ${fullSummary}` : ""
+        }\n`
+      : "";
+
+    const prompt = `You are a memory extraction system. You process a single conversation transcript and extract structured data.
 
 This conversation happened on the "${block.channel}" channel, ${timeRange}.
-
+${chunkContext}
 Return a JSON object with two fields:
 1. "summary": A 1-3 sentence summary of what was discussed (standalone, no references to "the conversation")
 2. "memories": An array of extracted memory objects, each with:
@@ -222,44 +258,57 @@ Guidelines:
 Return ONLY valid JSON. No markdown fences, no explanation.
 
 TRANSCRIPT:
-${transcript}`;
+${chunkTranscript}`;
 
-  let responseText: string;
-  try {
-    responseText = await callClaudeCLI(prompt);
-  } catch (err) {
-    logger.error("CLI call failed", err);
-    // Rollback: unlink messages and delete conversation so they can be retried
-    await supabase.from("messages").update({ conversation_id: null }).in("id", block.messageIds);
-    await supabase.from("conversations").delete().eq("id", conversationId);
-    return;
-  }
-
-  let parsed: {
-    summary?: string;
-    memories?: Array<{ type: string; content: string }>;
-  };
-  try {
-    // CLI may include preamble text before JSON — extract the JSON object
-    const cleaned = responseText
-      .replace(/^```(?:json)?\s*/m, "")
-      .replace(/\s*```\s*$/m, "")
-      .trim();
-    // Try direct parse first, then extract JSON from response
+    let responseText: string;
     try {
-      parsed = JSON.parse(cleaned);
-    } catch {
-      const jsonMatch = cleaned.match(/\{[\s\S]*"summary"[\s\S]*"memories"[\s\S]*\}/);
-      if (!jsonMatch) throw new Error("No JSON found in response");
-      parsed = JSON.parse(jsonMatch[0]);
+      responseText = await callClaudeCLI(prompt);
+    } catch (err) {
+      chunkFailures++;
+      logger.error("Chunk CLI call failed", { chunk: i + 1, total: chunks.length, err });
+      // Continue with remaining chunks — don't abort entire block
+      continue;
     }
-  } catch {
-    logger.error("Failed to parse response", { preview: responseText.substring(0, 200) });
-    // Rollback: unlink messages and delete conversation so they can be retried
+
+    let chunkParsed: {
+      summary?: string;
+      memories?: Array<{ type: string; content: string }>;
+    };
+    try {
+      const cleaned = responseText
+        .replace(/^```(?:json)?\s*/m, "")
+        .replace(/\s*```\s*$/m, "")
+        .trim();
+      try {
+        chunkParsed = JSON.parse(cleaned);
+      } catch {
+        const jsonMatch = cleaned.match(/\{[\s\S]*"summary"[\s\S]*"memories"[\s\S]*\}/);
+        if (!jsonMatch) throw new Error("No JSON found in response");
+        chunkParsed = JSON.parse(jsonMatch[0]);
+      }
+    } catch {
+      chunkFailures++;
+      logger.error("Chunk parse failed", { chunk: i + 1, total: chunks.length, preview: responseText.substring(0, 200) });
+      continue;
+    }
+
+    if (chunkParsed.summary) {
+      fullSummary += (fullSummary ? " " : "") + chunkParsed.summary;
+    }
+    if (chunkParsed.memories) {
+      allMemories.push(...chunkParsed.memories);
+    }
+  }
+
+  // If ALL chunks failed, rollback entirely
+  if (chunkFailures === chunks.length) {
+    logger.error("All chunks failed — rolling back block", { totalChunks: chunks.length });
     await supabase.from("messages").update({ conversation_id: null }).in("id", block.messageIds);
     await supabase.from("conversations").delete().eq("id", conversationId);
     return;
   }
+
+  const parsed = { summary: fullSummary || undefined, memories: allMemories };
 
   // Mark messages as summarized now that extraction succeeded
   await supabase
@@ -294,13 +343,14 @@ ${transcript}`;
 
   if (validMemories.length > 0) {
     for (const mem of validMemories) {
+      const hash = contentHash(mem.content);
       const result = await insertMemoryWithDedup(supabase, {
         type: mem.type,
         content: mem.content,
         source_agent: blockAgent,
         visibility: "shared",
         conversation_id: conversationId,
-        metadata: { source: "consolidation" },
+        metadata: { source: "consolidation", content_hash: hash },
       });
       logger.info(`${mem.content} → ${result.action}${result.resolution ? ` (${result.resolution.reason})` : ""}`, { type: mem.type });
     }
@@ -327,6 +377,10 @@ ${transcript}`;
         conversation_id: conversationId,
       }).catch(() => {});
     }
+  }
+  } finally {
+    // ELLIE-1035: Always release the consolidation lock
+    await releaseConsolidationLock(forestSql, block.channel, block.startedAt);
   }
 }
 
