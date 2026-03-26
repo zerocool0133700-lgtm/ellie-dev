@@ -33,8 +33,11 @@ import {
   getPsyContext,
   getPhaseContext,
   getHealthContext,
+  getCommitmentFollowUpContext,
+  getCognitiveLoadContext,
   getLastBuildMetrics,
 } from "./prompt-builder.ts";
+import { analyzeAndStoreEmpathy } from "./empathy-middleware.ts";
 import {
   callClaude,
   callClaudeVoice,
@@ -77,6 +80,7 @@ import {
   getAgentStructuredContext, getAgentMemoryContext, getMaxMemoriesForModel,
   getLiveForestContext,
 } from "./context-sources.ts";
+import { getAgentMemorySummary } from "./agent-memory-store.ts";
 import {
   executeOrchestrated,
   PipelineStepError,
@@ -449,11 +453,20 @@ async function _handleEllieChatMessage(
         .join("\n");
 
       // Lightweight context — skip structured context, recent messages, agent routing
-      const [contextDocket, relevantContext, elasticContext] = await Promise.all([
+      const lightweightResults = await Promise.allSettled([
         getContextDocket(),
         getRelevantContext(supabase, text, "ellie-chat", getActiveAgent("ellie-chat")),
         searchElastic(text, { limit: 3, recencyBoost: true, channel: "ellie-chat", sourceAgent: getActiveAgent("ellie-chat") }),
       ]);
+      const contextDocket = lightweightResults[0].status === "fulfilled" ? lightweightResults[0].value : "";
+      const relevantContext = lightweightResults[1].status === "fulfilled" ? lightweightResults[1].value : "";
+      const elasticContext = lightweightResults[2].status === "fulfilled" ? lightweightResults[2].value : "";
+      lightweightResults.forEach((r, i) => {
+        if (r.status === "rejected") {
+          const sources = ["contextDocket", "relevantContext", "elasticContext"];
+          logger.warn(`[ellie-chat-voice] Context source ${sources[i]} failed — using fallback`, { error: r.reason });
+        }
+      });
 
       const systemParts = [
         "You are Ellie, a personal AI assistant. You are in a VOICE CONVERSATION via the phone app.",
@@ -723,6 +736,18 @@ async function _handleEllieChatMessage(
           gchatMessage: `🤖 ${agentResult.dispatch.agent.name} agent dispatched`,
         }).catch((err) => logger.error("dispatch_confirm notification failed", { detail: err.message }));
       }
+    } else {
+      // Routing failed — notify user and fall back to general agent
+      logger.error("routeAndDispatch returned null (ellie-chat), falling back to general agent");
+      setActiveAgent("ellie-chat", "general");
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "⚠️ Routing failed — using general agent",
+          ts: Date.now(),
+          channelId,
+        }));
+      }
     }
 
     // ── ASYNC SPECIALIST PATH: ack immediately, run in background ──
@@ -972,10 +997,14 @@ async function _handleEllieChatMessage(
       { label: "work-item", content: workItemContext || "" },
       { label: "forest-awareness", content: ecForestAwareness || "" },
     ];
-    const [ecGroundTruthConflicts, ecCrossChannel] = await Promise.all([
+    const ecGroundTruthResults = await Promise.allSettled([
       checkGroundTruthConflicts(effectiveText, contextSectionsForCheck),
       buildCrossChannelSection(supabase, "ellie-chat"),
     ]);
+    const ecGroundTruthConflicts = ecGroundTruthResults[0].status === "fulfilled" ? ecGroundTruthResults[0].value : "";
+    const ecCrossChannel = ecGroundTruthResults[1].status === "fulfilled" ? ecGroundTruthResults[1].value : "";
+    if (ecGroundTruthResults[0].status === "rejected") logger.warn("[ellie-chat] Ground truth check failed", { error: ecGroundTruthResults[0].reason });
+    if (ecGroundTruthResults[1].status === "rejected") logger.warn("[ellie-chat] Cross-channel check failed", { error: ecGroundTruthResults[1].reason });
 
     // ELLIE-541: Populate working memory cache so buildPrompt can inject session context
     const _ecAgentName = agentResult?.dispatch.agent?.name || "general";
@@ -983,6 +1012,18 @@ async function _handleEllieChatMessage(
 
     // ELLIE-590: Set pending commitments context for prompt injection
     setPendingCommitmentsContext(session.sessionId, 0);
+    // Prime commitment follow-up cache so buildPrompt can inject it (ELLIE-339)
+    await getCommitmentFollowUpContext(supabase).catch(() => {});
+    // Prime cognitive load cache so buildPrompt can inject it (ELLIE-338)
+    await getCognitiveLoadContext(supabase).catch(() => {});
+
+    // ELLIE-1028: Fetch per-agent local memory for prompt injection
+    const ecAgentLocalMemory = await getAgentMemorySummary(ellieChatActiveAgent, 2000).catch(() => "");
+
+    // EI system: Analyze empathy needs and store emotion history
+    const empathyGuidance = ecUserId
+      ? await analyzeAndStoreEmpathy(supabase, ecUserId, effectiveText, "ellie-chat", session.conversationId).catch(() => null)
+      : null;
 
     const enrichedPrompt = buildPrompt(
       effectiveText, ecDocket, relevantContext, elasticContext, "ellie-chat",
@@ -1011,6 +1052,9 @@ async function _handleEllieChatMessage(
       ecGroundTruthConflicts || undefined,
       ecCrossChannel || undefined,
       commandBarContext,
+      undefined, // fullWorkingMemory
+      empathyGuidance || undefined,
+      ecAgentLocalMemory || undefined,
     );
 
     // ── ELLIE-383: Context snapshot logging (journal only) ──
@@ -1075,6 +1119,12 @@ async function _handleEllieChatMessage(
     // the queue already moved on and logged a DLQ entry. Don't send a late response.
     if (queueSignal.aborted) {
       logger.warn("Queue timed out mid-dispatch — discarding late response to prevent duplicate");
+      return;
+    }
+
+    // Aborted or empty dispatch — silently discard (user disconnected or signal was stale)
+    if (!rawResponse || rawResponse.trim().length === 0) {
+      logger.warn("Empty response from callClaude — likely aborted dispatch, discarding silently");
       return;
     }
 
@@ -1319,16 +1369,28 @@ export async function runSpecialistAsync(
       { label: "work-item", content: workItemContext || "" },
       { label: "forest-awareness", content: liveForest.awareness || "" },
     ];
-    const [ecGroundTruthConflicts, ecCrossChannel] = await Promise.all([
+    const ecSpecGroundTruthResults = await Promise.allSettled([
       checkGroundTruthConflicts(effectiveText, specContextSections),
       buildCrossChannelSection(supabase, "ellie-chat"),
     ]);
+    const ecGroundTruthConflicts = ecSpecGroundTruthResults[0].status === "fulfilled" ? ecSpecGroundTruthResults[0].value : "";
+    const ecCrossChannel = ecSpecGroundTruthResults[1].status === "fulfilled" ? ecSpecGroundTruthResults[1].value : "";
+    if (ecSpecGroundTruthResults[0].status === "rejected") logger.warn("[ellie-chat-spec] Ground truth check failed", { error: ecSpecGroundTruthResults[0].reason });
+    if (ecSpecGroundTruthResults[1].status === "rejected") logger.warn("[ellie-chat-spec] Cross-channel check failed", { error: ecSpecGroundTruthResults[1].reason });
 
     // ELLIE-541: Populate working memory cache so buildPrompt can inject session context
     try { await primeWorkingMemoryCache(session.sessionId, agentResult.dispatch.agent.name); } catch { /* non-critical */ }
 
     // ELLIE-590: Set pending commitments context for prompt injection
     setPendingCommitmentsContext(session.sessionId, 0);
+
+    // ELLIE-1028: Fetch per-agent local memory for specialist prompt injection
+    const specAgentLocalMemory = await getAgentMemorySummary(ellieChatActiveAgent, 2000).catch(() => "");
+
+    // EI system: Analyze empathy needs and store emotion history
+    const specEmpathyGuidance = ecUserId
+      ? await analyzeAndStoreEmpathy(supabase, ecUserId, effectiveText, "ellie-chat", session.conversationId).catch(() => null)
+      : null;
 
     const enrichedPrompt = buildPrompt(
       effectiveText, contextDocket, relevantContext, elasticContext, "ellie-chat",
@@ -1356,6 +1418,10 @@ export async function runSpecialistAsync(
       channelProfile,
       ecGroundTruthConflicts || undefined,
       ecCrossChannel || undefined,
+      undefined, // commandBarContext
+      undefined, // fullWorkingMemory
+      specEmpathyGuidance || undefined,
+      specAgentLocalMemory || undefined,
     );
 
     // ── ELLIE-383: Context snapshot logging for specialist (journal only) ──
@@ -1417,6 +1483,12 @@ export async function runSpecialistAsync(
       logger.warn("Queue timed out mid-specialist — discarding late response to prevent duplicate", { agentName });
       // ELLIE-589: Mark dispatch commitment as timed_out on queue abort
       trackDispatchFailure(session.sessionId, dispatchTracking.commitmentId);
+      return;
+    }
+
+    // Aborted or empty specialist dispatch — discard silently
+    if (!rawResponse || rawResponse.trim().length === 0) {
+      logger.warn("Empty specialist response — likely aborted dispatch", { agentName });
       return;
     }
 
@@ -1509,9 +1581,12 @@ export async function runSpecialistAsync(
     clearProcessing(ecUserId || "anonymous");
     exitDispatchMode();
 
-    resilientTask("syncResponse", "critical", () => syncResponse(supabase, agentResult.dispatch.session_id, cleanedText, {
-      duration_ms: durationMs,
-    }));
+    if (agentResult?.dispatch?.session_id) {
+      const sessionId = agentResult.dispatch.session_id; // Capture before async callback
+      resilientTask("syncResponse", "critical", () => syncResponse(supabase, sessionId, cleanedText, {
+        duration_ms: durationMs,
+      }));
+    }
 
     // Fire playbook commands async (ELLIE:: tags)
     if (playCmds.length > 0) {

@@ -17,7 +17,7 @@ const logger = log.child("context:mode");
 
 // ── Types ────────────────────────────────────────────────────
 
-export type ContextMode = "conversation" | "strategy" | "workflow" | "deep-work" | "skill-only";
+export type ContextMode = "conversation" | "strategy" | "workflow" | "deep-work" | "skill-only" | "fast";
 
 export interface ModeDetectionResult {
   mode: ContextMode;
@@ -205,6 +205,10 @@ const MANUAL_OVERRIDES: Array<{ pattern: RegExp; mode: ContextMode }> = [
   { pattern: /\bskill[\s-]*only\b/i, mode: "skill-only" },
   { pattern: /\btriage\s+mode\b/i, mode: "skill-only" },
   { pattern: /\blight\s+mode\b/i, mode: "skill-only" },
+  { pattern: /\bfast\s+mode\b/i, mode: "fast" },
+  { pattern: /\bquick\s+(?:answer|mode)\b/i, mode: "fast" },
+  { pattern: /\bjust\s+(?:the\s+)?answer\b/i, mode: "fast" },
+  { pattern: /\bbe\s+brief\b/i, mode: "fast" },
   { pattern: /\bload\s+everything\b/i, mode: "conversation" },  // disable filtering
   { pattern: /\bfull\s+context\b/i, mode: "conversation" },
 ];
@@ -307,6 +311,7 @@ const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "structured-context": 4,
     "conversation": 3,
     "agent-memory": 8,
+    "agent-local-memory": 4,
     "forest-awareness": 8,
     "search": 9,
     "context-docket": 7,
@@ -328,6 +333,7 @@ const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "structured-context": 3,
     "conversation": 5,
     "agent-memory": 5,
+    "agent-local-memory": 3,
     "forest-awareness": 3,
     "search": 8,
     "context-docket": 3,
@@ -349,6 +355,7 @@ const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "structured-context": 3,
     "conversation": 6,
     "agent-memory": 3,
+    "agent-local-memory": 5,
     "forest-awareness": 5,
     "search": 7,
     "context-docket": 4,
@@ -370,6 +377,7 @@ const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "structured-context": 7,
     "conversation": 5,
     "agent-memory": 4,
+    "agent-local-memory": 3,
     "forest-awareness": 3,
     "search": 5,
     "context-docket": 8,
@@ -391,6 +399,7 @@ const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "structured-context": 9,
     "conversation": 6,
     "agent-memory": 9,
+    "agent-local-memory": 9,
     "forest-awareness": 9,
     "search": 9,
     "context-docket": 9,
@@ -403,6 +412,28 @@ const DEFAULT_MODE_PRIORITIES: Record<ContextMode, Record<string, number>> = {
     "health": 9,
     "incidents": 9,
   },
+  fast: {
+    "soul": 9,
+    "archetype": 2,
+    "psy": 9,
+    "phase": 9,
+    "profile": 9,
+    "structured-context": 9,
+    "conversation": 3,
+    "agent-memory": 9,
+    "agent-local-memory": 9,
+    "forest-awareness": 9,
+    "search": 9,
+    "context-docket": 9,
+    "work-item": 9,
+    "playbook-commands": 9,
+    "work-commands": 9,
+    "queue": 9,
+    "skills": 1,
+    "orchestration-status": 9,
+    "health": 9,
+    "incidents": 9,
+  },
 };
 
 const DEFAULT_MODE_TOKEN_BUDGETS: Record<ContextMode, number> = {
@@ -411,6 +442,7 @@ const DEFAULT_MODE_TOKEN_BUDGETS: Record<ContextMode, number> = {
   workflow: 120_000,
   "deep-work": 190_000,
   "skill-only": 40_000,
+  fast: 30_000,
 };
 
 // ── Active config (mutable, persisted to disk) ──────────────

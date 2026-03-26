@@ -158,6 +158,7 @@ import {
 } from "./tool-approval.ts";
 import { handleGatewayRoute } from "./api/gateway-intake.ts";
 import { handleGtdRoute } from "./api/gtd.ts";
+import { getStatusLine } from "./api/status-line.ts";
 import {
   isAgentMailEnabled,
   getAgentMailConfig,
@@ -193,6 +194,7 @@ import { handleBriefingRoute } from "./api/routes/briefing.ts";
 import { handleAlertsRoute } from "./api/routes/alerts.ts";
 import { handleReactionsRoute } from "./api/routes/reactions.ts";
 import { handleEmojiPrefsRoute } from "./api/routes/emoji-prefs.ts";
+import { handleAgentMemoryRoute } from "./api/routes/agent-memory.ts";
 // ELLIE-547: CORS whitelist (replaces wildcard *)
 import { handlePreflight, corsHeader } from "./cors.ts";
 
@@ -5555,6 +5557,9 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
   // Emoji preferences (ELLIE-639) — contextual emoji in agent responses
   if (await handleEmojiPrefsRoute(req, res, url, supabase)) return;
 
+  // Agent memory (ELLIE-1027) — per-agent filesystem-based persistent memory
+  if (await handleAgentMemoryRoute(req, res, url, supabase)) return;
+
   // Rollup endpoints
   if (url.pathname.startsWith("/api/rollup/") && req.method === "POST") {
     let body = "";
@@ -5898,6 +5903,23 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         logger.error("Obsidian restart error", err);
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Failed to restart container" }));
+      }
+    })();
+    return;
+  }
+
+  // ELLIE-1025: Status line — compact endpoint for dashboard status bar
+  if (url.pathname === "/api/status-line" && req.method === "GET") {
+    (async () => {
+      try {
+        const { sql: forestSql } = await import("../../ellie-forest/src/index.ts");
+        const payload = await getStatusLine({ forestSql, supabase });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(payload));
+      } catch (err) {
+        logger.error("Status line failed", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Status line unavailable" }));
       }
     })();
     return;

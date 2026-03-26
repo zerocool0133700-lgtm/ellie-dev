@@ -857,7 +857,7 @@ const STRATEGY_PRESETS: Record<ContextStrategy, StrategyPreset> = {
     sources: [],  // No structured context at all
     priority: [],
     exclude: [],
-    excludeSections: ['structured-context', 'context-docket', 'search', 'forest-awareness', 'skills', 'queue'],
+    excludeSections: ['structured-context', 'context-docket', 'search', 'forest-awareness', 'skills', 'queue', 'agent-local-memory'],
     budget: 'minimal',
     // Soul at priority 7 — minimal but still present
     sectionPriorities: { soul: 7, archetype: 8 },
@@ -867,7 +867,7 @@ const STRATEGY_PRESETS: Record<ContextStrategy, StrategyPreset> = {
     priority: ['calendar'],
     exclude: [],
     excludeSections: ['memory-protocol', 'confirm-protocol', 'forest-memory-writes', 'dev-protocol',
-                      'playbook-commands', 'work-commands', 'context-docket', 'search'],
+                      'playbook-commands', 'work-commands', 'context-docket', 'search', 'agent-local-memory'],
     budget: 'minimal',
     // Soul at priority 7 — voice is tight on tokens
     sectionPriorities: { soul: 7, archetype: 8 },
@@ -880,6 +880,21 @@ const STRATEGY_PRESETS: Record<ContextStrategy, StrategyPreset> = {
     budget: 'extended',
     // Soul at priority 5 — present but situational context takes priority
     sectionPriorities: { soul: 5 },
+  },
+  fast: {
+    sources: [],  // No structured context fetching
+    priority: [],
+    exclude: [],
+    excludeSections: [
+      'soul', 'psy', 'phase', 'profile', 'structured-context',
+      'context-docket', 'agent-memory', 'forest-awareness', 'search',
+      'memory-protocol', 'confirm-protocol', 'forest-memory-writes',
+      'dev-protocol', 'incidents', 'queue', 'orchestration-status',
+      'health', 'ground-truth-conflicts', 'cross-channel-corrections',
+      'agent-local-memory',
+    ],
+    budget: 'fast',
+    sectionPriorities: { soul: 9, archetype: 2, skills: 1 },
   },
 };
 
@@ -898,6 +913,7 @@ const BUDGET_TOKEN_MAP: Record<string, number> = {
   minimal: 60_000,
   default: 150_000,
   extended: 190_000,
+  fast: 30_000,
 };
 
 /** Get the token budget for a strategy (used by applyTokenBudget in buildPrompt). */

@@ -881,6 +881,8 @@ export function buildPrompt(
   crossChannelCorrections?: string,
   commandBarContext?: string,
   fullWorkingMemory?: boolean,
+  empathyGuidance?: string,
+  agentLocalMemory?: string,
 ): string {
   const channelLabel = channel === "google-chat" ? "Google Chat" : channel === "ellie-chat" ? "Ellie Chat (dashboard)" : channel === "email" ? "Email (via AgentMail — replies are sent back as email to the sender)" : "Telegram";
 
@@ -919,6 +921,9 @@ export function buildPrompt(
   // Psy context (priority 4): cognitive profile — informs tone/framing but is secondary to phase.
   if (phaseContext) sections.push({ label: "relationship-phase", content: `\n${phaseContext}`, priority: 3 });
   if (psyContext) sections.push({ label: "psy-profile", content: `\n## Cognitive Profile\n${psyContext}`, priority: 4 });
+
+  // Empathy detection guidance (priority 3) — EI system response matrix
+  if (empathyGuidance) sections.push({ label: "empathy-detection", content: `\n${empathyGuidance}\n`, priority: 3 });
 
   // ELLIE-616: Inject ODS identity sections (archetype at priority 3, role at priority 5)
   // Only inject when legacy params are absent — avoids duplicate content during migration.
@@ -1180,6 +1185,13 @@ export function buildPrompt(
   if (structuredContext) sections.push({ label: "structured-context", content: `\n${structuredContext}`, priority: 5 });
   if (contextDocket) sections.push({ label: "context-docket", content: `\nCONTEXT:\n${contextDocket}`, priority: 6 });
   if (agentMemoryContext) sections.push({ label: "agent-memory", content: agentMemoryContext, priority: 5 });
+  if (agentLocalMemory) {
+    sections.push({
+      label: "agent-local-memory",
+      content: `\nAGENT LOCAL MEMORY (${agentConfig?.name || "general"}):\n${agentLocalMemory}`,
+      priority: 4,
+    });
+  }
   if (awarenessContext) sections.push({ label: "forest-awareness", content: `\n${awarenessContext}`, priority: 5 });
 
   // Priority 7: Search results (already trimmed by trimSearchContext, lowest variable priority)

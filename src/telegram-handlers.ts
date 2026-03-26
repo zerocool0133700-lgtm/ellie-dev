@@ -72,6 +72,7 @@ import {
   getAgentStructuredContext, getAgentMemoryContext, getMaxMemoriesForModel,
   getLiveForestContext,
 } from "./context-sources.ts";
+import { getAgentMemorySummary } from "./agent-memory-store.ts";
 import {
   executeOrchestrated,
   PipelineStepError,
@@ -280,6 +281,16 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
         gchatMessage: `🤖 ${agentName} agent dispatched`,
       }).catch((err) => logger.error("Dispatch confirm notification failed", err));
     }
+  } else {
+    // Routing failed — notify user and fall back to general agent
+    logger.error("routeAndDispatch returned null, falling back to general agent");
+    setActiveAgent("telegram", "general");
+    notify(getNotifyCtx(), {
+      event: "dispatch_confirm",
+      workItemId: "routing_failure",
+      telegramMessage: "⚠️ Routing failed — falling back to general agent",
+      gchatMessage: "⚠️ Routing failed — using general agent",
+    }).catch((err) => logger.error("Routing failure notification failed", err));
   }
 
   // Gather context: full conversation (primary) + docket + search (excluding current conversation) + structured + forest + agent memory + queue
@@ -292,7 +303,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   if (modeChanged) {
     logger.info("context mode changed", { mode: contextMode });
   }
-  const [conversationContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext, liveForest, factsContext] = await Promise.all([
+  const results = await Promise.allSettled([
     activeConvoId && supabase ? getConversationMessages(supabase, activeConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
     getContextDocket(),
     getRelevantContext(supabase, effectiveText, "telegram", activeAgent, activeConvoId),
@@ -304,6 +315,23 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
     getLiveForestContext(effectiveText),
     getRelevantFacts(supabase, effectiveText),  // ELLIE-967: Tier 2 fact retrieval
   ]);
+  const conversationContext = results[0].status === "fulfilled" ? results[0].value : { text: "", messageCount: 0, conversationId: "" };
+  const contextDocket = results[1].status === "fulfilled" ? results[1].value : "";
+  const relevantContext = results[2].status === "fulfilled" ? results[2].value : "";
+  const elasticContext = results[3].status === "fulfilled" ? results[3].value : "";
+  const structuredContext = results[4].status === "fulfilled" ? results[4].value : "";
+  const forestContext = results[5].status === "fulfilled" ? results[5].value : "";
+  const agentMemory = results[6].status === "fulfilled" ? results[6].value : "";
+  const queueContext = results[7].status === "fulfilled" ? results[7].value : "";
+  const liveForest = results[8].status === "fulfilled" ? results[8].value : { awareness: "", agentMap: "" };
+  const factsContext = results[9].status === "fulfilled" ? results[9].value : "";
+  // Log any failures
+  results.forEach((r, i) => {
+    if (r.status === "rejected") {
+      const sources = ["conversationContext", "contextDocket", "relevantContext", "elasticContext", "structuredContext", "forestContext", "agentMemory", "queueContext", "liveForest", "factsContext"];
+      logger.warn(`[telegram] Context source ${sources[i]} failed — using fallback`, { error: r.reason });
+    }
+  });
   // Prime commitment follow-up cache so buildPrompt can inject it (ELLIE-339)
   getCommitmentFollowUpContext(supabase).catch(() => {});
   // Prime cognitive load cache so buildPrompt can inject it (ELLIE-338)
@@ -348,6 +376,9 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   const tgDocket = tgRefreshResults["context-docket"] || contextDocket;
   const tgForestAwareness = tgRefreshResults["forest-awareness"] || liveForest.awareness;
   const tgAgentMem = tgRefreshResults["agent-memory"] || agentMemory.memoryContext;
+
+  // ELLIE-1028: Fetch per-agent local memory for prompt injection
+  const tgAgentLocalMemory = await getAgentMemorySummary(activeAgent, 2000).catch(() => "");
 
   // Detect work item mentions (ELLIE-5, EVE-3, etc.)
   let workItemContext = "";
@@ -483,6 +514,8 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
           undefined, // crossChannelCorrections
           undefined, // commandBarContext
           true,      // fullWorkingMemory — inject all 7 sections
+          undefined, // empathyGuidance
+          tgAgentLocalMemory || undefined,
         );
         const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
         const fallbackAgentName = agentResult?.dispatch.agent.name || "general";
@@ -507,10 +540,14 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
     { label: "work-item", content: workItemContext || "" },
     { label: "forest-awareness", content: tgForestAwareness || "" },
   ];
-  const [tgGroundTruthConflicts, tgCrossChannel] = await Promise.all([
+  const groundTruthResults = await Promise.allSettled([
     checkGroundTruthConflicts(effectiveText, tgContextSections),
     buildCrossChannelSection(supabase, "telegram"),
   ]);
+  const tgGroundTruthConflicts = groundTruthResults[0].status === "fulfilled" ? groundTruthResults[0].value : "";
+  const tgCrossChannel = groundTruthResults[1].status === "fulfilled" ? groundTruthResults[1].value : "";
+  if (groundTruthResults[0].status === "rejected") logger.warn("[telegram] Ground truth check failed", { error: groundTruthResults[0].reason });
+  if (groundTruthResults[1].status === "rejected") logger.warn("[telegram] Cross-channel check failed", { error: groundTruthResults[1].reason });
 
   // ELLIE-541: Populate working memory cache so buildPrompt can inject session context
   const _tgAgentName = agentResult?.dispatch.agent?.name || "general";
@@ -540,6 +577,8 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
     tgCrossChannel || undefined,
     undefined, // commandBarContext
     true,      // fullWorkingMemory — inject all 7 sections
+    undefined, // empathyGuidance
+    tgAgentLocalMemory || undefined,
   );
 
   // ── ELLIE-383: Context snapshot logging (journal only, not broadcast) ──
@@ -702,6 +741,16 @@ bot.on("message:voice", withQueue(async (ctx) => {
           gchatMessage: `🤖 ${agentName} agent dispatched`,
         }).catch((err) => logger.error("Dispatch confirm notification failed", err));
       }
+    } else {
+      // Routing failed — notify user and fall back to general agent
+      logger.error("routeAndDispatch returned null (voice), falling back to general agent");
+      setActiveAgent("telegram", "general");
+      notify(getNotifyCtx(), {
+        event: "dispatch_confirm",
+        workItemId: "routing_failure",
+        telegramMessage: "⚠️ Routing failed — falling back to general agent",
+        gchatMessage: "⚠️ Routing failed — using general agent",
+      }).catch((err) => logger.error("Routing failure notification failed", err));
     }
 
     const voiceActiveAgent = getActiveAgent("telegram");
@@ -714,7 +763,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
       logger.info("context mode changed", { mode: voiceContextMode, channel: "voice" });
     }
 
-    const [voiceConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, voiceQueueContext, liveForest] = await Promise.all([
+    const voiceResults = await Promise.allSettled([
       voiceConvoId && supabase ? getConversationMessages(supabase, voiceConvoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
       getContextDocket(),
       getRelevantContext(supabase, effectiveTranscription, "telegram", voiceActiveAgent, voiceConvoId),
@@ -725,6 +774,22 @@ bot.on("message:voice", withQueue(async (ctx) => {
       agentResult?.dispatch.is_new ? getQueueContext(voiceActiveAgent) : Promise.resolve(""),
       getLiveForestContext(effectiveTranscription),
     ]);
+    const voiceConvoContext = voiceResults[0].status === "fulfilled" ? voiceResults[0].value : { text: "", messageCount: 0, conversationId: "" };
+    const contextDocket = voiceResults[1].status === "fulfilled" ? voiceResults[1].value : "";
+    const relevantContext = voiceResults[2].status === "fulfilled" ? voiceResults[2].value : "";
+    const elasticContext = voiceResults[3].status === "fulfilled" ? voiceResults[3].value : "";
+    const structuredContext = voiceResults[4].status === "fulfilled" ? voiceResults[4].value : "";
+    const forestContext = voiceResults[5].status === "fulfilled" ? voiceResults[5].value : "";
+    const agentMemory = voiceResults[6].status === "fulfilled" ? voiceResults[6].value : "";
+    const voiceQueueContext = voiceResults[7].status === "fulfilled" ? voiceResults[7].value : "";
+    const liveForest = voiceResults[8].status === "fulfilled" ? voiceResults[8].value : { awareness: "", agentMap: "" };
+    // Log any failures
+    voiceResults.forEach((r, i) => {
+      if (r.status === "rejected") {
+        const sources = ["voiceConvoContext", "contextDocket", "relevantContext", "elasticContext", "structuredContext", "forestContext", "agentMemory", "voiceQueueContext", "liveForest"];
+        logger.warn(`[telegram-voice] Context source ${sources[i]} failed — using fallback`, { error: r.reason });
+      }
+    });
     const recentMessages = voiceConvoContext.text;
     if (agentResult?.dispatch.is_new && voiceQueueContext) {
       resilientTask("acknowledgeQueueItems", "critical", () => acknowledgeQueueItems(voiceActiveAgent));
@@ -754,6 +819,9 @@ bot.on("message:voice", withQueue(async (ctx) => {
         },
       },
     );
+
+    // ELLIE-1028: Fetch per-agent local memory for voice prompt injection
+    const voiceAgentLocalMemory = await getAgentMemorySummary(voiceActiveAgent, 2000).catch(() => "");
 
     // ── Voice multi-step branch (ELLIE-58) ──
     if (agentResult?.route.execution_mode !== "single" && agentResult?.route.skills?.length) {
@@ -840,6 +908,8 @@ bot.on("message:voice", withQueue(async (ctx) => {
             undefined, // crossChannelCorrections
             undefined, // commandBarContext
             true,      // fullWorkingMemory — inject all 7 sections
+            undefined, // empathyGuidance
+            voiceAgentLocalMemory || undefined,
           );
           const fallbackRaw = await callClaudeWithTyping(ctx, fallbackPrompt, { resume: true });
           const voiceFallbackAgent = agentResult?.dispatch.agent.name || "general";
@@ -889,6 +959,8 @@ bot.on("message:voice", withQueue(async (ctx) => {
       undefined, // crossChannelCorrections
       undefined, // commandBarContext
       true,      // fullWorkingMemory — inject all 7 sections
+      undefined, // empathyGuidance
+      voiceAgentLocalMemory || undefined,
     );
 
     // ── ELLIE-383: Context snapshot logging for voice ──

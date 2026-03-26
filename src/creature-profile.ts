@@ -37,7 +37,7 @@ const VALID_SECTION_LABELS = new Set([
   "forest-awareness", "search", "freshness", "staleness-warning",
   "source-hierarchy", "ground-truth-conflicts", "cross-channel-corrections",
   "work-item", "dev-protocol", "playbook-commands", "work-commands",
-  "planning-mode",
+  "planning-mode", "agent-local-memory",
 ]);
 
 // ── Parser ───────────────────────────────────────────────────
