@@ -202,6 +202,7 @@ import { handleAlertsRoute } from "./api/routes/alerts.ts";
 import { handleReactionsRoute } from "./api/routes/reactions.ts";
 import { handleEmojiPrefsRoute } from "./api/routes/emoji-prefs.ts";
 import { handleAgentMemoryRoute } from "./api/routes/agent-memory.ts";
+import { ingestDocument, ingestUrl, canIngest } from "./document-ingestion.ts";
 // ELLIE-547: CORS whitelist (replaces wildcard *)
 import { handlePreflight, corsHeader } from "./cors.ts";
 
@@ -6451,6 +6452,58 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
       }
     })();
+    return;
+  }
+
+  // ── ELLIE-1087: Document ingestion — POST /api/ingest/file ──
+  if (url.pathname === "/api/ingest/file" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { filename, content } = JSON.parse(body);
+        if (!filename || !content) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "filename and content (base64) are required" }));
+          return;
+        }
+        if (!canIngest(filename)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: `Unsupported file format: ${filename}` }));
+          return;
+        }
+        const buffer = Buffer.from(content, "base64");
+        const result = await ingestDocument(buffer, filename);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err: any) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Invalid request body" }));
+      }
+    });
+    return;
+  }
+
+  // ── ELLIE-1087: URL ingestion — POST /api/ingest/url ──
+  if (url.pathname === "/api/ingest/url" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { url: targetUrl } = JSON.parse(body);
+        if (!targetUrl) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "url is required" }));
+          return;
+        }
+        const result = await ingestUrl(targetUrl);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err: any) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Invalid request body" }));
+      }
+    });
     return;
   }
 
