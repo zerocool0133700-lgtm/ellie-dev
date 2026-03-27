@@ -6225,6 +6225,50 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // ── ELLIE-1073: Quality scoring framework — GET /api/quality/prompt ──
+  if (url.pathname === "/api/quality/prompt" && req.method === "GET") {
+    try {
+      const { getReviewPromptSection } = await import("./quality-scoring.ts");
+      const prompt = getReviewPromptSection();
+      res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req) });
+      res.end(JSON.stringify({ ok: true, prompt }));
+    } catch (err) { logger.error("Quality prompt error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    return;
+  }
+
+  // ── ELLIE-1073: Quality scoring framework — POST /api/quality/review ──
+  if (url.pathname === "/api/quality/review" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { buildReview, formatReviewMarkdown } = await import("./quality-scoring.ts");
+        const payload = JSON.parse(body);
+        const { target, dimensions, findings, workItemId, gateConfig } = payload;
+        if (!target || !dimensions || !Array.isArray(dimensions)) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing required fields: target, dimensions (array)" }));
+          return;
+        }
+        const review = buildReview({
+          target,
+          dimensions,
+          findings: findings || [],
+          workItemId,
+          gateConfig,
+        });
+        const markdown = formatReviewMarkdown(review);
+        res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req) });
+        res.end(JSON.stringify({ ok: true, review, markdown }));
+      } catch (err) {
+        logger.error("Quality review error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
+    return;
+  }
+
   res.writeHead(404);
   res.end("Not found");
 }
