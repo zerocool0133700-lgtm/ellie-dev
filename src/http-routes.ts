@@ -6269,6 +6269,91 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // ── ELLIE-1084: Atomic orchestrator endpoints ──────────────
+
+  // POST /api/atomic/decompose — decompose a work item into tasks (preview, no execution)
+  if (url.pathname === "/api/atomic/decompose" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { decomposeWorkItem } = await import("./task-decomposer.ts");
+        const payload = JSON.parse(body);
+        const { workItemId, title, description, acceptanceCriteria, codebaseContext } = payload;
+        if (!workItemId || !title || !description) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing required fields: workItemId, title, description" }));
+          return;
+        }
+        const decomposition = await decomposeWorkItem({ workItemId, title, description, acceptanceCriteria, codebaseContext });
+        res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req) });
+        res.end(JSON.stringify({ ok: true, decomposition }));
+      } catch (err) {
+        logger.error("Atomic decompose error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
+    return;
+  }
+
+  // POST /api/atomic/run — decompose AND execute atomically
+  if (url.pathname === "/api/atomic/run" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { executeAtomicRun } = await import("./atomic-orchestrator.ts");
+        const payload = JSON.parse(body);
+        const { workItemId, title, description, agent, model, acceptanceCriteria, codebaseContext, agentContext } = payload;
+        if (!workItemId || !title || !description || !agent) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing required fields: workItemId, title, description, agent" }));
+          return;
+        }
+        const result = await executeAtomicRun({
+          workItemId, title, description, agent, model, acceptanceCriteria, codebaseContext, agentContext,
+        });
+        // Serialize Map to plain object for JSON
+        const outputsObj: Record<string, string> = {};
+        for (const [k, v] of result.outputs) outputsObj[k] = v;
+        res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req) });
+        res.end(JSON.stringify({ ok: true, ...result, outputs: outputsObj }));
+      } catch (err) {
+        logger.error("Atomic run error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
+    return;
+  }
+
+  // GET /api/atomic/status/:runId — get run status from formation checkpoints
+  if (url.pathname.startsWith("/api/atomic/status/") && req.method === "GET") {
+    const runId = url.pathname.split("/api/atomic/status/")[1];
+    if (!runId) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Missing runId" }));
+      return;
+    }
+    try {
+      const { getFormationState } = await import("./formation-checkpoint.ts");
+      const state = await getFormationState(runId);
+      if (!state) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Run not found" }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req) });
+      res.end(JSON.stringify({ ok: true, state }));
+    } catch (err) {
+      logger.error("Atomic status error", err);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Internal server error" }));
+    }
+    return;
+  }
+
   res.writeHead(404);
   res.end("Not found");
 }
