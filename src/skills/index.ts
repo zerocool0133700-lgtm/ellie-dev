@@ -11,3 +11,5 @@ export { getSkillCommands, matchSkillCommand, matchInstantCommand } from "./comm
 export { startSkillWatcher, stopSkillWatcher } from "./watcher.ts";
 export type { SkillEntry, SkillFrontmatter, SkillSnapshot, SkillCommand } from "./types.ts";
 export { SKILL_LIMITS } from "./types.ts";
+export { extractMetadata, formatMetadataSection, classifySkills } from "./metadata.ts";
+export type { SkillMetadata, SkillDisclosureResult } from "./metadata.ts";

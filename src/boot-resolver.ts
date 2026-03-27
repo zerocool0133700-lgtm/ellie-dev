@@ -14,6 +14,7 @@
 import { readFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
 import { log } from "./logger.ts";
+import { loadCreature as loadUnifiedCreature, loadAllCreatures as loadAllUnifiedCreatures } from "./creature-loader.ts";
 
 const logger = log.child("boot-resolver");
 
@@ -103,32 +104,25 @@ export function parseCreature(raw: string): CreatureDef | null {
 
 /**
  * Load all creature definitions from the creatures/ directory.
+ * Uses unified loader (ELLIE-1075) which supports both legacy .md files
+ * and new directory structure (creatures/{name}/).
  */
 export function loadCreatures(dir?: string): Map<string, CreatureDef> {
-  const creaturesDir = dir ?? CREATURES_DIR;
-  if (!existsSync(creaturesDir)) return new Map();
-
-  const files = readdirSync(creaturesDir).filter(f => f.endsWith(".md"));
-  const creatures = new Map<string, CreatureDef>();
-
-  for (const file of files) {
-    const raw = readFileSync(join(creaturesDir, file), "utf-8");
-    const def = parseCreature(raw);
-    if (def) {
-      const key = def.role ?? def.name.toLowerCase();
-      creatures.set(key, def);
-    }
+  const unified = loadAllUnifiedCreatures(dir);
+  const result = new Map<string, CreatureDef>();
+  for (const [key, def] of unified) {
+    result.set(key, def);
   }
-
-  return creatures;
+  return result;
 }
 
 /**
  * Get a creature by agent name (matches role or name field).
+ * Uses unified loader (ELLIE-1075) which checks directory structure first,
+ * then falls back to legacy .md file.
  */
 export function getCreature(agentName: string, dir?: string): CreatureDef | null {
-  const creatures = loadCreatures(dir);
-  return creatures.get(agentName) ?? null;
+  return loadUnifiedCreature(agentName, dir) ?? null;
 }
 
 // ── Boot resolution ──────────────────────────────────────────────
