@@ -17,6 +17,7 @@ import { getForestContext } from "./elasticsearch/context.ts";
 import { trimSearchContext } from "./relay-utils.ts";
 import { USER_NAME } from "./prompt-builder.ts";
 import { log } from "./logger.ts";
+import { processVoiceCall } from "./voice-extraction.ts";
 
 const logger = log.child("voice-pipeline");
 
@@ -306,6 +307,26 @@ export function handleVoiceConnection(ws: WebSocket): void {
           source_agent_species: "ant",
         }))
         .catch(err => logger.warn("Failed to write Forest memory", { err: String(err) }));
+
+      // ELLIE-1065: Extract structured data (action items, decisions, speakers) from call
+      if (_deps.supabase && session.callSid) {
+        _deps.supabase
+          .from("messages")
+          .select("conversation_id")
+          .eq("channel", "voice")
+          .eq("metadata->>callSid", session.callSid)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .single()
+          .then(({ data }) => {
+            if (data?.conversation_id) {
+              processVoiceCall(_deps.supabase!, data.conversation_id, session.callSid!).catch(err =>
+                logger.warn("Voice extraction failed", { error: String(err) })
+              );
+            }
+          })
+          .catch(err => logger.warn("Failed to find conversation for extraction", { error: String(err) }));
+      }
     }
   });
 

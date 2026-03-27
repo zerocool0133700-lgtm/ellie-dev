@@ -6065,6 +6065,166 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // ── ELLIE-1065: Voice Extraction — GET /api/voice/calls/:conversationId/extraction ──
+  const voiceExtractionMatch = url.pathname.match(/^\/api\/voice\/calls\/([^/]+)\/extraction$/);
+  if (voiceExtractionMatch && req.method === "GET") {
+    const conversationId = voiceExtractionMatch[1];
+    (async () => {
+      try {
+        const { supabase } = getRelayDeps();
+        if (!supabase) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Database not available" }));
+          return;
+        }
+        const { getVoiceExtraction } = await import("./voice-extraction.ts");
+        const extraction = await getVoiceExtraction(supabase, conversationId);
+        if (!extraction) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "No extraction found for this conversation" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(extraction));
+      } catch (err) {
+        logger.error("Voice extraction endpoint error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
+  // Relationship Intelligence endpoints (ELLIE-1066)
+  if (url.pathname === "/api/relationships" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getRelationships } = await import("./relationship-tracker.ts");
+        const deps = getRelayDeps();
+        const status = url.searchParams.get("status") ?? undefined;
+        const limit = url.searchParams.get("limit") ? parseInt(url.searchParams.get("limit")!) : undefined;
+        const data = await getRelationships(deps.supabase, { status, limit });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(data));
+      } catch (err) { logger.error("Relationships list error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  const relationshipPersonMatch = url.pathname.match(/^\/api\/relationships\/([^/]+)$/);
+  if (relationshipPersonMatch && req.method === "GET") {
+    const personName = decodeURIComponent(relationshipPersonMatch[1]);
+    (async () => {
+      try {
+        const { getPersonProfile } = await import("./relationship-tracker.ts");
+        const deps = getRelayDeps();
+        const data = await getPersonProfile(deps.supabase, personName);
+        if (!data) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Person not found" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(data));
+      } catch (err) { logger.error("Relationship person profile error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  // Commitment Tracking endpoints (ELLIE-1067)
+  if (url.pathname === "/api/commitments/v2" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getOpenCommitments } = await import("./commitment-tracker.ts");
+        const deps = getRelayDeps();
+        const personName = url.searchParams.get("person") ?? undefined;
+        const assignee = url.searchParams.get("assignee") ?? undefined;
+        const includeOverdue = url.searchParams.get("includeOverdue") === "true";
+        const data = await getOpenCommitments(deps.supabase, { personName, assignee, includeOverdue });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(data));
+      } catch (err) { logger.error("Commitments v2 list error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/commitments/v2" && req.method === "POST") {
+    (async () => {
+      try {
+        const { createCommitment } = await import("./commitment-tracker.ts");
+        const deps = getRelayDeps();
+        const body = await new Promise<string>((resolve) => { let d = ""; req.on("data", (c: Buffer) => d += c); req.on("end", () => resolve(d)); });
+        const parsed = JSON.parse(body);
+        const data = await createCommitment(deps.supabase, {
+          content: parsed.content,
+          personName: parsed.person_name,
+          assignee: parsed.assignee,
+          dueDate: parsed.due_date,
+          sourceConversationId: parsed.source_conversation_id,
+          sourceChannel: parsed.source_channel,
+        });
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(data));
+      } catch (err) { logger.error("Commitments v2 create error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  const commitmentCompleteMatch = url.pathname.match(/^\/api\/commitments\/v2\/([^/]+)\/complete$/);
+  if (commitmentCompleteMatch && req.method === "POST") {
+    const id = commitmentCompleteMatch[1];
+    (async () => {
+      try {
+        const { completeCommitment } = await import("./commitment-tracker.ts");
+        const deps = getRelayDeps();
+        await completeCommitment(deps.supabase, id);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (err) { logger.error("Commitment v2 complete error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/commitments/v2/overdue" && req.method === "GET") {
+    (async () => {
+      try {
+        const { detectOverdueCommitments } = await import("./commitment-tracker.ts");
+        const deps = getRelayDeps();
+        const data = await detectOverdueCommitments(deps.supabase);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(data));
+      } catch (err) { logger.error("Commitments v2 overdue error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  // Meeting Prep endpoint (ELLIE-1068)
+  const meetingPrepMatch = url.pathname.match(/^\/api\/meeting-prep\/([^/]+)$/);
+  if (meetingPrepMatch && req.method === "GET") {
+    const personName = decodeURIComponent(meetingPrepMatch[1]);
+    (async () => {
+      try {
+        const { generateMeetingPrep } = await import("./meeting-prep.ts");
+        const deps = getRelayDeps();
+        const brief = await generateMeetingPrep(deps.supabase, personName);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(brief));
+      } catch (err) { logger.error("Meeting prep error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    })();
+    return;
+  }
+
+  // Decision Consistency endpoint (ELLIE-1070)
+  if (url.pathname === "/api/decisions/consistency" && req.method === "GET") {
+    try {
+      const { generateConsistencyReport } = await import("./decision-consistency.ts");
+      const report = generateConsistencyReport();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(report));
+    } catch (err) { logger.error("Decision consistency error", err); res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "Internal server error" })); }
+    return;
+  }
+
   res.writeHead(404);
   res.end("Not found");
 }
