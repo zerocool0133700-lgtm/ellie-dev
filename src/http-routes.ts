@@ -6354,6 +6354,97 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // ── Wiki Synthesis (ELLIE-1047) — POST /api/wiki/synthesize ──
+  if (url.pathname === "/api/wiki/synthesize" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const { scope_path, scope_name } = JSON.parse(body);
+        if (!scope_path || !scope_name) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "scope_path and scope_name required" }));
+          return;
+        }
+        const { getMemoriesForWiki, computeCentroid, rankByCentroid, synthesizeArticle } = await import("../../ellie-forest/src/wiki-synthesis.ts");
+        const memories = await getMemoriesForWiki(scope_path);
+        const embeddings = memories.filter(m => m.embedding).map(m => m.embedding as number[]);
+        const centroid = computeCentroid(embeddings);
+        const ranked = rankByCentroid(memories, centroid);
+        const result = await synthesizeArticle({ scopePath: scope_path, scopeName: scope_name, memories: ranked });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ content: result.content, memory_ids: result.memoryIds, generated_at: new Date().toISOString() }));
+      } catch (err: any) {
+        logger.error("Wiki synthesis error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+      }
+    });
+    return;
+  }
+
+  // ── Knowledge Canvas (ELLIE-1048) — GET /api/knowledge-canvas ──
+  if (url.pathname === "/api/knowledge-canvas" && req.method === "GET") {
+    (async () => {
+      try {
+        const { sql: forestSql } = await import("../../ellie-forest/src/index.ts");
+        const scopePath = url.searchParams.get("scope_path") || "2";
+        const limit = Math.min(parseInt(url.searchParams.get("limit") || "100", 10), 500);
+
+        // Fetch memory nodes
+        const nodes = scopePath === "2"
+          ? await forestSql`
+              SELECT id, content, type, scope_path, importance_score
+              FROM shared_memories
+              WHERE archived_at IS NULL
+              ORDER BY importance_score DESC NULLS LAST, created_at DESC
+              LIMIT ${limit}
+            `
+          : await forestSql`
+              SELECT id, content, type, scope_path, importance_score
+              FROM shared_memories
+              WHERE archived_at IS NULL AND scope_path LIKE ${scopePath + '%'}
+              ORDER BY importance_score DESC NULLS LAST, created_at DESC
+              LIMIT ${limit}
+            `;
+
+        const nodeIds = nodes.map((n: any) => n.id);
+
+        // Fetch edges between the returned nodes
+        const edges = nodeIds.length > 0
+          ? await forestSql`
+              SELECT source_memory_id, target_memory_id, similarity
+              FROM semantic_edges
+              WHERE source_memory_id = ANY(${nodeIds}) AND target_memory_id = ANY(${nodeIds})
+            `
+          : [];
+
+        const result = {
+          nodes: nodes.map((n: any) => ({
+            id: n.id,
+            label: (n.content || "").slice(0, 50) + ((n.content || "").length > 50 ? "..." : ""),
+            type: n.type,
+            scope: n.scope_path || "",
+            importance: n.importance_score ?? 0.5,
+          })),
+          edges: (edges as any[]).map((e: any) => ({
+            source: e.source_memory_id,
+            target: e.target_memory_id,
+            weight: e.similarity,
+          })),
+        };
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch (err: any) {
+        logger.error("Knowledge canvas error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
   res.writeHead(404);
   res.end("Not found");
 }
