@@ -13,8 +13,22 @@ import { RELAY_EPOCH } from "./relay-epoch.ts";
 import { breakers } from "./resilience.ts";
 import { guardAgentDispatch, resolveRbacEntityId, formatDenialMessage, type GuardConfig, DEFAULT_GUARD_CONFIG } from "./permission-guard.ts";
 import { logCheck } from "./permission-audit.ts";
+import { getAllowedMCPs } from "./tool-access-control.ts";
+import { canPerformRole } from "./segregation-of-duties.ts";
 
 const logger = log.child("agent-router");
+
+export type DispatchFailureReason = "breaker_open" | "timeout" | "edge_fn_error" | "missing_data" | "local_fallback_failed";
+
+/** Classify why a circuit breaker call returned fallback. */
+function classifyBreakerFailure(breaker: typeof breakers.edgeFn, hadResult: boolean): DispatchFailureReason {
+  const { state } = breaker.getState();
+  if (state === "open") return "breaker_open";
+  const lastErr = breaker.lastError;
+  if (lastErr instanceof Error && lastErr.message.includes("timeout")) return "timeout";
+  if (!hadResult) return "edge_fn_error";
+  return "missing_data";
+}
 
 export interface AgentConfig {
   name: string;
@@ -52,8 +66,8 @@ export interface DispatchResult {
     name: string;
     description: string;
   };
-  /** ELLIE-839: Resolved boot packet for prompt injection. */
-  boot_packet?: string;
+  allowed_mcps?: string[];  // Filtered list of allowed MCP servers (ELLIE-970)
+
 }
 
 export interface SyncResult {
@@ -85,7 +99,8 @@ export async function routeMessage(
   );
 
   if (!invoked || !invoked.data?.agent_name) {
-    logger.error("Route error", "no agent_name or breaker open");
+    const reason = classifyBreakerFailure(breakers.edgeFn, !!invoked);
+    logger.error("Route failed", { reason, error: reason !== "missing_data" ? String(breakers.edgeFn.lastError) : "edge function returned no agent_name" });
     return null;
   }
 
@@ -204,6 +219,9 @@ async function localDispatch(
     `Local dispatch: ${isNew ? "New" : "Resumed"} session ${sessionId.slice(0, 8)} for ${agentName}`,
   );
 
+  // ELLIE-970: Apply tool access filtering
+  const allowedMCPs = getAllowedMCPs(agent.tools_enabled, agent.name);
+
   return {
     session_id: sessionId,
     agent: {
@@ -217,6 +235,7 @@ async function localDispatch(
     is_new: isNew,
     context_summary: contextSummary,
     skill_context: skillContext,
+    allowed_mcps: allowedMCPs,
   };
 }
 
@@ -248,14 +267,26 @@ export async function dispatchAgent(
   );
 
   if (!invoked || !invoked.data?.session_id) {
-    logger.warn("Edge dispatch failed, trying local fallback", "no session_id or breaker open");
-    return localDispatch(supabase, agentName, userId, channel, message, workItemId, skillName);
+    const reason = classifyBreakerFailure(breakers.edgeFn, !!invoked);
+    logger.warn("Edge dispatch failed, trying local fallback", { reason, error: String(breakers.edgeFn.lastError) });
+    const localResult = await localDispatch(supabase, agentName, userId, channel, message, workItemId, skillName);
+    if (!localResult) {
+      logger.error("Local dispatch also failed", { reason: "local_fallback_failed", agent: agentName });
+    }
+    return localResult;
   }
 
   logger.info(
     `${invoked.data.is_new ? "New" : "Resumed"} session ${invoked.data.session_id.slice(0, 8)} for ${agentName}`,
   );
-  return invoked.data as DispatchResult;
+
+  // ELLIE-970: Apply tool access filtering for edge function result
+  const result = invoked.data as DispatchResult;
+  if (!result.allowed_mcps) {
+    result.allowed_mcps = getAllowedMCPs(result.agent.tools_enabled, result.agent.name);
+  }
+
+  return result;
 }
 
 /**
@@ -353,7 +384,8 @@ export async function syncResponse(
   );
 
   if (!invoked) {
-    logger.warn("Edge sync failed, trying local fallback", "breaker open");
+    const reason = classifyBreakerFailure(breakers.edgeFn, false);
+    logger.warn("Edge sync failed, trying local fallback", { reason, error: String(breakers.edgeFn.lastError) });
     return localSync(supabase, sessionId, assistantMessage, options);
   }
 
@@ -400,39 +432,36 @@ export async function routeAndDispatch(
   try {
     const { default: forestSql } = await import('../../ellie-forest/src/db');
     const entityId = await resolveRbacEntityId(forestSql, route.agent_name);
-    if (entityId) {
-      const guard = await guardAgentDispatch(forestSql, entityId, route.agent_name);
-      logCheck(entityId, "agents", "dispatch", guard.allowed ? "allow" : "deny", undefined, route.agent_name);
-      if (!guard.allowed && guard.denial) {
-        logger.warn(`[rbac] ${formatDenialMessage(guard.denial)}`);
-        return null;
-      }
+    if (!entityId) {
+      // Cannot resolve agent entity — fail closed
+      logger.error(`[rbac] Cannot resolve entity ID for agent '${route.agent_name}', denying dispatch`);
+      return null;
+    }
+    const guard = await guardAgentDispatch(forestSql, entityId, route.agent_name);
+    logCheck(entityId, "agents", "dispatch", guard.allowed ? "allow" : "deny", undefined, route.agent_name);
+    if (!guard.allowed && guard.denial) {
+      logger.warn(`[rbac] ${formatDenialMessage(guard.denial)}`);
+      return null;
     }
   } catch (err) {
-    // RBAC check failure should not block dispatch — log and continue
-    logger.error("[rbac] Guard check failed, allowing dispatch", err);
+    // RBAC check failure should block dispatch — security checks must fail closed
+    logger.error("[rbac] Guard check failed, denying dispatch", err);
+    return null;
   }
 
-  // ELLIE-839: Boot-up packet resolution
-  let bootPacket: string | undefined;
+  // SOD check — verify creature can perform this role (advisory only)
   try {
-    const { getCreature, resolveBootRequirements, formatBootPacket, canDispatch } = await import("./boot-resolver.ts");
-    const creature = getCreature(route.agent_name);
-    if (creature?.boot_requirements) {
-      const resolution = resolveBootRequirements(creature, {
-        workItemId: workItemId,
-        channel,
-      });
-      const dispatchCheck = canDispatch(resolution);
-      if (!dispatchCheck.allowed) {
-        logger.warn(`[boot] ${dispatchCheck.reason}`);
-        // Don't block — boot failures are soft (except identity which is logged)
-      }
-      bootPacket = formatBootPacket(resolution);
-      logger.info(`[boot] ${route.agent_name}: ${resolution.summary}`);
+    const creatureArchetype = route.agent_name; // e.g., "dev", "critic"
+    // Determine role from context: if this is a review request, role is "reviewer"
+    // For now, just validate the creature can be a "maker" (default role)
+    const defaultRole = "maker" as const;
+    if (!canPerformRole(creatureArchetype, defaultRole)) {
+      logger.warn(`[sod] ${creatureArchetype} cannot perform role ${defaultRole}`, { agent: route.agent_name });
+      // Don't block — just warn. SOD is advisory for now.
     }
   } catch (err) {
-    logger.error("[boot] Boot resolution failed, continuing without packet", err);
+    // SOD is advisory — don't block dispatch on failure
+    logger.warn("[sod] Check failed, continuing dispatch", err);
   }
 
   const effectiveWorkItemId = workItemId;
@@ -458,10 +487,6 @@ export async function routeAndDispatch(
     };
   }
 
-  // ELLIE-839: Attach boot packet to dispatch result
-  if (bootPacket) {
-    dispatch.boot_packet = bootPacket;
-  }
 
   return { route, dispatch };
 }

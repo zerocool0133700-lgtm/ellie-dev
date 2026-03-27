@@ -153,5 +153,80 @@ export async function getPersonProfile(
   return data as PersonRelationship | null;
 }
 
+/**
+ * Normalize a person name for matching.
+ * Lowercase, trim, collapse whitespace.
+ */
+export function normalizeName(name: string): string {
+  return name.toLowerCase().trim().replace(/\s+/g, " ");
+}
+
+/**
+ * Check if two names might be the same person.
+ * Simple heuristic: one name contains the other, or first names match.
+ */
+export function mightBeAlias(nameA: string, nameB: string): boolean {
+  const a = normalizeName(nameA);
+  const b = normalizeName(nameB);
+  if (a === b) return true;
+  if (a.includes(b) || b.includes(a)) return true;
+  // First name match
+  const firstA = a.split(" ")[0];
+  const firstB = b.split(" ")[0];
+  if (firstA.length >= 3 && firstA === firstB) return true;
+  return false;
+}
+
+/**
+ * Find potential aliases for a person across all relationships.
+ */
+export async function findPotentialAliases(
+  supabase: SupabaseClient,
+  personName: string
+): Promise<Array<{ id: string; person_name: string; similarity: string }>> {
+  const { data } = await supabase
+    .from("person_relationships")
+    .select("id, person_name")
+    .neq("person_name", personName);
+
+  if (!data) return [];
+
+  return data
+    .filter(p => mightBeAlias(p.person_name, personName))
+    .map(p => ({
+      id: p.id,
+      person_name: p.person_name,
+      similarity: normalizeName(p.person_name) === normalizeName(personName) ? "exact" : "partial",
+    }));
+}
+
+/**
+ * Merge two person records (combine stats, keep canonical name).
+ */
+export async function mergePersonRecords(
+  supabase: SupabaseClient,
+  canonicalId: string,
+  mergeId: string
+): Promise<void> {
+  const { data: canonical } = await supabase.from("person_relationships").select("*").eq("id", canonicalId).single();
+  const { data: merge } = await supabase.from("person_relationships").select("*").eq("id", mergeId).single();
+
+  if (!canonical || !merge) return;
+
+  await supabase
+    .from("person_relationships")
+    .update({
+      aliases: [...new Set([...(canonical.aliases || []), merge.person_name, ...(merge.aliases || [])])],
+      meeting_count: canonical.meeting_count + merge.meeting_count,
+      channels: [...new Set([...(canonical.channels || []), ...(merge.channels || [])])],
+      top_topics: [...new Set([...(canonical.top_topics || []), ...(merge.top_topics || [])])].slice(0, 10),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", canonicalId);
+
+  await supabase.from("person_relationships").delete().eq("id", mergeId);
+  logger.info("Merged person records", { canonical: canonical.person_name, merged: merge.person_name });
+}
+
 // Export for testing
 export { LOSING_TOUCH_DAYS, SCORE_DECAY_RATE };

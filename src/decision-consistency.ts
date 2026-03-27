@@ -79,13 +79,14 @@ export function checkContradictions(): ConsistencyReport["contradictions"] {
         const a = topicDecisions[i];
         const b = topicDecisions[j];
 
-        // Only flag if texts are substantially different
-        if (a.text.toLowerCase() !== b.text.toLowerCase()) {
+        // Only flag as contradiction if texts are substantially DIFFERENT
+        const similarity = textSimilarity(a.text, b.text);
+        if (similarity < 0.5) {  // Less than 50% word overlap = likely contradiction
           contradictions.push({
             decisionA: a,
             decisionB: b,
             topic,
-            reason: `Different conclusions on "${topic}"`,
+            reason: `Different conclusions on "${topic}" (similarity: ${Math.round(similarity * 100)}%)`,
           });
         }
       }
@@ -123,6 +124,24 @@ export function generateConsistencyReport(): ConsistencyReport {
  */
 export function getDecisionsByTopic(topic: string): TrackedDecision[] {
   return decisions.filter(d => d.topic === topic.toLowerCase());
+}
+
+/**
+ * Calculate simple text similarity (Jaccard on word sets).
+ * Returns 0-1 where 1 = identical word sets.
+ */
+export function textSimilarity(a: string, b: string): number {
+  const wordsA = new Set(a.toLowerCase().split(/\s+/).filter(w => w.length > 2));
+  const wordsB = new Set(b.toLowerCase().split(/\s+/).filter(w => w.length > 2));
+  if (wordsA.size === 0 && wordsB.size === 0) return 1;
+
+  let intersection = 0;
+  for (const w of wordsA) {
+    if (wordsB.has(w)) intersection++;
+  }
+
+  const union = new Set([...wordsA, ...wordsB]).size;
+  return union > 0 ? intersection / union : 0;
 }
 
 /** Reset for testing */

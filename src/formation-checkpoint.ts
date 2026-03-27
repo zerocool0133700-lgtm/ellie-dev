@@ -4,6 +4,8 @@
  */
 
 import { log } from "./logger.ts";
+import { writeFile, readFile, mkdir } from "node:fs/promises";
+import { join } from "node:path";
 
 const logger = log.child("formation:checkpoint");
 
@@ -26,8 +28,29 @@ export interface FormationState {
   lastCheckpointAt: string;
 }
 
-// In-memory checkpoint store (persist to Forest for durability)
+// In-memory checkpoint store (persist to disk for durability)
 const states = new Map<string, FormationState>();
+
+const CHECKPOINT_DIR = join(import.meta.dir, "..", ".checkpoints");
+
+async function persistToDisk(formationId: string, state: FormationState): Promise<void> {
+  try {
+    await mkdir(CHECKPOINT_DIR, { recursive: true });
+    await writeFile(
+      join(CHECKPOINT_DIR, `${formationId}.json`),
+      JSON.stringify(state, null, 2)
+    );
+  } catch {}
+}
+
+async function loadFromDisk(formationId: string): Promise<FormationState | null> {
+  try {
+    const data = await readFile(join(CHECKPOINT_DIR, `${formationId}.json`), "utf-8");
+    return JSON.parse(data);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Initialize formation state for a new run.
@@ -79,16 +102,23 @@ export function saveCheckpoint(
   }
 
   logger.info("Checkpoint saved", { formationId, stepId: checkpoint.stepId, status: checkpoint.status });
+
+  // Persist to disk (non-blocking, non-fatal)
+  persistToDisk(formationId, state).catch(() => {});
 }
 
 /**
  * Get the last successful checkpoint for resume.
  */
-export function getResumePoint(formationId: string): {
+export async function getResumePoint(formationId: string): Promise<{
   lastCompletedStep: number;
   completedOutputs: Map<string, Record<string, unknown>>;
-} | null {
-  const state = states.get(formationId);
+} | null> {
+  let state = states.get(formationId);
+  if (!state) {
+    state = await loadFromDisk(formationId) ?? undefined;
+    if (state) states.set(formationId, state); // Re-hydrate in memory
+  }
   if (!state) return null;
 
   const completed = state.checkpoints.filter(c => c.status === "completed");
@@ -107,8 +137,8 @@ export function getResumePoint(formationId: string): {
 /**
  * Check if a formation can be resumed.
  */
-export function canResume(formationId: string): boolean {
-  const state = states.get(formationId);
+export async function canResume(formationId: string): Promise<boolean> {
+  const state = await getFormationState(formationId);
   if (!state) return false;
   return state.status === "failed" || state.status === "paused";
 }
@@ -116,8 +146,13 @@ export function canResume(formationId: string): boolean {
 /**
  * Get formation state.
  */
-export function getFormationState(formationId: string): FormationState | null {
-  return states.get(formationId) ?? null;
+export async function getFormationState(formationId: string): Promise<FormationState | null> {
+  let state = states.get(formationId) ?? null;
+  if (!state) {
+    state = await loadFromDisk(formationId);
+    if (state) states.set(formationId, state); // Re-hydrate in memory
+  }
+  return state;
 }
 
 /**

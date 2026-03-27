@@ -41,4 +41,18 @@ describe("ELLIE-1066: Relationship intelligence", () => {
       expect(typeof mod.getPersonProfile).toBe("function");
     });
   });
+
+  describe("alias detection", () => {
+    it("normalizeName lowercases and trims", async () => {
+      const { normalizeName } = await import("../src/relationship-tracker.ts");
+      expect(normalizeName("  Alex Chen  ")).toBe("alex chen");
+    });
+
+    it("mightBeAlias detects partial matches", async () => {
+      const { mightBeAlias } = await import("../src/relationship-tracker.ts");
+      expect(mightBeAlias("Alex", "alex")).toBe(true);
+      expect(mightBeAlias("Alex Chen", "Alex")).toBe(true);
+      expect(mightBeAlias("Alex", "Bob")).toBe(false);
+    });
+  });
 });

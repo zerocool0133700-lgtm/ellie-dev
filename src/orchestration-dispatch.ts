@@ -25,6 +25,7 @@ import { withTrace, getTraceId, generateTraceId } from "./trace.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
 import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost, writeJobTouchpointForAgent } from "./jobs-ledger.ts";
 import { estimateTokens } from "./relay-utils.ts";
+import { recordUsage, shouldBlock } from "./creature-cost-tracker.ts";
 import { startCreature, failCreature, completeCreature, dispatchPushCreature, writeJobCompletionMetric } from "../../ellie-forest/src/index";
 import { postCreatureEvent, postJobEvent } from "./channels/discord/observation.ts";
 import { RELAY_BASE_URL } from "./relay-config.ts";
@@ -186,6 +187,12 @@ export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispat
 async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<void> {
   const { agentType, workItemId, channel, playbookCtx } = opts;
   const ctx = playbookCtx;
+
+  // Cost control check — log warning but don't block (can make blocking later)
+  const costCheck = shouldBlock(agentType);
+  if (costCheck.blocked) {
+    logger.warn("Dispatch cost warning — budget exceeded", { agent: agentType, reason: costCheck.reason, workItemId });
+  }
 
   const notifyCtx: NotifyContext = {
     bot: ctx.bot,
@@ -495,6 +502,16 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       const tokensIn = estimateTokens(prompt, dispatch.agent.model ?? undefined);
       const tokensOut = estimateTokens(rawResponse, dispatch.agent.model ?? undefined);
       const costUsd = estimateJobCost(dispatch.agent.model, tokensIn, tokensOut);
+      // Record usage in per-creature cost tracker
+      const costResult = recordUsage({
+        creature: agentType,
+        model: dispatch.agent.model || "sonnet",
+        inputTokens: tokensIn,
+        outputTokens: tokensOut,
+      });
+      if (costResult.alerts.length > 0) {
+        logger.warn("Cost alerts after dispatch", { creature: agentType, alerts: costResult.alerts, sessionTotal: costResult.sessionTotal, dailyTotal: costResult.dailyTotal });
+      }
       await updateJob(jobId, {
         status: finalStatus, total_duration_ms: durationMs, current_step: null,
         tokens_in: tokensIn, tokens_out: tokensOut, cost_usd: costUsd,

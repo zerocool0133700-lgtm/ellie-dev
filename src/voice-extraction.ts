@@ -120,7 +120,9 @@ export async function processVoiceCall(
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: true });
 
-  if (!messages || messages.length === 0) {
+  const MIN_MESSAGES_FOR_EXTRACTION = 3;
+  if (!messages || messages.length < MIN_MESSAGES_FOR_EXTRACTION) {
+    logger.debug("Skipping extraction — too few messages", { count: messages?.length ?? 0, min: MIN_MESSAGES_FOR_EXTRACTION });
     return emptyExtraction();
   }
 

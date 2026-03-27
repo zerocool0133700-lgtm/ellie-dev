@@ -8,6 +8,7 @@
 
 import { log } from "./logger.ts";
 import { encodingForModel } from "js-tiktoken";
+import { compressSection, type CompressedSection } from "./section-compressor.ts";
 
 const logger = log.child("relay-utils");
 
@@ -216,6 +217,113 @@ export function applyTokenBudget(
 
   const finalTokens = estimateTokens(result.join('\n'));
   logger.warn("Final prompt after trimming", { tokens: finalTokens, targetMax: effectiveMax });
+
+  return result.join('\n');
+}
+
+/**
+ * Async version of applyTokenBudget that tries compression before dropping.
+ * Priority tiers:
+ *   1-5: Include (never trimmed)
+ *   6-8: Try compression via section-compressor before dropping
+ *   9+:  Suppress entirely (no compression attempt)
+ *
+ * The original sync applyTokenBudget is preserved unchanged.
+ */
+export async function applyTokenBudgetWithCompression(
+  sections: PromptSection[],
+  maxTokens: number = 150_000,
+): Promise<string> {
+  // Apply 10% buffer margin to account for system prompt overhead (ELLIE-245)
+  const effectiveMax = Math.floor(maxTokens * 0.9);
+
+  // Fast path: if under budget, just join
+  const joined = sections.map(s => s.content).join('\n');
+  const totalTokens = estimateTokens(joined);
+
+  if (totalTokens <= effectiveMax) {
+    return joined;
+  }
+
+  // Over budget — need to trim by removing/truncating sections
+  logger.warn(
+    `Prompt exceeds budget — trimming with compression`,
+    { totalTokens, effectiveMax, overBy: totalTokens - effectiveMax }
+  );
+
+  // Pre-compute token counts per section
+  const sectionTokens = sections.map(s => estimateTokens(s.content));
+  let tokensToTrim = totalTokens - effectiveMax;
+
+  // Sort trimmable sections: highest priority number first, then largest first
+  const trimmable = sections
+    .map((s, i) => ({ ...s, index: i, tokens: sectionTokens[i] }))
+    .filter(s => s.priority > 1)
+    .sort((a, b) => b.priority - a.priority || b.tokens - a.tokens);
+
+  const trimmed = new Set<number>();
+  const truncatedContent = new Map<number, string>();
+
+  for (const section of trimmable) {
+    if (tokensToTrim <= 0) break;
+
+    // Priority 9+: suppress entirely (no compression attempt)
+    if (section.priority >= 9) {
+      trimmed.add(section.index);
+      tokensToTrim -= section.tokens;
+      logger.warn("Suppressed section", { label: section.label, tokens: section.tokens });
+      continue;
+    }
+
+    // Priority 6-8: try compression before dropping
+    if (section.priority >= 6 && section.tokens >= 100) {
+      try {
+        const compressed = await compressSection(section.label, section.content, section.priority);
+        if (compressed.compressed && compressed.shadowId) {
+          const savedTokens = section.tokens - estimateTokens(compressed.content);
+          if (savedTokens > 0) {
+            truncatedContent.set(section.index, compressed.content);
+            tokensToTrim -= savedTokens;
+            logger.info("Compressed section", { label: section.label, saved: savedTokens, shadowId: compressed.shadowId });
+            continue;
+          }
+        }
+      } catch {
+        // Compression failed — fall through to drop
+      }
+    }
+
+    // Fallback: drop or truncate (same logic as sync version)
+    if (section.tokens <= tokensToTrim) {
+      trimmed.add(section.index);
+      tokensToTrim -= section.tokens;
+      logger.warn("Dropped section", { label: section.label, tokens: section.tokens });
+    } else {
+      // Truncate this section — estimate how much text to keep
+      const keepRatio = 1 - (tokensToTrim / section.tokens);
+      const keepChars = Math.floor(section.content.length * keepRatio);
+      const truncatedText = section.content.slice(0, keepChars);
+      const lastNewline = truncatedText.lastIndexOf('\n');
+      const cleanCut = lastNewline > keepChars * 0.5 ? truncatedText.slice(0, lastNewline) : truncatedText;
+      truncatedContent.set(section.index, cleanCut + `\n[...truncated — ${section.label}]`);
+      logger.warn("Truncated section", { label: section.label, originalTokens: section.tokens, keptChars: cleanCut.length });
+      tokensToTrim = 0;
+    }
+  }
+
+  // Reassemble with trimmed/truncated sections
+  const result: string[] = [];
+  for (let i = 0; i < sections.length; i++) {
+    if (trimmed.has(i)) continue;
+    if (truncatedContent.has(i)) {
+      result.push(truncatedContent.get(i)!);
+    } else {
+      result.push(sections[i].content);
+    }
+  }
+
+  const finalTokens = estimateTokens(result.join('\n'));
+  logger.warn("Final prompt after compression+trimming", { tokens: finalTokens, targetMax: effectiveMax });
 
   return result.join('\n');
 }

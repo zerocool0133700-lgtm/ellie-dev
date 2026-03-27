@@ -20,62 +20,62 @@ describe("ELLIE-1081: Formation checkpoint/resume", () => {
   });
 
   describe("saveCheckpoint", () => {
-    it("records completed step", () => {
+    it("records completed step", async () => {
       initFormation({ formationId: "f1", workflowName: "test", totalSteps: 3 });
       saveCheckpoint("f1", { stepIndex: 0, stepId: "lint", status: "completed", outputs: { clean: true } });
-      const state = getFormationState("f1");
+      const state = await getFormationState("f1");
       expect(state!.checkpoints.length).toBe(1);
       expect(state!.checkpoints[0].stepId).toBe("lint");
     });
 
-    it("marks formation failed on step failure", () => {
+    it("marks formation failed on step failure", async () => {
       initFormation({ formationId: "f1", workflowName: "test", totalSteps: 3 });
       saveCheckpoint("f1", { stepIndex: 0, stepId: "lint", status: "failed", outputs: {} });
-      expect(getFormationState("f1")!.status).toBe("failed");
+      expect((await getFormationState("f1"))!.status).toBe("failed");
     });
 
-    it("marks formation completed when all steps done", () => {
+    it("marks formation completed when all steps done", async () => {
       initFormation({ formationId: "f1", workflowName: "test", totalSteps: 2 });
       saveCheckpoint("f1", { stepIndex: 0, stepId: "lint", status: "completed", outputs: {} });
       saveCheckpoint("f1", { stepIndex: 1, stepId: "test", status: "completed", outputs: {} });
-      expect(getFormationState("f1")!.status).toBe("completed");
+      expect((await getFormationState("f1"))!.status).toBe("completed");
     });
   });
 
   describe("getResumePoint", () => {
-    it("returns last completed step and outputs", () => {
+    it("returns last completed step and outputs", async () => {
       initFormation({ formationId: "f1", workflowName: "test", totalSteps: 5 });
       saveCheckpoint("f1", { stepIndex: 0, stepId: "lint", status: "completed", outputs: { clean: true } });
       saveCheckpoint("f1", { stepIndex: 1, stepId: "test", status: "completed", outputs: { passed: 42 } });
       saveCheckpoint("f1", { stepIndex: 2, stepId: "review", status: "failed", outputs: {} });
 
-      const resume = getResumePoint("f1");
+      const resume = await getResumePoint("f1");
       expect(resume).not.toBeNull();
       expect(resume!.lastCompletedStep).toBe(1);
       expect(resume!.completedOutputs.get("test")).toEqual({ passed: 42 });
     });
 
-    it("returns null for unknown formation", () => {
-      expect(getResumePoint("nonexistent")).toBeNull();
+    it("returns null for unknown formation", async () => {
+      expect(await getResumePoint("nonexistent")).toBeNull();
     });
   });
 
   describe("canResume", () => {
-    it("can resume failed formations", () => {
+    it("can resume failed formations", async () => {
       initFormation({ formationId: "f1", workflowName: "test", totalSteps: 3 });
       saveCheckpoint("f1", { stepIndex: 0, stepId: "lint", status: "failed", outputs: {} });
-      expect(canResume("f1")).toBe(true);
+      expect(await canResume("f1")).toBe(true);
     });
 
-    it("cannot resume completed formations", () => {
+    it("cannot resume completed formations", async () => {
       initFormation({ formationId: "f1", workflowName: "test", totalSteps: 1 });
       saveCheckpoint("f1", { stepIndex: 0, stepId: "only", status: "completed", outputs: {} });
-      expect(canResume("f1")).toBe(false);
+      expect(await canResume("f1")).toBe(false);
     });
 
-    it("cannot resume running formations", () => {
+    it("cannot resume running formations", async () => {
       initFormation({ formationId: "f1", workflowName: "test", totalSteps: 3 });
-      expect(canResume("f1")).toBe(false);
+      expect(await canResume("f1")).toBe(false);
     });
   });
 });

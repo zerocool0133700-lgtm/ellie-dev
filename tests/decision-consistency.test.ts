@@ -23,8 +23,8 @@ describe("ELLIE-1070: Decision consistency checking", () => {
 
   describe("checkContradictions", () => {
     it("detects contradicting decisions on same topic", () => {
-      recordDecision({ text: "Go with monthly billing", topic: "pricing" });
-      recordDecision({ text: "Go with annual billing", topic: "pricing" });
+      recordDecision({ text: "Go with monthly billing cycles", topic: "pricing" });
+      recordDecision({ text: "Switch to annual contracts instead", topic: "pricing" });
       const contradictions = checkContradictions();
       expect(contradictions.length).toBe(1);
       expect(contradictions[0].topic).toBe("pricing");
@@ -87,6 +87,25 @@ describe("ELLIE-1070: Decision consistency checking", () => {
   describe("constants", () => {
     it("stale threshold is 90 days", () => {
       expect(STALE_DECISION_DAYS).toBe(90);
+    });
+  });
+
+  describe("textSimilarity", () => {
+    it("returns 1 for identical text", async () => {
+      const { textSimilarity } = await import("../src/decision-consistency.ts");
+      expect(textSimilarity("go with monthly", "go with monthly")).toBe(1);
+    });
+
+    it("returns high similarity for restatements", async () => {
+      const { textSimilarity } = await import("../src/decision-consistency.ts");
+      const sim = textSimilarity("go with monthly billing", "monthly billing approved");
+      expect(sim).toBeGreaterThan(0.3);
+    });
+
+    it("returns low similarity for contradictions", async () => {
+      const { textSimilarity } = await import("../src/decision-consistency.ts");
+      const sim = textSimilarity("go with monthly billing", "switch to annual contracts");
+      expect(sim).toBeLessThan(0.3);
     });
   });
 });

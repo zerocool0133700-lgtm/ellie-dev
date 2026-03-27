@@ -19,6 +19,7 @@ import { isPlaneConfigured } from "./plane.ts";
 import {
   trimSearchContext,
   applyTokenBudget,
+  applyTokenBudgetWithCompression,
   estimateTokens,
   mapHealthToMemoryCategory,
   type PromptSection,
