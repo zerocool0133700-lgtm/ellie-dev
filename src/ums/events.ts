@@ -14,6 +14,7 @@ import type { UnifiedMessage, MessageQueryFilters, Provider, ContentType } from 
 import { log } from "../logger.ts";
 import { advanceWatermark, recordWatermarkError } from "./consumer-watermark.ts";
 import { shouldProcess, recordSuccess, recordFailure } from "./consumer-backoff.ts";
+import { recordProcessed, recordError } from "./consumer-health.ts";
 
 const logger = log.child("ums-events");
 
@@ -80,10 +81,14 @@ export async function notify(message: UnifiedMessage, supabase?: SupabaseClient 
     try {
       await sub.handler(message);
       recordSuccess(sub.name);
+      // ELLIE-1053: Track consumer health for /health endpoint
+      recordProcessed(sub.name);
       // ELLIE-1032: Track successful processing
       if (supabase) advanceWatermark(supabase, sub.name, message.id).catch(() => {});
     } catch (err) {
       recordFailure(sub.name, String(err));
+      // ELLIE-1053: Track consumer errors for /health endpoint
+      recordError(sub.name, String(err));
       logger.error("UMS subscriber handler failed", { subscriber: sub.name, messageId: message.id, err });
       // ELLIE-1032: Track consumer errors
       if (supabase) recordWatermarkError(supabase, sub.name, String(err)).catch(() => {});

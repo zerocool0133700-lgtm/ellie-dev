@@ -65,6 +65,7 @@ import { getFireForgetMetrics } from "./resilient-task.ts";
 import { checkContextPressure, shouldNotify, getCompactionNotice, checkpointSessionToForest } from "./api/session-compaction.ts";
 import { primeWorkingMemoryCache } from "./working-memory.ts";
 import { getReconcileStatus } from "./elasticsearch/reconcile.ts";
+import { getConsumerHealthStatus, hasStaleConsumers } from "./ums/consumer-health.ts";
 import { handleTicketStatus } from "./api/ticket-status-handler.ts";
 import {
   saveMessage,
@@ -1440,7 +1441,8 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
   if (url.pathname === "/health") {
     const circuitBreakers = getBreakerStatus();
     const anyBreakerOpen = Object.values(circuitBreakers).some(b => b.state === "open");
-    const status = anyBreakerOpen ? "degraded" : "ok";
+    // ELLIE-1053: Stale consumers also contribute to degraded status
+    const status = anyBreakerOpen || hasStaleConsumers() ? "degraded" : "ok";
 
     getPlaneQueueStatus().then(planeQueue => {
       res.writeHead(status === "ok" ? 200 : 503, { "Content-Type": "application/json" });
@@ -1470,6 +1472,8 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
         fireAndForget: getFireForgetMetrics(),
         // ELLIE-496: ES reconciliation status
         esReconciliation: getReconcileStatus(),
+        // ELLIE-1053: Per-consumer health staleness tracking
+        consumers: getConsumerHealthStatus(),
       }));
     }).catch(() => {
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -6019,6 +6023,45 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
       cost: costSummary,
       timestamp: new Date().toISOString(),
     }));
+    return;
+  }
+
+  // ── ELLIE-1046: Citations — GET /api/citations/top, GET /api/citations/:responseId ──
+  if (url.pathname === "/api/citations/top" && req.method === "GET") {
+    (async () => {
+      try {
+        const sql = (await import("../../ellie-forest/src/db")).default;
+        const { getMostCitedMemories } = await import("../../ellie-forest/src/citations.ts");
+        const limit = url.searchParams.get("limit") ? parseInt(url.searchParams.get("limit")!, 10) : 20;
+        const since = url.searchParams.get("since") ?? undefined;
+        const results = await getMostCitedMemories(sql, { limit, since });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(results));
+      } catch (err) {
+        logger.error("Citations top error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
+  const citationMatch = url.pathname.match(/^\/api\/citations\/([^/]+)$/);
+  if (citationMatch && citationMatch[1] !== "top" && req.method === "GET") {
+    const responseId = citationMatch[1];
+    (async () => {
+      try {
+        const sql = (await import("../../ellie-forest/src/db")).default;
+        const { getCitationsForResponse } = await import("../../ellie-forest/src/citations.ts");
+        const results = await getCitationsForResponse(sql, responseId);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(results));
+      } catch (err) {
+        logger.error("Citations response error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    })();
     return;
   }
 
