@@ -1025,7 +1025,7 @@ async function _handleEllieChatMessage(
       ? await analyzeAndStoreEmpathy(supabase, ecUserId, effectiveText, "ellie-chat", session.conversationId).catch(() => null)
       : null;
 
-    const enrichedPrompt = buildPrompt(
+    const enrichedPrompt = await buildPrompt(
       effectiveText, ecDocket, relevantContext, elasticContext, "ellie-chat",
       agentResult?.dispatch.agent ? {
         system_prompt: agentResult.dispatch.agent.system_prompt,
@@ -1045,7 +1045,7 @@ async function _handleEllieChatMessage(
       ecQueueContext || undefined,
       liveForest.incidents || undefined,
       ecForestAwareness || undefined,
-      (await getSkillSnapshot(ecCreatureProfile?.allowed_skills)).prompt || undefined,
+      (await getSkillSnapshot(ecCreatureProfile?.allowed_skills, effectiveText)).prompt || undefined,
       contextMode,
       ecRefreshed,
       channelProfile,
@@ -1392,7 +1392,7 @@ export async function runSpecialistAsync(
       ? await analyzeAndStoreEmpathy(supabase, ecUserId, effectiveText, "ellie-chat", session.conversationId).catch(() => null)
       : null;
 
-    const enrichedPrompt = buildPrompt(
+    const enrichedPrompt = await buildPrompt(
       effectiveText, contextDocket, relevantContext, elasticContext, "ellie-chat",
       {
         system_prompt: agentResult.dispatch.agent.system_prompt,
@@ -1412,7 +1412,7 @@ export async function runSpecialistAsync(
       specQueueContext || undefined,
       liveForest.incidents || undefined,
       liveForest.awareness || undefined,
-      (await getSkillSnapshot(specCreatureProfile?.allowed_skills)).prompt || undefined,
+      (await getSkillSnapshot(specCreatureProfile?.allowed_skills, effectiveText)).prompt || undefined,
       specContextMode,
       undefined, // refreshedSources
       channelProfile,

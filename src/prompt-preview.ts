@@ -91,17 +91,17 @@ export const VALID_CHANNELS = ["telegram", "google-chat", "ellie-chat", "voice"]
  * Calls buildPrompt() in dry-run mode (no LLM call) and
  * enriches the metrics with source paths and status.
  */
-export function buildPromptPreview(
+export async function buildPromptPreview(
   agent: string,
   channel: string = "telegram",
   opts: { include_content?: boolean } = {},
-): PromptPreviewResult {
+): Promise<PromptPreviewResult> {
   // Build prompt in dry-run mode (just assembles, doesn't send)
   const agentConfig = agent !== "general"
     ? { system_prompt: null, name: agent, tools_enabled: [] as string[] }
     : undefined;
 
-  const prompt = buildPrompt(
+  const prompt = await buildPrompt(
     "(preview mode — no actual user message)",
     undefined, // contextDocket
     undefined, // relevantContext

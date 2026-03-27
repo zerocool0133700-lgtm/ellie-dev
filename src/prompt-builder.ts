@@ -852,7 +852,7 @@ export async function runPostMessageAssessment(
 
 // ── buildPrompt ─────────────────────────────────────────────
 
-export function buildPrompt(
+export async function buildPrompt(
   userMessage: string,
   contextDocket?: string,
   relevantContext?: string,
@@ -884,7 +884,7 @@ export function buildPrompt(
   fullWorkingMemory?: boolean,
   empathyGuidance?: string,
   agentLocalMemory?: string,
-): string {
+): Promise<string> {
   const channelLabel = channel === "google-chat" ? "Google Chat" : channel === "ellie-chat" ? "Ellie Chat (dashboard)" : channel === "email" ? "Email (via AgentMail — replies are sent back as email to the sender)" : "Telegram";
 
   // ELLIE-534: Snapshot River cache counters at build start to compute per-build delta
@@ -1396,5 +1396,5 @@ export function buildPrompt(
     riverCacheMisses: _riverDocMetrics.cacheMisses - _riverMissesAtStart,
   };
 
-  return applyTokenBudget(filteredSections, budget);
+  return await applyTokenBudgetWithCompression(filteredSections, budget);
 }

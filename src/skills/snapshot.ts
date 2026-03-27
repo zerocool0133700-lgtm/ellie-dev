@@ -9,6 +9,7 @@ import { loadSkillEntries } from "./loader.ts";
 import { filterEligibleSkills } from "./eligibility.ts";
 import { SKILL_LIMITS, type SkillEntry, type SkillSnapshot } from "./types.ts";
 import { log } from "../logger.ts";
+import { classifySkills, formatMetadataSection, extractMetadata } from "./metadata.ts";
 
 const logger = log.child("skills");
 
@@ -20,7 +21,7 @@ let snapshotVersion = 0;
  * Get the current skills snapshot. Rebuilds if version has changed.
  * Optionally filter to only include specific skills (ELLIE-367: creature skill allow-lists).
  */
-export async function getSkillSnapshot(allowedSkills?: string[]): Promise<SkillSnapshot> {
+export async function getSkillSnapshot(allowedSkills?: string[], message?: string): Promise<SkillSnapshot> {
   // ELLIE-430: No declaration = no skills. If allowedSkills is undefined,
   // the agent has no skill list — return empty. Pass explicit array to load skills.
   if (!allowedSkills) {
@@ -28,10 +29,14 @@ export async function getSkillSnapshot(allowedSkills?: string[]): Promise<SkillS
     return empty;
   }
 
-  const cacheKey = allowedSkills.length > 0 ? allowedSkills.slice().sort().join(",") : "none";
-  const cached = snapshotCache.get(cacheKey);
-  if (cached && cached.version === snapshotVersion) {
-    return cached;
+  const skillKey = allowedSkills.length > 0 ? allowedSkills.slice().sort().join(",") : "none";
+  // ELLIE-1078: Skip cache when message is provided (progressive disclosure depends on message content)
+  const cacheKey = message ? null : skillKey;
+  if (cacheKey) {
+    const cached = snapshotCache.get(cacheKey);
+    if (cached && cached.version === snapshotVersion) {
+      return cached;
+    }
   }
 
   const allSkills = await loadSkillEntries();
@@ -40,7 +45,20 @@ export async function getSkillSnapshot(allowedSkills?: string[]): Promise<SkillS
   const allowed = new Set(allowedSkills);
   eligible = eligible.filter(s => allowed.has(s.name));
 
-  const prompt = buildSkillsPrompt(eligible);
+  // ELLIE-1078: Progressive disclosure — only load full content for triggered/always-on skills
+  const classifiedInput = eligible.map(skill => ({
+    metadata: extractMetadata(skill.frontmatter as Record<string, any>, skill.body),
+    fullContent: formatSkillBlock(skill),
+  }));
+
+  const classified = classifySkills(classifiedInput, { message });
+
+  // Build prompt: full content for active skills + metadata summary for rest
+  const fullBlocks = classified.fullContent;
+  const metadataSummary = formatMetadataSection(classified.metadataOnly);
+  const prompt = fullBlocks.length > 0 || metadataSummary
+    ? `<available_skills>\n${fullBlocks.join("\n")}${metadataSummary ? `\n${metadataSummary}` : ""}\n</available_skills>`
+    : "";
 
   const snapshot: SkillSnapshot = {
     prompt,
@@ -48,10 +66,12 @@ export async function getSkillSnapshot(allowedSkills?: string[]): Promise<SkillS
     version: snapshotVersion,
     totalChars: prompt.length,
   };
-  snapshotCache.set(cacheKey, snapshot);
+  if (cacheKey) snapshotCache.set(cacheKey, snapshot);
 
   logger.info(
-    `Snapshot built (${cacheKey}): ${eligible.length}/${allSkills.length} eligible, ${prompt.length} chars`
+    `Snapshot built (${cacheKey}): ${eligible.length}/${allSkills.length} eligible, ` +
+    `${classified.fullContent.length} full + ${classified.metadataOnly.length} metadata-only, ` +
+    `${prompt.length} chars (saved ~${classified.tokensSaved} tokens)`
   );
 
   return snapshot;

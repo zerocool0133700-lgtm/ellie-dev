@@ -1237,6 +1237,34 @@ export async function getAgentMemoryContext(
         `\n${lines.join('\n')}`;
     }
 
+    // ELLIE-1059: Scoped search — agent-specific memories from Forest knowledge scopes
+    try {
+      const { readMemoriesForAgent } = await import('../../ellie-forest/src/shared-memory');
+      const scopedMemories = await withTimeout(
+        readMemoriesForAgent({
+          agent: agentName,
+          limit: 10,
+          include_global: false,
+        }),
+        3000,
+        []
+      );
+      if (scopedMemories.length > 0) {
+        // Deduplicate against session memories already fetched
+        const existingIds = new Set(memories.map((m: any) => m.id));
+        const uniqueScoped = scopedMemories.filter((m: any) => !existingIds.has(m.id));
+        if (uniqueScoped.length > 0) {
+          const scopedLines = uniqueScoped.map((m: any) => {
+            const conf = m.confidence ? ` (confidence: ${m.confidence.toFixed(1)})` : '';
+            return `  [scoped] ${m.content}${conf}`;
+          });
+          memoryContext += `\n\nAGENT-SCOPED MEMORY (${uniqueScoped.length} memories from ${agentName}'s knowledge scope):\n${scopedLines.join('\n')}`;
+        }
+      }
+    } catch (err) {
+      logger.warn("Scoped memory fetch failed", { agent: agentName }, err);
+    }
+
     // Cross-agent pull (ELLIE-178)
     try {
       const agent = await getAgent(agentName);

@@ -14,6 +14,7 @@ import { breakers } from "./resilience.ts";
 import { guardAgentDispatch, resolveRbacEntityId, formatDenialMessage, type GuardConfig, DEFAULT_GUARD_CONFIG } from "./permission-guard.ts";
 import { logCheck } from "./permission-audit.ts";
 import { getAllowedMCPs } from "./tool-access-control.ts";
+import { filterTools, getDeferredToolSummary } from "./tool-discovery-filter.ts";
 import { canPerformRole } from "./segregation-of-duties.ts";
 
 const logger = log.child("agent-router");
@@ -222,6 +223,13 @@ async function localDispatch(
   // ELLIE-970: Apply tool access filtering
   const allowedMCPs = getAllowedMCPs(agent.tools_enabled, agent.name);
 
+  // ELLIE-1059: Filter tools by archetype + message intent
+  const agentArchetype = agent.name || "general";
+  const toolDefs = (agent.tools_enabled || []).map((t: string) => ({ name: t, description: t }));
+  const filtered = filterTools(toolDefs, { archetype: agentArchetype, message });
+  const filteredToolNames = filtered.included.map(t => t.name);
+  const deferredSummary = getDeferredToolSummary(filtered.deferred);
+
   return {
     session_id: sessionId,
     agent: {
@@ -229,11 +237,11 @@ async function localDispatch(
       type: agent.type,
       system_prompt: agent.system_prompt,
       model: agent.model,
-      tools_enabled: agent.tools_enabled || [],
+      tools_enabled: filteredToolNames,
       capabilities: agent.capabilities || [],
     },
     is_new: isNew,
-    context_summary: contextSummary,
+    context_summary: contextSummary ? (deferredSummary ? `${contextSummary}\n${deferredSummary}` : contextSummary) : deferredSummary || undefined,
     skill_context: skillContext,
     allowed_mcps: allowedMCPs,
   };

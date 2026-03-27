@@ -490,7 +490,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
         logger.error("Multi-step failed, falling back to single agent", err);
         // ELLIE-541: Populate working memory cache before fallback prompt build
         try { await primeWorkingMemoryCache(session.sessionId, agentResult?.dispatch.agent?.name || "general"); } catch { /* non-critical */ }
-        const fallbackPrompt = buildPrompt(
+        const fallbackPrompt = await buildPrompt(
           effectiveText, contextDocket, relevantContext, elasticContext, "telegram",
           agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
           workItemContext, structuredContext, recentMessages,
@@ -506,7 +506,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
           queueContext || undefined,
           liveForest.incidents || undefined,
           liveForest.awareness || undefined,
-          (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills)).prompt || undefined,
+          (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills, effectiveText)).prompt || undefined,
           contextMode,
           undefined, // refreshedSources
           undefined, // channelProfile
@@ -553,7 +553,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   const _tgAgentName = agentResult?.dispatch.agent?.name || "general";
   try { await primeWorkingMemoryCache(session.sessionId, _tgAgentName); } catch { /* non-critical */ }
 
-  const enrichedPrompt = buildPrompt(
+  const enrichedPrompt = await buildPrompt(
     effectiveText, tgDocket, relevantContext, elasticContext, "telegram",
     agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
     workItemContext, tgStructured, recentMessages,
@@ -569,7 +569,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
     queueContext || undefined,
     liveForest.incidents || undefined,
     tgForestAwareness || undefined,
-    (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills)).prompt || undefined,
+    (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills, effectiveText)).prompt || undefined,
     contextMode,
     tgRefreshed,
     undefined, // channelProfile (Telegram doesn't use channels yet)
@@ -883,7 +883,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
         } else {
           logger.error("Voice multi-step failed", err);
           await ctx.reply("Multi-step execution failed \u2014 processing as single request.");
-          const fallbackPrompt = buildPrompt(
+          const fallbackPrompt = await buildPrompt(
             `[Voice message transcribed]: ${effectiveTranscription}`,
             contextDocket, relevantContext, elasticContext, "telegram",
             agentResult?.dispatch.agent ? { system_prompt: agentResult.dispatch.agent.system_prompt, name: agentResult.dispatch.agent.name, tools_enabled: agentResult.dispatch.agent.tools_enabled } : undefined,
@@ -900,7 +900,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
             voiceQueueContext || undefined,
             liveForest.incidents || undefined,
             liveForest.awareness || undefined,
-            (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills)).prompt || undefined,
+            (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills, effectiveTranscription)).prompt || undefined,
             voiceContextMode,
             undefined, // refreshedSources
             undefined, // channelProfile
@@ -931,7 +931,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
     const voiceForestAwareness = voiceRefreshResults["forest-awareness"] || liveForest.awareness;
     const voiceAgentMem = voiceRefreshResults["agent-memory"] || agentMemory.memoryContext;
 
-    const enrichedPrompt = buildPrompt(
+    const enrichedPrompt = await buildPrompt(
       `[Voice message transcribed]: ${effectiveTranscription}`,
       voiceDocket,
       relevantContext,
@@ -951,7 +951,7 @@ bot.on("message:voice", withQueue(async (ctx) => {
       voiceQueueContext || undefined,
       liveForest.incidents || undefined,
       voiceForestAwareness || undefined,
-      (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills)).prompt || undefined,
+      (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills, effectiveTranscription)).prompt || undefined,
       voiceContextMode,
       voiceRefreshed,
       undefined, // channelProfile

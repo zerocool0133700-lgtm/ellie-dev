@@ -764,7 +764,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
             const _gchatAgentName = gchatAgentResult?.dispatch.agent?.name || "general";
             try { await primeWorkingMemoryCache(session.sessionId, _gchatAgentName); } catch { /* non-critical */ }
 
-            const enrichedPrompt = buildPrompt(
+            const enrichedPrompt = await buildPrompt(
               effectiveGchatText, gchatDocket, relevantContext, elasticContext, "google-chat",
               gchatAgentResult?.dispatch.agent ? { system_prompt: gchatAgentResult.dispatch.agent.system_prompt, name: gchatAgentResult.dispatch.agent.name, tools_enabled: gchatAgentResult.dispatch.agent.tools_enabled } : undefined,
               workItemContext || undefined, gchatStructured, recentMessages,
@@ -780,7 +780,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
               gchatQueueContext || undefined,
               liveForest.incidents || undefined,
               gchatForestAwareness || undefined,
-              (await getSkillSnapshot(getCreatureProfile(gchatAgentResult?.dispatch.agent?.name)?.allowed_skills)).prompt || undefined,
+              (await getSkillSnapshot(getCreatureProfile(gchatAgentResult?.dispatch.agent?.name)?.allowed_skills, effectiveGchatText)).prompt || undefined,
               gchatContextMode,
               gchatRefreshed,
               undefined, // channelProfile (Google Chat doesn't use channels)
@@ -1130,7 +1130,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
           const agentMemory = await getAgentMemoryContext(supabase, "email");
           const relevantContext = await getRelevantContext(supabase, parsed.text);
 
-          prompt = buildPrompt(
+          prompt = await buildPrompt(
             emailContext,
             getContextDocket(),
             relevantContext,
@@ -1146,7 +1146,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
           const archetypeContext = await getAgentArchetype(agentName);
           const roleContext = await getAgentRoleContext(agentName);
 
-          prompt = buildPrompt(
+          prompt = await buildPrompt(
             emailContext,
             getContextDocket(),
             undefined, // relevantContext
@@ -1325,7 +1325,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
             const _alexaAgentName = agentResult?.dispatch.agent?.name || "general";
             try { await primeWorkingMemoryCache(session.sessionId, _alexaAgentName); } catch { /* non-critical */ }
 
-            const enrichedPrompt = buildPrompt(
+            const enrichedPrompt = await buildPrompt(
               effectiveQuery, contextDocket, relevantContext, elasticContext, "alexa",
               agentResult?.dispatch.agent ? {
                 system_prompt: agentResult.dispatch.agent.system_prompt,
@@ -1345,7 +1345,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
               alexaQueueContext || undefined,
               liveForest.incidents || undefined,
               liveForest.awareness || undefined,
-              (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills)).prompt || undefined,
+              (await getSkillSnapshot(getCreatureProfile(agentResult?.dispatch.agent?.name)?.allowed_skills, effectiveQuery)).prompt || undefined,
               undefined, // contextMode
               undefined, // refreshedSources
               undefined, // channelProfile
@@ -4979,7 +4979,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         }
 
         const includeContent = url.searchParams.get("include_content") === "true";
-        const preview = buildPromptPreview(agent!, channel, { include_content: includeContent });
+        const preview = await buildPromptPreview(agent!, channel, { include_content: includeContent });
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(preview));
       } catch (err: any) {

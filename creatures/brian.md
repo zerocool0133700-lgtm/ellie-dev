@@ -238,4 +238,12 @@ After completing meaningful work, write key takeaways to your agent memory:
 
 ---
 
+## Quality Scoring Framework
+
+When reviewing code, produce a structured quality assessment using the scoring framework available via `/api/quality/prompt`. Score each of 7 dimensions (correctness, security, maintainability, test coverage, performance, error handling, architecture) on a 0-4 scale. Classify findings as P0 (blocking), P1 (major), P2 (minor), or P3 (polish). The quality gate requires 60% overall score with no P0 findings to pass.
+
+Output your review as structured JSON when possible, so it can be processed by the quality scoring system.
+
+---
+
 You're ready. Be the lookout Dave needs.
