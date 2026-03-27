@@ -180,6 +180,10 @@ import { freshnessTracker, autoRefreshStaleSources, detectConflicts } from "./co
 import { checkGroundTruthConflicts, buildCrossChannelSection } from "./source-hierarchy.ts";
 import { getModeConfig, updateModeConfig, resetModeConfig, detectMode, isContextRefresh, type ContextMode } from "./context-mode.ts";
 import { getSectionContents, updateSectionContent } from "./api/context-sections.ts";
+import { shadowStore } from "./shadow-context-store.ts";
+import { compressionCache } from "./compression-cache.ts";
+import { getToolCompressionMetrics } from "./tool-output-compressor.ts";
+import { getCostSummary } from "./creature-cost-tracker.ts";
 import type { ApiRequest, ApiResponse } from "./api/types.ts";
 import { getActiveRunStates, getRunState, killRun } from "./orchestration-tracker.ts";
 import { getRecentEvents, getRunEvents } from "./orchestration-ledger.ts";
@@ -1647,6 +1651,27 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: err?.message || "Invalid request body" }));
       }
+    });
+    return;
+  }
+
+  // ── ELLIE-1056: Shadow Context Expand — POST /api/context/expand ────
+  if (url.pathname === "/api/context/expand" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", () => {
+      try {
+        const { shadowId } = JSON.parse(body);
+        if (!shadowId) { res.writeHead(400); res.end('{"error":"shadowId required"}'); return; }
+        const content = shadowStore.expand(shadowId);
+        if (content === null) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Shadow entry not found or expired" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ content }));
+      } catch { res.writeHead(400); res.end('{"error":"invalid json"}'); }
     });
     return;
   }
@@ -5967,6 +5992,33 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         res.end(JSON.stringify({ error: "Failed to fetch watermarks" }));
       }
     })();
+    return;
+  }
+
+  // ── ELLIE-1060: Cost Summary — GET /api/cost/summary ──────────
+  if (url.pathname === "/api/cost/summary" && req.method === "GET") {
+    const summary = getCostSummary();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(summary));
+    return;
+  }
+
+  // ── ELLIE-1061: Compression Metrics — GET /api/compression/metrics ──
+  if (url.pathname === "/api/compression/metrics" && req.method === "GET") {
+    const toolMetrics = getToolCompressionMetrics();
+    const costSummary = getCostSummary();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      cache: compressionCache.stats(),
+      shadow: shadowStore.stats(),
+      toolOutput: {
+        totalCompressed: toolMetrics.totalCompressed,
+        totalPassthrough: toolMetrics.totalPassthrough,
+        totalTokensSaved: toolMetrics.totalTokensSaved,
+      },
+      cost: costSummary,
+      timestamp: new Date().toISOString(),
+    }));
     return;
   }
 
