@@ -219,33 +219,46 @@ export async function ingestDocument(
         title = filename;
         break;
 
-      case ".pdf":
+      case ".pdf": {
+        // PDF text extraction via unpdf
+        try {
+          const { extractText } = await import("unpdf");
+          const { text: pdfText, totalPages } = await extractText(new Uint8Array(buffer));
+          markdown = pdfText || "";
+          title = filename.replace(/\.pdf$/i, "");
+          if (totalPages) markdown = `*${totalPages} page(s)*\n\n${markdown}`;
+          logger.info("PDF extracted", { filename, pages: totalPages, chars: markdown.length });
+        } catch (pdfErr) {
+          logger.warn("PDF extraction failed, falling back", { filename, error: String(pdfErr) });
+          markdown = `*PDF: ${filename} — ${buffer.length} bytes. Text extraction failed.*`;
+        }
+        break;
+      }
+
       case ".docx":
-      case ".doc":
+      case ".doc": {
+        // Word document via mammoth → HTML → markdown
+        try {
+          const mammoth = await import("mammoth");
+          const result = await mammoth.convertToHtml({ buffer: Buffer.from(buffer) });
+          markdown = htmlToMarkdown(result.value);
+          title = filename.replace(/\.docx?$/i, "");
+          if (result.messages?.length) {
+            const warnings = result.messages.filter((m: any) => m.type === "warning").length;
+            if (warnings > 0) logger.info("DOCX conversion warnings", { filename, warnings });
+          }
+          logger.info("DOCX extracted", { filename, chars: markdown.length });
+        } catch (docErr) {
+          logger.warn("DOCX extraction failed", { filename, error: String(docErr) });
+          markdown = `*Word document: ${filename} — ${buffer.length} bytes. Extraction failed.*`;
+        }
+        break;
+      }
+
       case ".pptx":
       case ".xlsx":
       case ".epub":
-        // Binary document formats — attempt text extraction from buffer
-        // For PDF: try to extract raw text content
-        if (ext === ".pdf") {
-          // Simple PDF text extraction: find text between stream markers
-          const raw = Buffer.from(buffer).toString("latin1");
-          const textChunks: string[] = [];
-          const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
-          let match;
-          while ((match = streamRegex.exec(raw)) !== null) {
-            // Filter to printable ASCII content
-            const chunk = match[1].replace(/[^\x20-\x7E\n\r\t]/g, "").trim();
-            if (chunk.length > 10) textChunks.push(chunk);
-          }
-          if (textChunks.length > 0) {
-            markdown = textChunks.join("\n\n");
-          } else {
-            markdown = `*Binary document: ${filename} — ${buffer.length} bytes*\n\n*Full text extraction requires a dedicated PDF parser. The raw content could not be extracted inline.*`;
-          }
-        } else {
-          markdown = `*Binary document: ${filename} (${ext}) — ${buffer.length} bytes*\n\n*Full text extraction for ${ext} files requires a dedicated parser.*`;
-        }
+        markdown = `*Binary document: ${filename} (${ext}) — ${buffer.length} bytes*\n\n*Full text extraction for ${ext} files is not yet supported.*`;
         title = filename;
         break;
 
