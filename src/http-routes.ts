@@ -3702,14 +3702,23 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           return;
         }
 
-        // Copy all files except _audit-report.json to skills/
-        const entries = await readdir(sandboxDir);
-        await mkdir(targetDir, { recursive: true });
-        for (const entry of entries) {
-          if (entry === "_audit-report.json") continue;
-          const content = await readFile(join(sandboxDir, entry), "utf-8");
-          await writeFile(join(targetDir, entry), content, "utf-8");
+        // Copy all files except _audit-report.json to skills/ (recursive)
+        async function copyDir(src: string, dest: string) {
+          await mkdir(dest, { recursive: true });
+          const entries = await readdir(src, { withFileTypes: true });
+          for (const entry of entries) {
+            if (entry.name === "_audit-report.json") continue;
+            const srcPath = join(src, entry.name);
+            const destPath = join(dest, entry.name);
+            if (entry.isDirectory()) {
+              await copyDir(srcPath, destPath);
+            } else {
+              const content = await readFile(srcPath, "utf-8");
+              await writeFile(destPath, content, "utf-8");
+            }
+          }
         }
+        await copyDir(sandboxDir, targetDir);
 
         // Remove from sandbox
         await rm(sandboxDir, { recursive: true, force: true });
