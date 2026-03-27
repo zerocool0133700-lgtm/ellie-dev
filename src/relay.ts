@@ -108,6 +108,7 @@ import { reconcilePlaneState, isWorkItemDone } from "./plane.ts";
 import { reconcileDashboard } from "./active-tickets-dashboard.ts";
 import { setWatchdogNotify, stopWatchdog } from "./orchestration-tracker.ts";
 import { stopReconciler } from "./orchestration-reconciler.ts";
+import { setMonitorDependencies, startOrchestrationMonitor, stopOrchestrationMonitor } from "./orchestration-monitor.ts";
 import { restoreModeState } from "./context-mode.ts";
 import { registerJobVines } from "./jobs-ledger.ts";
 import { initOrchestration } from "./orchestration-init.ts";
@@ -288,6 +289,10 @@ setBroadcastExtension(broadcastExtension);
 setNotifyCtx(getNotifyCtx);
 // ELLIE-387: Wire watchdog notifications (after setRelayDeps so getNotifyCtx works)
 setWatchdogNotify(notify, getNotifyCtx());
+// ELLIE-924: Wire orchestration monitor (GTD task stall detection)
+if (supabase) {
+  setMonitorDependencies(supabase, notify, getNotifyCtx());
+}
 setAnthropicClient(anthropic);
 setQueueBroadcast(broadcastExtension);
 setSenderDeps({ supabase, getActiveAgent });
@@ -439,9 +444,11 @@ logger.info("Starting Claude Telegram Relay...", {
 
 // Start HTTP + WebSocket server
 const _doneHttpListen = startPhase("http-listen");
-httpServer.listen(HTTP_PORT, () => {
+// Bind to localhost only — Cloudflare tunnel handles external access
+const BIND_HOST = process.env.BIND_HOST || "127.0.0.1";
+httpServer.listen(HTTP_PORT, BIND_HOST, () => {
   _doneHttpListen();
-  logger.info("Server listening", { port: HTTP_PORT });
+  logger.info("Server listening", { host: BIND_HOST, port: HTTP_PORT });
   logger.info("WebSocket endpoints ready", {
     voice: `ws://localhost:${HTTP_PORT}/media-stream`,
     extension: `ws://localhost:${HTTP_PORT}/extension`,
@@ -497,6 +504,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
   stopAllTasks();      // periodic-tasks
   stopWatchdog();      // orchestration watchdog
   stopReconciler();    // orchestration reconciler
+  stopOrchestrationMonitor(); // GTD task stall monitor
   stopPlaneQueueWorker(); // plane-queue
   logger.info("Background tasks stopped");
 
