@@ -278,13 +278,25 @@ const SMART_PATTERNS: SmartPattern[] = [
   { pattern: /\bfind\s+out\s+(about|how|what|why)\b/i, agent: "research", rule: "research_find" },
 
   // Critic patterns
-  { pattern: /\breview\s+(this|my|the)\s+(code|pr|pull\s+request|implementation|design)\b/i, agent: "critic", rule: "critic_review" },
-  { pattern: /\bwhat'?s?\s+wrong\s+with\s+(this|my)\b/i, agent: "critic", rule: "critic_whats_wrong" },
+  { pattern: /\breview\s+(this|my|the)\s+(code|pr|pull\s+request|implementation|design|work|changes?)\b/i, agent: "critic", rule: "critic_review" },
+  { pattern: /\bwhat'?s?\s+wrong\s+with\s+(this|my|the)\b/i, agent: "critic", rule: "critic_whats_wrong" },
   { pattern: /\baudit\s+(this|my|the)\b/i, agent: "critic", rule: "critic_audit" },
+  { pattern: /\bcritique\s+(this|my|the)\b/i, agent: "critic", rule: "critic_critique" },
+  { pattern: /\b(is\s+this|are\s+we)\s+ready\s+to\s+(ship|merge|deploy|release)\b/i, agent: "critic", rule: "critic_ship_check" },
+  { pattern: /\bcheck\s+(this\s+)?(for\s+)?(bugs?|issues?|problems?|errors?)\b/i, agent: "critic", rule: "critic_bug_check" },
+  { pattern: /\b(look|check)\s+(for|over)\s+(issues?|problems?|edge\s+cases?|risks?)\b/i, agent: "critic", rule: "critic_look_for" },
+  { pattern: /\bgive\s+(me\s+)?(feedback|thoughts)\s+(on|about)\b/i, agent: "critic", rule: "critic_feedback" },
+  { pattern: /\bquality\s+(check|review|gate)\b/i, agent: "critic", rule: "critic_quality" },
+  { pattern: /\bhave\s+brian\b/i, agent: "critic", rule: "critic_by_name" },
+  { pattern: /\bask\s+brian\b/i, agent: "critic", rule: "critic_ask_brian" },
+  { pattern: /\bbrian\s+(should|can|needs?\s+to)\b/i, agent: "critic", rule: "critic_brian_should" },
+  { pattern: /\b(code|pr|security)\s+review\b/i, agent: "critic", rule: "critic_code_review" },
 
   // Content patterns
   { pattern: /\b(write|draft|compose)\s+(an?\s+)?(email|post|blog|article|message|announcement)\b/i, agent: "content", rule: "content_draft" },
   { pattern: /\bcreate\s+(content|copy|messaging)\s+for\b/i, agent: "content", rule: "content_create" },
+  { pattern: /\b(document|documenting|write\s+(a\s+)?doc)\s+(how|what|the)\b/i, agent: "content", rule: "content_document" },
+  { pattern: /\b(write|create|draft)\s+(a\s+)?(readme|guide|tutorial|docs?|documentation)\b/i, agent: "content", rule: "content_docs" },
 
   // Finance patterns
   { pattern: /\bhow\s+much\s+(did|do|are|have)\s+we\s+(spend|spent|pay|paid)\b/i, agent: "finance", rule: "finance_spend" },
@@ -295,6 +307,20 @@ const SMART_PATTERNS: SmartPattern[] = [
   { pattern: /\b(deploy|restart|rollback)\s+(the\s+)?(server|service|relay|app)\b/i, agent: "ops", rule: "ops_deploy" },
   { pattern: /\b(server|service|relay)\s+(status|health|logs?)\b/i, agent: "ops", rule: "ops_status" },
   { pattern: /\bhealth\s+check\b/i, agent: "ops", rule: "ops_health" },
+
+  // Name-based routing — "have James fix this", "ask Kate to research", etc.
+  { pattern: /\b(have|ask|get|tell|let)\s+james\b/i, agent: "dev", rule: "name_james" },
+  { pattern: /\bjames\s+(should|can|needs?\s+to|will)\b/i, agent: "dev", rule: "name_james_should" },
+  { pattern: /\b(have|ask|get|tell|let)\s+kate\b/i, agent: "research", rule: "name_kate" },
+  { pattern: /\bkate\s+(should|can|needs?\s+to|will)\b/i, agent: "research", rule: "name_kate_should" },
+  { pattern: /\b(have|ask|get|tell|let)\s+alan\b/i, agent: "strategy", rule: "name_alan" },
+  { pattern: /\balan\s+(should|can|needs?\s+to|will)\b/i, agent: "strategy", rule: "name_alan_should" },
+  { pattern: /\b(have|ask|get|tell|let)\s+amy\b/i, agent: "content", rule: "name_amy" },
+  { pattern: /\bamy\s+(should|can|needs?\s+to|will)\b/i, agent: "content", rule: "name_amy_should" },
+  { pattern: /\b(have|ask|get|tell|let)\s+marcus\b/i, agent: "finance", rule: "name_marcus" },
+  { pattern: /\bmarcus\s+(should|can|needs?\s+to|will)\b/i, agent: "finance", rule: "name_marcus_should" },
+  { pattern: /\b(have|ask|get|tell|let)\s+jason\b/i, agent: "ops", rule: "name_jason" },
+  { pattern: /\bjason\s+(should|can|needs?\s+to|will)\b/i, agent: "ops", rule: "name_jason_should" },
 ];
 
 // ── Tree-based routing rules — ELLIE-435 ─────────────────────────────────
