@@ -206,6 +206,7 @@ import { handleAvatarRoutes } from "./avatar-routes.ts";
 import { ingestDocument, ingestUrl, canIngest } from "./document-ingestion.ts";
 // ELLIE-547: CORS whitelist (replaces wildcard *)
 import { handlePreflight, corsHeader } from "./cors.ts";
+import { runCoordinatorLoop, buildCoordinatorDeps } from "./coordinator.ts";
 
 const logger = log.child("http");
 
@@ -588,6 +589,61 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
 
             const gchatActiveAgent = getActiveAgent("google-chat");
             const gchatConvoId = await getOrCreateConversation(supabase!, "google-chat") || undefined;
+
+            // ── COORDINATOR MODE (feature flag) ──────────────────────
+            const COORDINATOR_MODE = process.env.COORDINATOR_MODE === "true";
+
+            if (COORDINATOR_MODE) {
+              try {
+                const gchatCoordinatorResult = await runCoordinatorLoop({
+                  message: effectiveGchatText || parsed.text,
+                  channel: "google-chat",
+                  userId: parsed.senderEmail,
+                  foundation: "software-dev",
+                  systemPrompt: `You are Ellie, a coordinator assistant. The user is messaging via Google Chat.`,
+                  model: gchatAgentResult?.dispatch.agent.model || "claude-sonnet-4-6",
+                  agentRoster: ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
+                  deps: buildCoordinatorDeps({
+                    sessionId: gchatAgentResult?.dispatch.session_id || `gchat-${Date.now()}`,
+                    channel: "google-chat",
+                    sendFn: async (_ch, msg) => {
+                      if (parsed.spaceName) {
+                        await sendGoogleChatMessage(parsed.spaceName, msg, parsed.threadName);
+                      }
+                    },
+                    forestReadFn: async (query) => {
+                      const bridgeRes = await fetch("http://localhost:3001/api/bridge/read", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json", "x-bridge-key": process.env.BRIDGE_KEY || "" },
+                        body: JSON.stringify({ query, scope_path: "2" }),
+                      });
+                      const bridgeData = await bridgeRes.json() as { memories?: Array<{ content: string }> };
+                      return bridgeData.memories?.map(m => m.content).join("\n") || "No results.";
+                    },
+                    planeReadFn: async (query) => `Plane lookup not yet integrated for coordinator. Query: ${query}`,
+                  }),
+                  workItemId: gchatWorkItem || undefined,
+                });
+
+                // Save and send response
+                await saveMessage("assistant", gchatCoordinatorResult.response, {}, "google-chat");
+
+                logger.info("Coordinator response (gchat)", {
+                  iterations: gchatCoordinatorResult.loopIterations,
+                  cost: gchatCoordinatorResult.totalCostUsd,
+                  duration: gchatCoordinatorResult.durationMs,
+                });
+
+                // Send response back to Google Chat
+                const gchatCoordResponse = { text: gchatCoordinatorResult.response };
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify(gchatCoordResponse));
+                return; // Skip existing dispatch path
+              } catch (err) {
+                logger.error("Coordinator mode failed (gchat), falling back to direct dispatch", { error: String(err) });
+                // Fall through to existing dispatch path
+              }
+            }
 
             // ── ELLIE-325: Message-level mode detection ──
             const { processMessageMode } = await import("./context-mode.ts");
