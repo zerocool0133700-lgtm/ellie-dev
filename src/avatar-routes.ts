@@ -28,8 +28,13 @@ export function handleAvatarRoutes(
 
   // GET /api/avatar/status — no auth needed
   if (url.pathname === "/api/avatar/status" && req.method === "GET") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ configured: isSimliConfigured() }));
+    isSimliConfigured().then(configured => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ configured }));
+    }).catch(() => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ configured: false }));
+    });
     return true;
   }
 

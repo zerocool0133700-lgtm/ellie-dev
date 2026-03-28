@@ -2,16 +2,34 @@
  * Simli API client — avatar session management.
  *
  * The relay creates session tokens (keeps API key server-side).
+ * API key is stored in The Hollow (encrypted credential store).
  * The browser uses simli-client SDK for WebRTC + video.
  */
 
 import { log } from "./logger.ts";
+import { getCredentialByDomain } from "../../ellie-forest/src/hollow";
 
 const logger = log.child("simli");
 
-const SIMLI_API_KEY = process.env.SIMLI_API_KEY || "";
 const SIMLI_API_URL = process.env.SIMLI_API_URL || "https://api.simli.ai";
 const SIMLI_FACE_ID = process.env.SIMLI_FACE_ID || "";
+
+// Cache the API key after first Hollow lookup
+let _cachedApiKey: string | null = null;
+
+async function getSimliApiKey(): Promise<string> {
+  if (_cachedApiKey) return _cachedApiKey;
+  try {
+    const cred = await getCredentialByDomain("simli.ai", "api_key");
+    if (cred?.payload) {
+      _cachedApiKey = typeof cred.payload === "string" ? cred.payload : String(cred.payload);
+      return _cachedApiKey;
+    }
+  } catch (err) {
+    logger.error("Failed to fetch Simli API key from Hollow", err);
+  }
+  return "";
+}
 
 /**
  * Get a Simli session token for the browser to establish WebRTC.
@@ -21,8 +39,10 @@ export async function getSimliSessionToken(
   faceId?: string,
   options?: { maxSessionLength?: number; maxIdleTime?: number }
 ): Promise<string | null> {
-  if (!SIMLI_API_KEY) {
-    logger.warn("SIMLI_API_KEY not configured — proceeding without auth header");
+  const apiKey = await getSimliApiKey();
+  if (!apiKey) {
+    logger.error("SIMLI_API_KEY not found in Hollow (simli.ai/api_key)");
+    return null;
   }
 
   const body = {
@@ -37,7 +57,7 @@ export async function getSimliSessionToken(
     const response = await fetch(`${SIMLI_API_URL}/compose/token`, {
       method: "POST",
       headers: {
-        "x-simli-api-key": SIMLI_API_KEY,
+        "x-simli-api-key": apiKey,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
@@ -62,11 +82,12 @@ export async function getSimliSessionToken(
  * Returns the ICE server array, or null on failure.
  */
 export async function getSimliIceServers(): Promise<any[] | null> {
-  if (!SIMLI_API_KEY) return null;
+  const apiKey = await getSimliApiKey();
+  if (!apiKey) return null;
 
   try {
     const response = await fetch(`${SIMLI_API_URL}/compose/ice`, {
-      headers: { "x-simli-api-key": SIMLI_API_KEY },
+      headers: { "x-simli-api-key": apiKey },
     });
 
     if (!response.ok) {
@@ -81,9 +102,10 @@ export async function getSimliIceServers(): Promise<any[] | null> {
   }
 }
 
-/** Check if Simli is configured. */
-export function isSimliConfigured(): boolean {
-  return !!(SIMLI_API_KEY && SIMLI_FACE_ID);
+/** Check if Simli is configured (checks Hollow for API key). */
+export async function isSimliConfigured(): Promise<boolean> {
+  const apiKey = await getSimliApiKey();
+  return !!(apiKey && SIMLI_FACE_ID);
 }
 
 /** Get the configured face ID. */
