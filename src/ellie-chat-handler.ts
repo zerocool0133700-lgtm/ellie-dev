@@ -1110,10 +1110,6 @@ async function _handleEllieChatMessage(
               return "";
             }
           },
-          planeReadFn: async (_query: string) => {
-            // Placeholder for Phase 1
-            return "";
-          },
         });
 
         const coordinatorResult = await runCoordinatorLoop({

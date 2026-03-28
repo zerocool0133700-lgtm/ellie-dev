@@ -520,9 +520,32 @@ export function buildCoordinatorDeps(opts: {
   channel: string;
   sendFn: (channel: string, message: string) => Promise<void>;
   forestReadFn: (query: string) => Promise<string>;
-  planeReadFn: (query: string) => Promise<string>;
+  planeReadFn?: (query: string) => Promise<string>;
 }): CoordinatorDeps {
-  const { sessionId, channel, sendFn, forestReadFn, planeReadFn } = opts;
+  const { sessionId, channel, sendFn, forestReadFn } = opts;
+
+  // Default Plane reader — uses the existing plane.ts API
+  const defaultPlaneRead = async (query: string): Promise<string> => {
+    const { isPlaneConfigured, fetchWorkItemDetails, listOpenIssues } = await import("./plane.ts");
+    if (!isPlaneConfigured()) return "Plane is not configured.";
+
+    // If query looks like a ticket ID (e.g. "ELLIE-123"), fetch that specific ticket
+    const ticketMatch = query.match(/([A-Z]+-\d+)/);
+    if (ticketMatch) {
+      const details = await fetchWorkItemDetails(ticketMatch[1]);
+      if (details) {
+        return `${ticketMatch[1]}: ${details.name}\nPriority: ${details.priority}\nState: ${(details.state as string) || "unknown"}\n${details.description ? `Description: ${details.description.slice(0, 500)}` : ""}`;
+      }
+      return `Could not find ticket ${ticketMatch[1]}.`;
+    }
+
+    // Otherwise list open issues
+    const issues = await listOpenIssues("ELLIE", 15);
+    if (issues.length === 0) return "No open issues found.";
+    return `Open ELLIE issues (${issues.length}):\n${issues.map(i => `- ELLIE-${i.sequenceId}: ${i.name} [${i.priority}]`).join("\n")}`;
+  };
+
+  const planeReadFn = opts.planeReadFn ?? defaultPlaneRead;
 
   return {
     callSpecialist: async (agent: string, task: string, context?: string, timeoutMs?: number) => {

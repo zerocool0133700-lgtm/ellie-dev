@@ -620,7 +620,6 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
                       const bridgeData = await bridgeRes.json() as { memories?: Array<{ content: string }> };
                       return bridgeData.memories?.map(m => m.content).join("\n") || "No results.";
                     },
-                    planeReadFn: async (query) => `Plane lookup not yet integrated for coordinator. Query: ${query}`,
                   }),
                   workItemId: gchatWorkItem || undefined,
                 });

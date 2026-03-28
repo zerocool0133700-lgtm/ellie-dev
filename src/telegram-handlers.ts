@@ -629,7 +629,6 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
             const data = await res.json() as { memories?: Array<{ content: string }> };
             return data.memories?.map(m => m.content).join("\n") || "No results.";
           },
-          planeReadFn: async (query) => `Plane lookup not yet integrated for coordinator. Query: ${query}`,
         }),
         workItemId: detectedWorkItem || undefined,
       });
