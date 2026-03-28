@@ -61,7 +61,7 @@ export class CoordinatorContext {
         {
           type: "tool_result",
           tool_use_id: toolUseId,
-          content: result,
+          content: result ?? "No output.",
         },
       ],
     });

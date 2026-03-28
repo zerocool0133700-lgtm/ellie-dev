@@ -351,7 +351,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
 
       const dispatchResults = await Promise.all(dispatchPromises);
       for (const { toolId, result } of dispatchResults) {
-        ctx.addToolResult(toolId, result);
+        ctx.addToolResult(toolId, result ?? "No output returned.");
       }
     }
 
@@ -362,7 +362,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
 
       try {
         const result = await handleTool(toolName, tool.input as Record<string, unknown>, channel, deps);
-        ctx.addToolResult(toolId, result);
+        ctx.addToolResult(toolId, result ?? "OK");
       } catch (err) {
         ctx.addToolResult(toolId, JSON.stringify({
           status: "error",
