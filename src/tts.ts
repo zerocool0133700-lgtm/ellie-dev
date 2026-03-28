@@ -427,6 +427,43 @@ export async function textToSpeechFastStream(text: string, providerOverride?: "e
   return { body: response.body, contentType: "audio/mpeg" };
 }
 
+/**
+ * Streaming PCM16 TTS at 16kHz mono — for Simli avatar lip-sync.
+ * Returns raw PCM s16le audio chunks suitable for piping to Simli.
+ */
+export async function textToSpeechPCM16Stream(
+  text: string,
+  providerOverride?: "elevenlabs" | "openai"
+): Promise<TTSStream | null> {
+  const provider = getProvider(providerOverride);
+  if (!provider) return null;
+
+  if (provider === "openai") {
+    return await openaiTTSStream(text, "pcm", "audio/pcm");
+  }
+
+  // ElevenLabs — PCM 16kHz output
+  const response = await fetch(
+    `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream?output_format=pcm_16000`,
+    {
+      method: "POST",
+      headers: { "xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        model_id: "eleven_turbo_v2_5",
+        voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+      }),
+    }
+  );
+
+  if (!response.ok || !response.body) {
+    logger.error("ElevenLabs PCM16 stream error", { status: response.status, body: await response.text() });
+    return null;
+  }
+
+  return { body: response.body, contentType: "audio/pcm" };
+}
+
 /** Streaming OGG/Opus TTS — pipes directly to client. */
 export async function textToSpeechOggStream(text: string, providerOverride?: "elevenlabs" | "openai"): Promise<TTSStream | null> {
   const provider = getProvider(providerOverride);
