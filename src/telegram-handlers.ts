@@ -107,6 +107,7 @@ import { withTrace } from "./trace.ts";
 import { resilientTask } from "./resilient-task.ts";
 import { checkContextPressure, shouldNotify, getCompactionNotice, checkpointSessionToForest } from "./api/session-compaction.ts";
 import { primeWorkingMemoryCache } from "./working-memory.ts";
+import { runCoordinatorLoop, buildCoordinatorDeps } from "./coordinator.ts";
 
 const logger = log.child("telegram");
 
@@ -597,6 +598,66 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
 
   const agentTools = agentResult?.dispatch.agent.tools_enabled;
   const agentModel = agentResult?.dispatch.agent.model;
+
+  // ── COORDINATOR MODE (feature flag) ──────────────────────
+  const COORDINATOR_MODE = process.env.COORDINATOR_MODE === "true";
+
+  if (COORDINATOR_MODE) {
+    // Send typing indicator
+    await ctx.replyWithChatAction("typing");
+    const typingInterval = setInterval(() => ctx.replyWithChatAction("typing").catch(() => {}), 4000);
+
+    try {
+      const coordinatorResult = await runCoordinatorLoop({
+        message: effectiveText,
+        channel: "telegram",
+        userId: userId,
+        foundation: "software-dev", // Hardcoded for Phase 1
+        systemPrompt: enrichedPrompt,
+        model: agentModel || "claude-sonnet-4-6",
+        agentRoster: ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
+        deps: buildCoordinatorDeps({
+          sessionId: session.sessionId,
+          channel: "telegram",
+          sendFn: async (_ch, msg) => { await ctx.reply(msg); },
+          forestReadFn: async (query) => {
+            const res = await fetch("http://localhost:3001/api/bridge/read", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "x-bridge-key": process.env.BRIDGE_KEY || "" },
+              body: JSON.stringify({ query, scope_path: "2" }),
+            });
+            const data = await res.json() as { memories?: Array<{ content: string }> };
+            return data.memories?.map(m => m.content).join("\n") || "No results.";
+          },
+          planeReadFn: async (query) => `Plane lookup not yet integrated for coordinator. Query: ${query}`,
+        }),
+        workItemId: detectedWorkItem || undefined,
+      });
+
+      clearInterval(typingInterval);
+
+      // Send the coordinator's response
+      const cleanedResponse = await sendWithApprovals(ctx, coordinatorResult.response, session.sessionId, "ellie");
+      await saveMessage("assistant", cleanedResponse, undefined, "telegram", userId);
+
+      // Log coordinator metrics
+      logger.info("Coordinator response", {
+        iterations: coordinatorResult.loopIterations,
+        tokensIn: coordinatorResult.totalTokensIn,
+        tokensOut: coordinatorResult.totalTokensOut,
+        cost: coordinatorResult.totalCostUsd,
+        hitRail: coordinatorResult.hitSafetyRail,
+        duration: coordinatorResult.durationMs,
+        envelopes: coordinatorResult.envelopes.length,
+      });
+
+      return; // Skip the old dispatch path
+    } catch (err) {
+      clearInterval(typingInterval);
+      logger.error("Coordinator mode failed, falling back to direct dispatch", { error: String(err) });
+      // Fall through to existing dispatch path
+    }
+  }
 
   const startTime = Date.now();
   let rawResponse = await callClaudeWithTyping(ctx, enrichedPrompt, {
