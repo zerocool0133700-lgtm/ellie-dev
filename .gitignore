@@ -47,6 +47,10 @@ session.json
 .DS_Store
 Thumbs.db
 
+# Worktrees
+.worktrees/
+.superpowers/
+
 # IDE
 .idea/
 .vscode/
