@@ -202,6 +202,7 @@ import { handleAlertsRoute } from "./api/routes/alerts.ts";
 import { handleReactionsRoute } from "./api/routes/reactions.ts";
 import { handleEmojiPrefsRoute } from "./api/routes/emoji-prefs.ts";
 import { handleAgentMemoryRoute } from "./api/routes/agent-memory.ts";
+import { handleAvatarRoutes } from "./avatar-routes.ts";
 import { ingestDocument, ingestUrl, canIngest } from "./document-ingestion.ts";
 // ELLIE-547: CORS whitelist (replaces wildcard *)
 import { handlePreflight, corsHeader } from "./cors.ts";
@@ -2328,6 +2329,9 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
     });
     return;
   }
+
+  // Avatar routes (Simli integration)
+  if (handleAvatarRoutes(url, req, res, authenticateRequest, EXTENSION_API_KEY)) return;
 
   // TTS provider info — returns available providers
   if (url.pathname === "/api/tts/provider" && req.method === "GET") {
