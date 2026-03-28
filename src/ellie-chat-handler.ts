@@ -1121,7 +1121,7 @@ async function _handleEllieChatMessage(
           channel: "ellie-chat",
           userId: "dashboard",
           foundation: "software-dev",
-          systemPrompt: enrichedPrompt,
+          systemPrompt: "You are Ellie, a coordinator assistant for Dave. Decompose requests into tasks, dispatch specialists, synthesize results. Be concise and helpful. For simple questions, answer directly using the complete tool.",
           model: agentModel || "claude-sonnet-4-6",
           agentRoster: ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
           deps: coordinatorDeps,

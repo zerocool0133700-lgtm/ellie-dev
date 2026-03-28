@@ -584,14 +584,21 @@ export function buildCoordinatorDeps(opts: {
     },
 
     logEnvelope: async (envelope: DispatchEnvelope) => {
-      const { emitEvent } = await import("./orchestration-ledger.ts");
-      emitEvent(
-        envelope.id,
-        envelope.status === "completed" ? "completed" : "failed",
-        envelope.agent,
-        envelope.work_item_id,
-        { cost_usd: envelope.cost_usd, tokens_in: envelope.tokens_in, tokens_out: envelope.tokens_out },
-      );
+      // Log envelope to coordinator's own tracking — don't use orchestration-ledger
+      // since it expects UUIDs and our envelope IDs are dsp_ prefixed.
+      // Envelope data is already tracked in the CoordinatorResult.envelopes array.
+      logger.info("Dispatch envelope", {
+        id: envelope.id,
+        type: envelope.type,
+        agent: envelope.agent,
+        status: envelope.status,
+        cost_usd: envelope.cost_usd,
+        tokens_in: envelope.tokens_in,
+        tokens_out: envelope.tokens_out,
+        duration_ms: envelope.completed_at && envelope.started_at
+          ? new Date(envelope.completed_at).getTime() - new Date(envelope.started_at).getTime()
+          : 0,
+      });
     },
   };
 }

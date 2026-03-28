@@ -613,7 +613,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
         channel: "telegram",
         userId: userId,
         foundation: "software-dev", // Hardcoded for Phase 1
-        systemPrompt: enrichedPrompt,
+        systemPrompt: "You are Ellie, a coordinator assistant for Dave. Decompose requests into tasks, dispatch specialists, synthesize results. Be concise and helpful. For simple questions, answer directly using the complete tool.",
         model: agentModel || "claude-sonnet-4-6",
         agentRoster: ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
         deps: buildCoordinatorDeps({
