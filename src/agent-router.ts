@@ -13,7 +13,7 @@ import { RELAY_EPOCH } from "./relay-epoch.ts";
 import { breakers } from "./resilience.ts";
 import { guardAgentDispatch, resolveRbacEntityId, formatDenialMessage, type GuardConfig, DEFAULT_GUARD_CONFIG } from "./permission-guard.ts";
 import { logCheck } from "./permission-audit.ts";
-import { getAllowedMCPs } from "./tool-access-control.ts";
+import { getAllowedMCPs, getAllowedToolsForCLI } from "./tool-access-control.ts";
 import { filterTools, getDeferredToolSummary } from "./tool-discovery-filter.ts";
 import { canPerformRole } from "./segregation-of-duties.ts";
 
@@ -230,6 +230,9 @@ async function localDispatch(
   const filteredToolNames = filtered.included.map(t => t.name);
   const deferredSummary = getDeferredToolSummary(filtered.deferred);
 
+  // ELLIE-1092: Convert tool categories to CLI format
+  const cliTools = getAllowedToolsForCLI(agent.tools_enabled, agent.name);
+
   return {
     session_id: sessionId,
     agent: {
@@ -237,7 +240,7 @@ async function localDispatch(
       type: agent.type,
       system_prompt: agent.system_prompt,
       model: agent.model,
-      tools_enabled: filteredToolNames,
+      tools_enabled: cliTools,  // ELLIE-1092: Use CLI-formatted tools
       capabilities: agent.capabilities || [],
     },
     is_new: isNew,
@@ -293,6 +296,9 @@ export async function dispatchAgent(
   if (!result.allowed_mcps) {
     result.allowed_mcps = getAllowedMCPs(result.agent.tools_enabled, result.agent.name);
   }
+
+  // ELLIE-1092: Convert tools to CLI format for edge function results
+  result.agent.tools_enabled = getAllowedToolsForCLI(result.agent.tools_enabled, result.agent.name);
 
   return result;
 }
