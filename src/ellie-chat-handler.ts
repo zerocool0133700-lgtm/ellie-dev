@@ -57,6 +57,7 @@ import {
 import { searchElastic } from "./elasticsearch.ts";
 import { log } from "./logger.ts";
 import { deliverResponse, markProcessing, clearProcessing } from "./ws-delivery.ts";
+import { runCoordinatorLoop, buildCoordinatorDeps } from "./coordinator.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
 
 const logger = log.child("ellie-chat");
@@ -1078,6 +1079,72 @@ async function _handleEllieChatMessage(
         ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId, agent: agentResult?.dispatch?.agent?.name || "general" }));
       }
     }, 4_000);
+
+    // ── COORDINATOR_MODE: feature-flagged coordinator path (Phase 1) ──
+    if (process.env.COORDINATOR_MODE === "true") {
+      try {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "typing", agent: "ellie" }));
+        }
+
+        const coordinatorDeps = buildCoordinatorDeps({
+          sessionId: session.sessionId || agentResult?.dispatch.session_id || `ec-${Date.now()}`,
+          channel: "ellie-chat",
+          sendFn: async (_ch: string, msg: string) => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "progress", text: msg, agent: "ellie", ts: Date.now() }));
+            }
+          },
+          forestReadFn: async (query: string) => {
+            try {
+              const resp = await fetch("http://localhost:3001/api/bridge/read", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "x-bridge-key": process.env.BRIDGE_KEY || "",
+                },
+                body: JSON.stringify({ query, scope_path: "2" }),
+              });
+              return await resp.text();
+            } catch {
+              return "";
+            }
+          },
+          planeReadFn: async (_query: string) => {
+            // Placeholder for Phase 1
+            return "";
+          },
+        });
+
+        const coordinatorResult = await runCoordinatorLoop({
+          message: effectiveText || text,
+          channel: "ellie-chat",
+          userId: "dashboard",
+          foundation: "software-dev",
+          systemPrompt: enrichedPrompt,
+          model: agentModel || "claude-sonnet-4-6",
+          agentRoster: ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
+          deps: coordinatorDeps,
+          workItemId: ellieChatWorkItem || undefined,
+        });
+
+        // Success — send final response via WebSocket
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "response", text: coordinatorResult.response, agent: "ellie", ts: Date.now() }));
+        }
+        await saveMessage("assistant", coordinatorResult.response, {}, "ellie-chat", ecUserId);
+        clearInterval(typingInterval);
+        log.info(
+          `[coordinator] ellie-chat complete — iterations=${coordinatorResult.loopIterations} ` +
+          `tokens_in=${coordinatorResult.totalTokensIn} tokens_out=${coordinatorResult.totalTokensOut} ` +
+          `cost=$${coordinatorResult.totalCostUsd.toFixed(4)} duration=${coordinatorResult.durationMs}ms`
+        );
+        return;
+      } catch (coordErr) {
+        log.error(`[coordinator] ellie-chat error, falling through to callClaude:`, coordErr);
+        // Fall through to existing callClaude path
+      }
+    }
 
     let rawResponse: string;
     try {
