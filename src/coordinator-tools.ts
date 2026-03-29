@@ -51,7 +51,7 @@ export interface InvokeRecipeInput {
 
 export interface ReadContextInput {
   /** Where to fetch information from */
-  source: "forest" | "plane" | "memory" | "sessions";
+  source: "forest" | "plane" | "memory" | "sessions" | "foundations";
   /** Natural-language query or identifier */
   query: string;
 }
@@ -189,8 +189,8 @@ export const COORDINATOR_TOOL_DEFINITIONS: Anthropic.Tool[] = [
       properties: {
         source: {
           type: "string",
-          enum: ["forest", "plane", "memory", "sessions"],
-          description: "Where to look: 'forest' (knowledge), 'plane' (tickets), 'memory' (agent memory), 'sessions' (active agent sessions).",
+          enum: ["forest", "plane", "memory", "sessions", "foundations"],
+          description: "Where to look: 'forest' (knowledge), 'plane' (tickets), 'memory' (agent memory), 'sessions' (active agent sessions), 'foundations' (available foundations and active foundation).",
         },
         query: {
           type: "string",

@@ -372,7 +372,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
       const toolName = tool.name as string;
 
       try {
-        const result = await handleTool(toolName, tool.input as Record<string, unknown>, channel, deps);
+        const result = await handleTool(toolName, tool.input as Record<string, unknown>, channel, deps, opts.registry);
         ctx.addToolResult(toolId, result ?? "OK");
       } catch (err) {
         ctx.addToolResult(toolId, JSON.stringify({
@@ -431,6 +431,7 @@ async function handleTool(
   input: Record<string, unknown>,
   channel: string,
   deps: CoordinatorDeps,
+  registry?: FoundationRegistry,
 ): Promise<string> {
   switch (name) {
     case "ask_user": {
@@ -465,6 +466,16 @@ async function handleTool(
         case "sessions":
           data = await deps.readSessions(readInput.query);
           break;
+        case "foundations": {
+          if (registry) {
+            const all = registry.listAll();
+            const active = registry.getActive();
+            data = `Active: ${active?.name || "none"}\nAvailable: ${all.map(f => `${f.name} (${f.agents.length} agents)`).join(", ")}`;
+          } else {
+            data = "Foundation registry not available.";
+          }
+          break;
+        }
         default:
           data = `Unknown source: ${readInput.source}`;
       }
