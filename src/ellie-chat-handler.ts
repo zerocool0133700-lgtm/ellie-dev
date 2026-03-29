@@ -1076,11 +1076,12 @@ async function _handleEllieChatMessage(
     // ── COORDINATOR_MODE: feature-flagged coordinator path ──
     // Placed BEFORE buildPrompt to avoid the text.length crash in skill-eligibility
     if (process.env.COORDINATOR_MODE === "true") {
+      let ecTypingInterval: ReturnType<typeof setInterval> | undefined;
       try {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "typing", agent: "ellie" }));
         }
-        const ecTypingInterval = setInterval(() => {
+        ecTypingInterval = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId, agent: "ellie" }));
           }
@@ -1131,7 +1132,6 @@ async function _handleEllieChatMessage(
           workItemId: ellieChatWorkItem || undefined,
         });
 
-        clearInterval(ecTypingInterval);
         const coordResponse = coordinatorResult.response || "I completed the request but didn't generate a response. Please try again.";
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: "response", text: coordResponse, agent: "ellie", ts: Date.now() }));
@@ -1146,6 +1146,8 @@ async function _handleEllieChatMessage(
       } catch (coordErr) {
         log.error(`[coordinator] ellie-chat error, falling through to callClaude:`, coordErr);
         // Fall through to existing dispatch path
+      } finally {
+        if (ecTypingInterval) clearInterval(ecTypingInterval);
       }
     }
 
