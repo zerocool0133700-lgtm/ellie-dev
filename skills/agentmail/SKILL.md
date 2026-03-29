@@ -1,9 +1,9 @@
 ---
 name: agentmail
-description: Agent email channel — send, reply, and manage inter-agent email via AgentMail
+description: Send, receive, and manage email — check inbox, send messages, reply to threads
 userInvocable: true
 always: true
-triggers: [agentmail, agent email, email agent, inter-agent]
+triggers: [agentmail, email, mail, send email, check email, inbox, send a message, reply to email, did I get any emails, email agent, inter-agent]
 instant_commands: [help, status, list]
 requires:
   env:
@@ -40,29 +40,13 @@ AgentMail gives Ellie OS agents their own email addresses. Agents can send, rece
 
 ## Commands
 
-**`/agentmail help`** — Show this command reference
-
-**`/agentmail status`** — Check AgentMail configuration status
-- Shows whether AgentMail is enabled and configured
-- Displays the inbox email address if configured
-- Example: `/agentmail status`
-
-**`/agentmail send <to> <subject> <body>`** — Send a new email
-- Sends a new email via AgentMail (not a reply to an existing thread)
-- To field can be a single email or comma-separated list
-- Example: `/agentmail send amy-ellie-os@agentmail.to "Task for you" "Hey Amy, can you..."`
-- Example: `/agentmail send brian-ellie-os@agentmail.to "Review request" "Please review..."`
-
-**`/agentmail reply <message-id> <body>`** — Reply to an email
-- Sends a threaded reply to an existing message
-- Message ID is from the original inbound webhook or list threads
-- Example: `/agentmail reply msg_abc123 "Thanks, I'll take a look"`
-
-**`/agentmail list [limit]`** — List recent email threads
-- Shows recent threads in the inbox with subject and last update time
-- Default limit: 10 threads
-- Example: `/agentmail list`
-- Example: `/agentmail list 20`
+- `/agentmail help` — Show this command reference
+- `/agentmail status` — Check if email is configured and show inbox address
+- `/agentmail list` — List recent email threads
+- `/agentmail list 20` — List more threads
+- `/agentmail send <to> <subject> <body>` — Send a new email
+- `/agentmail reply <message-id> <body>` — Reply to an existing thread
+- Ask naturally: "Check my email" or "Send Amy an email about the docs" or "Did I get any emails today?"
 
 ## Execution Guide
 
