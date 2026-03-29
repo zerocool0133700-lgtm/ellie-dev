@@ -2,6 +2,7 @@
 name: forest-import
 description: Import web content into the Forest knowledge base with auto-tagging and smart categorization
 userInvocable: true
+instant_commands: [help]
 triggers: [http://, https://, import, save this, add to forest, remember this link]
 ---
 

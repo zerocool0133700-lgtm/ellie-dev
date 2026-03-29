@@ -2,6 +2,7 @@
 name: google-workspace
 description: Manage Google Docs, Sheets, Drive, Gmail, Calendar, and Chat
 userInvocable: true
+instant_commands: [help]
 agent: dev
 mcp: mcp__google-workspace__*
 requires:

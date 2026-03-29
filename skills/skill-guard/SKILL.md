@@ -9,6 +9,7 @@ description: >
   dependency risks, or obfuscated code. Produces a structured security report
   with risk rating and actionable recommendations.
 userInvocable: true
+instant_commands: [help]
 always: true
 triggers: [audit, skill, safe, review skill, check skill, install skill, security, guard]
 ---

@@ -357,6 +357,31 @@ async function _handleEllieChatMessage(
     return;
   }
 
+  // /skills [help] — list all available skills
+  if (text.trim() === "/skills" || text.trim() === "/skills help" || text.trim() === "/skills list") {
+    try {
+      const { getSkillCommands } = await import("./skills/commands.ts");
+      const commands = await getSkillCommands();
+      const lines = [
+        "Available skills — say /<name> help for details",
+        "",
+        ...commands.map(cmd => `  /${cmd.name} — ${cmd.description}`),
+        "",
+        "  /foundation — Manage agent teams and foundations",
+        "  /skills — This help",
+      ];
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "response", text: lines.join("\n"), agent: "system", ts: Date.now(), channelId }));
+      }
+    } catch (err) {
+      logger.warn("Failed to list skills", { error: String(err) });
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "response", text: "Could not load skills list.", agent: "system", ts: Date.now() }));
+      }
+    }
+    return;
+  }
+
   // Instant skill commands — static content, no Claude call (sub-100ms)
   try {
     const instant = await matchInstantCommand(text);

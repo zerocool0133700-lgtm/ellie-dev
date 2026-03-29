@@ -2,6 +2,7 @@
 name: architecture-review
 description: Senior architect — reviews designs against prior decisions, validates consistency, writes ADRs. Use for architecture reviews, design validation, pattern checks, conflict detection, or "what did we decide about X?"
 userInvocable: true
+instant_commands: [help]
 agent: dev
 always: false
 mode_aware: true

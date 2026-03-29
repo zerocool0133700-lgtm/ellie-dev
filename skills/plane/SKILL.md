@@ -2,6 +2,7 @@
 name: plane
 description: Manage Plane project issues, cycles, modules, and worklogs
 userInvocable: true
+instant_commands: [help]
 agent: dev
 mcp: mcp__plane__*
 requires:

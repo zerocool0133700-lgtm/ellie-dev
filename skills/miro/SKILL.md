@@ -2,6 +2,7 @@
 name: miro
 description: Create and manage Miro boards, sticky notes, and diagrams
 userInvocable: true
+instant_commands: [help]
 agent: dev
 requires:
   credentials: [miro.com]

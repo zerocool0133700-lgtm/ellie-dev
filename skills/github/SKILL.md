@@ -2,6 +2,7 @@
 name: github
 description: Work with GitHub issues, PRs, repositories, and code reviews
 userInvocable: true
+instant_commands: [help]
 agent: dev
 mcp: mcp__github__*
 requires:

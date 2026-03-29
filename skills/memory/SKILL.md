@@ -2,6 +2,7 @@
 name: memory
 description: Conversation memory and knowledge extraction — automatically extracts facts, goals, and preferences from conversation; detects conflicts; syncs to Forest. Supports tag-based and AI-based extraction.
 userInvocable: true
+instant_commands: [help]
 agent: dev
 mcp: mcp__memory__*
 always_on: true
