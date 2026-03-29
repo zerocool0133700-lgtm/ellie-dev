@@ -1,5 +1,5 @@
 -- 002_foundations.sql
--- Seeds two foundations: software-dev (active) and life-management (inactive)
+-- Seeds three foundations: software-dev (active), life-management (inactive), small-business (inactive)
 -- Re-runnable: deletes existing rows by name before inserting
 
 DELETE FROM foundations WHERE name IN ('software-dev', 'life-management');
@@ -180,6 +180,95 @@ VALUES
       "per_day_usd": 10.00
     },
     "default_model": "claude-haiku-4-5"
+  }'::jsonb,
+  false
+);
+
+-- Small Business Foundation
+DELETE FROM foundations WHERE name = 'small-business';
+
+INSERT INTO foundations (name, description, icon, version, agents, recipes, behavior, active)
+VALUES
+(
+  'small-business',
+  'Small business management — finances, content, scheduling, client outreach',
+  'briefcase',
+  1,
+  '[
+    {
+      "name": "marcus",
+      "role": "finance",
+      "model": "claude-sonnet-4-6",
+      "tools": [
+        "plane_mcp",
+        "forest_bridge_read", "forest_bridge_write",
+        "memory_extraction", "transaction_import", "receipt_parsing"
+      ]
+    },
+    {
+      "name": "amy",
+      "role": "content",
+      "model": "claude-sonnet-4-6",
+      "tools": [
+        "google_workspace", "forest_bridge_read",
+        "qmd_search", "brave_web_search", "memory_extraction"
+      ]
+    },
+    {
+      "name": "scheduler",
+      "role": "calendar",
+      "model": "claude-sonnet-4-6",
+      "tools": [
+        "google_workspace", "forest_bridge", "memory_extraction"
+      ]
+    },
+    {
+      "name": "outreach",
+      "role": "client-comms",
+      "model": "claude-sonnet-4-6",
+      "tools": [
+        "google_workspace", "brave_web_search",
+        "forest_bridge", "memory_extraction"
+      ]
+    }
+  ]'::jsonb,
+  '[
+    {
+      "name": "invoice-review",
+      "type": "pipeline",
+      "steps": ["marcus", "outreach"],
+      "trigger": "monthly or on request"
+    },
+    {
+      "name": "social-post",
+      "type": "pipeline",
+      "steps": ["amy", "outreach"],
+      "trigger": "on request"
+    },
+    {
+      "name": "monthly-pnl",
+      "type": "fan-out",
+      "agents": ["marcus", "scheduler"],
+      "trigger": "first of month"
+    }
+  ]'::jsonb,
+  '{
+    "approvals": {
+      "send_email": "always_confirm",
+      "spending": "always_confirm",
+      "client_comms": "always_confirm",
+      "tracking": "auto",
+      "plane_update": "auto"
+    },
+    "proactivity": "high",
+    "tone": "professional, clear, action-oriented",
+    "escalation": "flag and continue",
+    "max_loop_iterations": 8,
+    "cost_limits": {
+      "per_session_usd": 1.50,
+      "per_day_usd": 15.00
+    },
+    "coordinator_model": "claude-sonnet-4-6"
   }'::jsonb,
   false
 );
