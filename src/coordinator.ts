@@ -544,11 +544,8 @@ async function handleTool(
     }
 
     case "invoke_recipe": {
-      const _recipeInput = input as unknown as InvokeRecipeInput;
-      return JSON.stringify({
-        status: "not_available",
-        note: "Recipe invocation is not yet available (Phase 2).",
-      });
+      const recipeInput = input as unknown as InvokeRecipeInput;
+      return await executeRecipe(recipeInput, channel, deps, registry);
     }
 
     default:
@@ -590,6 +587,177 @@ function isRateLimitError(err: unknown): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ── Recipe Execution (ELLIE-1102) ──────────────────────────────────────────
+
+/**
+ * Execute a coordination recipe using the coordinator's own dispatch capabilities.
+ * Pipeline and fan-out patterns are executed directly by dispatching agents.
+ * This avoids the heavy OrchestratorDeps wiring of the legacy formation system.
+ */
+async function executeRecipe(
+  recipeInput: InvokeRecipeInput,
+  channel: string,
+  deps: CoordinatorDeps,
+  registry?: FoundationRegistry,
+): Promise<string> {
+  // Find the recipe in the active foundation
+  const recipes = registry?.getRecipes() ?? [];
+  const recipe = recipes.find(r => r.name === recipeInput.recipe_name);
+
+  if (!recipe) {
+    const available = recipes.map(r => r.name).join(", ") || "none";
+    return JSON.stringify({
+      status: "error",
+      error: `Recipe "${recipeInput.recipe_name}" not found. Available: ${available}`,
+    });
+  }
+
+  const agents = recipeInput.agents_override ?? recipe.steps ?? recipe.agents ?? [];
+  if (agents.length === 0) {
+    return JSON.stringify({ status: "error", error: `Recipe "${recipe.name}" has no agents defined.` });
+  }
+
+  const inputText = typeof recipeInput.input === "string" ? recipeInput.input : JSON.stringify(recipeInput.input);
+  logger.info("Executing recipe", { name: recipe.name, pattern: recipe.pattern, agents });
+
+  // Notify UI
+  try {
+    await deps.sendEvent({
+      type: "spawn_status",
+      spawnId: `recipe-${recipe.name}-${Date.now()}`,
+      agent: "ellie",
+      task: `Running recipe: ${recipe.name} (${recipe.pattern}) with ${agents.join(", ")}`,
+      status: "running",
+      ts: Date.now(),
+    });
+  } catch { /* best-effort */ }
+
+  const startTime = Date.now();
+  const agentOutputs: Array<{ agent: string; output: string; duration_ms: number }> = [];
+
+  try {
+    switch (recipe.pattern) {
+      case "pipeline": {
+        // Sequential: each agent receives the input + prior agent's output
+        let runningContext = inputText;
+        for (const agent of agents) {
+          const result = await deps.callSpecialist(
+            agent,
+            `${inputText}\n\nPrior context from pipeline:\n${runningContext}`,
+          );
+          agentOutputs.push({ agent, output: result.output, duration_ms: result.duration_ms });
+          runningContext = result.output; // Feed forward
+          if (result.status === "error") {
+            return JSON.stringify({
+              status: "error",
+              error: `Pipeline failed at ${agent}: ${result.error}`,
+              agentOutputs,
+            });
+          }
+        }
+        break;
+      }
+
+      case "fan-out": {
+        // Parallel: all agents get the same input, results collected
+        const results = await Promise.all(
+          agents.map(agent => deps.callSpecialist(agent, inputText))
+        );
+        for (let i = 0; i < agents.length; i++) {
+          agentOutputs.push({
+            agent: agents[i],
+            output: results[i].output,
+            duration_ms: results[i].duration_ms,
+          });
+        }
+        break;
+      }
+
+      case "debate": {
+        // Alternating rounds: each agent responds to the prior, 2 rounds
+        let debate = inputText;
+        for (let round = 0; round < 2; round++) {
+          for (const agent of agents) {
+            const result = await deps.callSpecialist(
+              agent,
+              `Round ${round + 1} of debate.\n\nTopic: ${inputText}\n\nDiscussion so far:\n${debate}`,
+            );
+            debate += `\n\n**${agent}** (round ${round + 1}):\n${result.output}`;
+            agentOutputs.push({ agent, output: result.output, duration_ms: result.duration_ms });
+          }
+        }
+        break;
+      }
+
+      case "round-table": {
+        // 4-phase: convene → discuss (fan-out) → converge → deliver
+        // Simplified version — uses the coordinator's dispatch rather than the legacy orchestrator
+        const convener = agents[0];
+
+        // Phase 1: Convene
+        const conveneResult = await deps.callSpecialist(convener,
+          `CONVENE PHASE: Analyze this request and identify the key dimensions to discuss.\n\n${inputText}`);
+        agentOutputs.push({ agent: convener, output: conveneResult.output, duration_ms: conveneResult.duration_ms });
+
+        // Phase 2: Discuss (fan-out to all agents)
+        const discussResults = await Promise.all(
+          agents.map(agent => deps.callSpecialist(agent,
+            `DISCUSS PHASE: Share your perspective on this topic.\n\nTopic: ${inputText}\n\nConvene analysis:\n${conveneResult.output}`))
+        );
+        for (let i = 0; i < agents.length; i++) {
+          agentOutputs.push({ agent: agents[i], output: discussResults[i].output, duration_ms: discussResults[i].duration_ms });
+        }
+
+        // Phase 3: Converge
+        const allDiscussion = discussResults.map((r, i) => `**${agents[i]}:** ${r.output}`).join("\n\n");
+        const convergeResult = await deps.callSpecialist(convener,
+          `CONVERGE PHASE: Synthesize agreements, disagreements, and priorities from the discussion.\n\n${allDiscussion}`);
+        agentOutputs.push({ agent: convener, output: convergeResult.output, duration_ms: convergeResult.duration_ms });
+
+        // Phase 4: Deliver
+        const deliverResult = await deps.callSpecialist(convener,
+          `DELIVER PHASE: Produce the final polished deliverable based on the convergence.\n\n${convergeResult.output}`);
+        agentOutputs.push({ agent: convener, output: deliverResult.output, duration_ms: deliverResult.duration_ms });
+        break;
+      }
+
+      default:
+        return JSON.stringify({ status: "error", error: `Unknown recipe pattern: ${recipe.pattern}` });
+    }
+  } catch (err) {
+    return JSON.stringify({
+      status: "error",
+      error: `Recipe execution failed: ${err instanceof Error ? err.message : String(err)}`,
+      agentOutputs,
+    });
+  }
+
+  const durationMs = Date.now() - startTime;
+  logger.info("Recipe complete", { name: recipe.name, pattern: recipe.pattern, agents: agentOutputs.length, durationMs });
+
+  // Notify UI of completion
+  try {
+    await deps.sendEvent({
+      type: "spawn_announcement",
+      spawnId: `recipe-${recipe.name}-${startTime}`,
+      agent: "ellie",
+      status: "completed",
+      durationSec: Math.round(durationMs / 1000),
+      resultPreview: `Recipe ${recipe.name} completed with ${agentOutputs.length} agent contributions`,
+      ts: Date.now(),
+    });
+  } catch { /* best-effort */ }
+
+  return JSON.stringify({
+    status: "completed",
+    recipe: recipe.name,
+    pattern: recipe.pattern,
+    synthesis: agentOutputs[agentOutputs.length - 1]?.output ?? "",
+    agentOutputs: agentOutputs.map(o => ({ agent: o.agent, output: o.output.slice(0, 500), duration_ms: o.duration_ms })),
+    duration_ms: durationMs,
+  });
 }
 
 // ── buildCoordinatorDeps ────────────────────────────────────────────────────
