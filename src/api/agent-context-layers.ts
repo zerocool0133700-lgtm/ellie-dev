@@ -1,5 +1,5 @@
 /**
- * Agent Context Layers API — ELLIE-XXX
+ * Agent Context Layers API — ELLIE-1124
  *
  * GET /api/agents/:name/context-layers
  *
@@ -10,7 +10,7 @@
 
 import { log } from "../logger.ts";
 import { getCreatureProfile } from "../creature-profile.ts";
-import { getCachedRiverDoc } from "../prompt-builder.ts";
+import { getCachedRiverDoc, AGENT_PROFILE_MAP } from "../prompt-builder.ts";
 import { getSkillSnapshot } from "../skills/index.ts";
 import { getRelayDeps } from "../relay-state.ts";
 import type { ApiRequest, ApiResponse } from "./types.ts";
@@ -87,11 +87,8 @@ export async function getContextLayersEndpoint(
   // ── Creature profile (token budget, allowed skills, creature name) ─────────
   const profile = getCreatureProfile(normalized);
 
-  // Derive creature name from the AGENT_PROFILE_MAP equivalent — parse from
-  // the cached doc key convention: agent name maps to "<firstname>-<creature>"
-  // We can't import AGENT_PROFILE_MAP directly (not exported), so we derive
-  // creature name from the River doc key or fall back to agentName.
-  const creatureName = normalized; // used as the River doc key for DNA
+  // Resolve creature name from the shared AGENT_PROFILE_MAP (exported from prompt-builder)
+  const creatureName = AGENT_PROFILE_MAP[normalized] ?? normalized;
 
   const tokenBudget = profile?.token_budget ?? null;
 
@@ -177,9 +174,9 @@ export async function getContextLayersEndpoint(
     });
   }
 
-  // Layer 4 — Skills
+  // Layer 4 — Skills (pass undefined instead of "" to allow caching)
   try {
-    const snapshot = await getSkillSnapshot(profile?.allowed_skills, "");
+    const snapshot = await getSkillSnapshot(profile?.allowed_skills);
     const skillCount = snapshot.skills.length;
     const preview = truncate(snapshot.prompt || null);
     layers.push({
@@ -217,13 +214,9 @@ export async function getContextLayersEndpoint(
     source: "Forest DB (working_memory table)",
     content: [
       "7 sections (dynamic per session):",
-      "  • session_identity — agent name, ticket ID, channel",
-      "  • task_stack — ordered todo list with active task highlighted",
-      "  • conversation_thread — narrative summary (not a transcript)",
-      "  • investigation_state — hypotheses, files read, current exploration",
-      "  • decision_log — choices made with reasoning",
-      "  • context_anchors — must-survive details (error messages, line numbers)",
-      "  • resumption_prompt — continuation note written for your future self",
+      "  session_identity, task_stack, conversation_thread,",
+      "  investigation_state, decision_log, context_anchors,",
+      "  resumption_prompt",
     ].join("\n"),
     token_estimate: 0,
     configured: true,
@@ -244,16 +237,16 @@ export async function getContextLayersEndpoint(
       if (tools.some((t) => t.includes("mcp"))) toolCategories.push("mcp");
     }
 
-    const preview = toolsEnabled
-      ? truncate(`Tools: ${toolsEnabled.join(", ")}`)
-      : null;
+    // Estimate tokens on full content, truncate for preview
+    const fullToolsText = toolsEnabled ? `Tools: ${toolsEnabled.join(", ")}` : null;
+    const preview = truncate(fullToolsText);
 
     layers.push({
       name: "Tools Enabled",
       priority: 6,
       source: "Supabase agents table",
       content: preview,
-      token_estimate: estimateTokens(preview),
+      token_estimate: estimateTokens(fullToolsText),
       configured: toolsEnabled !== null,
       metadata: {
         tool_categories: toolCategories,

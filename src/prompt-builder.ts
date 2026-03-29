@@ -417,7 +417,7 @@ const AGENT_ARCHETYPE_CACHE_MS = 60_000;
 const ARCHETYPES_DIR = join(PROJECT_ROOT, "config", "archetypes");
 
 /** Maps short agent names to their Forest profile names. */
-const AGENT_PROFILE_MAP: Record<string, string> = {
+export const AGENT_PROFILE_MAP: Record<string, string> = {
   general: "ellie",
   dev: "james-ant",
   research: "kate-squirrel",
