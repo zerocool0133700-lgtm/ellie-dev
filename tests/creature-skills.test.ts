@@ -75,4 +75,18 @@ describe("creature-skills", () => {
     // Cleanup
     await sql`DELETE FROM archetype_default_skills WHERE archetype = 'test-arch'`;
   });
+
+  it("resolveSkillsForAgent returns null for null creature_id", async () => {
+    const { resolveSkillsForAgent } = await import("../../ellie-forest/src/creature-skills");
+    const result = await resolveSkillsForAgent(null);
+    expect(result).toBeNull();
+  });
+
+  it("resolveSkillsForAgent returns skills for valid creature_id", async () => {
+    const { resolveSkillsForAgent } = await import("../../ellie-forest/src/creature-skills");
+    const skills = await resolveSkillsForAgent(testCreatureId);
+    expect(skills).toContain("github");
+    expect(skills).toContain("plane");
+    expect(skills).toContain("ums-calendar");
+  });
 });
