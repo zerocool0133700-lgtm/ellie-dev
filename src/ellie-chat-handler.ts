@@ -819,6 +819,9 @@ async function _handleEllieChatMessage(
     if (imagePath) {
       effectiveText = `[Image: ${imagePath}]\n\n${effectiveText || "Analyze this image."}`;
     }
+    // ELLIE-1133: Hoist so coordinator block can access it
+    let dispatchConfirmMsgId: number | undefined;
+
     if (agentResult) {
       setActiveAgent("ellie-chat", agentResult.dispatch.agent.name);
       // ELLIE-846: Update agent presence to busy + broadcast
@@ -844,8 +847,6 @@ async function _handleEllieChatMessage(
       }
 
       // Dispatch notification (ELLIE-80 pattern from Google Chat)
-      // ELLIE-1133: Store message ID so we can delete it after dispatch completes
-      let dispatchConfirmMsgId: number | undefined;
       if (agentResult.dispatch.agent.name !== "general" && agentResult.dispatch.is_new) {
         notify(getNotifyCtx(), {
           event: "dispatch_confirm",
