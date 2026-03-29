@@ -58,9 +58,27 @@ import { searchElastic } from "./elasticsearch.ts";
 import { log } from "./logger.ts";
 import { deliverResponse, markProcessing, clearProcessing } from "./ws-delivery.ts";
 import { runCoordinatorLoop, buildCoordinatorDeps } from "./coordinator.ts";
+import type { FoundationRegistry } from "./foundation-registry.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
 
 const logger = log.child("ellie-chat");
+
+// ── Lazy Foundation Registry ────────────────────────────────────
+let _foundationRegistry: FoundationRegistry | null = null;
+async function getFoundationRegistry(): Promise<FoundationRegistry | null> {
+  if (_foundationRegistry) return _foundationRegistry;
+  try {
+    const { supabase } = getRelayDeps();
+    if (!supabase) return null;
+    const { FoundationRegistry, createSupabaseFoundationStore } = await import("./foundation-registry.ts");
+    _foundationRegistry = new FoundationRegistry(createSupabaseFoundationStore(supabase));
+    await _foundationRegistry.refresh();
+    return _foundationRegistry;
+  } catch {
+    return null;
+  }
+}
+
 import { getForestContext } from "./elasticsearch/context.ts";
 import { acknowledgeChannel } from "./delivery.ts";
 import { parseMentions, extractMentionedAgents, hasBroadcastMention, storeMentions } from "./mention-parser.ts";
@@ -1087,6 +1105,7 @@ async function _handleEllieChatMessage(
           ws.send(JSON.stringify({ type: "typing", agent: "ellie" }));
         }
 
+        const foundationRegistry = await getFoundationRegistry();
         const coordinatorDeps = buildCoordinatorDeps({
           sessionId: session.sessionId || agentResult?.dispatch.session_id || `ec-${Date.now()}`,
           channel: "ellie-chat",
@@ -1110,16 +1129,18 @@ async function _handleEllieChatMessage(
               return "";
             }
           },
+          registry: foundationRegistry || undefined,
         });
 
         const coordinatorResult = await runCoordinatorLoop({
           message: effectiveText || text,
           channel: "ellie-chat",
           userId: "dashboard",
-          foundation: "software-dev",
-          systemPrompt: "You are Ellie, a coordinator for Dave. Your specialists have tools you don't — Google Calendar, Gmail, GitHub, code editing, system ops, etc. When a request needs those capabilities, ALWAYS dispatch the right specialist using dispatch_agent rather than saying you can't do it. Your read_context tool only covers Forest, Plane, memory, and sessions. For everything else, dispatch. For greetings or simple chat, use complete directly.",
-          model: agentModel || "claude-sonnet-4-6",
-          agentRoster: ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
+          registry: foundationRegistry || undefined,
+          foundation: foundationRegistry?.getActive()?.name || "software-dev",
+          systemPrompt: foundationRegistry?.getCoordinatorPrompt() || "You are Ellie, a coordinator for Dave. Your specialists have tools you don't — Google Calendar, Gmail, GitHub, code editing, system ops, etc. When a request needs those capabilities, ALWAYS dispatch the right specialist using dispatch_agent rather than saying you can't do it. Your read_context tool only covers Forest, Plane, memory, and sessions. For everything else, dispatch. For greetings or simple chat, use complete directly.",
+          model: foundationRegistry?.getBehavior()?.coordinator_model || agentModel || "claude-sonnet-4-6",
+          agentRoster: foundationRegistry?.getAgentRoster() || ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
           deps: coordinatorDeps,
           workItemId: ellieChatWorkItem || undefined,
         });

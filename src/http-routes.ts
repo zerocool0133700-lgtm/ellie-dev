@@ -207,8 +207,25 @@ import { ingestDocument, ingestUrl, canIngest } from "./document-ingestion.ts";
 // ELLIE-547: CORS whitelist (replaces wildcard *)
 import { handlePreflight, corsHeader } from "./cors.ts";
 import { runCoordinatorLoop, buildCoordinatorDeps } from "./coordinator.ts";
+import type { FoundationRegistry } from "./foundation-registry.ts";
 
 const logger = log.child("http");
+
+// ── Lazy Foundation Registry ────────────────────────────────────
+let _foundationRegistry: FoundationRegistry | null = null;
+async function getFoundationRegistry(): Promise<FoundationRegistry | null> {
+  if (_foundationRegistry) return _foundationRegistry;
+  try {
+    const { supabase } = getRelayDeps();
+    if (!supabase) return null;
+    const { FoundationRegistry, createSupabaseFoundationStore } = await import("./foundation-registry.ts");
+    _foundationRegistry = new FoundationRegistry(createSupabaseFoundationStore(supabase));
+    await _foundationRegistry.refresh();
+    return _foundationRegistry;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * ELLIE-546: Returns true when a request to `pathname` from `clientIp` requires API authentication.
@@ -595,14 +612,16 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
 
             if (COORDINATOR_MODE) {
               try {
+                const foundationRegistry = await getFoundationRegistry();
                 const gchatCoordinatorResult = await runCoordinatorLoop({
                   message: effectiveGchatText || parsed.text,
                   channel: "google-chat",
                   userId: parsed.senderEmail,
-                  foundation: "software-dev",
-                  systemPrompt: "You are Ellie, a coordinator for Dave (via Google Chat). Your specialists have tools you don't — Google Calendar, Gmail, GitHub, code editing, system ops, etc. When a request needs those capabilities, ALWAYS dispatch the right specialist using dispatch_agent rather than saying you can't do it. Your read_context tool only covers Forest, Plane, memory, and sessions. For everything else, dispatch. For greetings or simple chat, use complete directly.",
-                  model: gchatAgentResult?.dispatch.agent.model || "claude-sonnet-4-6",
-                  agentRoster: ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
+                  registry: foundationRegistry || undefined,
+                  foundation: foundationRegistry?.getActive()?.name || "software-dev",
+                  systemPrompt: foundationRegistry?.getCoordinatorPrompt() || "You are Ellie, a coordinator for Dave (via Google Chat). Your specialists have tools you don't — Google Calendar, Gmail, GitHub, code editing, system ops, etc. When a request needs those capabilities, ALWAYS dispatch the right specialist using dispatch_agent rather than saying you can't do it. Your read_context tool only covers Forest, Plane, memory, and sessions. For everything else, dispatch. For greetings or simple chat, use complete directly.",
+                  model: foundationRegistry?.getBehavior()?.coordinator_model || gchatAgentResult?.dispatch.agent.model || "claude-sonnet-4-6",
+                  agentRoster: foundationRegistry?.getAgentRoster() || ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
                   deps: buildCoordinatorDeps({
                     sessionId: gchatAgentResult?.dispatch.session_id || `gchat-${Date.now()}`,
                     channel: "google-chat",
@@ -620,6 +639,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
                       const bridgeData = await bridgeRes.json() as { memories?: Array<{ content: string }> };
                       return bridgeData.memories?.map(m => m.content).join("\n") || "No results.";
                     },
+                    registry: foundationRegistry || undefined,
                   }),
                   workItemId: gchatWorkItem || undefined,
                 });

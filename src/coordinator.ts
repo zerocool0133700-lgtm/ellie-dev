@@ -9,6 +9,7 @@
 
 import Anthropic from "@anthropic-ai/sdk";
 import { log } from "./logger.ts";
+import type { FoundationRegistry } from "./foundation-registry.ts";
 import { CoordinatorContext } from "./coordinator-context.ts";
 import {
   COORDINATOR_TOOL_DEFINITIONS,
@@ -62,6 +63,7 @@ export interface CoordinatorOpts {
   model: string;
   agentRoster: string[];
   deps: CoordinatorDeps;
+  registry?: FoundationRegistry;
   maxIterations?: number;
   sessionTimeoutMs?: number;
   costCapUsd?: number;
@@ -106,9 +108,17 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
     _testResponses,
   } = opts;
 
-  const maxIterations = opts.maxIterations ?? DEFAULT_MAX_ITERATIONS;
+  const maxIterationsRaw = opts.maxIterations ?? DEFAULT_MAX_ITERATIONS;
   const sessionTimeoutMs = opts.sessionTimeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS;
-  const costCapUsd = opts.costCapUsd ?? DEFAULT_COST_CAP_USD;
+  const costCapRaw = opts.costCapUsd ?? DEFAULT_COST_CAP_USD;
+
+  // Foundation-aware defaults: registry values override opts, with raw values as fallback
+  const behavior = opts.registry?.getBehavior();
+  const effectiveMaxIterations = behavior?.max_loop_iterations ?? maxIterationsRaw;
+  const effectiveCostCap = behavior?.cost_cap_session ?? costCapRaw;
+  const effectiveModel = behavior?.coordinator_model ?? model;
+  const effectiveRoster = opts.registry?.getAgentRoster() ?? agentRoster;
+  const effectivePrompt = opts.registry?.getCoordinatorPrompt() ?? systemPrompt;
 
   const startTime = Date.now();
   const isTestMode = !!_testResponses;
@@ -116,8 +126,8 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
 
   // Build system prompt from base + roster + foundation
   const fullSystemPrompt = [
-    systemPrompt,
-    `\n## Agent Roster\nAvailable specialists: ${agentRoster.join(", ")}`,
+    effectivePrompt,
+    `\n## Agent Roster\nAvailable specialists: ${effectiveRoster.join(", ")}`,
     `\n## Foundation\n${foundation}`,
   ].join("\n");
 
@@ -132,7 +142,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
     type: "coordinator",
     agent: "ellie",
     foundation,
-    model,
+    model: effectiveModel,
     work_item_id: workItemId,
   });
 
@@ -155,7 +165,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
   }
 
   // 4. LOOP
-  for (let iteration = 0; iteration < maxIterations; iteration++) {
+  for (let iteration = 0; iteration < effectiveMaxIterations; iteration++) {
     loopIterations = iteration + 1;
 
     // 4a. Check wall-clock timeout
@@ -167,11 +177,11 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
     }
 
     // Check cost cap
-    const currentCost = computeCost(model, totalTokensIn, totalTokensOut);
-    if (currentCost > costCapUsd) {
+    const currentCost = computeCost(effectiveModel, totalTokensIn, totalTokensOut);
+    if (currentCost > effectiveCostCap) {
       hitSafetyRail = true;
       response = "I've reached the cost limit for this session. Here's what I've accomplished so far.";
-      logger.warn("Cost cap reached", { iteration, cost: currentCost, cap: costCapUsd });
+      logger.warn("Cost cap reached", { iteration, cost: currentCost, cap: effectiveCostCap });
       break;
     }
 
@@ -192,7 +202,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
     } else {
       try {
         const anthropicResponse = await callMessagesAPI(client!, {
-          model,
+          model: effectiveModel,
           systemPrompt: ctx.getSystemPrompt(),
           messages: ctx.getMessages(),
         });
@@ -284,9 +294,9 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
         const toolId = tool.id as string;
 
         // Validate agent is in roster
-        if (!agentRoster.includes(input.agent)) {
-          const errorMsg = `Agent "${input.agent}" is not in the roster. Available: ${agentRoster.join(", ")}`;
-          logger.warn("Agent not in roster", { agent: input.agent, roster: agentRoster });
+        if (!effectiveRoster.includes(input.agent)) {
+          const errorMsg = `Agent "${input.agent}" is not in the roster. Available: ${effectiveRoster.join(", ")}`;
+          logger.warn("Agent not in roster", { agent: input.agent, roster: effectiveRoster });
           return { toolId, result: errorMsg };
         }
 
@@ -296,7 +306,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
           agent: input.agent,
           foundation,
           parent_id: coordEnvelope.id,
-          model,
+          model: effectiveModel,
           work_item_id: workItemId,
         });
 
@@ -385,7 +395,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
   }
 
   // If we hit maxIterations without breaking
-  if (!response && loopIterations >= maxIterations) {
+  if (!response && loopIterations >= effectiveMaxIterations) {
     hitSafetyRail = true;
     response = "I've reached the maximum number of iterations for this request. Here's where things stand — please send a follow-up to continue.";
   }
@@ -394,13 +404,13 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
   const finalEnvelope = completeEnvelope(coordEnvelope, {
     tokens_in: totalTokensIn,
     tokens_out: totalTokensOut,
-    model,
+    model: effectiveModel,
   });
   envelopes[0] = finalEnvelope;
   try { await deps.logEnvelope(finalEnvelope); } catch { /* best-effort */ }
 
   const durationMs = Date.now() - startTime;
-  const totalCostUsd = computeCost(model, totalTokensIn, totalTokensOut);
+  const totalCostUsd = computeCost(effectiveModel, totalTokensIn, totalTokensOut);
 
   return {
     response,
@@ -522,6 +532,7 @@ export function buildCoordinatorDeps(opts: {
   sendFn: (channel: string, message: string) => Promise<void>;
   forestReadFn: (query: string) => Promise<string>;
   planeReadFn?: (query: string) => Promise<string>;
+  registry?: FoundationRegistry;
 }): CoordinatorDeps {
   const { sessionId, channel, sendFn, forestReadFn } = opts;
 
@@ -565,7 +576,10 @@ export function buildCoordinatorDeps(opts: {
         jason: ["bash_systemctl", "bash_journalctl", "bash_process_mgmt", "health_endpoint_checks", "log_analysis", "forest_bridge_read", "forest_bridge_write", "plane_mcp", "github_mcp", "telegram", "google_chat"],
       };
 
-      const agentToolCategories = AGENT_TOOLS[agent] ?? AGENT_TOOLS["general"];
+      const registryTools = opts.registry?.getAgentTools(agent);
+      const agentToolCategories = (registryTools && registryTools.length > 0)
+        ? registryTools
+        : (AGENT_TOOLS[agent] ?? AGENT_TOOLS["general"]);
       const allowedTools = getAllowedToolsForCLI(agentToolCategories, agent);
 
       const prompt = context ? `${task}\n\nContext:\n${context}` : task;

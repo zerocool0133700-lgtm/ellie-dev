@@ -108,8 +108,25 @@ import { resilientTask } from "./resilient-task.ts";
 import { checkContextPressure, shouldNotify, getCompactionNotice, checkpointSessionToForest } from "./api/session-compaction.ts";
 import { primeWorkingMemoryCache } from "./working-memory.ts";
 import { runCoordinatorLoop, buildCoordinatorDeps } from "./coordinator.ts";
+import type { FoundationRegistry } from "./foundation-registry.ts";
 
 const logger = log.child("telegram");
+
+// ── Lazy Foundation Registry ────────────────────────────────────
+let _foundationRegistry: FoundationRegistry | null = null;
+async function getFoundationRegistry(): Promise<FoundationRegistry | null> {
+  if (_foundationRegistry) return _foundationRegistry;
+  try {
+    const { supabase } = getRelayDeps();
+    if (!supabase) return null;
+    const { FoundationRegistry, createSupabaseFoundationStore } = await import("./foundation-registry.ts");
+    _foundationRegistry = new FoundationRegistry(createSupabaseFoundationStore(supabase));
+    await _foundationRegistry.refresh();
+    return _foundationRegistry;
+  } catch {
+    return null;
+  }
+}
 
 export function registerTelegramHandlers(bot: Bot): void {
   const { anthropic, supabase } = getRelayDeps();
@@ -608,14 +625,16 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
     const typingInterval = setInterval(() => ctx.replyWithChatAction("typing").catch(() => {}), 4000);
 
     try {
+      const foundationRegistry = await getFoundationRegistry();
       const coordinatorResult = await runCoordinatorLoop({
         message: effectiveText,
         channel: "telegram",
         userId: userId,
-        foundation: "software-dev", // Hardcoded for Phase 1
-        systemPrompt: "You are Ellie, a coordinator for Dave. Your specialists have tools you don't — Google Calendar, Gmail, GitHub, code editing, system ops, etc. When a request needs those capabilities, ALWAYS dispatch the right specialist using dispatch_agent rather than saying you can't do it. Your read_context tool only covers Forest, Plane, memory, and sessions. For everything else, dispatch. For greetings or simple chat, use complete directly.",
-        model: agentModel || "claude-sonnet-4-6",
-        agentRoster: ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
+        registry: foundationRegistry || undefined,
+        foundation: foundationRegistry?.getActive()?.name || "software-dev",
+        systemPrompt: foundationRegistry?.getCoordinatorPrompt() || "You are Ellie, a coordinator for Dave. Your specialists have tools you don't — Google Calendar, Gmail, GitHub, code editing, system ops, etc. When a request needs those capabilities, ALWAYS dispatch the right specialist using dispatch_agent rather than saying you can't do it. Your read_context tool only covers Forest, Plane, memory, and sessions. For everything else, dispatch. For greetings or simple chat, use complete directly.",
+        model: foundationRegistry?.getBehavior()?.coordinator_model || agentModel || "claude-sonnet-4-6",
+        agentRoster: foundationRegistry?.getAgentRoster() || ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
         deps: buildCoordinatorDeps({
           sessionId: session.sessionId,
           channel: "telegram",
@@ -629,6 +648,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
             const data = await res.json() as { memories?: Array<{ content: string }> };
             return data.memories?.map(m => m.content).join("\n") || "No results.";
           },
+          registry: foundationRegistry || undefined,
         }),
         workItemId: detectedWorkItem || undefined,
       });
