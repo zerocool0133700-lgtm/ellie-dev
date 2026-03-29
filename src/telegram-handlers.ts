@@ -166,6 +166,10 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   const rateLimited = checkMessageRate(userId, "telegram");
   if (rateLimited) { await ctx.reply(rateLimited); return; }
 
+  // ELLIE-1136: Flag user activity so overnight scheduler stops
+  const { flagUserActivity, isOvernightRunning } = await import("./overnight/scheduler.ts");
+  if (isOvernightRunning()) flagUserActivity();
+
   await ctx.replyWithChatAction("typing");
   acknowledgeChannel("telegram"); // User responded — clear pending responses
 

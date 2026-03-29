@@ -80,7 +80,8 @@ export type CoordinatorToolName =
   | "invoke_recipe"
   | "read_context"
   | "update_user"
-  | "complete";
+  | "complete"
+  | "start_overnight";
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
@@ -219,6 +220,25 @@ export const COORDINATOR_TOOL_DEFINITIONS: Anthropic.Tool[] = [
         },
       },
       required: ["message"],
+    },
+  },
+
+  {
+    name: "start_overnight",
+    description: "Start the off-hours autonomous work session. Picks up scheduled GTD tasks and runs them in isolated Docker containers. Each task gets its own branch and PR. Use when Dave says 'run the overnight queue', 'start off-hours work', or 'run tonight's tasks'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        end_time: {
+          type: "string",
+          description: "When to stop (e.g. '4am', '6am'). Default: 6 AM CST.",
+        },
+        concurrency: {
+          type: "number",
+          description: "Max simultaneous containers. Default: 2.",
+        },
+      },
+      required: [],
     },
   },
 

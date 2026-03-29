@@ -627,6 +627,19 @@ async function handleTool(
       return await executeRecipe(recipeInput, channel, deps, registry);
     }
 
+    case "start_overnight": {
+      const { startOvernightSession } = await import("./overnight/scheduler.ts");
+      try {
+        const sessionId = await startOvernightSession({
+          endTime: input.end_time as string | undefined,
+          concurrency: input.concurrency as number | undefined,
+        });
+        return JSON.stringify({ result: `Overnight session started (ID: ${sessionId}). I'll work through the scheduled GTD tasks until ${input.end_time || '6 AM'}. Check /overnight on the dashboard in the morning for results.` });
+      } catch (err) {
+        return JSON.stringify({ result: `Failed to start overnight session: ${(err as Error).message}` });
+      }
+    }
+
     default:
       return JSON.stringify({ status: "error", error: `Unknown tool: ${name}` });
   }

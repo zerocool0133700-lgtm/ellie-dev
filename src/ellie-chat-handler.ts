@@ -207,6 +207,10 @@ async function _handleEllieChatMessage(
   logger.info("User message received", { phoneMode, hasImage: !!image, mode, channelId: channelId?.substring(0, 8) });
   acknowledgeChannel("ellie-chat");
 
+  // ELLIE-1136: Flag user activity so overnight scheduler stops
+  const { flagUserActivity, isOvernightRunning } = await import("./overnight/scheduler.ts");
+  if (isOvernightRunning()) flagUserActivity();
+
   const ecUser = wsAppUserMap.get(ws);
   const ecUserId = ecUser?.id || ecUser?.anonymous_id || undefined;
 
