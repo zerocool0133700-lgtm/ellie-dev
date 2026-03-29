@@ -402,6 +402,173 @@ export async function callClaude(
   }
 }
 
+// ── spawnClaudeStreaming ────────────────────────────────────────
+
+/**
+ * Spawn the Claude CLI with stream-json output, calling callbacks on tool_use events.
+ * Falls back gracefully — if stream-json parsing fails, output is still returned.
+ * Used by the coordinator to emit real-time tool activity events to the dashboard.
+ */
+export async function spawnClaudeStreaming(
+  prompt: string,
+  options: {
+    timeoutMs?: number;
+    allowedTools?: string[];
+    onToolUse?: (toolName: string, toolInput: Record<string, unknown>) => void;
+    onToolResult?: (toolName: string, durationMs: number) => void;
+  },
+): Promise<{ output: string; costUsd: number; isError: boolean }> {
+  const args = [CLAUDE_PATH, "-p", "--output-format", "stream-json"];
+
+  if (AGENT_MODE) {
+    const tools = options.allowedTools?.length ? options.allowedTools : ALLOWED_TOOLS;
+    args.push("--allowedTools", ...tools);
+  }
+
+  const TIMEOUT_MS = options.timeoutMs ?? CLI_TIMEOUT_MS;
+
+  logger.info("spawnClaudeStreaming started", {
+    prompt_chars: prompt.length,
+    tools: options.allowedTools?.length ?? ALLOWED_TOOLS.length,
+    timeout_ms: TIMEOUT_MS,
+  });
+
+  try {
+    const proc = spawn(args, {
+      stdin: new Blob([prompt]),
+      stdout: "pipe",
+      stderr: "pipe",
+      cwd: PROJECT_DIR || undefined,
+      env: {
+        ...process.env,
+        CLAUDECODE: "",
+        ANTHROPIC_API_KEY: "",
+      },
+    });
+
+    let timedOut = false;
+    let killTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      logger.error("spawnClaudeStreaming timeout — sending SIGTERM", { pid: proc.pid });
+      proc.kill();
+      killTimer = setTimeout(() => {
+        try {
+          process.kill(proc.pid, 0);
+          proc.kill(9);
+        } catch { /* already exited */ }
+      }, 5_000);
+    }, TIMEOUT_MS);
+
+    // Track in-flight tool_use blocks for duration measurement
+    const toolStartTimes = new Map<string, number>();
+
+    // Stream stdout chunk-by-chunk, parsing JSON lines for tool events
+    const chunks: string[] = [];
+    const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+    let lineBuf = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const text = decoder.decode(value, { stream: true });
+      chunks.push(text);
+      lineBuf += text;
+
+      // Process complete JSON lines
+      const lines = lineBuf.split("\n");
+      lineBuf = lines.pop() ?? ""; // keep incomplete line in buffer
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const evt = JSON.parse(trimmed);
+          // Claude stream-json emits objects with a "type" field
+          if (evt.type === "content_block_start" && evt.content_block?.type === "tool_use") {
+            const toolName = evt.content_block.name ?? "unknown";
+            toolStartTimes.set(evt.content_block.id ?? toolName, Date.now());
+            try { options.onToolUse?.(toolName, evt.content_block.input ?? {}); } catch { /* best-effort */ }
+          } else if (evt.type === "content_block_stop" && evt.index !== undefined) {
+            // Tool block finished — try to find its start time
+            // The stop event doesn't repeat the tool name, so we track by index
+          } else if (evt.type === "result") {
+            // Final result object — contains cost_usd, result text, etc.
+            // We'll extract this below from the accumulated output
+          }
+          // Also detect tool_result in assistant message content
+          if (evt.type === "content_block_start" && evt.content_block?.type === "tool_result") {
+            const toolId = evt.content_block.tool_use_id;
+            const startTime = toolStartTimes.get(toolId);
+            if (startTime) {
+              const durationMs = Date.now() - startTime;
+              toolStartTimes.delete(toolId);
+              try { options.onToolResult?.(toolId, durationMs); } catch { /* best-effort */ }
+            }
+          }
+        } catch {
+          // Not valid JSON or unexpected format — skip silently
+        }
+      }
+    }
+
+    const rawOutput = chunks.join("");
+    const stderr = await new Response(proc.stderr).text();
+    clearTimeout(timeout);
+    if (killTimer) clearTimeout(killTimer);
+
+    const exitCode = await proc.exited;
+
+    if (stderr?.trim()) {
+      logger.info("spawnClaudeStreaming stderr", { stderr: stderr.substring(0, 500) });
+    }
+
+    if (timedOut) {
+      logger.error("spawnClaudeStreaming timed out", { timeout_ms: TIMEOUT_MS });
+      return { output: `Task timed out after ${TIMEOUT_MS / 1000}s.`, costUsd: 0, isError: true };
+    }
+
+    if (exitCode !== 0) {
+      logger.error("spawnClaudeStreaming non-zero exit", { exitCode, stderr: stderr?.substring(0, 300) });
+    }
+
+    // Try to extract structured result from the last JSON line (stream-json emits a final "result" object)
+    let resultText = rawOutput;
+    let costUsd = 0;
+    let isError = false;
+    try {
+      // Find the last "result" type line
+      const allLines = rawOutput.split("\n");
+      for (let i = allLines.length - 1; i >= 0; i--) {
+        const trimmed = allLines[i].trim();
+        if (!trimmed) continue;
+        try {
+          const obj = JSON.parse(trimmed);
+          if (obj.type === "result") {
+            resultText = obj.result ?? rawOutput;
+            costUsd = obj.cost_usd ?? obj.total_cost_usd ?? 0;
+            isError = obj.is_error ?? false;
+            break;
+          }
+        } catch { continue; }
+      }
+    } catch { /* use raw output */ }
+
+    logger.info("spawnClaudeStreaming completed", {
+      exit_code: exitCode,
+      output_chars: resultText.length,
+      cost_usd: costUsd,
+    });
+
+    return { output: resultText, costUsd, isError };
+  } catch (error) {
+    logger.error("spawnClaudeStreaming spawn error", error);
+    return { output: "Error: Could not run Claude CLI", costUsd: 0, isError: true };
+  }
+}
+
 // ── parseClaudeJsonOutput ────────────────────────────────────
 
 export interface ClaudeJsonOutput {

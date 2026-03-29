@@ -881,8 +881,11 @@ export function buildCoordinatorDeps(opts: {
 
   return {
     callSpecialist: async (agent: string, task: string, context?: string, timeoutMs?: number) => {
-      const { callClaude, parseClaudeJsonOutput } = await import("./claude-cli.ts");
+      const { spawnClaudeStreaming } = await import("./claude-cli.ts");
       const { getAllowedToolsForCLI } = await import("./tool-access-control.ts");
+
+      // Generate a dispatch ID for correlating tool call events to this agent
+      const spawnId = `dsp_${Date.now().toString(36)}`;
 
       // Look up the agent's tool categories from the known roster
       const AGENT_TOOLS: Record<string, string[]> = {
@@ -905,14 +908,45 @@ export function buildCoordinatorDeps(opts: {
       const prompt = context ? `${task}\n\nContext:\n${context}` : task;
       const start = Date.now();
       try {
-        const rawOutput = await callClaude(prompt, { timeoutMs, allowedTools, outputFormat: "json" });
-        const parsed = parseClaudeJsonOutput(rawOutput);
+        const result = await spawnClaudeStreaming(prompt, {
+          timeoutMs,
+          allowedTools,
+          onToolUse: (toolName, toolInput) => {
+            // Emit agent_tool_call event so dashboard can show real-time tool activity
+            try {
+              opts.sendEventFn?.({
+                type: "agent_tool_call",
+                spawnId,
+                agent,
+                tool: toolName,
+                input: toolInput,
+                status: "running",
+                ts: Date.now(),
+              });
+            } catch { /* best-effort */ }
+          },
+          onToolResult: (toolName, durationMs) => {
+            // Emit tool completion event
+            try {
+              opts.sendEventFn?.({
+                type: "agent_tool_call",
+                spawnId,
+                agent,
+                tool: toolName,
+                status: "done",
+                durationMs,
+                ts: Date.now(),
+              });
+            } catch { /* best-effort */ }
+          },
+        });
+
         return {
           agent,
-          status: (parsed.isError ? "error" : "completed") as "completed" | "error",
-          output: parsed.result,
-          cost_usd: parsed.costUsd,
-          tokens_used: 0, // Not available from CLI JSON output
+          status: (result.isError ? "error" : "completed") as "completed" | "error",
+          output: result.output,
+          cost_usd: result.costUsd,
+          tokens_used: 0, // Not available from CLI stream output
           duration_ms: Date.now() - start,
         };
       } catch (err) {
