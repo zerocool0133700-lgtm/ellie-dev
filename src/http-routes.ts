@@ -5080,6 +5080,33 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Agent creation endpoint — must be before /api/agents catch-all
+  if (url.pathname === "/api/agents/create" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        let data: Record<string, unknown> = {};
+        if (body) try { data = JSON.parse(body); } catch { /* ignore */ }
+
+        let _statusCode = 200;
+        const mockRes: ApiResponse = {
+          status(code: number) { _statusCode = code; return { json: (d: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); } }; },
+          json(d: unknown) { res.writeHead(_statusCode, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); },
+        };
+        const mockReq: ApiRequest = { body: data };
+
+        const { createAgentEndpoint } = await import("./api/agent-create.ts");
+        await createAgentEndpoint(mockReq, mockRes);
+      } catch (err) {
+        logger.error("Agent create error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
+    return;
+  }
+
   // Agent presence endpoint (ELLIE-846) — must be before /api/agents catch-all
   if (url.pathname === "/api/agents/presence" && req.method === "GET") {
     (async () => {
@@ -5208,6 +5235,10 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           // ELLIE-621: GET /api/agents/:name/identity
           const { agentIdentityEndpoint } = await import("./api/identity-endpoints.ts");
           agentIdentityEndpoint(mockReq, mockRes);
+        } else if (subResource === "context-layers" && req.method === "GET") {
+          // GET /api/agents/:name/context-layers
+          const { getContextLayersEndpoint } = await import("./api/agent-context-layers.ts");
+          await getContextLayersEndpoint(mockReq, mockRes);
         } else if (subResource === "skills") {
           await getAgentSkillsEndpoint(mockReq, mockRes, supabase, bot);
         } else if (agentName) {
