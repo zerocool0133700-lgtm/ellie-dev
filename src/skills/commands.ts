@@ -6,16 +6,20 @@
  */
 
 import { getSkillSnapshot } from "./snapshot.ts";
+import { loadSkillEntries } from "./loader.ts";
 import type { SkillCommand, SkillEntry } from "./types.ts";
 
 /**
  * Get all user-invocable slash commands from eligible skills.
+ * Uses loadSkillEntries directly (not getSkillSnapshot) because
+ * getSkillSnapshot requires an allowedSkills list and returns empty
+ * when called without one. Commands need ALL user-invocable skills.
  */
 export async function getSkillCommands(): Promise<SkillCommand[]> {
-  const snapshot = await getSkillSnapshot();
+  const allSkills = await loadSkillEntries();
   const commands: SkillCommand[] = [];
 
-  for (const skill of snapshot.skills) {
+  for (const skill of allSkills) {
     if (!skill.frontmatter.userInvocable) continue;
 
     const cmd: SkillCommand = {
@@ -81,9 +85,9 @@ export async function matchInstantCommand(text: string): Promise<{
   const normalized = text.trim().toLowerCase();
   if (!normalized.startsWith("/")) return null;
 
-  const snapshot = await getSkillSnapshot();
+  const allSkills = await loadSkillEntries();
 
-  for (const skill of snapshot.skills) {
+  for (const skill of allSkills) {
     if (!skill.frontmatter.userInvocable) continue;
     if (!skill.frontmatter.instant_commands?.length) continue;
 
