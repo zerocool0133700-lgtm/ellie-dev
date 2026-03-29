@@ -112,13 +112,73 @@ Key operations:
 - `GET /containers/{id}/logs` — capture output
 - `DELETE /volumes/{name}` — cleanup after exit
 
+### Resource Limits
+
+Every container runs with enforced resource caps to prevent runaway processes:
+
+- **Memory**: 512 MB (configurable via `OVERNIGHT_MEMORY_LIMIT`, default `536870912` bytes)
+- **CPU**: 1 CPU (configurable via `OVERNIGHT_CPU_LIMIT`, default `1000000000` NanoCpus)
+
+Passed via Docker API `HostConfig`:
+```json
+{
+  "Memory": 536870912,
+  "NanoCpus": 1000000000,
+  "AutoRemove": true
+}
+```
+
+These are starting points. Can be tuned per-task if certain work (e.g., running test suites) needs more headroom.
+
+### Secret Management & Prompt Injection Prevention
+
+Containers must not be able to leak credentials through prompt injection. Secrets are protected at two layers:
+
+**Layer 1: Minimal credential injection.** Only the bare minimum secrets are passed to the container as environment variables:
+- `GH_TOKEN` — scoped to the specific repo (use a fine-grained GitHub Personal Access Token with only repo contents + PR permissions, not a broad token)
+- `CLAUDE_CODE_OAUTH_TOKEN` — for Claude Code (Max subscription)
+
+No API keys, no Supabase credentials, no bridge keys, no database connection strings. The container can only reach GitHub and Claude Code. It cannot reach the relay, the Forest DB, or Supabase.
+
+**Layer 2: Env sanitizer.** Following Pope's pattern, the container entrypoint strips all secret-bearing environment variables from the LLM's subprocess environment. SDKs (GitHub CLI, Claude Code) read their tokens from `process.env` normally at startup, but the LLM cannot `echo $GH_TOKEN` or exfiltrate via bash — the subprocess env is filtered.
+
+**Implementation:**
+- The Docker executor builds the env array with only the allowed variables (whitelist, not blacklist)
+- The coding agent image's entrypoint includes an env sanitizer script that runs before the agent starts
+- The `GH_TOKEN` used for overnight work should be a dedicated fine-grained token, not Dave's main GitHub token. Created with minimal permissions: repo contents (read/write) + pull requests (read/write) on the specific repos the overnight agents need.
+
+**What containers CANNOT do:**
+- Reach the relay (`localhost:3001`) — no network access to host services
+- Access the Forest or Supabase databases
+- Read other containers' volumes
+- Exfiltrate secrets via echo/printenv (env sanitizer)
+- Push to branches other than their assigned `overnight/{task-id}` branch (enforced by branch naming convention + PR review)
+
+### Notification Isolation
+
+**Containers do not push notifications to the dashboard or relay.** The data flow is strictly one-way:
+
+```
+Container → writes to GitHub (branch, commits, PR)
+Scheduler → polls container status via Docker API (not the container reaching back)
+Scheduler → writes results to overnight_task_results table
+Dashboard → reads overnight_task_results on morning check-in (timed, not pushed)
+```
+
+If a container encounters an error:
+- The error is captured in container logs by the scheduler (via `GET /containers/{id}/logs`) after the container exits
+- The scheduler writes the error to `overnight_task_results.error`
+- The dashboard reads it during the morning review — no real-time push, no callback from the container
+
+**No WebSocket, no HTTP callback, no relay API calls from containers.** The scheduler is the only component that talks to both Docker and the database. Containers are fire-and-forget sandboxes that write only to GitHub.
+
 ### Docker Image
 
-Use Pope's `coding-agent-claude-code` image (or a locally built variant). The image includes: Node.js, GitHub CLI, Claude Code, git, build tools. The entrypoint scripts handle clone, auth, branch, run, commit, push, PR creation.
+Use Pope's `coding-agent-claude-code` image (or a locally built variant). The image includes: Node.js, GitHub CLI, Claude Code, git, build tools. The entrypoint scripts handle clone, auth, branch, run, commit, push, PR creation. The env sanitizer script is included in the image.
 
 ### New File
 
-`src/docker-executor.ts` — container create/start/monitor/cleanup, volume management, log capture, prompt building.
+`src/docker-executor.ts` — container create/start/monitor/cleanup, volume management, log capture, prompt building, resource limits, secret whitelist.
 
 ## Component 3: Morning Review Dashboard
 
@@ -248,7 +308,7 @@ No changes to existing GTD tables. The scheduler reads GTD tasks and updates the
 ## What This Does NOT Cover
 
 - Automatic task creation from coverage reports or analysis results (future — agents could queue follow-up tasks in GTD)
-- Container resource limits (CPU/memory caps per container — add later if needed)
 - Multi-repo support (currently assumes one repo per task)
-- Notifications to Telegram when overnight session completes (dashboard only for now)
+- Real-time notifications to Telegram/chat during overnight runs (by design — containers are isolated, dashboard is the morning review surface)
 - Retry logic for failed tasks (task stays in GTD, can be manually rescheduled)
+- Container network policies beyond host isolation (no custom Docker networks — containers use default bridge with no access to host services)
