@@ -109,6 +109,7 @@ import { checkContextPressure, shouldNotify, getCompactionNotice, checkpointSess
 import { primeWorkingMemoryCache } from "./working-memory.ts";
 import { runCoordinatorLoop, buildCoordinatorDeps } from "./coordinator.ts";
 import type { FoundationRegistry } from "./foundation-registry.ts";
+import { capturePrompt } from "./api/agent-prompts.ts";
 
 const logger = log.child("telegram");
 
@@ -600,6 +601,14 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
     tgAgentLocalMemory || undefined,
   );
 
+  capturePrompt({
+    agentName: agentResult?.dispatch.agent?.name || "general",
+    channel: "telegram",
+    workItemId: detectedWorkItem || undefined,
+    promptText: enrichedPrompt,
+    tokenCount: Math.round(enrichedPrompt.length / 4),
+  });
+
   // ── ELLIE-383: Context snapshot logging (journal only, not broadcast) ──
   const buildMetrics = getLastBuildMetrics();
   if (buildMetrics) {
@@ -1043,6 +1052,14 @@ bot.on("message:voice", withQueue(async (ctx) => {
       undefined, // empathyGuidance
       voiceAgentLocalMemory || undefined,
     );
+
+    capturePrompt({
+      agentName: agentResult?.dispatch.agent?.name || "general",
+      channel: "telegram",
+      workItemId: voiceWorkItem || undefined,
+      promptText: enrichedPrompt,
+      tokenCount: Math.round(enrichedPrompt.length / 4),
+    });
 
     // ── ELLIE-383: Context snapshot logging for voice ──
     const voiceBuildMetrics = getLastBuildMetrics();

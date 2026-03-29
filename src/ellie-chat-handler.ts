@@ -58,6 +58,7 @@ import { searchElastic } from "./elasticsearch.ts";
 import { log } from "./logger.ts";
 import { deliverResponse, markProcessing, clearProcessing } from "./ws-delivery.ts";
 import { runCoordinatorLoop, buildCoordinatorDeps, type CoordinatorPausedState } from "./coordinator.ts";
+import { capturePrompt } from "./api/agent-prompts.ts";
 import type { FoundationRegistry } from "./foundation-registry.ts";
 import { parseFoundationCommand, executeFoundationCommand } from "./foundation-commands.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
@@ -1222,6 +1223,14 @@ async function _handleEllieChatMessage(
       ecAgentLocalMemory || undefined,
     );
 
+    capturePrompt({
+      agentName: ellieChatActiveAgent || "general",
+      channel: "ellie-chat",
+      workItemId: ellieChatWorkItem || undefined,
+      promptText: enrichedPrompt,
+      tokenCount: Math.round(enrichedPrompt.length / 4),
+    });
+
     // ── ELLIE-383: Context snapshot logging (journal only) ──
     const ecBuildMetrics = getLastBuildMetrics();
     if (ecBuildMetrics) {
@@ -1588,6 +1597,14 @@ export async function runSpecialistAsync(
       specEmpathyGuidance || undefined,
       specAgentLocalMemory || undefined,
     );
+
+    capturePrompt({
+      agentName: agentName || "general",
+      channel: "ellie-chat",
+      workItemId: workItemId || undefined,
+      promptText: enrichedPrompt,
+      tokenCount: Math.round(enrichedPrompt.length / 4),
+    });
 
     // ── ELLIE-383: Context snapshot logging for specialist (journal only) ──
     const specBuildMetrics = getLastBuildMetrics();
