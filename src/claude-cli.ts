@@ -418,7 +418,7 @@ export async function spawnClaudeStreaming(
     onToolResult?: (toolName: string, durationMs: number) => void;
   },
 ): Promise<{ output: string; costUsd: number; isError: boolean }> {
-  const args = [CLAUDE_PATH, "-p", "--output-format", "stream-json"];
+  const args = [CLAUDE_PATH, "-p", "--verbose", "--output-format", "stream-json"];
 
   if (AGENT_MODE) {
     const tools = options.allowedTools?.length ? options.allowedTools : ALLOWED_TOOLS;
