@@ -19,6 +19,14 @@ You have access to the Plane project tracker via the `mcp__plane__*` MCP tools.
 - Project ID: `7194ace4-b80e-4c83-8042-c925598accf2`
 - Done state ID: `41fddf8d-d937-4964-9888-b27f416dcafa`
 
+## Commands
+
+- `/plane help` — Show this help
+- `/plane list` — List open issues
+- `/plane ELLIE-123` — Look up a specific ticket
+- `/plane create <title>` — Create a new issue
+- Ask naturally: "What tickets are in progress?" or "Create a ticket for the login bug"
+
 ## Capabilities
 
 - **Issues**: Create, update, list, search by readable identifier (e.g., ELLIE-123)

@@ -10,6 +10,11 @@ triggers: [http://, https://, import, save this, add to forest, remember this li
 
 Streamline importing web content into the Forest. Send a link, get a structured preview, approve, done.
 
+## Commands
+
+- /forest-import help — Show this help
+- Ask naturally about Import web content into the Forest knowledge base with auto-tagging and smart categorization
+
 ## When to Trigger
 
 ### Automatic

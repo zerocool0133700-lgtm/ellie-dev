@@ -12,6 +12,11 @@ help: "Generate a personal access token at https://miro.com/app/settings/account
 
 You have access to Miro boards for visual collaboration.
 
+## Commands
+
+- /miro help — Show this help
+- Ask naturally about Create and manage Miro boards, sticky notes, and diagrams
+
 ## Capabilities
 
 - Create and manage boards

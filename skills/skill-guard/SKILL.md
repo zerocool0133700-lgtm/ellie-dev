@@ -18,6 +18,11 @@ triggers: [audit, skill, safe, review skill, check skill, install skill, securit
 
 Comprehensive security audit for any OpenClaw skill before installation.
 
+## Commands
+
+- /skill-guard help — Show this help
+- Ask naturally about >
+
 ## Audit Modes
 
 - **Standard audit** (default): Full 9-step procedure below, including sandboxing recommendations

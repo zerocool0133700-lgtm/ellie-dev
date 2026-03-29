@@ -22,6 +22,11 @@ triggers:
 work_item: ELLIE-323
 ---
 
+## Commands
+
+- `/memory help` — Show this help
+- Ask naturally: "Remember that my meeting is at 3pm" or "What do you know about me?" or "Forget my old address"
+
 # Memory — Conversation Knowledge Extraction Engine
 
 You manage Dave's conversational memory — the system that automatically extracts facts, goals, decisions, and preferences from every conversation, stores them persistently, detects conflicts, and syncs important knowledge to the Forest.

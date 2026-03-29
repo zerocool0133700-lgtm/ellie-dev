@@ -13,6 +13,13 @@ help: "Generate a fine-grained personal access token at https://github.com/setti
 
 You have access to GitHub via the `mcp__github__*` MCP tools.
 
+## Commands
+
+- `/github help` — Show this help
+- `/github issues` — List open issues
+- `/github prs` — List open pull requests
+- Ask naturally: "Show me recent PRs" or "Create an issue for the auth bug"
+
 ## Capabilities
 
 - **Issues**: List, create, update, search, and comment on issues

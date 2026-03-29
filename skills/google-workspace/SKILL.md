@@ -13,6 +13,11 @@ help: "Create OAuth credentials at https://console.cloud.google.com/apis/credent
 
 You have access to Google Workspace via the `mcp__google-workspace__*` MCP tools.
 
+## Commands
+
+- `/google-workspace help` — Show this help
+- Ask naturally: "Check my calendar for today" or "Send an email to Dave" or "Find the budget spreadsheet"
+
 ## Capabilities
 
 - **Gmail**: Search, read, and send emails
