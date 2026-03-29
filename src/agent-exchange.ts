@@ -1,4 +1,12 @@
 /**
+ * @deprecated ELLIE-COORDINATOR: This module is deprecated and will be removed
+ * when the coordinator loop fully replaces agent collaboration.
+ * The coordinator mediates agent-to-agent work directly.
+ * Kept for exchange-timeout-handler.ts dependency.
+ * Target removal: Phase 4 (after timeout handler migration to coordinator).
+ */
+
+/**
  * Agent Exchange — ELLIE-601
  *
  * Direct agent-to-agent communication channel with approval gate.

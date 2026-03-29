@@ -1,4 +1,13 @@
 /**
+ * @deprecated ELLIE-COORDINATOR: This module is deprecated and will be removed
+ * when COORDINATOR_MODE becomes the permanent default.
+ * The coordinator IS the classifier — it decomposes and routes using the Messages API.
+ * Kept for: relay startup (initClassifier), non-coordinator fallback path,
+ * and the ExecutionMode type used by orchestrator-types/costs/workflow-templates.
+ * Target removal: Phase 4 (after ExecutionMode type migration + coordinator-only mode).
+ */
+
+/**
  * Intent Classifier — ELLIE-50 + ELLIE-53 + ELLIE-58 + ELLIE-59
  *
  * Replaces keyword/regex routing (route-message edge function) with
