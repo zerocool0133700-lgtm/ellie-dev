@@ -33,6 +33,7 @@ DROP POLICY IF EXISTS "Allow all for service role" ON agents;
 
 -- Service role bypasses RLS (Supabase default for service_role).
 -- For authenticated users, scope to company OR system agents.
+DROP POLICY IF EXISTS "company_isolation_agents" ON agents;
 CREATE POLICY "company_isolation_agents" ON agents
   FOR ALL
   USING (
@@ -46,6 +47,7 @@ CREATE POLICY "company_isolation_agents" ON agents
 -- ============================================================
 DROP POLICY IF EXISTS "Allow all for service role" ON formation_sessions;
 
+DROP POLICY IF EXISTS "company_isolation_formation_sessions" ON formation_sessions;
 CREATE POLICY "company_isolation_formation_sessions" ON formation_sessions
   FOR ALL
   USING (
@@ -58,6 +60,7 @@ CREATE POLICY "company_isolation_formation_sessions" ON formation_sessions
 -- ============================================================
 DROP POLICY IF EXISTS "Allow all for service role" ON work_sessions;
 
+DROP POLICY IF EXISTS "company_isolation_work_sessions" ON work_sessions;
 CREATE POLICY "company_isolation_work_sessions" ON work_sessions
   FOR ALL
   USING (
@@ -70,6 +73,7 @@ CREATE POLICY "company_isolation_work_sessions" ON work_sessions
 -- ============================================================
 DROP POLICY IF EXISTS "Allow all for service role" ON agent_budgets;
 
+DROP POLICY IF EXISTS "company_isolation_agent_budgets" ON agent_budgets;
 CREATE POLICY "company_isolation_agent_budgets" ON agent_budgets
   FOR ALL
   USING (
@@ -82,6 +86,7 @@ CREATE POLICY "company_isolation_agent_budgets" ON agent_budgets
 -- ============================================================
 DROP POLICY IF EXISTS "Allow all for service role" ON agent_audit_log;
 
+DROP POLICY IF EXISTS "company_isolation_agent_audit_log" ON agent_audit_log;
 CREATE POLICY "company_isolation_agent_audit_log" ON agent_audit_log
   FOR ALL
   USING (
@@ -96,6 +101,7 @@ CREATE POLICY "company_isolation_agent_audit_log" ON agent_audit_log
 -- Scoped via a join check rather than a direct column.
 DROP POLICY IF EXISTS "Allow all for service role" ON agent_delegations;
 
+DROP POLICY IF EXISTS "company_isolation_agent_delegations" ON agent_delegations;
 CREATE POLICY "company_isolation_agent_delegations" ON agent_delegations
   FOR ALL
   USING (

@@ -38,6 +38,7 @@ import { matchSkillCommand } from "./skills/commands.ts";
 import { matchWorkflow } from "./workflow-templates.ts";
 import { log } from "./logger.ts";
 import { writeToDisk, readFromDisk } from "./config-cache.ts";
+import { buildRoutingDecision, logRoutingDecision } from "./routing-decision-log.ts";
 
 const logger = log.child("intent");
 
@@ -124,6 +125,29 @@ export function initClassifier(
  * continuity (ELLIE-59).
  */
 export async function classifyIntent(
+  message: string,
+  channel: string,
+  userId: string,
+): Promise<ClassificationResult> {
+  const result = await classifyIntentCore(message, channel, userId);
+
+  // Fire-and-forget routing decision logging (ELLIE observability)
+  if (_supabase) {
+    const agentNames = (_agentCache || []).map(a => a.name);
+    const decision = buildRoutingDecision({
+      classification: result,
+      sessionId: null,
+      userMessage: message,
+      agentsConsidered: agentNames,
+      skillsLoaded: [],
+    });
+    logRoutingDecision(_supabase, decision).catch(() => {});
+  }
+
+  return result;
+}
+
+async function classifyIntentCore(
   message: string,
   channel: string,
   userId: string,
