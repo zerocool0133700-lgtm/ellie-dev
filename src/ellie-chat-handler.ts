@@ -1125,10 +1125,11 @@ async function _handleEllieChatMessage(
         });
 
         // Success — send final response via WebSocket
+        const coordResponse = coordinatorResult.response || "I completed the request but didn't generate a response. Please try again.";
         if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "response", text: coordinatorResult.response, agent: "ellie", ts: Date.now() }));
+          ws.send(JSON.stringify({ type: "response", text: coordResponse, agent: "ellie", ts: Date.now() }));
         }
-        await saveMessage("assistant", coordinatorResult.response, {}, "ellie-chat", ecUserId);
+        await saveMessage("assistant", coordResponse, {}, "ellie-chat", ecUserId);
         clearInterval(typingInterval);
         log.info(
           `[coordinator] ellie-chat complete — iterations=${coordinatorResult.loopIterations} ` +

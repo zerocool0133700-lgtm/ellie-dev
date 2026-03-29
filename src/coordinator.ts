@@ -253,7 +253,8 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
       if (tool.name === "complete") {
         // Handle complete tool — extract response, optionally promote
         const input = tool.input as unknown as CompleteInput;
-        response = input.response;
+        response = input.response || "";
+        logger.info("Complete tool called", { responseLength: response.length, responsePreview: response.slice(0, 200) });
 
         if (input.promote_to_memory) {
           try {
