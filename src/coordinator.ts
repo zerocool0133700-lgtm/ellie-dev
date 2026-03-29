@@ -45,6 +45,7 @@ export interface SpecialistResult {
 export interface CoordinatorDeps {
   callSpecialist: (agent: string, task: string, context?: string, timeoutMs?: number) => Promise<SpecialistResult>;
   sendMessage: (channel: string, message: string) => Promise<void>;
+  sendEvent: (event: Record<string, unknown>) => Promise<void>;  // ELLIE-1099: WebSocket events for UI
   readForest: (query: string) => Promise<string>;
   readPlane: (query: string) => Promise<string>;
   readMemory: (query: string) => Promise<string>;
@@ -336,6 +337,18 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
           work_item_id: workItemId,
         });
 
+        // ELLIE-1099: Send spawn_status so dashboard shows agent activity
+        try {
+          await deps.sendEvent({
+            type: "spawn_status",
+            spawnId: specEnvelope.id,
+            agent: input.agent,
+            task: input.task.slice(0, 200),
+            status: "running",
+            ts: Date.now(),
+          });
+        } catch { /* best-effort */ }
+
         try {
           const specResult = await deps.callSpecialist(
             input.agent,
@@ -357,6 +370,23 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
           }
           envelopes.push(completed);
           try { await deps.logEnvelope(completed); } catch { /* best-effort */ }
+
+          // ELLIE-1099: Send spawn_announcement so dashboard shows completion
+          try {
+            await deps.sendEvent({
+              type: "spawn_announcement",
+              spawnId: specEnvelope.id,
+              agent: input.agent,
+              status: specResult.status === "error" ? "failed" : "completed",
+              durationSec: Math.round(specResult.duration_ms / 1000),
+              costCents: Math.round(completed.cost_usd * 100),
+              resultPreview: specResult.status === "error"
+                ? (specResult.error || "Unknown error")
+                : specResult.output.slice(0, 300),
+              error: specResult.error || null,
+              ts: Date.now(),
+            });
+          } catch { /* best-effort */ }
 
           if (specResult.status === "error") {
             return {
@@ -572,6 +602,7 @@ export function buildCoordinatorDeps(opts: {
   sessionId: string;
   channel: string;
   sendFn: (channel: string, message: string) => Promise<void>;
+  sendEventFn?: (event: Record<string, unknown>) => Promise<void>;  // ELLIE-1099
   forestReadFn: (query: string) => Promise<string>;
   planeReadFn?: (query: string) => Promise<string>;
   registry?: FoundationRegistry;
@@ -651,6 +682,7 @@ export function buildCoordinatorDeps(opts: {
     },
 
     sendMessage: sendFn,
+    sendEvent: opts.sendEventFn ?? (async () => {}),  // ELLIE-1099: no-op if not provided
     readForest: forestReadFn,
     readPlane: planeReadFn,
 

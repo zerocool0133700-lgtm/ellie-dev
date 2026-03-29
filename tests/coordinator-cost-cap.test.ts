@@ -9,6 +9,7 @@ function createMockDeps(overrides?: Partial<CoordinatorDeps>): CoordinatorDeps {
       agent, status: "completed" as const, output: `${agent} done`, tokens_used: 500, cost_usd: 0.05, duration_ms: 1000,
     })),
     sendMessage: async () => {},
+    sendEvent: async () => {},
     readForest: async () => "",
     readPlane: async () => "",
     readMemory: async () => "",

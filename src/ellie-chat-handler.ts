@@ -1086,6 +1086,14 @@ async function _handleEllieChatMessage(
                 log.warn("Failed to send coordinator progress via WebSocket", { error: String(err) });
               }
             },
+            // ELLIE-1099: Send spawn events to dashboard for agent activity indicators
+            sendEventFn: async (event: Record<string, unknown>) => {
+              try {
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify(event));
+                }
+              } catch { /* best-effort */ }
+            },
             forestReadFn: async (query: string) => {
               try {
                 const resp = await fetch("http://localhost:3001/api/bridge/read", {

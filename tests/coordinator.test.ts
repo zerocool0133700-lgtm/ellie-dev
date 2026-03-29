@@ -16,6 +16,7 @@ function stubDeps(overrides: Partial<CoordinatorDeps> = {}): CoordinatorDeps {
       duration_ms: 50,
     }),
     sendMessage: async () => {},
+    sendEvent: async () => {},
     readForest: async () => "forest data",
     readPlane: async () => "plane data",
     readMemory: async () => "memory data",
