@@ -550,10 +550,27 @@ export function buildCoordinatorDeps(opts: {
   return {
     callSpecialist: async (agent: string, task: string, context?: string, timeoutMs?: number) => {
       const { callClaude } = await import("./claude-cli.ts");
+      const { getAllowedToolsForCLI } = await import("./tool-access-control.ts");
+
+      // Look up the agent's tool categories from the known roster
+      const AGENT_TOOLS: Record<string, string[]> = {
+        general: ["forest_bridge", "plane_lookup", "google_workspace", "web_search", "memory_extraction", "agent_router"],
+        james: ["read", "write", "edit", "glob", "grep", "bash_builds", "bash_tests", "systemctl", "plane_mcp", "forest_bridge_read", "forest_bridge_write", "git", "supabase_mcp", "psql_forest"],
+        kate: ["brave_search", "forest_bridge", "qmd_search", "google_workspace", "grep_glob_codebase", "memory_extraction"],
+        alan: ["brave_web_search", "forest_bridge_read", "forest_bridge_write", "qmd_search", "plane_mcp", "miro", "memory_extraction"],
+        brian: ["read", "glob", "grep", "forest_bridge_read", "forest_bridge_write", "plane_mcp", "bash_tests", "bash_type_checks"],
+        amy: ["google_workspace", "forest_bridge_read", "qmd_search", "brave_web_search", "memory_extraction"],
+        marcus: ["plane_mcp", "forest_bridge_read", "forest_bridge_write", "memory_extraction", "transaction_import", "receipt_parsing"],
+        jason: ["bash_systemctl", "bash_journalctl", "bash_process_mgmt", "health_endpoint_checks", "log_analysis", "forest_bridge_read", "forest_bridge_write", "plane_mcp", "github_mcp", "telegram", "google_chat"],
+      };
+
+      const agentToolCategories = AGENT_TOOLS[agent] ?? AGENT_TOOLS["general"];
+      const allowedTools = getAllowedToolsForCLI(agentToolCategories, agent);
+
       const prompt = context ? `${task}\n\nContext:\n${context}` : task;
       const start = Date.now();
       try {
-        const output = await callClaude(prompt, { timeoutMs, model: agent });
+        const output = await callClaude(prompt, { timeoutMs, allowedTools });
         return {
           agent,
           status: "completed" as const,
