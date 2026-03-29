@@ -292,6 +292,8 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
     broadcastExtension({ type: "route", channel: "telegram", agent: agentResult.dispatch.agent.name, mode: agentResult.route.execution_mode, confidence: agentResult.route.confidence, contextMode: preRouteDetection?.mode || undefined });
 
     // Dispatch confirmation — routed through notification policy (ELLIE-80)
+    // ELLIE-1133: Store message ID so we can delete it after dispatch completes
+    let dispatchConfirmMsgId: number | undefined;
     if (agentResult.dispatch.agent.name !== "general" && agentResult.dispatch.is_new) {
       const agentName = agentResult.dispatch.agent.name;
       notify(getNotifyCtx(), {
@@ -299,7 +301,8 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
         workItemId: agentName,
         telegramMessage: `🤖 ${agentName} agent`,
         gchatMessage: `🤖 ${agentName} agent dispatched`,
-      }).catch((err) => logger.error("Dispatch confirm notification failed", err));
+      }).then(r => { dispatchConfirmMsgId = r.telegramMessageId; })
+        .catch((err) => logger.error("Dispatch confirm notification failed", err));
     }
   } else {
     // Routing failed — notify user and fall back to general agent
@@ -642,7 +645,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
         userId: userId,
         registry: foundationRegistry || undefined,
         foundation: foundationRegistry?.getActive()?.name || "software-dev",
-        systemPrompt: foundationRegistry?.getCoordinatorPrompt() || "You are Ellie, a coordinator for Dave. Your specialists have tools you don't — Google Calendar, Gmail, GitHub, code editing, system ops, etc. When a request needs those capabilities, ALWAYS dispatch the right specialist using dispatch_agent rather than saying you can't do it. Your read_context tool only covers Forest, Plane, memory, and sessions. For everything else, dispatch. For greetings or simple chat, use complete directly.",
+        systemPrompt: (foundationRegistry ? await foundationRegistry.getCoordinatorPrompt() : null) || "You are Ellie, a coordinator for Dave. You manage a team of specialist agents. When a request needs specialist capabilities, ALWAYS dispatch the right agent using dispatch_agent. Check each agent's skills in the roster to match the right agent to the task. For greetings or simple chat, use complete directly.",
         model: foundationRegistry?.getBehavior()?.coordinator_model || agentModel || "claude-sonnet-4-6",
         agentRoster: foundationRegistry?.getAgentRoster() || ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
         deps: buildCoordinatorDeps({
@@ -664,6 +667,11 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
       });
 
       clearInterval(typingInterval);
+
+      // ELLIE-1133: Delete dispatch confirm message now that dispatch is complete
+      if (dispatchConfirmMsgId) {
+        ctx.api.deleteMessage(ctx.chat!.id, dispatchConfirmMsgId).catch(() => {});
+      }
 
       // Send the coordinator's response
       const cleanedResponse = await sendWithApprovals(ctx, coordinatorResult.response, session.sessionId, "ellie");

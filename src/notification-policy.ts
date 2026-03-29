@@ -364,11 +364,13 @@ async function sendDirect(
   channel: NotificationChannel,
   workItemId: string,
   message: string,
-): Promise<void> {
+): Promise<number | undefined> {
   markSent(event, channel, workItemId);
   try {
     if (channel === "telegram") {
-      await ctx.bot.api.sendMessage(ctx.telegramUserId, message, { parse_mode: "Markdown" });
+      const sent = await ctx.bot.api.sendMessage(ctx.telegramUserId, message, { parse_mode: "Markdown" });
+      logger.info(`${channel}/${event}/${workItemId}: sent`);
+      return sent.message_id;
     } else if (channel === "google-chat" && ctx.gchatSpaceName) {
       await sendGoogleChatMessage(ctx.gchatSpaceName, message);
     } else if (channel === "slack" && ctx.slackSend) {
@@ -405,20 +407,23 @@ export interface NotifyOptions {
  * Send a notification through the policy engine.
  * Respects channel routing, throttling, batching, and coalescing rules.
  */
-export async function notify(ctx: NotifyContext, options: NotifyOptions): Promise<void> {
+export async function notify(ctx: NotifyContext, options: NotifyOptions): Promise<{ telegramMessageId?: number }> {
   const { event, workItemId, telegramMessage, gchatMessage } = options;
   const policy = NOTIFICATION_POLICY[event];
-  if (!policy) return;
+  if (!policy) return {};
 
   // ELLIE-397: Try coalescing for failure events
-  if (tryCoalesce(ctx, options)) return;
+  if (tryCoalesce(ctx, options)) return {};
 
   const sends: Promise<void>[] = [];
+  let telegramMessageId: number | undefined;
 
   // Telegram
   if (policy.channels.telegram.enabled) {
     if (!isThrottled(event, "telegram", workItemId)) {
-      sends.push(sendDirect(ctx, event, "telegram", workItemId, telegramMessage));
+      const sendPromise = sendDirect(ctx, event, "telegram", workItemId, telegramMessage)
+        .then(msgId => { telegramMessageId = msgId; });
+      sends.push(sendPromise);
     } else {
       scheduleBatchedSend(ctx, event, "telegram", workItemId, telegramMessage);
     }
@@ -445,6 +450,7 @@ export async function notify(ctx: NotifyContext, options: NotifyOptions): Promis
   }
 
   await Promise.allSettled(sends);
+  return { telegramMessageId };
 }
 
 /**
