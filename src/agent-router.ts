@@ -16,8 +16,36 @@ import { logCheck } from "./permission-audit.ts";
 import { getAllowedMCPs, getAllowedToolsForCLI } from "./tool-access-control.ts";
 import { filterTools, getDeferredToolSummary } from "./tool-discovery-filter.ts";
 import { canPerformRole } from "./segregation-of-duties.ts";
+import { resolveSkillsForAgent as forestResolveSkills } from "../../ellie-forest/src/creature-skills";
 
 const logger = log.child("agent-router");
+
+/**
+ * Resolve an agent's skills — creature toolbox first, tools_enabled fallback.
+ *
+ * If the agent has a creature_id, queries the Forest DB for creature_skills.
+ * Falls back to tools_enabled if creature_id is absent, creature has no skills,
+ * or the resolver throws.
+ *
+ * Accepts an optional resolver function for testability (defaults to Forest DB call).
+ */
+export async function resolveAgentSkills(
+  agent: { creature_id?: string | null; tools_enabled?: string[] },
+  resolver: (creatureId: string | null) => Promise<string[] | null> = forestResolveSkills,
+): Promise<string[]> {
+  const fallback = agent.tools_enabled || [];
+
+  if (!agent.creature_id) return fallback;
+
+  try {
+    const skills = await resolver(agent.creature_id);
+    if (skills && skills.length > 0) return skills;
+    return fallback;
+  } catch (err) {
+    logger.warn("Failed to resolve creature skills, falling back to tools_enabled", { creature_id: agent.creature_id, error: String(err) });
+    return fallback;
+  }
+}
 
 export type DispatchFailureReason = "breaker_open" | "timeout" | "edge_fn_error" | "missing_data" | "local_fallback_failed";
 
@@ -125,7 +153,7 @@ async function localDispatch(
   // 1. Look up agent
   const { data: agent, error: agentError } = await supabase
     .from("agents")
-    .select("id, name, type, system_prompt, model, tools_enabled, capabilities")
+    .select("id, name, type, system_prompt, model, tools_enabled, capabilities, creature_id")
     .eq("name", agentName)
     .eq("status", "active")
     .single();
@@ -220,18 +248,21 @@ async function localDispatch(
     `Local dispatch: ${isNew ? "New" : "Resumed"} session ${sessionId.slice(0, 8)} for ${agentName}`,
   );
 
+  // Resolve skills from creature toolbox (falls back to tools_enabled)
+  const resolvedSkills = await resolveAgentSkills(agent);
+
   // ELLIE-970: Apply tool access filtering
-  const allowedMCPs = getAllowedMCPs(agent.tools_enabled, agent.name);
+  const allowedMCPs = getAllowedMCPs(resolvedSkills, agent.name);
 
   // ELLIE-1059: Filter tools by archetype + message intent
   const agentArchetype = agent.name || "general";
-  const toolDefs = (agent.tools_enabled || []).map((t: string) => ({ name: t, description: t }));
+  const toolDefs = resolvedSkills.map((t: string) => ({ name: t, description: t }));
   const filtered = filterTools(toolDefs, { archetype: agentArchetype, message });
   const filteredToolNames = filtered.included.map(t => t.name);
   const deferredSummary = getDeferredToolSummary(filtered.deferred);
 
   // ELLIE-1092: Convert tool categories to CLI format
-  const cliTools = getAllowedToolsForCLI(agent.tools_enabled, agent.name);
+  const cliTools = getAllowedToolsForCLI(resolvedSkills, agent.name);
 
   return {
     session_id: sessionId,
