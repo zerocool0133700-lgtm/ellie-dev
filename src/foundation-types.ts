@@ -62,7 +62,7 @@ export interface Recipe {
  */
 export interface BehaviorRules {
   /** Maps action names to approval policy: "always_confirm" | "confirm_first_time" | "auto". */
-  approvals: Record<string, string>;
+  approvals?: Record<string, string>;
   /** How proactively the system acts without being asked: "high" | "medium" | "low". */
   proactivity: string;
   /** Free-text description of the desired communication style. */

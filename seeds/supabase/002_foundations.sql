@@ -86,17 +86,17 @@ VALUES
   '[
     {
       "name": "code-review",
-      "type": "pipeline",
+      "pattern": "pipeline",
       "steps": ["james", "brian"]
     },
     {
       "name": "architecture-decision",
-      "type": "round-table",
-      "participants": ["james", "brian", "alan"]
+      "pattern": "round-table",
+      "agents": ["james", "brian", "alan"]
     },
     {
       "name": "deploy-checklist",
-      "type": "pipeline",
+      "pattern": "pipeline",
       "steps": ["james", "jason"]
     }
   ]'::jsonb,
@@ -104,12 +104,10 @@ VALUES
     "proactivity": "high",
     "tone": "direct/technical",
     "escalation": "block_and_ask",
-    "max_iterations": 10,
-    "cost_limits": {
-      "per_session_usd": 2.00,
-      "per_day_usd": 20.00
-    },
-    "default_model": "claude-sonnet-4-6"
+    "max_loop_iterations": 10,
+    "cost_cap_session": 2.00,
+    "cost_cap_daily": 20.00,
+    "coordinator_model": "claude-sonnet-4-6"
   }'::jsonb,
   true
 ),
@@ -156,17 +154,17 @@ VALUES
   '[
     {
       "name": "morning-routine",
-      "type": "pipeline",
+      "pattern": "pipeline",
       "steps": ["scheduler", "coach"]
     },
     {
       "name": "weekly-review",
-      "type": "fan-out",
-      "participants": ["coach", "scheduler", "scribe"]
+      "pattern": "fan-out",
+      "agents": ["coach", "scheduler", "scribe"]
     },
     {
       "name": "habit-check",
-      "type": "pipeline",
+      "pattern": "pipeline",
       "steps": ["coach", "buddy"]
     }
   ]'::jsonb,
@@ -174,12 +172,10 @@ VALUES
     "proactivity": "medium",
     "tone": "warm/encouraging",
     "escalation": "suggest_and_move_on",
-    "max_iterations": 6,
-    "cost_limits": {
-      "per_session_usd": 1.00,
-      "per_day_usd": 10.00
-    },
-    "default_model": "claude-haiku-4-5"
+    "max_loop_iterations": 6,
+    "cost_cap_session": 1.00,
+    "cost_cap_daily": 10.00,
+    "coordinator_model": "claude-haiku-4-5"
   }'::jsonb,
   false
 );
@@ -235,19 +231,19 @@ VALUES
   '[
     {
       "name": "invoice-review",
-      "type": "pipeline",
+      "pattern": "pipeline",
       "steps": ["marcus", "outreach"],
       "trigger": "monthly or on request"
     },
     {
       "name": "social-post",
-      "type": "pipeline",
+      "pattern": "pipeline",
       "steps": ["amy", "outreach"],
       "trigger": "on request"
     },
     {
       "name": "monthly-pnl",
-      "type": "fan-out",
+      "pattern": "fan-out",
       "agents": ["marcus", "scheduler"],
       "trigger": "first of month"
     }
@@ -264,10 +260,8 @@ VALUES
     "tone": "professional, clear, action-oriented",
     "escalation": "flag and continue",
     "max_loop_iterations": 8,
-    "cost_limits": {
-      "per_session_usd": 1.50,
-      "per_day_usd": 15.00
-    },
+    "cost_cap_session": 1.50,
+    "cost_cap_daily": 15.00,
     "coordinator_model": "claude-sonnet-4-6"
   }'::jsonb,
   false
