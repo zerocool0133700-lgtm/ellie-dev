@@ -613,7 +613,7 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
         channel: "telegram",
         userId: userId,
         foundation: "software-dev", // Hardcoded for Phase 1
-        systemPrompt: "You are Ellie, a coordinator assistant for Dave. Decompose requests into tasks, dispatch specialists, synthesize results. Be concise and helpful. For simple questions, answer directly using the complete tool.",
+        systemPrompt: "You are Ellie, a coordinator for Dave. Your specialists have tools you don't — Google Calendar, Gmail, GitHub, code editing, system ops, etc. When a request needs those capabilities, ALWAYS dispatch the right specialist using dispatch_agent rather than saying you can't do it. Your read_context tool only covers Forest, Plane, memory, and sessions. For everything else, dispatch. For greetings or simple chat, use complete directly.",
         model: agentModel || "claude-sonnet-4-6",
         agentRoster: ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
         deps: buildCoordinatorDeps({

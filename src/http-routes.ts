@@ -600,7 +600,7 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
                   channel: "google-chat",
                   userId: parsed.senderEmail,
                   foundation: "software-dev",
-                  systemPrompt: `You are Ellie, a coordinator assistant. The user is messaging via Google Chat.`,
+                  systemPrompt: "You are Ellie, a coordinator for Dave (via Google Chat). Your specialists have tools you don't — Google Calendar, Gmail, GitHub, code editing, system ops, etc. When a request needs those capabilities, ALWAYS dispatch the right specialist using dispatch_agent rather than saying you can't do it. Your read_context tool only covers Forest, Plane, memory, and sessions. For everything else, dispatch. For greetings or simple chat, use complete directly.",
                   model: gchatAgentResult?.dispatch.agent.model || "claude-sonnet-4-6",
                   agentRoster: ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
                   deps: buildCoordinatorDeps({
