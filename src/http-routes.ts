@@ -5099,6 +5099,71 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Agent prompt history endpoints — POST/GET /api/agents/:name/prompts
+  if (url.pathname.match(/^\/api\/agents\/[^/]+\/prompts$/) && (req.method === "POST" || req.method === "GET")) {
+    const agentNameFromPath = url.pathname.split("/")[3];
+    const isGet = req.method === "GET";
+
+    const handlePromptRequest = async (body?: string) => {
+      let data: Record<string, unknown> = {};
+      if (!isGet && body) {
+        try { data = JSON.parse(body); } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid JSON body" }));
+          return;
+        }
+      }
+
+      const queryParams: Record<string, string> = {};
+      url.searchParams.forEach((v: string, k: string) => { queryParams[k] = v; });
+
+      const mockReq: ApiRequest = {
+        body: data,
+        query: queryParams,
+        params: { name: agentNameFromPath },
+      };
+      const mockRes: ApiResponse = {
+        status: (code: number) => ({
+          json: (resData: unknown) => {
+            res.writeHead(code, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(resData));
+          },
+        }),
+        json: (resData: unknown) => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(resData));
+        },
+      };
+
+      const { storePromptEndpoint, getPromptsEndpoint } = await import("./api/agent-prompts.ts");
+
+      if (isGet) {
+        await getPromptsEndpoint(mockReq, mockRes);
+      } else {
+        await storePromptEndpoint(mockReq, mockRes);
+      }
+    };
+
+    if (isGet) {
+      handlePromptRequest().catch((err) => {
+        logger.error("Agent prompts GET error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      });
+    } else {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+      req.on("end", () => {
+        handlePromptRequest(body).catch((err) => {
+          logger.error("Agent prompts POST error", err);
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Internal server error" }));
+        });
+      });
+    }
+    return;
+  }
+
   // Agent registry endpoints (ELLIE-91)
   if (url.pathname.startsWith("/api/agents") || url.pathname === "/api/capabilities") {
     (async () => {
