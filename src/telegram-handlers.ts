@@ -123,7 +123,8 @@ async function getFoundationRegistry(): Promise<FoundationRegistry | null> {
     _foundationRegistry = new FoundationRegistry(createSupabaseFoundationStore(supabase));
     await _foundationRegistry.refresh();
     return _foundationRegistry;
-  } catch {
+  } catch (err) {
+    logger.warn("Foundation registry failed to load — using hardcoded fallback", { error: String(err) });
     return null;
   }
 }

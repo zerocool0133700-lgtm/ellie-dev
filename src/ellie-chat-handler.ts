@@ -74,7 +74,8 @@ async function getFoundationRegistry(): Promise<FoundationRegistry | null> {
     _foundationRegistry = new FoundationRegistry(createSupabaseFoundationStore(supabase));
     await _foundationRegistry.refresh();
     return _foundationRegistry;
-  } catch {
+  } catch (err) {
+    log.warn("Foundation registry failed to load — using hardcoded fallback", { error: String(err) });
     return null;
   }
 }
@@ -1146,8 +1147,12 @@ async function _handleEllieChatMessage(
           sessionId: session.sessionId || agentResult?.dispatch.session_id || `ec-${Date.now()}`,
           channel: "ellie-chat",
           sendFn: async (_ch: string, msg: string) => {
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: "progress", text: msg, agent: "ellie", ts: Date.now() }));
+            try {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "progress", text: msg, agent: "ellie", ts: Date.now() }));
+              }
+            } catch (err) {
+              log.warn("Failed to send coordinator progress via WebSocket", { error: String(err) });
             }
           },
           forestReadFn: async (query: string) => {
@@ -1160,7 +1165,8 @@ async function _handleEllieChatMessage(
                 },
                 body: JSON.stringify({ query, scope_path: "2" }),
               });
-              return await resp.text();
+              const data = await resp.json() as { memories?: Array<{ content: string }> };
+              return data.memories?.map(m => m.content).join("\n") || "No results.";
             } catch {
               return "";
             }

@@ -177,59 +177,55 @@ export class FoundationRegistry {
     const foundation = this.getActive();
     const behavior = this.getBehavior();
     const recipes = this.getRecipes();
-
-    const lines: string[] = [];
-
-    // Header
-    if (foundation) {
-      lines.push(`# Coordinator — ${foundation.name}`);
-      if (foundation.description) {
-        lines.push(foundation.description);
-      }
-    } else {
-      lines.push("# Coordinator");
-    }
-
-    lines.push("");
-
-    // Core instruction
-    lines.push(
-      "Your specialists have tools you don't — dispatch them rather than saying you can't do it.",
-    );
-    lines.push("");
-
-    // Agent roster
-    lines.push("## Agent Roster");
     const agents = foundation?.agents ?? [];
-    if (agents.length === 0) {
-      lines.push("No agents defined.");
-    } else {
-      for (const agent of agents) {
-        const toolList = agent.tools.join(", ");
-        lines.push(`- **${agent.name}** (${agent.role}): tools=[${toolList}]`);
-      }
-    }
-    lines.push("");
 
-    // Recipes
-    lines.push("## Recipes");
-    if (recipes.length === 0) {
-      lines.push("No recipes defined.");
-    } else {
-      for (const recipe of recipes) {
-        const trigger = recipe.trigger ?? "No trigger specified";
-        lines.push(`- **${recipe.name}** [${recipe.pattern}]: ${trigger}`);
-      }
-    }
-    lines.push("");
+    const agentList = agents.length > 0
+      ? agents.map(a => `- **${a.name}** (${a.role}): ${a.tools.slice(0, 5).join(", ")}${a.tools.length > 5 ? "..." : ""}`).join("\n")
+      : "No agents available.";
 
-    // Behavior
-    lines.push("## Behavior");
-    lines.push(`- **Tone**: ${behavior.tone}`);
-    lines.push(`- **Proactivity**: ${behavior.proactivity}`);
-    lines.push(`- **Escalation**: ${behavior.escalation}`);
+    const recipeList = recipes.length > 0
+      ? recipes.map(r => `- **${r.name}** (${r.pattern}): ${r.trigger || "on request"}`).join("\n")
+      : "None defined.";
 
-    return lines.join("\n");
+    return `You are Ellie, Dave's coordinator assistant. You manage a team of specialist agents. Your job: understand what Dave needs, dispatch the right specialists, and synthesize their results into a clear response.
+
+## Foundation: ${foundation?.name || "none"} — ${foundation?.description || ""}
+
+## Your Tools
+
+You have 6 tools. Use them:
+
+**dispatch_agent** — Send a task to a specialist. They have capabilities you don't (Google Calendar, Gmail, GitHub, code editing, bash, web search, etc). When something needs those tools, ALWAYS dispatch — never say "I can't do that." You can dispatch multiple agents in parallel by calling dispatch_agent multiple times in one response.
+
+**read_context** — Quick lookups without dispatching a full agent. Sources: forest (knowledge tree), plane (tickets), memory (working memory), sessions (active work), foundations (available foundations). Use this for simple queries before deciding whether to dispatch.
+
+**update_user** — Send a progress message while specialists are working. Use this when dispatching will take time — keep Dave informed.
+
+**ask_user** — Pause and ask Dave a question. Use for: clarification, approvals, decisions between options. Don't guess — ask.
+
+**invoke_recipe** — Run a named coordination pattern (pipeline, fan-out, debate, round-table). Check the recipes list below.
+
+**complete** — End the loop and deliver your final response. You MUST call this to finish. Every conversation ends with complete.
+
+## When To Do What
+
+- **Simple greeting or chat** → Call complete directly. No dispatch needed.
+- **Question you can answer from context** → Use read_context first, then complete.
+- **Task needing specialist tools** → Dispatch the right agent, synthesize result, complete.
+- **Multi-part request** → Decompose into separate dispatches (parallel when independent), synthesize all results, complete.
+- **Need clarification** → Call ask_user before dispatching.
+- **Specialist fails or errors** → Think about it. Try a different agent, ask the user, or explain what happened.
+
+## Your Specialists
+${agentList}
+
+## Recipes
+${recipeList}
+
+## Communication Style
+- Tone: ${behavior.tone}
+- Proactivity: ${behavior.proactivity}
+- Escalation: ${behavior.escalation}`;
   }
 
   // ── Private ──────────────────────────────────────────────────

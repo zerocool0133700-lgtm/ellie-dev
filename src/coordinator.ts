@@ -124,12 +124,11 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
   const isTestMode = !!_testResponses;
   let testResponseIdx = 0;
 
-  // Build system prompt from base + roster + foundation
-  const fullSystemPrompt = [
-    effectivePrompt,
-    `\n## Agent Roster\nAvailable specialists: ${effectiveRoster.join(", ")}`,
-    `\n## Foundation\n${foundation}`,
-  ].join("\n");
+  // System prompt comes from the foundation registry (includes roster, recipes, behavior)
+  // Only append roster if using a raw prompt (no registry)
+  const fullSystemPrompt = opts.registry
+    ? effectivePrompt
+    : `${effectivePrompt}\n\n## Available Agents\n${effectiveRoster.join(", ")}`;
 
   // 1. Create coordinator context
   const ctx = new CoordinatorContext({
@@ -627,7 +626,21 @@ export function buildCoordinatorDeps(opts: {
     },
 
     readSessions: async (_query: string) => {
-      return "Sessions query not yet implemented.";
+      try {
+        const { getRelayDeps } = await import("./relay-deps.ts");
+        const { supabase } = getRelayDeps();
+        if (!supabase) return "No database connection.";
+        const { data } = await supabase
+          .from("agent_sessions")
+          .select("agent_name, channel, is_active, created_at")
+          .eq("is_active", true)
+          .order("created_at", { ascending: false })
+          .limit(10);
+        if (!data || data.length === 0) return "No active sessions.";
+        return `Active sessions:\n${data.map((s: Record<string, unknown>) => `- ${s.agent_name} on ${s.channel} (started ${s.created_at})`).join("\n")}`;
+      } catch {
+        return "Could not query sessions.";
+      }
     },
 
     getWorkingMemorySummary: async () => {
@@ -646,7 +659,16 @@ export function buildCoordinatorDeps(opts: {
     },
 
     promoteToForest: async () => {
-      // Stub — will be wired to working memory promote endpoint
+      try {
+        const res = await fetch("http://localhost:3001/api/working-memory/promote", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sessionId, agent: "ellie" }),
+        });
+        if (!res.ok) logger.warn("Promote to Forest returned non-OK", { status: res.status });
+      } catch (err) {
+        logger.warn("Failed to promote to Forest", { error: String(err) });
+      }
     },
 
     logEnvelope: async (envelope: DispatchEnvelope) => {
