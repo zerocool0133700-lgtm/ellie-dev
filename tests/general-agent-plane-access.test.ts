@@ -21,17 +21,22 @@ describe("General agent Plane MCP access (ELLIE-1092)", () => {
     ]);
   });
 
-  test("getAllowedToolsForCLI includes plane for general agent", () => {
+  test("getAllowedToolsForCLI includes plane for general agent via plane_lookup", () => {
     const generalTools = ["forest_bridge", "plane_lookup", "google_workspace", "web_search", "memory_extraction", "agent_router"];
     const result = getAllowedToolsForCLI(generalTools, "general");
 
-    // Should include built-in tools
+    // ELLIE-1110: Only safe built-ins + gated ones matching config
     expect(result).toContain("Read");
-    expect(result).toContain("Edit");
-    expect(result).toContain("Write");
-    expect(result).toContain("Bash");
+    expect(result).toContain("Glob");
+    expect(result).toContain("Grep");
+    expect(result).toContain("WebSearch");
+    expect(result).toContain("WebFetch");
+    // General agent has no write/edit/bash categories
+    expect(result).not.toContain("Edit");
+    expect(result).not.toContain("Write");
+    expect(result).not.toContain("Bash");
 
-    // Should include Plane MCP in CLI format
+    // Should include Plane MCP via plane_lookup category
     expect(result).toContain("mcp__plane__*");
 
     // Should include other MCPs
@@ -42,35 +47,78 @@ describe("General agent Plane MCP access (ELLIE-1092)", () => {
     expect(result).toContain("mcp__qmd__*");
   });
 
-  test("getAllowedToolsForCLI includes plane for dev agent", () => {
+  test("getAllowedToolsForCLI includes plane for dev agent via plane_mcp", () => {
     const devTools = ["read", "write", "edit", "glob", "grep", "bash_builds", "bash_tests", "systemctl", "plane_mcp", "forest_bridge_read", "forest_bridge_write", "git", "supabase_mcp", "psql_forest"];
     const result = getAllowedToolsForCLI(devTools, "dev");
 
-    // Should include Plane MCP (from ALWAYS_ALLOWED_TOOLS)
+    // ELLIE-1110: Plane MCP comes from plane_mcp category, not ALWAYS_ALLOWED
     expect(result).toContain("mcp__plane__*");
 
     // Should include explicitly enabled tools
     expect(result).toContain("mcp__supabase__*");
     expect(result).toContain("mcp__git__*");
+
+    // Dev agent has write/edit/bash categories
+    expect(result).toContain("Edit");
+    expect(result).toContain("Write");
+    expect(result).toContain("Bash");
   });
 
-  test("getAllowedToolsForCLI includes plane even with empty tools_enabled", () => {
+  test("getAllowedToolsForCLI returns safe defaults with empty tools_enabled", () => {
     const result = getAllowedToolsForCLI([], "test-agent");
 
-    // Should still get ALWAYS_ALLOWED_TOOLS
-    expect(result).toContain("mcp__plane__*");
+    // ELLIE-1110: plane is no longer always-allowed
+    expect(result).not.toContain("mcp__plane__*");
+    // Core coordination MCPs still present
+    expect(result).toContain("mcp__forest-bridge__*");
+    expect(result).toContain("mcp__qmd__*");
+    expect(result).toContain("mcp__memory__*");
+    // Only safe built-ins
+    expect(result).toContain("Read");
+    expect(result).toContain("Glob");
+    expect(result).toContain("Grep");
+    expect(result).not.toContain("Edit");
+    expect(result).not.toContain("Write");
+    expect(result).not.toContain("Bash");
+  });
+
+  test("getAllowedToolsForCLI returns safe defaults with null tools_enabled", () => {
+    const result = getAllowedToolsForCLI(null, "test-agent");
+
+    // ELLIE-1110: plane is no longer always-allowed
+    expect(result).not.toContain("mcp__plane__*");
+    // Core coordination MCPs still present
     expect(result).toContain("mcp__forest-bridge__*");
     expect(result).toContain("mcp__qmd__*");
     expect(result).toContain("mcp__memory__*");
   });
 
-  test("getAllowedToolsForCLI includes plane even with null tools_enabled", () => {
-    const result = getAllowedToolsForCLI(null, "test-agent");
+  // ELLIE-1104: Double conversion bug
+  test("getAllowedToolsForCLI is idempotent — calling twice preserves all tools", () => {
+    const rawCategories = ["forest_bridge", "plane_lookup", "google_workspace", "web_search"];
+    const firstPass = getAllowedToolsForCLI(rawCategories, "general");
+    const secondPass = getAllowedToolsForCLI(firstPass, "general");
 
-    // Should still get ALWAYS_ALLOWED_TOOLS
-    expect(result).toContain("mcp__plane__*");
-    expect(result).toContain("mcp__forest-bridge__*");
-    expect(result).toContain("mcp__qmd__*");
-    expect(result).toContain("mcp__memory__*");
+    // Second pass should produce identical output — no tools lost
+    expect(secondPass).toEqual(firstPass);
+  });
+
+  test("getAllowedToolsForCLI preserves agent-specific MCP tools on double conversion", () => {
+    const devTools = ["read", "write", "edit", "bash_builds", "git", "supabase_mcp"];
+    const firstPass = getAllowedToolsForCLI(devTools, "dev");
+
+    // First pass should include agent-specific MCPs
+    expect(firstPass).toContain("mcp__supabase__*");
+    expect(firstPass).toContain("mcp__git__*");
+
+    // Second pass must NOT strip agent-specific MCPs
+    const secondPass = getAllowedToolsForCLI(firstPass, "dev");
+    expect(secondPass).toContain("mcp__supabase__*");
+    expect(secondPass).toContain("mcp__git__*");
+    expect(secondPass).toContain("Read");
+    // ELLIE-1110: These are preserved from first pass (already CLI-formatted)
+    expect(secondPass).toContain("Bash");
+    expect(secondPass).toContain("Edit");
+    expect(secondPass).toContain("Write");
   });
 });

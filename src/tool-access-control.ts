@@ -98,15 +98,47 @@ export const TOOL_CATEGORY_TO_MCP: Record<string, string[]> = {
 };
 
 /**
- * Default tools available to ALL agents regardless of configuration.
+ * Default MCP servers available to ALL agents regardless of configuration.
  * These are core coordination and logging tools that every agent needs.
+ *
+ * ELLIE-1110: Removed "plane" — Plane access must be explicitly granted
+ * via agent tools_enabled config (plane_mcp or plane_lookup categories).
  */
 const ALWAYS_ALLOWED_TOOLS = [
   "forest-bridge",  // All agents can read/write to Forest
   "qmd",            // All agents can search River vault
   "memory",         // All agents can extract memories
-  "plane",          // All agents can query Plane (read-only by default)
 ];
+
+/**
+ * Built-in tools that are safe for ALL agents (read-only / non-destructive).
+ */
+const SAFE_BUILT_IN_TOOLS = ["Read", "Glob", "Grep"];
+
+/**
+ * Built-in tools that require explicit agent config to enable.
+ * Maps tool category prefixes to the CLI built-in tools they unlock.
+ *
+ * ELLIE-1110: Edit, Write, Bash, WebSearch, WebFetch are no longer
+ * granted unconditionally — agents must have matching categories.
+ */
+const GATED_BUILT_IN_MAP: Record<string, string[]> = {
+  edit: ["Edit"],
+  write: ["Edit", "Write"],  // write implies edit
+  bash_builds: ["Bash"],
+  bash_tests: ["Bash"],
+  bash_type_checks: ["Bash"],
+  bash_systemctl: ["Bash"],
+  bash_journalctl: ["Bash"],
+  bash_process_mgmt: ["Bash"],
+  systemctl: ["Bash"],
+  health_endpoint_checks: ["Bash"],
+  log_analysis: ["Bash"],
+  web_search: ["WebSearch", "WebFetch"],
+  brave_search: ["WebSearch", "WebFetch"],
+  brave_web_search: ["WebSearch", "WebFetch"],
+  google_workspace: ["WebFetch"],  // GW may need web fetch for API calls
+};
 
 /**
  * Get the list of allowed MCP servers for an agent based on their tools_enabled.
@@ -184,13 +216,36 @@ export function getAllowedToolsForCLI(
   toolsEnabled: string[] | null | undefined,
   agentName: string
 ): string[] {
+  // ELLIE-1104: Guard against double conversion — if input already contains
+  // CLI-formatted tools (built-in names or mcp__*__* patterns), return as-is
+  // with ALWAYS_ALLOWED_TOOLS merged in to avoid stripping MCP access.
+  // ELLIE-1110: Only merge safe built-ins, not all built-ins.
+  if (toolsEnabled && toolsEnabled.length > 0 && isAlreadyCLIFormatted(toolsEnabled)) {
+    const alwaysAllowedMCPs = formatMCPsForCLI(ALWAYS_ALLOWED_TOOLS);
+    const merged = new Set([...toolsEnabled, ...SAFE_BUILT_IN_TOOLS, ...alwaysAllowedMCPs]);
+    return Array.from(merged);
+  }
+
   const mcpNames = getAllowedMCPs(toolsEnabled, agentName);
   const mcpTools = formatMCPsForCLI(mcpNames);
 
-  // Built-in tools that every agent should have
-  const builtInTools = ["Read", "Edit", "Write", "Bash", "Glob", "Grep", "WebSearch", "WebFetch"];
+  // ELLIE-1110: Start with safe built-ins, then add gated ones based on agent config
+  const builtIns = new Set<string>(SAFE_BUILT_IN_TOOLS);
+  if (toolsEnabled) {
+    for (const category of toolsEnabled) {
+      const gated = GATED_BUILT_IN_MAP[category];
+      if (gated) gated.forEach(t => builtIns.add(t));
+    }
+  }
 
-  return [...builtInTools, ...mcpTools];
+  return [...builtIns, ...mcpTools];
+}
+
+/** Detect if tools array is already in CLI format (built-in names or mcp__*__* patterns) */
+function isAlreadyCLIFormatted(tools: string[]): boolean {
+  const CLI_BUILT_INS = new Set(["Read", "Edit", "Write", "Bash", "Glob", "Grep", "WebSearch", "WebFetch"]);
+  // If any tool matches CLI patterns, the array has already been converted
+  return tools.some(t => CLI_BUILT_INS.has(t) || /^mcp__[^_]+__/.test(t));
 }
 
 /**
