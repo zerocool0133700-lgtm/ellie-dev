@@ -814,7 +814,7 @@ async function _handleEllieChatMessage(
       agentResult?.route.skills?.length ?? 0,
     );
 
-    if (isSpecialist && !isMultiStep && agentResult) {
+    if (isSpecialist && !isMultiStep && agentResult && process.env.COORDINATOR_MODE !== "true") {
       const ack = getSpecialistAck(ecRouteAgent);
       const ackMemoryId = await saveMessage("assistant", ack, { agent: "general" }, "ellie-chat", ecUserId);
       deliverResponse(ws, { type: "response", text: ack, agent: "general", memoryId: ackMemoryId, ts: Date.now() });
