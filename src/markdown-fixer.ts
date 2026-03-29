@@ -35,11 +35,17 @@ export function fixListSpacing(text: string): string {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const prev = i > 0 ? lines[i - 1] : undefined;
+    const next = i < lines.length - 1 ? lines[i + 1] : undefined;
 
+    // Add blank line before start of list block
     if (isListItem(line) && prev !== undefined && !isBlank(prev) && !isListItem(prev)) {
       result.push("");
     }
     result.push(line);
+    // Add blank line after end of list block
+    if (isListItem(line) && next !== undefined && !isBlank(next) && !isListItem(next)) {
+      result.push("");
+    }
   }
 
   return result.join("\n");

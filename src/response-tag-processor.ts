@@ -217,7 +217,7 @@ export async function processResponseTags(
   cleaned = cleaned.replace(/\[GOAL:\s*.+?(?:\s*\|\s*DEADLINE:\s*.+?)?\]/gi, "");
 
   // Clean up any double spaces or trailing whitespace from tag removal
-  cleaned = cleaned.replace(/\s{2,}/g, " ").trim();
+  cleaned = cleaned.replace(/[^\S\n]{2,}/g, " ").trim();
 
   // Fix markdown formatting (ELLIE-787)
   const { fixMarkdown } = await import("./markdown-fixer.ts");
