@@ -94,6 +94,14 @@ export async function saveMessage(
         userId,
         timestamp: new Date(),
       }));
+
+      // ELLIE-1135: Background message refinement — clean up user text messages
+      if (role === "user" && !content.startsWith("[")) {
+        resilientTask("refineMessage", "best-effort", async () => {
+          const { refineAndStoreMessage } = await import("./message-refiner.ts");
+          await refineAndStoreMessage(data.id, content, channel);
+        });
+      }
     }
 
     return data?.id || null;

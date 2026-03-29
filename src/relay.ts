@@ -336,6 +336,7 @@ import { startSlackChannel } from "./channels/slack/index.ts";
 { const _done = startPhase("classifiers");
   if (anthropic && supabase) initClassifier(anthropic, supabase);
   if (anthropic) initEntailmentClassifier(anthropic);
+  if (anthropic && supabase) { const { initMessageRefiner } = await import("./message-refiner.ts"); initMessageRefiner(anthropic, supabase); }
   _done();
 }
 
