@@ -16,7 +16,6 @@ import {
   type ReviewContext,
   type CriticFeedback,
 } from "../src/dev-critic-review.ts";
-import { _resetAgentRequestsForTesting } from "../src/agent-request.ts";
 import { _resetExchangesForTesting } from "../src/agent-exchange.ts";
 import { _resetRegistryForTesting } from "../src/agent-registry.ts";
 import { _resetLedgerForTesting } from "../src/commitment-ledger.ts";
@@ -24,7 +23,6 @@ import { _resetLedgerForTesting } from "../src/commitment-ledger.ts";
 // ── Setup ────────────────────────────────────────────────────────────────────
 
 beforeEach(() => {
-  _resetAgentRequestsForTesting();
   _resetExchangesForTesting();
   _resetRegistryForTesting();
   _resetLedgerForTesting();
