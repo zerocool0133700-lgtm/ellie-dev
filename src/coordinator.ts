@@ -142,7 +142,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
   const effectiveCostCap = behavior?.cost_cap_session ?? costCapRaw;
   const effectiveModel = behavior?.coordinator_model ?? model;
   const effectiveRoster = opts.registry?.getAgentRoster() ?? agentRoster;
-  const effectivePrompt = opts.registry?.getCoordinatorPrompt() ?? systemPrompt;
+  const effectivePrompt = opts.registry ? await opts.registry.getCoordinatorPrompt() : systemPrompt;
 
   const startTime = Date.now();
   const isTestMode = !!_testResponses;

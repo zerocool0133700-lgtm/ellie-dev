@@ -173,15 +173,34 @@ export class FoundationRegistry {
    * - Behavior rules (tone, proactivity, escalation)
    * - Core dispatch instruction
    */
-  getCoordinatorPrompt(): string {
+  async getCoordinatorPrompt(): Promise<string> {
     const foundation = this.getActive();
     const behavior = this.getBehavior();
     const recipes = this.getRecipes();
     const agents = foundation?.agents ?? [];
 
-    const agentList = agents.length > 0
-      ? agents.map(a => `- **${a.name}** (${a.role}): ${a.tools.slice(0, 5).join(", ")}${a.tools.length > 5 ? "..." : ""}`).join("\n")
-      : "No agents available.";
+    // ELLIE-1131: Enrich agent roster with creature skills from DB
+    let agentList: string;
+    if (agents.length > 0) {
+      const { getSkillsForCreature } = await import("../../ellie-forest/src/creature-skills");
+      const enriched = await Promise.all(agents.map(async (a) => {
+        // Look up creature skills for this agent
+        try {
+          const sql = (await import("../../ellie-forest/src/db")).default;
+          const [entity] = await sql`SELECT id FROM entities WHERE name = ${a.name} AND type = 'agent' AND active = true`;
+          if (entity) {
+            const skills = await getSkillsForCreature(entity.id);
+            if (skills.length > 0) {
+              return `- **${a.name}** (${a.role}): skills: ${skills.join(", ")}`;
+            }
+          }
+        } catch { /* fall through to static tools */ }
+        return `- **${a.name}** (${a.role}): ${a.tools.slice(0, 5).join(", ")}${a.tools.length > 5 ? "..." : ""}`;
+      }));
+      agentList = enriched.join("\n");
+    } else {
+      agentList = "No agents available.";
+    }
 
     const recipeList = recipes.length > 0
       ? recipes.map(r => `- **${r.name}** (${r.pattern}): ${r.trigger || "on request"}`).join("\n")
@@ -195,7 +214,7 @@ export class FoundationRegistry {
 
 You have 6 tools. Use them:
 
-**dispatch_agent** — Send a task to a specialist. They have capabilities you don't (Google Calendar, Gmail, GitHub, code editing, bash, web search, etc). When something needs those tools, ALWAYS dispatch — never say "I can't do that." You can dispatch multiple agents in parallel by calling dispatch_agent multiple times in one response.
+**dispatch_agent** — Send a task to a specialist. Each agent has specific skills listed in the roster below — use those skills when writing dispatch instructions. ALWAYS dispatch to the agent whose skills match the task. Never reference tools an agent doesn't have. You can dispatch multiple agents in parallel by calling dispatch_agent multiple times in one response.
 
 **read_context** — Quick lookups without dispatching a full agent. Sources: forest (knowledge tree), plane (tickets), memory (working memory), sessions (active work), foundations (available foundations). Use this for simple queries before deciding whether to dispatch.
 
