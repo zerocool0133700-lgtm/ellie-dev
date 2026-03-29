@@ -69,7 +69,7 @@ VALUES
       "model": "claude-sonnet-4-6",
       "tools": [
         "google_workspace", "forest_bridge_read",
-        "qmd_search", "brave_web_search", "memory_extraction"
+        "qmd_search", "brave_web_search", "memory_extraction", "agentmail"
       ]
     },
     {
@@ -211,7 +211,7 @@ VALUES
       "model": "claude-sonnet-4-6",
       "tools": [
         "google_workspace", "forest_bridge_read",
-        "qmd_search", "brave_web_search", "memory_extraction"
+        "qmd_search", "brave_web_search", "memory_extraction", "agentmail"
       ]
     },
     {

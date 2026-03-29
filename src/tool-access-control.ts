@@ -87,6 +87,9 @@ export const TOOL_CATEGORY_TO_MCP: Record<string, string[]> = {
   transaction_import: ["finance"],
   receipt_parsing: ["finance"],
 
+  // Email
+  agentmail: ["agentmail"],
+
   // Agent routing
   agent_router: ["agent-router"],
 
