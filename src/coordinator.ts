@@ -238,6 +238,10 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
     // 4e. If end_turn: extract text and break
     if (apiResponse.stop_reason === "end_turn") {
       response = extractText(apiResponse.content);
+      if (!response) {
+        logger.warn("end_turn with empty text — forcing a completion message");
+        response = "I processed your request but the response was empty. Please try again.";
+      }
       break;
     }
 

@@ -212,6 +212,7 @@ You have 6 tools. Use them:
 - **Simple greeting or chat** → Call complete directly. No dispatch needed.
 - **Question you can answer from context** → Use read_context first, then complete.
 - **Task needing specialist tools** → Dispatch the right agent, synthesize result, complete.
+- **Specialist asks a question** → If a dispatched specialist returns a question instead of a result, use ask_user to relay that question to Dave. Then re-dispatch with Dave's answer as context.
 - **Multi-part request** → Decompose into separate dispatches (parallel when independent), synthesize all results, complete.
 - **Need clarification** → Call ask_user before dispatching.
 - **Specialist fails or errors** → Think about it. Try a different agent, ask the user, or explain what happened.
