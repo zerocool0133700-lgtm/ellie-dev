@@ -130,7 +130,7 @@ process.on("SIGTERM", async () => {
 
 export async function callClaude(
   prompt: string,
-  options?: { resume?: boolean; imagePath?: string; allowedTools?: string[]; model?: string; sessionId?: string; timeoutMs?: number; runId?: string; abortSignal?: AbortSignal }
+  options?: { resume?: boolean; imagePath?: string; allowedTools?: string[]; model?: string; sessionId?: string; timeoutMs?: number; runId?: string; abortSignal?: AbortSignal; outputFormat?: "text" | "json" }
 ): Promise<string> {
   // Prompt is piped via stdin to avoid E2BIG (ARG_MAX) on large prompts.
   // The positional [prompt] arg is omitted; claude -p reads from stdin.
@@ -141,7 +141,7 @@ export async function callClaude(
     args.push("--resume", resumeSessionId);
   }
 
-  args.push("--output-format", "text");
+  args.push("--output-format", options?.outputFormat ?? "text");
 
   if (AGENT_MODEL_OVERRIDE && options?.model) { args.push("--model", options.model); }
 
@@ -399,6 +399,45 @@ export async function callClaude(
   } catch (error) {
     logger.error("Spawn error", error);
     return `Error: Could not run Claude CLI`;
+  }
+}
+
+// ── parseClaudeJsonOutput ────────────────────────────────────
+
+export interface ClaudeJsonOutput {
+  result: string;
+  costUsd: number;
+  durationMs: number;
+  numTurns: number;
+  isError: boolean;
+  sessionId?: string;
+}
+
+/**
+ * Parse the JSON output from `claude -p --output-format json`.
+ * Returns structured data including cost_usd for accurate cost tracking.
+ */
+export function parseClaudeJsonOutput(raw: string): ClaudeJsonOutput {
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      result: parsed.result ?? "",
+      costUsd: parsed.cost_usd ?? parsed.total_cost_usd ?? 0,
+      durationMs: parsed.duration_ms ?? 0,
+      numTurns: parsed.num_turns ?? 1,
+      isError: parsed.is_error ?? false,
+      sessionId: parsed.session_id,
+    };
+  } catch {
+    // If JSON parsing fails, treat the raw output as the result with zero cost
+    logger.warn("Failed to parse Claude JSON output", { rawLength: raw.length, preview: raw.substring(0, 200) });
+    return {
+      result: raw,
+      costUsd: 0,
+      durationMs: 0,
+      numTurns: 0,
+      isError: false,
+    };
   }
 }
 

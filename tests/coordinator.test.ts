@@ -12,6 +12,7 @@ function stubDeps(overrides: Partial<CoordinatorDeps> = {}): CoordinatorDeps {
       status: "completed" as const,
       output: `Result from ${_agent}`,
       tokens_used: 100,
+      cost_usd: 0.01,
       duration_ms: 50,
     }),
     sendMessage: async () => {},
@@ -111,6 +112,7 @@ describe("runCoordinatorLoop", () => {
           status: "completed" as const,
           output: `${agent} completed: ${task}`,
           tokens_used: 100,
+          cost_usd: 0.01,
           duration_ms: 50,
         };
       },
@@ -173,6 +175,7 @@ describe("runCoordinatorLoop", () => {
         output: "",
         error: "Agent crashed unexpectedly",
         tokens_used: 0,
+        cost_usd: 0,
         duration_ms: 10,
       }),
     });
@@ -193,5 +196,170 @@ describe("runCoordinatorLoop", () => {
     expect(result.response).toBe("I encountered an error with James but handled it.");
     expect(result.loopIterations).toBe(2);
     expect(result.hitSafetyRail).toBe(false);
+  });
+
+  test("ask_user pauses the coordinator loop and returns the question", async () => {
+    const sentMessages: Array<{ channel: string; message: string }> = [];
+    const deps = stubDeps({
+      sendMessage: async (channel, message) => {
+        sentMessages.push({ channel, message });
+      },
+    });
+
+    const result = await runCoordinatorLoop({
+      ...BASE_OPTS,
+      deps,
+      _testResponses: [
+        // Iteration 1: coordinator calls ask_user
+        makeToolUseResponse([
+          {
+            name: "ask_user",
+            id: "tool_ask_1",
+            input: { question: "Which database should I use?" },
+          },
+        ]),
+        // Iteration 2: this should NEVER execute — the loop should have stopped
+        makeCompleteResponse("This should not be reached."),
+      ],
+    });
+
+    // The loop should have paused after ask_user
+    expect(result.loopIterations).toBe(1);
+    // The question should be returned as the response
+    expect(result.response).toBe("Which database should I use?");
+    // The question should have been sent to the user's channel
+    expect(sentMessages).toEqual([
+      { channel: "telegram", message: "Which database should I use?" },
+    ]);
+    // Not a safety rail — this is intentional pausing
+    expect(result.hitSafetyRail).toBe(false);
+  });
+
+  test("ask_user with options includes them in the sent message", async () => {
+    const sentMessages: Array<{ channel: string; message: string }> = [];
+    const deps = stubDeps({
+      sendMessage: async (channel, message) => {
+        sentMessages.push({ channel, message });
+      },
+    });
+
+    const result = await runCoordinatorLoop({
+      ...BASE_OPTS,
+      deps,
+      _testResponses: [
+        makeToolUseResponse([
+          {
+            name: "ask_user",
+            id: "tool_ask_2",
+            input: {
+              question: "Which approach?",
+              options: ["Option A", "Option B"],
+            },
+          },
+        ]),
+        // Should not be reached
+        makeCompleteResponse("Unreachable."),
+      ],
+    });
+
+    expect(result.loopIterations).toBe(1);
+    expect(result.response).toBe("Which approach?");
+    expect(result.hitSafetyRail).toBe(false);
+    // Message was sent
+    expect(sentMessages.length).toBe(1);
+  });
+
+  test("rate limit retries do not consume iteration budget", async () => {
+    let callCount = 0;
+    const rateLimitError = new Error("rate_limit_error");
+    (rateLimitError as any).status = 429;
+    (rateLimitError as any).message = "rate_limit exceeded";
+
+    const result = await runCoordinatorLoop({
+      ...BASE_OPTS,
+      maxIterations: 3,
+      deps: stubDeps(),
+      _apiCallFn: async () => {
+        callCount++;
+        // First 2 calls throw rate limit errors
+        if (callCount <= 2) {
+          throw rateLimitError;
+        }
+        // 3rd call succeeds with end_turn
+        return {
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: "Success after retries" }],
+          usage: { input_tokens: 100, output_tokens: 50 },
+        };
+      },
+    });
+
+    // Should succeed — rate limit retries didn't eat iteration budget
+    expect(result.response).toBe("Success after retries");
+    expect(result.hitSafetyRail).toBe(false);
+    // The successful response happened on iteration 1 (retries don't count)
+    expect(result.loopIterations).toBe(1);
+    // But the API was called 3 times total (2 rate limits + 1 success)
+    expect(callCount).toBe(3);
+  });
+
+  test("rate limit retries eventually hit iteration cap if never resolved", async () => {
+    let callCount = 0;
+    const rateLimitError = new Error("rate_limit exceeded");
+
+    const result = await runCoordinatorLoop({
+      ...BASE_OPTS,
+      maxIterations: 2,
+      deps: stubDeps(),
+      _apiCallFn: async () => {
+        callCount++;
+        // First call succeeds (uses iteration 0)
+        if (callCount === 1) {
+          return {
+            stop_reason: "end_turn",
+            content: [{ type: "text", text: "First response" }],
+            usage: { input_tokens: 100, output_tokens: 50 },
+          };
+        }
+        // Should never be called — only 2 iterations and first one breaks
+        throw rateLimitError;
+      },
+    });
+
+    // First call succeeds and breaks the loop via end_turn
+    expect(result.response).toBe("First response");
+    expect(callCount).toBe(1);
+  });
+
+  test("returns fallback message when end_turn has empty text content", async () => {
+    const result = await runCoordinatorLoop({
+      ...BASE_OPTS,
+      deps: stubDeps(),
+      _apiCallFn: async () => ({
+        stop_reason: "end_turn",
+        content: [{ type: "text", text: "" }],
+        usage: { input_tokens: 100, output_tokens: 10 },
+      }),
+    });
+
+    expect(result.response).toBe(
+      "I processed your request but the response was empty. Please try again."
+    );
+  });
+
+  test("returns fallback message when end_turn has no text blocks", async () => {
+    const result = await runCoordinatorLoop({
+      ...BASE_OPTS,
+      deps: stubDeps(),
+      _apiCallFn: async () => ({
+        stop_reason: "end_turn",
+        content: [],
+        usage: { input_tokens: 100, output_tokens: 10 },
+      }),
+    });
+
+    expect(result.response).toBe(
+      "I processed your request but the response was empty. Please try again."
+    );
   });
 });

@@ -120,6 +120,7 @@ export function formatForestMetrics(m: {
  * Falls back to character heuristic (~4 chars/token) if tokenizer fails.
  */
 export function estimateTokens(text: string, _model?: string): number {
+  if (!text) return 0;
   try {
     const enc = getEncoder();
     return enc.encode(text).length;

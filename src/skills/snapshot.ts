@@ -47,7 +47,7 @@ export async function getSkillSnapshot(allowedSkills?: string[], message?: strin
 
   // ELLIE-1078: Progressive disclosure — only load full content for triggered/always-on skills
   const classifiedInput = eligible.map(skill => ({
-    metadata: extractMetadata(skill.frontmatter as Record<string, any>, skill.body),
+    metadata: extractMetadata(skill.frontmatter as Record<string, any>, skill.instructions),
     fullContent: formatSkillBlock(skill),
   }));
 

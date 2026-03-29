@@ -38,6 +38,7 @@ export interface SpecialistResult {
   output: string;
   error?: string;
   tokens_used: number;
+  cost_usd: number;
   duration_ms: number;
 }
 
@@ -69,6 +70,11 @@ export interface CoordinatorOpts {
   costCapUsd?: number;
   workItemId?: string;
   _testResponses?: Array<{
+    stop_reason: string;
+    content: Array<Record<string, unknown>>;
+    usage: { input_tokens: number; output_tokens: number };
+  }>;
+  _apiCallFn?: () => Promise<{
     stop_reason: string;
     content: Array<Record<string, unknown>>;
     usage: { input_tokens: number; output_tokens: number };
@@ -106,6 +112,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
     deps,
     workItemId,
     _testResponses,
+    _apiCallFn,
   } = opts;
 
   const maxIterationsRaw = opts.maxIterations ?? DEFAULT_MAX_ITERATIONS;
@@ -153,13 +160,14 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
   // Tracking
   let totalTokensIn = 0;
   let totalTokensOut = 0;
+  let specialistCostUsd = 0;
   let hitSafetyRail = false;
   let response = "";
   let loopIterations = 0;
 
-  // Anthropic client (only created if not in test mode)
+  // Anthropic client (only created if not in test mode and no custom call fn)
   let client: Anthropic | null = null;
-  if (!isTestMode) {
+  if (!isTestMode && !_apiCallFn) {
     client = new Anthropic();
   }
 
@@ -175,12 +183,13 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
       break;
     }
 
-    // Check cost cap
-    const currentCost = computeCost(effectiveModel, totalTokensIn, totalTokensOut);
+    // Check cost cap (coordinator tokens + specialist costs)
+    const coordinatorCost = computeCost(effectiveModel, totalTokensIn, totalTokensOut);
+    const currentCost = coordinatorCost + specialistCostUsd;
     if (currentCost > effectiveCostCap) {
       hitSafetyRail = true;
       response = "I've reached the cost limit for this session. Here's what I've accomplished so far.";
-      logger.warn("Cost cap reached", { iteration, cost: currentCost, cap: effectiveCostCap });
+      logger.warn("Cost cap reached", { iteration, cost: currentCost, coordinatorCost, specialistCost: specialistCostUsd, cap: effectiveCostCap });
       break;
     }
 
@@ -191,7 +200,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
       usage: { input_tokens: number; output_tokens: number };
     };
 
-    if (isTestMode) {
+    if (isTestMode && !_apiCallFn) {
       if (testResponseIdx >= _testResponses!.length) {
         hitSafetyRail = true;
         response = "Test responses exhausted.";
@@ -200,23 +209,27 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
       apiResponse = _testResponses![testResponseIdx++];
     } else {
       try {
-        const anthropicResponse = await callMessagesAPI(client!, {
-          model: effectiveModel,
-          systemPrompt: ctx.getSystemPrompt(),
-          messages: ctx.getMessages(),
-        });
-        apiResponse = {
-          stop_reason: anthropicResponse.stop_reason ?? "end_turn",
-          content: anthropicResponse.content as unknown as Array<Record<string, unknown>>,
-          usage: anthropicResponse.usage,
-        };
+        if (_apiCallFn) {
+          apiResponse = await _apiCallFn();
+        } else {
+          const anthropicResponse = await callMessagesAPI(client!, {
+            model: effectiveModel,
+            systemPrompt: ctx.getSystemPrompt(),
+            messages: ctx.getMessages(),
+          });
+          apiResponse = {
+            stop_reason: anthropicResponse.stop_reason ?? "end_turn",
+            content: anthropicResponse.content as unknown as Array<Record<string, unknown>>,
+            usage: anthropicResponse.usage,
+          };
+        }
       } catch (err: unknown) {
         // Rate limit: exponential backoff
         if (isRateLimitError(err)) {
           const backoff = Math.min(1000 * Math.pow(2, iteration), 30000);
           logger.warn("Rate limited, backing off", { backoff, iteration });
           await sleep(backoff);
-          loopIterations--; // Retry this iteration
+          iteration--; // Don't count rate-limit retries against iteration budget
           continue;
         }
         // Unknown API error: break with safety rail
@@ -281,6 +294,16 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
         ctx.addToolResult(tool.id as string, JSON.stringify({ status: "completed", response: input.response }));
         shouldBreak = true;
         break;
+      } else if (tool.name === "ask_user") {
+        // Pause the loop — send question to user and break
+        const askInput = tool.input as unknown as AskUserInput;
+        await deps.sendMessage(channel, askInput.question);
+        response = askInput.question;
+        logger.info("ask_user paused loop", { question: askInput.question.slice(0, 200) });
+
+        ctx.addToolResult(tool.id as string, JSON.stringify({ status: "paused", note: "Loop paused. User response will start a new coordinator loop." }));
+        shouldBreak = true;
+        break;
       } else if (tool.name === "dispatch_agent") {
         dispatchCalls.push(tool);
       } else {
@@ -321,10 +344,17 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
             input.timeout_ms
           );
 
+          // Aggregate specialist cost into session total
+          specialistCostUsd += specResult.cost_usd;
+
           const completed = completeEnvelope(specEnvelope, {
             tokens_in: specResult.tokens_used,
             tokens_out: 0,
           });
+          // Override envelope cost with actual CLI-reported cost when available
+          if (specResult.cost_usd > 0) {
+            completed.cost_usd = specResult.cost_usd;
+          }
           envelopes.push(completed);
           try { await deps.logEnvelope(completed); } catch { /* best-effort */ }
 
@@ -413,7 +443,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
   try { await deps.logEnvelope(finalEnvelope); } catch { /* best-effort */ }
 
   const durationMs = Date.now() - startTime;
-  const totalCostUsd = computeCost(effectiveModel, totalTokensIn, totalTokensOut);
+  const totalCostUsd = computeCost(effectiveModel, totalTokensIn, totalTokensOut) + specialistCostUsd;
 
   return {
     response,
@@ -438,13 +468,11 @@ async function handleTool(
 ): Promise<string> {
   switch (name) {
     case "ask_user": {
+      // ask_user is handled in the main loop (breaks the loop to pause for user input).
+      // This case should not be reached — but handle defensively.
       const askInput = input as unknown as AskUserInput;
-      // Send the question but return a placeholder (full implementation in Task 5)
       await deps.sendMessage(channel, askInput.question);
-      return JSON.stringify({
-        status: "sent",
-        note: "Question sent. User response will arrive asynchronously.",
-      });
+      return JSON.stringify({ status: "paused", question: askInput.question });
     }
 
     case "update_user": {
@@ -575,7 +603,7 @@ export function buildCoordinatorDeps(opts: {
 
   return {
     callSpecialist: async (agent: string, task: string, context?: string, timeoutMs?: number) => {
-      const { callClaude } = await import("./claude-cli.ts");
+      const { callClaude, parseClaudeJsonOutput } = await import("./claude-cli.ts");
       const { getAllowedToolsForCLI } = await import("./tool-access-control.ts");
 
       // Look up the agent's tool categories from the known roster
@@ -599,12 +627,14 @@ export function buildCoordinatorDeps(opts: {
       const prompt = context ? `${task}\n\nContext:\n${context}` : task;
       const start = Date.now();
       try {
-        const output = await callClaude(prompt, { timeoutMs, allowedTools });
+        const rawOutput = await callClaude(prompt, { timeoutMs, allowedTools, outputFormat: "json" });
+        const parsed = parseClaudeJsonOutput(rawOutput);
         return {
           agent,
-          status: "completed" as const,
-          output,
-          tokens_used: 0, // CLI doesn't report tokens
+          status: (parsed.isError ? "error" : "completed") as "completed" | "error",
+          output: parsed.result,
+          cost_usd: parsed.costUsd,
+          tokens_used: 0, // Not available from CLI JSON output
           duration_ms: Date.now() - start,
         };
       } catch (err) {
@@ -613,6 +643,7 @@ export function buildCoordinatorDeps(opts: {
           status: "error" as const,
           output: "",
           error: err instanceof Error ? err.message : String(err),
+          cost_usd: 0,
           tokens_used: 0,
           duration_ms: Date.now() - start,
         };

@@ -59,6 +59,7 @@ import { log } from "./logger.ts";
 import { deliverResponse, markProcessing, clearProcessing } from "./ws-delivery.ts";
 import { runCoordinatorLoop, buildCoordinatorDeps } from "./coordinator.ts";
 import type { FoundationRegistry } from "./foundation-registry.ts";
+import { parseFoundationCommand, executeFoundationCommand } from "./foundation-commands.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
 
 const logger = log.child("ellie-chat");
@@ -341,36 +342,11 @@ async function _handleEllieChatMessage(
 
   // /foundation [list|<name>] — switch active foundation
   if (text.startsWith("/foundation")) {
-    const parts = text.split(/\s+/);
-    const subcommand = parts[1];
     const registry = await getFoundationRegistry();
-
-    if (!registry) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "response", text: "Foundation system not available (no database connection).", agent: "system", ts: Date.now() }));
-      }
-      return;
-    }
-
-    if (!subcommand || subcommand === "list") {
-      const all = registry.listAll();
-      const active = registry.getActive();
-      const list = all.map(f => `${f.name === active?.name ? "→ " : "  "}${f.name} — ${f.description} (${f.agents.length} agents)`).join("\n");
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "response", text: `Foundations:\n${list}`, agent: "system", ts: Date.now() }));
-      }
-      return;
-    }
-
-    try {
-      const switched = await registry.switchTo(subcommand);
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "response", text: `Switched to ${switched.name} — ${switched.description}\n${switched.agents.length} agents: ${switched.agents.map(a => a.name).join(", ")}`, agent: "system", ts: Date.now() }));
-      }
-    } catch (err) {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "response", text: `Failed to switch: ${(err as Error).message}`, agent: "system", ts: Date.now() }));
-      }
+    const cmd = parseFoundationCommand(text);
+    const result = await executeFoundationCommand(cmd, registry);
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "response", text: result.output, agent: "system", ts: Date.now() }));
     }
     return;
   }
