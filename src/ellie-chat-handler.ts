@@ -357,6 +357,59 @@ async function _handleEllieChatMessage(
     return;
   }
 
+  // /agentmail [status|list] — direct agentmail commands (no Claude needed)
+  if (text.startsWith("/agentmail")) {
+    const parts = text.trim().split(/\s+/);
+    const sub = parts[1] || "";
+
+    try {
+      if (sub === "status") {
+        const { isAgentMailEnabled, getAgentMailConfig } = await import("./agentmail.ts");
+        const enabled = isAgentMailEnabled();
+        const config = enabled ? getAgentMailConfig() : null;
+        const output = enabled
+          ? `AgentMail is configured.\nInbox: ${config?.inboxEmail || "unknown"}`
+          : "AgentMail is not configured. Missing AGENTMAIL_API_KEY, AGENTMAIL_INBOX_EMAIL, or AGENTMAIL_WEBHOOK_SECRET in .env";
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "response", text: output, agent: "system", ts: Date.now() }));
+        }
+        return;
+      }
+
+      if (sub === "list") {
+        const { isAgentMailEnabled, listThreads } = await import("./agentmail.ts");
+        if (!isAgentMailEnabled()) {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "response", text: "AgentMail is not configured. Run /agentmail status for details.", agent: "system", ts: Date.now() }));
+          }
+          return;
+        }
+        const limit = parseInt(parts[2] || "10", 10);
+        const result = await listThreads();
+        if (!result || !result.threads || result.threads.length === 0) {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "response", text: "No email threads found.", agent: "system", ts: Date.now() }));
+          }
+          return;
+        }
+        const lines = result.threads.slice(0, limit).map((t: Record<string, unknown>) =>
+          `- ${t.subject || "(no subject)"} — ${t.updated_at || ""}`
+        );
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "response", text: `Email threads (${lines.length}):\n${lines.join("\n")}`, agent: "system", ts: Date.now() }));
+        }
+        return;
+      }
+    } catch (err) {
+      logger.warn("agentmail command error", { sub, error: String(err) });
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "response", text: `AgentMail error: ${(err as Error).message}`, agent: "system", ts: Date.now() }));
+      }
+      return;
+    }
+    // Other /agentmail subcommands (help, send, reply) fall through to instant commands or coordinator
+  }
+
   // /skills [help] — list all available skills
   if (text.trim() === "/skills" || text.trim() === "/skills help" || text.trim() === "/skills list") {
     try {

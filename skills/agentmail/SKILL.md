@@ -4,7 +4,7 @@ description: Send, receive, and manage email — check inbox, send messages, rep
 userInvocable: true
 always: true
 triggers: [agentmail, email, mail, send email, check email, inbox, send a message, reply to email, did I get any emails, email agent, inter-agent]
-instant_commands: [help, status, list]
+instant_commands: [help]
 requires:
   env:
     - AGENTMAIL_API_KEY
