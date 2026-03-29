@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS raw_messages (
+  id UUID PRIMARY KEY,
+  content TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
