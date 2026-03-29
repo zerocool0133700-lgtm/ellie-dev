@@ -844,13 +844,16 @@ async function _handleEllieChatMessage(
       }
 
       // Dispatch notification (ELLIE-80 pattern from Google Chat)
+      // ELLIE-1133: Store message ID so we can delete it after dispatch completes
+      let dispatchConfirmMsgId: number | undefined;
       if (agentResult.dispatch.agent.name !== "general" && agentResult.dispatch.is_new) {
         notify(getNotifyCtx(), {
           event: "dispatch_confirm",
           workItemId: agentResult.dispatch.agent.name,
           telegramMessage: `🤖 ${agentResult.dispatch.agent.name} agent`,
           gchatMessage: `🤖 ${agentResult.dispatch.agent.name} agent dispatched`,
-        }).catch((err) => logger.error("dispatch_confirm notification failed", { detail: err.message }));
+        }).then(r => { dispatchConfirmMsgId = r.telegramMessageId; })
+          .catch((err) => logger.error("dispatch_confirm notification failed", { detail: err.message }));
       }
     } else {
       // Routing failed — notify user and fall back to general agent
@@ -1210,7 +1213,7 @@ async function _handleEllieChatMessage(
             userId: "dashboard",
             registry: foundationRegistry || undefined,
             foundation: foundationRegistry?.getActive()?.name || "software-dev",
-            systemPrompt: foundationRegistry?.getCoordinatorPrompt() || "You are Ellie, a coordinator for Dave. Dispatch specialists for capabilities you don't have.",
+            systemPrompt: (foundationRegistry ? await foundationRegistry.getCoordinatorPrompt() : null) || "You are Ellie, a coordinator for Dave. Dispatch specialists for capabilities you don't have.",
             model: foundationRegistry?.getBehavior()?.coordinator_model || coordAgentModel || "claude-sonnet-4-6",
             agentRoster: foundationRegistry?.getAgentRoster() || ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
             deps: coordinatorDeps,
@@ -1226,6 +1229,12 @@ async function _handleEllieChatMessage(
             // Don't send a "response" — just save the question as a message
             await saveMessage("assistant", coordinatorResult.response, {}, "ellie-chat", ecUserId);
             return;
+          }
+
+          // ELLIE-1133: Delete dispatch confirm message now that dispatch is complete
+          if (dispatchConfirmMsgId) {
+            const notifyCtx = getNotifyCtx();
+            notifyCtx.bot.api.deleteMessage(notifyCtx.telegramUserId, dispatchConfirmMsgId).catch(() => {});
           }
 
           const coordResponse = coordinatorResult.response || "I completed the request but didn't generate a response. Please try again.";
