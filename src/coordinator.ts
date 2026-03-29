@@ -70,6 +70,7 @@ export interface CoordinatorOpts {
   sessionTimeoutMs?: number;
   costCapUsd?: number;
   workItemId?: string;
+  resumeState?: CoordinatorPausedState;  // ELLIE-1101: resume from ask_user pause
   _testResponses?: Array<{
     stop_reason: string;
     content: Array<Record<string, unknown>>;
@@ -82,6 +83,20 @@ export interface CoordinatorOpts {
   }>;
 }
 
+export interface CoordinatorPausedState {
+  messages: unknown[];      // Serialized Messages API conversation
+  systemPrompt: string;
+  toolUseId: string;        // The ask_user tool_use ID to resume with
+  question: string;         // What was asked
+  foundation: string;
+  model: string;
+  agentRoster: string[];
+  envelopes: DispatchEnvelope[];
+  totalTokensIn: number;
+  totalTokensOut: number;
+  iteration: number;
+}
+
 export interface CoordinatorResult {
   response: string;
   loopIterations: number;
@@ -91,6 +106,7 @@ export interface CoordinatorResult {
   totalCostUsd: number;
   hitSafetyRail: boolean;
   durationMs: number;
+  paused?: CoordinatorPausedState;  // ELLIE-1101: set when ask_user pauses the loop
 }
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -155,14 +171,48 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
 
   const envelopes: DispatchEnvelope[] = [coordEnvelope];
 
-  // 3. Add user message
-  ctx.addUserMessage(message);
-
   // Tracking
   let totalTokensIn = 0;
   let totalTokensOut = 0;
   let specialistCostUsd = 0;
   let hitSafetyRail = false;
+  let loopStartIteration = 0;
+
+  // ELLIE-1101: Resume from ask_user pause
+  if (opts.resumeState) {
+    const rs = opts.resumeState;
+    logger.info("Resuming coordinator from ask_user pause", { toolUseId: rs.toolUseId, question: rs.question.slice(0, 100) });
+
+    // Restore conversation history
+    for (const msg of rs.messages) {
+      const m = msg as { role: string; content: unknown };
+      if (m.role === "user") {
+        if (typeof m.content === "string") ctx.addUserMessage(m.content);
+        else if (Array.isArray(m.content)) {
+          // Tool results — add raw
+          for (const block of m.content as Array<Record<string, unknown>>) {
+            if (block.type === "tool_result") {
+              ctx.addToolResult(block.tool_use_id as string, (block.content as string) ?? "");
+            }
+          }
+        }
+      } else if (m.role === "assistant") {
+        ctx.addAssistantMessage(m.content as Anthropic.ContentBlockParam[]);
+      }
+    }
+
+    // Feed the user's reply as the tool result for the ask_user call
+    ctx.addToolResult(rs.toolUseId, JSON.stringify({ response: message, timed_out: false }));
+
+    // Restore tracking state
+    totalTokensIn = rs.totalTokensIn;
+    totalTokensOut = rs.totalTokensOut;
+    envelopes.push(...rs.envelopes.slice(1)); // Skip the coord envelope (we made a new one)
+    loopStartIteration = rs.iteration;
+  } else {
+    // 3. Add user message (normal start)
+    ctx.addUserMessage(message);
+  }
   let response = "";
   let loopIterations = 0;
 
@@ -296,15 +346,44 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
         shouldBreak = true;
         break;
       } else if (tool.name === "ask_user") {
-        // Pause the loop — send question to user and break
+        // ELLIE-1101: Pause the loop — save state so next message can resume
         const askInput = tool.input as unknown as AskUserInput;
         await deps.sendMessage(channel, askInput.question);
-        response = askInput.question;
-        logger.info("ask_user paused loop", { question: askInput.question.slice(0, 200) });
+        logger.info("ask_user pausing loop", { question: askInput.question.slice(0, 200), toolUseId: tool.id });
 
-        ctx.addToolResult(tool.id as string, JSON.stringify({ status: "paused", note: "Loop paused. User response will start a new coordinator loop." }));
-        shouldBreak = true;
-        break;
+        // Add the assistant message with the ask_user tool_use to context before saving
+        // (it was already added above via addAssistantMessage)
+        // Save the full conversation state for resume
+        const pausedState: CoordinatorPausedState = {
+          messages: ctx.getMessages() as unknown[],
+          systemPrompt: fullSystemPrompt,
+          toolUseId: tool.id as string,
+          question: askInput.question,
+          foundation,
+          model: effectiveModel,
+          agentRoster: effectiveRoster,
+          envelopes: [...envelopes],
+          totalTokensIn,
+          totalTokensOut,
+          iteration: loopIterations,
+        };
+
+        // Return with paused state — the handler will store this
+        const durationMs = Date.now() - startTime;
+        const finalEnvelope = completeEnvelope(coordEnvelope, { tokens_in: totalTokensIn, tokens_out: totalTokensOut, model: effectiveModel });
+        envelopes[0] = finalEnvelope;
+
+        return {
+          response: askInput.question,
+          loopIterations,
+          envelopes,
+          totalTokensIn,
+          totalTokensOut,
+          totalCostUsd: computeCost(effectiveModel, totalTokensIn, totalTokensOut) + specialistCostUsd,
+          hitSafetyRail: false,
+          durationMs,
+          paused: pausedState,
+        };
       } else if (tool.name === "dispatch_agent") {
         dispatchCalls.push(tool);
       } else {

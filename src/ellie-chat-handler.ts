@@ -57,12 +57,17 @@ import {
 import { searchElastic } from "./elasticsearch.ts";
 import { log } from "./logger.ts";
 import { deliverResponse, markProcessing, clearProcessing } from "./ws-delivery.ts";
-import { runCoordinatorLoop, buildCoordinatorDeps } from "./coordinator.ts";
+import { runCoordinatorLoop, buildCoordinatorDeps, type CoordinatorPausedState } from "./coordinator.ts";
 import type { FoundationRegistry } from "./foundation-registry.ts";
 import { parseFoundationCommand, executeFoundationCommand } from "./foundation-commands.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
 
 const logger = log.child("ellie-chat");
+
+// ── ELLIE-1101: Coordinator ask_user pause state ────────────────
+// When the coordinator pauses for ask_user, the state is stored here.
+// The next message from the user resumes the coordinator with the reply.
+let _pendingAskUser: CoordinatorPausedState | null = null;
 
 // ── Lazy Foundation Registry ────────────────────────────────────
 let _foundationRegistry: FoundationRegistry | null = null;
@@ -1113,6 +1118,13 @@ async function _handleEllieChatMessage(
             registry: foundationRegistry || undefined,
           });
 
+          // ELLIE-1101: Check for pending ask_user resume
+          const resumeState = _pendingAskUser;
+          if (resumeState) {
+            _pendingAskUser = null; // Consume the pending state
+            log.info("[coordinator] Resuming from ask_user pause", { question: resumeState.question.slice(0, 100) });
+          }
+
           const coordinatorResult = await runCoordinatorLoop({
             message: coordMessage,
             channel: "ellie-chat",
@@ -1124,7 +1136,18 @@ async function _handleEllieChatMessage(
             agentRoster: foundationRegistry?.getAgentRoster() || ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
             deps: coordinatorDeps,
             workItemId: coordWorkItem,
+            resumeState: resumeState || undefined,
           });
+
+          // ELLIE-1101: If coordinator paused for ask_user, store state for resume
+          if (coordinatorResult.paused) {
+            _pendingAskUser = coordinatorResult.paused;
+            log.info("[coordinator] Paused for ask_user", { question: coordinatorResult.paused.question.slice(0, 100) });
+            // The question was already sent to the user by the coordinator's sendMessage
+            // Don't send a "response" — just save the question as a message
+            await saveMessage("assistant", coordinatorResult.response, {}, "ellie-chat", ecUserId);
+            return;
+          }
 
           const coordResponse = coordinatorResult.response || "I completed the request but didn't generate a response. Please try again.";
           if (ws.readyState === WebSocket.OPEN) {
