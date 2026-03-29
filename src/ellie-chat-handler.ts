@@ -1073,6 +1073,82 @@ async function _handleEllieChatMessage(
     // Prime cognitive load cache so buildPrompt can inject it (ELLIE-338)
     await getCognitiveLoadContext(supabase).catch(() => {});
 
+    // ── COORDINATOR_MODE: feature-flagged coordinator path ──
+    // Placed BEFORE buildPrompt to avoid the text.length crash in skill-eligibility
+    if (process.env.COORDINATOR_MODE === "true") {
+      try {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "typing", agent: "ellie" }));
+        }
+        const ecTypingInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId, agent: "ellie" }));
+          }
+        }, 4_000);
+
+        const foundationRegistry = await getFoundationRegistry();
+        const coordinatorDeps = buildCoordinatorDeps({
+          sessionId: session.sessionId || agentResult?.dispatch.session_id || `ec-${Date.now()}`,
+          channel: "ellie-chat",
+          sendFn: async (_ch: string, msg: string) => {
+            try {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "progress", text: msg, agent: "ellie", ts: Date.now() }));
+              }
+            } catch (err) {
+              log.warn("Failed to send coordinator progress via WebSocket", { error: String(err) });
+            }
+          },
+          forestReadFn: async (query: string) => {
+            try {
+              const resp = await fetch("http://localhost:3001/api/bridge/read", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "x-bridge-key": process.env.BRIDGE_KEY || "",
+                },
+                body: JSON.stringify({ query, scope_path: "2" }),
+              });
+              const data = await resp.json() as { memories?: Array<{ content: string }> };
+              return data.memories?.map(m => m.content).join("\n") || "No results.";
+            } catch {
+              return "";
+            }
+          },
+          registry: foundationRegistry || undefined,
+        });
+
+        const coordinatorResult = await runCoordinatorLoop({
+          message: effectiveText || text,
+          channel: "ellie-chat",
+          userId: "dashboard",
+          registry: foundationRegistry || undefined,
+          foundation: foundationRegistry?.getActive()?.name || "software-dev",
+          systemPrompt: foundationRegistry?.getCoordinatorPrompt() || "You are Ellie, a coordinator for Dave. Dispatch specialists for capabilities you don't have.",
+          model: foundationRegistry?.getBehavior()?.coordinator_model || agentResult?.dispatch.agent?.model || "claude-sonnet-4-6",
+          agentRoster: foundationRegistry?.getAgentRoster() || ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
+          deps: coordinatorDeps,
+          workItemId: ellieChatWorkItem || undefined,
+        });
+
+        clearInterval(ecTypingInterval);
+        const coordResponse = coordinatorResult.response || "I completed the request but didn't generate a response. Please try again.";
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "response", text: coordResponse, agent: "ellie", ts: Date.now() }));
+        }
+        await saveMessage("assistant", coordResponse, {}, "ellie-chat", ecUserId);
+        log.info(
+          `[coordinator] ellie-chat complete — iterations=${coordinatorResult.loopIterations} ` +
+          `tokens_in=${coordinatorResult.totalTokensIn} tokens_out=${coordinatorResult.totalTokensOut} ` +
+          `cost=$${coordinatorResult.totalCostUsd.toFixed(4)} duration=${coordinatorResult.durationMs}ms`
+        );
+        return;
+      } catch (coordErr) {
+        log.error(`[coordinator] ellie-chat error, falling through to callClaude:`, coordErr);
+        // Fall through to existing dispatch path
+      }
+    }
+
     // ELLIE-1028: Fetch per-agent local memory for prompt injection
     const ecAgentLocalMemory = await getAgentMemorySummary(ellieChatActiveAgent, 2000).catch(() => "");
 
@@ -1134,77 +1210,6 @@ async function _handleEllieChatMessage(
         ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId, agent: agentResult?.dispatch?.agent?.name || "general" }));
       }
     }, 4_000);
-
-    // ── COORDINATOR_MODE: feature-flagged coordinator path (Phase 1) ──
-    if (process.env.COORDINATOR_MODE === "true") {
-      try {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "typing", agent: "ellie" }));
-        }
-
-        const foundationRegistry = await getFoundationRegistry();
-        const coordinatorDeps = buildCoordinatorDeps({
-          sessionId: session.sessionId || agentResult?.dispatch.session_id || `ec-${Date.now()}`,
-          channel: "ellie-chat",
-          sendFn: async (_ch: string, msg: string) => {
-            try {
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "progress", text: msg, agent: "ellie", ts: Date.now() }));
-              }
-            } catch (err) {
-              log.warn("Failed to send coordinator progress via WebSocket", { error: String(err) });
-            }
-          },
-          forestReadFn: async (query: string) => {
-            try {
-              const resp = await fetch("http://localhost:3001/api/bridge/read", {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "x-bridge-key": process.env.BRIDGE_KEY || "",
-                },
-                body: JSON.stringify({ query, scope_path: "2" }),
-              });
-              const data = await resp.json() as { memories?: Array<{ content: string }> };
-              return data.memories?.map(m => m.content).join("\n") || "No results.";
-            } catch {
-              return "";
-            }
-          },
-          registry: foundationRegistry || undefined,
-        });
-
-        const coordinatorResult = await runCoordinatorLoop({
-          message: effectiveText || text,
-          channel: "ellie-chat",
-          userId: "dashboard",
-          registry: foundationRegistry || undefined,
-          foundation: foundationRegistry?.getActive()?.name || "software-dev",
-          systemPrompt: foundationRegistry?.getCoordinatorPrompt() || "You are Ellie, a coordinator for Dave. Your specialists have tools you don't — Google Calendar, Gmail, GitHub, code editing, system ops, etc. When a request needs those capabilities, ALWAYS dispatch the right specialist using dispatch_agent rather than saying you can't do it. Your read_context tool only covers Forest, Plane, memory, and sessions. For everything else, dispatch. For greetings or simple chat, use complete directly.",
-          model: foundationRegistry?.getBehavior()?.coordinator_model || agentModel || "claude-sonnet-4-6",
-          agentRoster: foundationRegistry?.getAgentRoster() || ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
-          deps: coordinatorDeps,
-          workItemId: ellieChatWorkItem || undefined,
-        });
-
-        // Success — send final response via WebSocket
-        const coordResponse = coordinatorResult.response || "I completed the request but didn't generate a response. Please try again.";
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "response", text: coordResponse, agent: "ellie", ts: Date.now() }));
-        }
-        await saveMessage("assistant", coordResponse, {}, "ellie-chat", ecUserId);
-        clearInterval(typingInterval);
-        log.info(
-          `[coordinator] ellie-chat complete — iterations=${coordinatorResult.loopIterations} ` +
-          `tokens_in=${coordinatorResult.totalTokensIn} tokens_out=${coordinatorResult.totalTokensOut} ` +
-          `cost=$${coordinatorResult.totalCostUsd.toFixed(4)} duration=${coordinatorResult.durationMs}ms`
-        );
-        return;
-      } catch (coordErr) {
-        log.error(`[coordinator] ellie-chat error, falling through to callClaude:`, coordErr);
-        // Fall through to existing callClaude path
-      }
-    }
 
     let rawResponse: string;
     try {
