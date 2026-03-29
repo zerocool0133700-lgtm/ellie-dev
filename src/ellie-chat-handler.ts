@@ -1150,10 +1150,16 @@ async function _handleEllieChatMessage(
           }
 
           const coordResponse = coordinatorResult.response || "I completed the request but didn't generate a response. Please try again.";
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "response", text: coordResponse, agent: "ellie", ts: Date.now() }));
-          }
-          await saveMessage("assistant", coordResponse, {}, "ellie-chat", ecUserId);
+          // ELLIE-1097: Use deliverResponse instead of raw ws.send — buffers on disconnect
+          const memoryId = await saveMessage("assistant", coordResponse, {}, "ellie-chat", ecUserId);
+          deliverResponse(ws, {
+            type: "response",
+            text: coordResponse,
+            agent: "ellie",
+            memoryId: memoryId || undefined,
+            ts: Date.now(),
+            duration_ms: coordinatorResult.durationMs,
+          }, ecUserId);
           log.info(
             `[coordinator] ellie-chat complete — iterations=${coordinatorResult.loopIterations} ` +
             `tokens_in=${coordinatorResult.totalTokensIn} tokens_out=${coordinatorResult.totalTokensOut} ` +
@@ -1161,9 +1167,12 @@ async function _handleEllieChatMessage(
           );
         } catch (coordErr) {
           log.error(`[coordinator] background error:`, coordErr);
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "response", text: "Something went wrong while coordinating. Please try again.", agent: "ellie", ts: Date.now() }));
-          }
+          deliverResponse(ws, {
+            type: "response",
+            text: "Something went wrong while coordinating. Please try again.",
+            agent: "ellie",
+            ts: Date.now(),
+          }, ecUserId);
         } finally {
           if (typingInterval) clearInterval(typingInterval);
         }
