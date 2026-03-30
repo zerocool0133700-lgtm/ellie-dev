@@ -32,14 +32,20 @@ export interface FoundationStore {
 
 // ── Default Behavior ──────────────────────────────────────────────
 
+/**
+ * LIMITS RELAXED (2026-03-30): Single-user Mac subscription — raised from
+ * 10 iterations / $5 session / $20 daily to generous defaults. Original
+ * intent: sensible defaults for multi-user production. Tighten when
+ * onboarding external users.
+ */
 const DEFAULT_BEHAVIOR: BehaviorRules = {
   approvals: {},
   proactivity: "medium",
   tone: "helpful and concise",
   escalation: "Ask the user when uncertain about scope or intent.",
-  max_loop_iterations: 10,
-  cost_cap_session: 5,
-  cost_cap_daily: 20,
+  max_loop_iterations: 50,   // was 10
+  cost_cap_session: 50,      // was $5
+  cost_cap_daily: 200,       // was $20
   coordinator_model: "claude-sonnet-4-6",
 };
 

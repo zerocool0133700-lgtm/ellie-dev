@@ -150,7 +150,13 @@ export const MAX_PREVIOUS_OUTPUT_CHARS = 8_000;
 export const MAX_INSTRUCTION_CHARS = 500;
 export const MAX_CRITIC_ROUNDS = 3;
 export const COST_WARN_THRESHOLD = 0.50; // warn at $0.50
-export const MAX_COST_PER_EXECUTION = 2.00; // hard limit per execution
+/**
+ * LIMITS RELAXED (2026-03-30): Raised from $2 to $50. Single-user Mac
+ * subscription — the $2 hard limit was aborting complex pipelines and
+ * critic loops prematurely. Original intent: prevent runaway costs in
+ * multi-user scenarios. Lower this when onboarding external users.
+ */
+export const MAX_COST_PER_EXECUTION = 50.00; // was $2.00 — relaxed for single-user dev
 
 /**
  * Fallback model pricing (USD per million tokens) used when the Supabase

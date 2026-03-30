@@ -141,45 +141,58 @@ export const httpLimiter = new SlidingWindowLimiter({
 /**
  * Check if a message from a user/channel is rate-limited.
  * Returns a friendly message if limited, or null if allowed.
+ *
+ * LIMITS DISABLED (2026-03-30): Single-user Mac subscription — rate limits
+ * block rapid testing and dev work. Original intent: prevent abuse in
+ * multi-user scenarios. Re-enable when onboarding external users.
+ * See: ELLIE-228 for original implementation.
  */
 export function checkMessageRate(userId: string, channel: string): string | null {
-  const result = messageLimiter.check(`${channel}:${userId}`);
-  if (!result.allowed) {
-    const retrySeconds = Math.ceil((result.retryAfterMs ?? 0) / 1000);
-    return `I need a quick breather — you're sending messages faster than I can process them. Try again in ${retrySeconds}s.`;
-  }
+  // Still track for observability, but never block
+  messageLimiter.check(`${channel}:${userId}`);
+  // const result = messageLimiter.check(`${channel}:${userId}`);
+  // if (!result.allowed) {
+  //   const retrySeconds = Math.ceil((result.retryAfterMs ?? 0) / 1000);
+  //   return `I need a quick breather — you're sending messages faster than I can process them. Try again in ${retrySeconds}s.`;
+  // }
   return null;
 }
 
 /**
  * Check voice call rate limit.
+ *
+ * LIMITS DISABLED (2026-03-30): Single-user Mac subscription — see checkMessageRate.
  */
 export function checkVoiceRate(userId: string): string | null {
-  const result = voiceLimiter.check(userId);
-  if (!result.allowed) {
-    const retrySeconds = Math.ceil((result.retryAfterMs ?? 0) / 1000);
-    return `Voice calls are limited. Please try again in ${retrySeconds}s.`;
-  }
+  voiceLimiter.check(userId);
+  // const result = voiceLimiter.check(userId);
+  // if (!result.allowed) {
+  //   const retrySeconds = Math.ceil((result.retryAfterMs ?? 0) / 1000);
+  //   return `Voice calls are limited. Please try again in ${retrySeconds}s.`;
+  // }
   return null;
 }
 
 /**
  * Check API endpoint rate limit. Returns HTTP 429 response if limited.
+ *
+ * LIMITS DISABLED (2026-03-30): Single-user Mac subscription — see checkMessageRate.
  */
 export function checkApiRate(key: string): Response | null {
-  const result = apiLimiter.check(key);
-  if (!result.allowed) {
-    return new Response(
-      JSON.stringify({ error: "Rate limited", retryAfterMs: result.retryAfterMs }),
-      {
-        status: 429,
-        headers: {
-          "Content-Type": "application/json",
-          "Retry-After": String(Math.ceil((result.retryAfterMs ?? 0) / 1000)),
-        },
-      },
-    );
-  }
+  apiLimiter.check(key);
+  // const result = apiLimiter.check(key);
+  // if (!result.allowed) {
+  //   return new Response(
+  //     JSON.stringify({ error: "Rate limited", retryAfterMs: result.retryAfterMs }),
+  //     {
+  //       status: 429,
+  //       headers: {
+  //         "Content-Type": "application/json",
+  //         "Retry-After": String(Math.ceil((result.retryAfterMs ?? 0) / 1000)),
+  //       },
+  //     },
+  //   );
+  // }
   return null;
 }
 
@@ -187,22 +200,27 @@ export function checkApiRate(key: string): Response | null {
  * ELLIE-554: Check IP-based HTTP rate limit for all inbound requests.
  * Skips localhost (internal agents/services). Returns true if rate limited
  * (response already sent), false if allowed.
+ *
+ * LIMITS DISABLED (2026-03-30): Single-user Mac subscription — see checkMessageRate.
  */
 export function checkHttpRateLimit(req: IncomingMessage, res: ServerResponse): boolean {
   const clientIp = req.socket?.remoteAddress ?? "unknown";
-  const isLocalhost = clientIp === "127.0.0.1" || clientIp === "::1" || clientIp === "::ffff:127.0.0.1";
-  if (isLocalhost) return false;
-
-  const result = httpLimiter.check(clientIp);
-  if (!result.allowed) {
-    const retryAfterSec = Math.ceil((result.retryAfterMs ?? 0) / 1000);
-    res.writeHead(429, {
-      "Content-Type": "application/json",
-      "Retry-After": String(retryAfterSec),
-    });
-    res.end(JSON.stringify({ error: "Rate limited", retryAfterMs: result.retryAfterMs }));
-    return true;
+  // Still track for observability
+  if (clientIp !== "127.0.0.1" && clientIp !== "::1" && clientIp !== "::ffff:127.0.0.1") {
+    httpLimiter.check(clientIp);
   }
+  // const isLocalhost = clientIp === "127.0.0.1" || clientIp === "::1" || clientIp === "::ffff:127.0.0.1";
+  // if (isLocalhost) return false;
+  // const result = httpLimiter.check(clientIp);
+  // if (!result.allowed) {
+  //   const retryAfterSec = Math.ceil((result.retryAfterMs ?? 0) / 1000);
+  //   res.writeHead(429, {
+  //     "Content-Type": "application/json",
+  //     "Retry-After": String(retryAfterSec),
+  //   });
+  //   res.end(JSON.stringify({ error: "Rate limited", retryAfterMs: result.retryAfterMs }));
+  //   return true;
+  // }
   return false;
 }
 

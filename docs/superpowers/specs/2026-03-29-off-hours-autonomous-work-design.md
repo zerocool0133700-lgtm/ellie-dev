@@ -123,8 +123,7 @@ Passed via Docker API `HostConfig`:
 ```json
 {
   "Memory": 536870912,
-  "NanoCpus": 1000000000,
-  "AutoRemove": true
+  "NanoCpus": 1000000000
 }
 ```
 

@@ -113,9 +113,9 @@ describe("buildHostConfig", () => {
     expect(config.NanoCpus).toBe(1000000000);
   });
 
-  it("sets AutoRemove to true", () => {
+  it("does not set AutoRemove (ELLIE-1140: logs must be collected before removal)", () => {
     const config = buildHostConfig("test-vol");
-    expect(config.AutoRemove).toBe(true);
+    expect(config.AutoRemove).toBeUndefined();
   });
 
   it("includes no-new-privileges security opt", () => {

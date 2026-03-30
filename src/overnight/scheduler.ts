@@ -335,17 +335,8 @@ async function launchTask(task: GtdTask): Promise<void> {
 
   const taskResultId = taskResult.id;
 
-  // Update session tasks_total
-  await supabase.rpc("increment_session_counter", {
-    p_session_id: sessionId,
-    p_field: "tasks_total",
-  }).catch(() => {
-    // Fallback: direct update
-    supabase
-      .from("overnight_sessions")
-      .update({ tasks_total: (_runningContainers.size + 1) })
-      .eq("id", sessionId);
-  });
+  // Update session tasks_total (ELLIE-1141: use helper with proper fallback)
+  await incrementSessionCounter(supabase, sessionId, "tasks_total");
 
   // Mark GTD task as in-progress
   await supabase
@@ -420,6 +411,8 @@ async function onTaskComplete(
   gtdTaskId: string,
   result: { exitCode: number; logs: string },
 ): Promise<void> {
+  // Capture startedAt BEFORE deleting from map (ELLIE-1139: fix race condition)
+  const startedAt = _runningContainers.get(taskResultId)?.startedAt ?? Date.now();
   _runningContainers.delete(taskResultId);
 
   const { supabase } = getRelayDeps();
@@ -447,7 +440,7 @@ async function onTaskComplete(
       summary: cleanLogs.slice(-2000), // last 2KB of sanitized logs
       error: errorMsg,
       completed_at: new Date().toISOString(),
-      duration_ms: Date.now() - (_runningContainers.get(taskResultId)?.startedAt ?? Date.now()),
+      duration_ms: Date.now() - startedAt,
     })
     .eq("id", taskResultId);
 
@@ -457,14 +450,9 @@ async function onTaskComplete(
     .update({ status: success ? "done" : "open" })
     .eq("id", gtdTaskId);
 
-  // Update session counters
+  // Update session counters (ELLIE-1141: use helper with proper fallback)
   const counterField = success ? "tasks_completed" : "tasks_failed";
-  await supabase.rpc("increment_session_counter", {
-    p_session_id: _config.sessionId,
-    p_field: counterField,
-  }).catch(() => {
-    logger.warn("Failed to increment session counter", { field: counterField });
-  });
+  await incrementSessionCounter(supabase, _config.sessionId, counterField);
 
   logger.info("Task completed", {
     taskResultId,
@@ -475,6 +463,8 @@ async function onTaskComplete(
 }
 
 async function onTaskError(taskResultId: string, gtdTaskId: string, err: unknown): Promise<void> {
+  // Capture startedAt BEFORE deleting from map (ELLIE-1139: fix race condition)
+  const startedAt = _runningContainers.get(taskResultId)?.startedAt ?? Date.now();
   _runningContainers.delete(taskResultId);
 
   const { supabase } = getRelayDeps();
@@ -488,6 +478,7 @@ async function onTaskError(taskResultId: string, gtdTaskId: string, err: unknown
       status: "failed",
       error: message,
       completed_at: new Date().toISOString(),
+      duration_ms: Date.now() - startedAt,
     })
     .eq("id", taskResultId);
 
@@ -496,15 +487,56 @@ async function onTaskError(taskResultId: string, gtdTaskId: string, err: unknown
     .update({ status: "open" })
     .eq("id", gtdTaskId);
 
-  await supabase.rpc("increment_session_counter", {
-    p_session_id: _config.sessionId,
-    p_field: "tasks_failed",
-  }).catch(() => {});
+  // ELLIE-1141: use helper with proper fallback
+  await incrementSessionCounter(supabase, _config.sessionId, "tasks_failed");
 
   logger.error("Task errored", { taskResultId, error: message });
 }
 
 // ── Helpers ─────────────────────────────────────────────────
+
+type CounterField = "tasks_total" | "tasks_completed" | "tasks_failed";
+
+/**
+ * Atomically increment a session counter via the RPC function.
+ * Falls back to a read-then-write increment if the RPC is missing (pre-migration).
+ * ELLIE-1141: The original fallback was broken — it overwrote the counter
+ * with a non-atomic value derived from _runningContainers.size.
+ */
+export async function incrementSessionCounter(
+  supabase: any,
+  sessionId: string,
+  field: CounterField,
+): Promise<void> {
+  const { error: rpcError } = await supabase.rpc("increment_session_counter", {
+    p_session_id: sessionId,
+    p_field: field,
+  });
+
+  if (!rpcError) return;
+
+  // Fallback: read current value, increment, write back.
+  // Safe because only one scheduler instance runs at a time.
+  logger.warn("increment_session_counter RPC failed, using SQL fallback", {
+    field,
+    sessionId,
+    error: rpcError.message,
+  });
+
+  const { data: session } = await supabase
+    .from("overnight_sessions")
+    .select(field)
+    .eq("id", sessionId)
+    .single();
+
+  if (session) {
+    const currentVal: number = (session as Record<string, any>)[field] ?? 0;
+    await supabase
+      .from("overnight_sessions")
+      .update({ [field]: currentVal + 1 })
+      .eq("id", sessionId);
+  }
+}
 
 function extractPrUrl(logs: string): string | null {
   const match = logs.match(PR_URL_PATTERN);
@@ -530,7 +562,7 @@ export function sanitizeLogs(logs: string): string {
 
 export function _resetForTesting(): void {
   _running = false;
-  _config = null;
+  _config = { endsAt: new Date(Date.now() + 3_600_000), concurrencyLimit: 2, sessionId: "test-session" };
   _userActivityFlag = false;
   _runningContainers.clear();
   if (_pollTimer) {
@@ -538,3 +570,9 @@ export function _resetForTesting(): void {
     _pollTimer = null;
   }
 }
+
+export function _setContainerStateForTesting(taskResultId: string, state: ContainerState): void {
+  _runningContainers.set(taskResultId, state);
+}
+
+export const _onTaskCompleteForTesting = onTaskComplete;

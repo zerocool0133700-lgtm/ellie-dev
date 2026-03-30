@@ -177,7 +177,6 @@ export function buildHostConfig(volumeName: string): Record<string, unknown> {
   return {
     Memory: memoryLimit,
     NanoCpus: nanoCpus,
-    AutoRemove: true,
     SecurityOpt: ["no-new-privileges"],
     NetworkMode: ISOLATED_NETWORK_NAME,
     ExtraHosts: [
@@ -397,7 +396,7 @@ export async function killContainer(containerId: string): Promise<void> {
       error: err instanceof Error ? err.message : String(err),
     });
   }
-  // Force remove in case AutoRemove didn't trigger
+  // Force remove after kill
   try {
     await dockerApi("DELETE", `/containers/${containerId}?force=true`);
   } catch {
@@ -435,7 +434,7 @@ export async function runOvernightTask(
     // Race: container completion vs timeout
     const exitCode = await waitWithTimeout(containerId, timeoutMs, taskId);
 
-    // Logs may fail if AutoRemove already cleaned up the container
+    // Collect logs before removing the container
     let logs = "";
     try {
       logs = await getContainerLogs(containerId);
@@ -443,6 +442,14 @@ export async function runOvernightTask(
       logger.warn(`Could not retrieve logs for ${taskId}`, {
         error: err instanceof Error ? err.message : String(err),
       });
+    }
+
+    // Remove container now that logs have been collected
+    try {
+      await dockerApi("DELETE", `/containers/${containerId}?force=true`);
+      logger.debug(`Removed container after log collection`, { containerId });
+    } catch {
+      // Best-effort cleanup — container may already be gone (timeout path)
     }
 
     if (exitCode === TIMEOUT_EXIT_CODE) {

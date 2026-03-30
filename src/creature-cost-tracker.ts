@@ -151,8 +151,14 @@ export function recordUsage(opts: {
 
 /**
  * Check if a creature should be blocked (over budget).
+ *
+ * LIMITS DISABLED (2026-03-30): Single-user Mac subscription — cost blocking
+ * was prematurely cutting off agent work. Original intent: prevent runaway
+ * costs in multi-user/production scenarios. Re-enable when onboarding
+ * external users. See: ELLIE-1060 for original implementation.
  */
 export function shouldBlock(creature: string): { blocked: boolean; reason?: string } {
+  // Still log for cost awareness, but never block
   resetDailyIfNeeded();
   const sessionKey = `${creature}:${todayStr()}`;
   const session = activeSessions.get(sessionKey);
@@ -160,10 +166,12 @@ export function shouldBlock(creature: string): { blocked: boolean; reason?: stri
   const dailyBudget = parseFloat(process.env.CREATURE_DAILY_BUDGET_USD || String(DEFAULT_DAILY_BUDGET_USD));
 
   if (session && session.estimatedCostUsd >= sessionBudget) {
-    return { blocked: true, reason: `${creature} exceeded session budget ($${session.estimatedCostUsd.toFixed(2)} / $${sessionBudget})` };
+    logger.warn("Cost tracking: session budget exceeded (not blocking)", { creature, cost: session.estimatedCostUsd, budget: sessionBudget });
+    // return { blocked: true, reason: `${creature} exceeded session budget ($${session.estimatedCostUsd.toFixed(2)} / $${sessionBudget})` };
   }
   if (dailyCost.totalCostUsd >= dailyBudget) {
-    return { blocked: true, reason: `Daily budget exceeded ($${dailyCost.totalCostUsd.toFixed(2)} / $${dailyBudget})` };
+    logger.warn("Cost tracking: daily budget exceeded (not blocking)", { creature, dailyCost: dailyCost.totalCostUsd, budget: dailyBudget });
+    // return { blocked: true, reason: `Daily budget exceeded ($${dailyCost.totalCostUsd.toFixed(2)} / $${dailyBudget})` };
   }
   return { blocked: false };
 }
