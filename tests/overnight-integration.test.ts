@@ -353,6 +353,7 @@ describe("onTaskComplete integration", () => {
       volumeName: "vol-pr",
       startedAt: Date.now() - 10_000,
       gtdTaskId: "gtd-pr",
+      sessionId: "test-session",
     });
 
     await _onTaskCompleteForTesting("task-pr", "gtd-pr", {
@@ -395,6 +396,7 @@ describe("onTaskComplete integration", () => {
       volumeName: "vol-done",
       startedAt: Date.now() - 5_000,
       gtdTaskId: "gtd-done",
+      sessionId: "test-session",
     });
 
     await _onTaskCompleteForTesting("task-done", "gtd-done", {
@@ -434,6 +436,7 @@ describe("onTaskComplete integration", () => {
       volumeName: "vol-fail",
       startedAt: Date.now() - 2_000,
       gtdTaskId: "gtd-fail",
+      sessionId: "test-session",
     });
 
     await _onTaskCompleteForTesting("task-fail", "gtd-fail", {
@@ -479,6 +482,7 @@ describe("onTaskComplete integration", () => {
       volumeName: "vol-timeout",
       startedAt: Date.now() - 30_000,
       gtdTaskId: "gtd-timeout",
+      sessionId: "test-session",
     });
 
     await _onTaskCompleteForTesting("task-timeout", "gtd-timeout", {
@@ -519,6 +523,7 @@ describe("onTaskComplete integration", () => {
       volumeName: "vol-redact",
       startedAt: Date.now() - 3_000,
       gtdTaskId: "gtd-redact",
+      sessionId: "test-session",
     });
 
     await _onTaskCompleteForTesting("task-redact", "gtd-redact", {
@@ -561,6 +566,7 @@ describe("onTaskComplete integration", () => {
       volumeName: "vol-biglog",
       startedAt: Date.now() - 1_000,
       gtdTaskId: "gtd-biglog",
+      sessionId: "test-session",
     });
 
     // Generate logs > 2000 chars
@@ -604,6 +610,7 @@ describe("onTaskComplete integration", () => {
       volumeName: "vol-counter",
       startedAt: Date.now() - 1_000,
       gtdTaskId: "gtd-counter",
+      sessionId: "test-session",
     });
 
     await _onTaskCompleteForTesting("task-counter", "gtd-counter", {
@@ -645,6 +652,7 @@ describe("onTaskComplete integration", () => {
       volumeName: "vol-failcount",
       startedAt: Date.now() - 1_000,
       gtdTaskId: "gtd-failcount",
+      sessionId: "test-session",
     });
 
     await _onTaskCompleteForTesting("task-failcount", "gtd-failcount", {
@@ -819,6 +827,7 @@ describe("concurrency enforcement", () => {
       volumeName: "vol-a",
       startedAt: Date.now(),
       gtdTaskId: "gtd-a",
+      sessionId: "test-session",
     });
 
     _setContainerStateForTesting("task-b", {
@@ -828,6 +837,7 @@ describe("concurrency enforcement", () => {
       volumeName: "vol-b",
       startedAt: Date.now(),
       gtdTaskId: "gtd-b",
+      sessionId: "test-session",
     });
 
     // Verify both are tracked (pollTick would check _runningContainers.size
@@ -905,6 +915,7 @@ describe("end-to-end overnight flow", () => {
       volumeName: "vol-e2e",
       startedAt: Date.now() - 60_000,
       gtdTaskId: "gtd-e2e",
+      sessionId: "test-session",
     });
 
     await _onTaskCompleteForTesting("e2e-task", "gtd-e2e", {
@@ -967,6 +978,7 @@ describe("end-to-end overnight flow", () => {
       volumeName: "vol-fail",
       startedAt: Date.now() - 5_000,
       gtdTaskId: "gtd-e2e-fail",
+      sessionId: "test-session",
     });
 
     await _onTaskCompleteForTesting("e2e-fail", "gtd-e2e-fail", {
@@ -1025,6 +1037,7 @@ describe("end-to-end overnight flow", () => {
         volumeName: `vol-multi-${i}`,
         startedAt: Date.now() - 10_000,
         gtdTaskId: `gtd-multi-${i}`,
+        sessionId: "test-session",
       });
     }
 
@@ -1105,7 +1118,7 @@ describe("edge cases", () => {
   beforeEach(() => _resetForTesting());
   afterEach(() => _resetForTesting());
 
-  it("onTaskComplete handles missing container state gracefully", async () => {
+  it("onTaskComplete bails gracefully when container state is missing (no sessionId)", async () => {
     const updates: Record<string, unknown>[] = [];
     mockSupabase = {
       from: (table: string) => {
@@ -1120,18 +1133,14 @@ describe("edge cases", () => {
       rpc: () => Promise.resolve({ data: null, error: null }),
     } as ReturnType<typeof createMockSupabase>;
 
-    // Don't set container state — simulates a race where state was already cleaned up
+    // Don't set container state — no sessionId available (ELLIE-1160)
     await _onTaskCompleteForTesting("orphan-task", "gtd-orphan", {
       exitCode: 0,
       logs: "Done",
     });
 
-    // Should still record the update (uses Date.now() as fallback for startedAt)
-    const taskUpdate = updates.find(
-      (u) => (u as Record<string, unknown>).table === "overnight_task_results"
-    );
-    expect(taskUpdate).toBeDefined();
-    expect((taskUpdate as Record<string, unknown>).duration_ms).toBeGreaterThanOrEqual(0);
+    // Should bail without crashing — no updates since sessionId is unknown
+    expect(updates.length).toBe(0);
   });
 
   it("onTaskComplete handles logs with no PR URL", async () => {
@@ -1156,6 +1165,7 @@ describe("edge cases", () => {
       volumeName: "vol-nopr",
       startedAt: Date.now() - 1_000,
       gtdTaskId: "gtd-nopr",
+      sessionId: "test-session",
     });
 
     await _onTaskCompleteForTesting("no-pr", "gtd-nopr", {

@@ -65,10 +65,54 @@ import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
 
 const logger = log.child("ellie-chat");
 
-// ── ELLIE-1101: Coordinator ask_user pause state ────────────────
-// When the coordinator pauses for ask_user, the state is stored here.
-// The next message from the user resumes the coordinator with the reply.
-let _pendingAskUser: CoordinatorPausedState | null = null;
+// ── ELLIE-1158/1159: Coordinator ask_user pause queue ──────────
+// FIFO queue so concurrent coordinators each get their own slot.
+// Previously a single global variable — caused responses to route to
+// whichever coordinator wrote last instead of the one that asked first.
+// ELLIE-1158: Entries older than ASK_USER_STALE_MS are pruned on shift
+// to prevent orphaned paused states from being resumed with unrelated messages.
+
+export const ASK_USER_STALE_MS = 5 * 60 * 1000; // 5 minutes
+
+interface PendingAskUserEntry {
+  state: CoordinatorPausedState;
+  pausedAt: number;
+}
+
+const _pendingAskUserQueue: PendingAskUserEntry[] = [];
+
+export { type CoordinatorPausedState } from "./coordinator.ts";
+
+/** Push a paused coordinator state onto the ask_user queue. */
+export function pushPendingAskUser(state: CoordinatorPausedState, pausedAt?: number): void {
+  _pendingAskUserQueue.push({ state, pausedAt: pausedAt ?? Date.now() });
+}
+
+/** Consume the oldest non-stale pending ask_user state (FIFO). Prunes stale entries. Returns null if empty. */
+export function shiftPendingAskUser(): CoordinatorPausedState | null {
+  const now = Date.now();
+  while (_pendingAskUserQueue.length > 0) {
+    const entry = _pendingAskUserQueue.shift()!;
+    if (now - entry.pausedAt <= ASK_USER_STALE_MS) {
+      return entry.state;
+    }
+    logger.warn("[coordinator] Pruned stale ask_user entry", {
+      question: entry.state.question.slice(0, 100),
+      ageMs: now - entry.pausedAt,
+    });
+  }
+  return null;
+}
+
+/** Number of coordinators currently waiting for a user response (including stale). */
+export function getPendingAskUserCount(): number {
+  return _pendingAskUserQueue.length;
+}
+
+/** Clear all pending ask_user states. For testing only. */
+export function clearPendingAskUserQueue(): void {
+  _pendingAskUserQueue.length = 0;
+}
 
 // ── Lazy Foundation Registry ────────────────────────────────────
 let _foundationRegistry: FoundationRegistry | null = null;
@@ -1205,11 +1249,10 @@ async function _handleEllieChatMessage(
             registry: foundationRegistry || undefined,
           });
 
-          // ELLIE-1101: Check for pending ask_user resume
-          const resumeState = _pendingAskUser;
+          // ELLIE-1159: Consume oldest pending ask_user (FIFO queue)
+          const resumeState = shiftPendingAskUser();
           if (resumeState) {
-            _pendingAskUser = null; // Consume the pending state
-            log.info("[coordinator] Resuming from ask_user pause", { question: resumeState.question.slice(0, 100) });
+            log.info("[coordinator] Resuming from ask_user pause", { question: resumeState.question.slice(0, 100), queueRemaining: getPendingAskUserCount() });
           }
 
           const coordinatorResult = await runCoordinatorLoop({
@@ -1226,10 +1269,10 @@ async function _handleEllieChatMessage(
             resumeState: resumeState || undefined,
           });
 
-          // ELLIE-1101: If coordinator paused for ask_user, store state for resume
+          // ELLIE-1159: Push paused state onto FIFO queue (not overwrite)
           if (coordinatorResult.paused) {
-            _pendingAskUser = coordinatorResult.paused;
-            log.info("[coordinator] Paused for ask_user", { question: coordinatorResult.paused.question.slice(0, 100) });
+            pushPendingAskUser(coordinatorResult.paused);
+            log.info("[coordinator] Paused for ask_user", { question: coordinatorResult.paused.question.slice(0, 100), queueDepth: getPendingAskUserCount() });
             // The question was already sent to the user by the coordinator's sendMessage
             // Don't send a "response" — just save the question as a message
             await saveMessage("assistant", coordinatorResult.response, {}, "ellie-chat", ecUserId);

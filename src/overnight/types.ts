@@ -2,6 +2,8 @@
  * Off-Hours Autonomous Work — Shared Types
  */
 
+export type StopReason = "time_limit" | "user_activity" | "manual" | "all_done" | "relay_restart";
+
 export interface OvernightSession {
   id: string;
   started_at: string;
@@ -12,7 +14,7 @@ export interface OvernightSession {
   tasks_total: number;
   tasks_completed: number;
   tasks_failed: number;
-  stop_reason: "time_limit" | "user_activity" | "manual" | "all_done" | null;
+  stop_reason: StopReason | null;
 }
 
 export interface OvernightTaskResult {
@@ -41,6 +43,8 @@ export interface ContainerState {
   volumeName: string;
   startedAt: number;
   gtdTaskId: string;
+  /** Captured at launch so completion handlers don't depend on _config (ELLIE-1160) */
+  sessionId: string;
 }
 
 export interface SchedulerConfig {
@@ -48,5 +52,3 @@ export interface SchedulerConfig {
   concurrencyLimit: number;
   sessionId: string;
 }
-
-export type StopReason = "time_limit" | "user_activity" | "manual" | "all_done";

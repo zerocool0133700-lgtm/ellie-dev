@@ -531,3 +531,174 @@ describe("updateItemStatus — invalid status rejection", () => {
     );
   });
 });
+
+// ── ELLIE-1154: Concurrency & transaction boundary tests ─────
+
+describe("concurrent child completions (ELLIE-1154 race condition)", () => {
+  it("does not produce duplicate parent updates when children complete simultaneously", async () => {
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
+
+    const parent = await createOrchestrationParent({
+      content: "Concurrent completion test parent",
+      createdBy: "test-agent",
+    });
+    track(parent.id);
+
+    const children = await Promise.all(
+      Array.from({ length: 5 }, (_, i) =>
+        createDispatchChild({
+          parentId: parent.id,
+          content: `Concurrent child ${i}`,
+          assignedAgent: "dev",
+          assignedTo: "dev",
+          createdBy: "test-agent",
+        }),
+      ),
+    );
+    for (const c of children) track(c.id);
+
+    // Complete all children concurrently — this is the race condition scenario.
+    // Before ELLIE-1154 fix, concurrent checkParentCompletion() calls could
+    // both read all-terminal and both try to update the parent.
+    await Promise.all(children.map((c) => updateItemStatus(c.id, "done")));
+
+    // Verify parent ended up in exactly one correct terminal state
+    const { data: parentRow } = await _testSupabase!
+      .from("todos")
+      .select("status, completed_at")
+      .eq("id", parent.id)
+      .single();
+
+    expect(parentRow!.status).toBe("done");
+    expect(parentRow!.completed_at).toBeDefined();
+  });
+
+  it("handles mixed concurrent completions (some done, some failed)", async () => {
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
+
+    const parent = await createOrchestrationParent({
+      content: "Mixed concurrent test parent",
+      createdBy: "test-agent",
+    });
+    track(parent.id);
+
+    const child1 = await createDispatchChild({
+      parentId: parent.id,
+      content: "Mixed child 1",
+      assignedAgent: "dev",
+      assignedTo: "dev",
+      createdBy: "test-agent",
+    });
+    track(child1.id);
+
+    const child2 = await createDispatchChild({
+      parentId: parent.id,
+      content: "Mixed child 2",
+      assignedAgent: "research",
+      assignedTo: "research",
+      createdBy: "test-agent",
+    });
+    track(child2.id);
+
+    // Complete both concurrently with different terminal states
+    await Promise.all([
+      updateItemStatus(child1.id, "done"),
+      updateItemStatus(child2.id, "failed"),
+    ]);
+
+    const { data: parentRow } = await _testSupabase!
+      .from("todos")
+      .select("status")
+      .eq("id", parent.id)
+      .single();
+
+    // Should be waiting_for since one child failed
+    expect(parentRow!.status).toBe("waiting_for");
+  });
+});
+
+describe("cancel cascade atomicity (ELLIE-1154 transaction boundaries)", () => {
+  it("atomically cancels deeply nested tree", async () => {
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
+
+    const parent = await createOrchestrationParent({
+      content: "Deep cancel test parent",
+      createdBy: "test-agent",
+    });
+    track(parent.id);
+
+    const child = await createDispatchChild({
+      parentId: parent.id,
+      content: "Deep cancel child",
+      assignedAgent: "dev",
+      assignedTo: "dev",
+      createdBy: "test-agent",
+    });
+    track(child.id);
+
+    const grandchild = await createQuestionItem({
+      parentId: child.id,
+      content: "Deep cancel grandchild question",
+      createdBy: "dev-agent",
+    });
+    track(grandchild.id);
+
+    // Cancel the child — should cascade to grandchild atomically
+    await cancelItem(child.id);
+
+    // Verify all descendants are cancelled
+    const { data: items } = await _testSupabase!
+      .from("todos")
+      .select("id, status")
+      .in("id", [child.id, grandchild.id]);
+
+    for (const item of items!) {
+      expect(item.status).toBe("cancelled");
+    }
+  });
+
+  it("skips already-terminal items during cascade", async () => {
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
+
+    const parent = await createOrchestrationParent({
+      content: "Terminal skip test parent",
+      createdBy: "test-agent",
+    });
+    track(parent.id);
+
+    const child1 = await createDispatchChild({
+      parentId: parent.id,
+      content: "Already done child",
+      assignedAgent: "dev",
+      assignedTo: "dev",
+      createdBy: "test-agent",
+    });
+    track(child1.id);
+
+    const child2 = await createDispatchChild({
+      parentId: parent.id,
+      content: "Still open child",
+      assignedAgent: "research",
+      assignedTo: "research",
+      createdBy: "test-agent",
+    });
+    track(child2.id);
+
+    // Complete child1 first
+    await updateItemStatus(child1.id, "done");
+
+    // Cancel the parent — child1 should stay "done", child2 should become "cancelled"
+    await cancelItem(parent.id);
+
+    const { data: items } = await _testSupabase!
+      .from("todos")
+      .select("id, status")
+      .in("id", [child1.id, child2.id])
+      .order("created_at");
+
+    const c1 = items!.find((i) => i.id === child1.id);
+    const c2 = items!.find((i) => i.id === child2.id);
+    expect(c1!.status).toBe("done"); // preserved
+    expect(c2!.status).toBe("cancelled"); // cascaded
+  });
+});

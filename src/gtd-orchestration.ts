@@ -316,87 +316,39 @@ export async function updateItemStatus(
 
   const supabase = getSupabase();
 
-  // Fetch current item (need parent_id, and metadata if merging)
-  const selectFields = metadata ? "metadata, parent_id" : "parent_id";
-  const { data: current } = await supabase
-    .from("todos")
-    .select(selectFields)
-    .eq("id", id)
-    .single();
+  // Atomic: update status, merge metadata, and check parent completion in one transaction
+  const { data: parentId, error } = await supabase.rpc("update_item_status_atomic", {
+    p_item_id: id,
+    p_status: status,
+    p_metadata: metadata ? metadata : null,
+  });
 
-  // Build update payload
-  const update: Record<string, unknown> = { status };
-  if (status === "done") update.completed_at = new Date().toISOString();
-
-  if (metadata) {
-    const existing = (current?.metadata as Record<string, unknown>) ?? {};
-    update.metadata = { ...existing, ...metadata };
-  }
-
-  const { error } = await supabase.from("todos").update(update).eq("id", id);
   if (error) {
     logger.error("Failed to update item status", { id, status }, error);
     throw error;
   }
 
-  // Check parent completion if item has a parent
-  if (current?.parent_id) {
-    await checkParentCompletion(current.parent_id);
-  }
-
-  logger.info("Updated item status", { id, status });
+  logger.info("Updated item status", { id, status, parent_id: parentId });
   broadcastDispatchEvent({ type: "dispatch_update" });
 }
 
 export async function checkParentCompletion(parentId: string): Promise<void> {
   const supabase = getSupabase();
 
-  // Fetch all children of this parent in a single query
-  const { data: children, error } = await supabase
-    .from("todos")
-    .select("id, status")
-    .eq("parent_id", parentId);
+  // Atomic: lock parent row, check all children, update if all terminal
+  // Uses FOR UPDATE on the parent to serialize concurrent child completions
+  const { data: newStatus, error } = await supabase.rpc("check_parent_completion_atomic", {
+    p_parent_id: parentId,
+  });
 
   if (error) {
     logger.error("Failed to check parent completion", { parentId }, error);
     throw error;
   }
 
-  if (!children || children.length === 0) return;
-
-  // Check if all children are in terminal states
-  const allTerminal = children.every((c) => TERMINAL_STATUSES.has(c.status));
-
-  if (!allTerminal) return;
-
-  // Determine parent status based on children
-  const allDone = children.every((c) => c.status === "done" || c.status === "cancelled");
-  const anyFailed = children.some((c) => c.status === "failed" || c.status === "timed_out");
-
-  let parentStatus: string;
-  if (allDone) {
-    parentStatus = "done";
-  } else if (anyFailed) {
-    parentStatus = "waiting_for";
-  } else {
-    // All cancelled
-    parentStatus = "cancelled";
+  if (newStatus) {
+    logger.info("Parent auto-completed", { parentId, status: newStatus });
   }
-
-  const update: Record<string, unknown> = { status: parentStatus };
-  if (parentStatus === "done") update.completed_at = new Date().toISOString();
-
-  const { error: updateError } = await supabase
-    .from("todos")
-    .update(update)
-    .eq("id", parentId);
-
-  if (updateError) {
-    logger.error("Failed to update parent status", { parentId, parentStatus }, updateError);
-    throw updateError;
-  }
-
-  logger.info("Parent auto-completed", { parentId, status: parentStatus });
 }
 
 // ── Cancel ────────────────────────────────────────────────────
@@ -404,70 +356,19 @@ export async function checkParentCompletion(parentId: string): Promise<void> {
 export async function cancelItem(id: string): Promise<void> {
   const supabase = getSupabase();
 
-  // Fetch the item to get parent_id before updating
-  const { data: item } = await supabase
-    .from("todos")
-    .select("parent_id")
-    .eq("id", id)
-    .single();
-
-  // Cancel the item itself
-  const { error } = await supabase
-    .from("todos")
-    .update({ status: "cancelled" })
-    .eq("id", id);
+  // Atomic: cancel item + all descendants via recursive CTE + check parent completion
+  // All in a single transaction to prevent partial cancellation state
+  const { data: cancelledCount, error } = await supabase.rpc("cancel_item_cascade", {
+    p_item_id: id,
+  });
 
   if (error) {
     logger.error("Failed to cancel item", { id }, error);
     throw error;
   }
 
-  // Recursively cancel all non-terminal descendants
-  await cancelDescendants(id);
-
-  // Check parent completion if this item has a parent
-  if (item?.parent_id) {
-    await checkParentCompletion(item.parent_id);
-  }
-
-  logger.info("Cancelled item and all descendants", { id });
+  logger.info("Cancelled item and all descendants", { id, cancelled_count: cancelledCount });
   broadcastDispatchEvent({ type: "dispatch_update" });
-}
-
-async function cancelDescendants(parentId: string): Promise<void> {
-  const supabase = getSupabase();
-  const nonTerminalStatuses = [...VALID_STATUSES].filter((s) => !TERMINAL_STATUSES.has(s));
-
-  // Find all non-terminal children of this parent
-  const { data: children, error } = await supabase
-    .from("todos")
-    .select("id")
-    .eq("parent_id", parentId)
-    .in("status", nonTerminalStatuses);
-
-  if (error) {
-    logger.error("Failed to fetch descendants for cancel", { parentId }, error);
-    throw error;
-  }
-
-  if (!children || children.length === 0) return;
-
-  // Cancel these children
-  const childIds = children.map((c) => c.id);
-  const { error: updateError } = await supabase
-    .from("todos")
-    .update({ status: "cancelled" })
-    .in("id", childIds);
-
-  if (updateError) {
-    logger.error("Failed to cascade cancel to descendants", { parentId }, updateError);
-    throw updateError;
-  }
-
-  // Recurse into each child to cancel their children
-  for (const childId of childIds) {
-    await cancelDescendants(childId);
-  }
 }
 
 // ── Answer question ───────────────────────────────────────────
@@ -478,43 +379,20 @@ export async function answerQuestion(
 ): Promise<string | null> {
   const supabase = getSupabase();
 
-  // Fetch the question to get its parent_id and existing metadata
-  const { data: question, error: fetchError } = await supabase
-    .from("todos")
-    .select("parent_id, metadata")
-    .eq("id", questionId)
-    .single();
-
-  if (fetchError) {
-    logger.error("Failed to fetch question", { questionId }, fetchError);
-    throw fetchError;
-  }
-
-  const existingMeta = (question?.metadata as Record<string, unknown>) ?? {};
-
-  // Mark question as done with answer in metadata
-  const { error } = await supabase
-    .from("todos")
-    .update({
-      status: "done",
-      completed_at: new Date().toISOString(),
-      metadata: { ...existingMeta, answer: answerText },
-    })
-    .eq("id", questionId);
+  // Atomic: mark question done with answer, merge metadata, check parent completion
+  const { data: parentId, error } = await supabase.rpc("answer_question_atomic", {
+    p_question_id: questionId,
+    p_answer_text: answerText,
+  });
 
   if (error) {
     logger.error("Failed to answer question", { questionId }, error);
     throw error;
   }
 
-  // Check parent completion
-  if (question?.parent_id) {
-    await checkParentCompletion(question.parent_id);
-  }
-
-  logger.info("Answered question", { questionId, parent_id: question?.parent_id });
+  logger.info("Answered question", { questionId, parent_id: parentId });
   broadcastDispatchEvent({ type: "dispatch_update" });
-  return question?.parent_id ?? null;
+  return parentId ?? null;
 }
 
 // ── Badge count ───────────────────────────────────────────────

@@ -23,7 +23,7 @@ mock.module("../src/trace.ts", () => ({
 
 // ── Imports ─────────────────────────────────────────────────
 
-import { parseEndTime, shouldStop, incrementSessionCounter, _onTaskCompleteForTesting, _setContainerStateForTesting, _resetForTesting } from "../src/overnight/scheduler.ts";
+import { parseEndTime, shouldStop, incrementSessionCounter, _onTaskCompleteForTesting, _onTaskErrorForTesting, _setContainerStateForTesting, _resetForTesting, _clearConfigForTesting } from "../src/overnight/scheduler.ts";
 
 // ── parseEndTime ────────────────────────────────────────────
 
@@ -229,6 +229,7 @@ describe("onTaskComplete duration_ms", () => {
       volumeName: "ellie-overnight-vol-test",
       startedAt: Date.now() - 5_000,
       gtdTaskId,
+      sessionId: "test-session",
     });
 
     await _onTaskCompleteForTesting(taskResultId, gtdTaskId, {
@@ -240,5 +241,127 @@ describe("onTaskComplete duration_ms", () => {
     // duration_ms should be ~5000, definitely not 0
     expect(updateArgs!.duration_ms).toBeGreaterThan(4_000);
     expect(updateArgs!.duration_ms).toBeLessThan(10_000);
+  });
+});
+
+// ── _config null race condition (ELLIE-1160) ─────────────────
+
+describe("onTaskComplete when _config is null (session stopped mid-run)", () => {
+  let taskResultUpdates: Record<string, unknown> | null = null;
+  let todoUpdates: Record<string, unknown> | null = null;
+  let rpcCalls: { fn: string; params: any }[] = [];
+
+  const mockSupabase = {
+    from: (table: string) => {
+      const chain: any = {
+        update: (data: Record<string, unknown>) => {
+          if (table === "overnight_task_results") taskResultUpdates = data;
+          if (table === "todos") todoUpdates = data;
+          return chain;
+        },
+        eq: () => chain,
+        select: () => chain,
+        single: () => Promise.resolve({ data: null, error: null }),
+      };
+      return chain;
+    },
+    rpc: (fn: string, params: any) => {
+      rpcCalls.push({ fn, params });
+      return Promise.resolve({ data: null, error: null });
+    },
+  };
+
+  it("still updates task result and GTD task even when _config is null", async () => {
+    const { getRelayDeps } = await import("../src/relay-state.ts");
+    (getRelayDeps as any).mockImplementation(() => ({
+      supabase: mockSupabase,
+      anthropic: null,
+      bot: null,
+    }));
+
+    _resetForTesting();
+    taskResultUpdates = null;
+    todoUpdates = null;
+    rpcCalls = [];
+
+    const taskResultId = "task-config-null-test";
+    const gtdTaskId = "gtd-config-null";
+
+    // Simulate a container launched with sessionId captured in state
+    _setContainerStateForTesting(taskResultId, {
+      taskResultId,
+      containerId: "c-xyz",
+      containerName: "ellie-overnight-null-test",
+      volumeName: "ellie-overnight-vol-null-test",
+      startedAt: Date.now() - 10_000,
+      gtdTaskId,
+      sessionId: "session-that-was-stopped",
+    });
+
+    // Simulate session being stopped — _config is now null
+    _clearConfigForTesting();
+
+    await _onTaskCompleteForTesting(taskResultId, gtdTaskId, {
+      exitCode: 0,
+      logs: "Task completed successfully",
+    });
+
+    // Task result should STILL be updated (not silently bailed)
+    expect(taskResultUpdates).not.toBeNull();
+    expect(taskResultUpdates!.status).toBe("completed");
+
+    // GTD task should STILL be updated
+    expect(todoUpdates).not.toBeNull();
+    expect(todoUpdates!.status).toBe("done");
+
+    // Session counter should use the captured sessionId
+    const counterCall = rpcCalls.find((c) => c.fn === "increment_session_counter");
+    expect(counterCall).toBeDefined();
+    expect(counterCall!.params.p_session_id).toBe("session-that-was-stopped");
+  });
+
+  it("still updates task result on error even when _config is null", async () => {
+    const { getRelayDeps } = await import("../src/relay-state.ts");
+    (getRelayDeps as any).mockImplementation(() => ({
+      supabase: mockSupabase,
+      anthropic: null,
+      bot: null,
+    }));
+
+    _resetForTesting();
+    taskResultUpdates = null;
+    todoUpdates = null;
+    rpcCalls = [];
+
+    const taskResultId = "task-error-config-null";
+    const gtdTaskId = "gtd-error-null";
+
+    _setContainerStateForTesting(taskResultId, {
+      taskResultId,
+      containerId: "c-err",
+      containerName: "ellie-overnight-err-test",
+      volumeName: "ellie-overnight-vol-err-test",
+      startedAt: Date.now() - 8_000,
+      gtdTaskId,
+      sessionId: "session-stopped-during-error",
+    });
+
+    _clearConfigForTesting();
+
+    await _onTaskErrorForTesting(taskResultId, gtdTaskId, new Error("Container crashed"));
+
+    // Task result should STILL be updated
+    expect(taskResultUpdates).not.toBeNull();
+    expect(taskResultUpdates!.status).toBe("failed");
+    expect(taskResultUpdates!.error).toBe("Container crashed");
+
+    // GTD task should be reset to open
+    expect(todoUpdates).not.toBeNull();
+    expect(todoUpdates!.status).toBe("open");
+
+    // Session counter should use captured sessionId
+    const counterCall = rpcCalls.find((c) => c.fn === "increment_session_counter");
+    expect(counterCall).toBeDefined();
+    expect(counterCall!.params.p_session_id).toBe("session-stopped-during-error");
   });
 });

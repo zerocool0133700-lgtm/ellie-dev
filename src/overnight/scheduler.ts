@@ -373,7 +373,8 @@ async function launchTask(task: GtdTask): Promise<void> {
     SYSTEM_PROMPT: systemPrompt,
   });
 
-  // Track container state
+  // Track container state — sessionId captured here so completion handlers
+  // don't depend on _config being non-null (ELLIE-1160)
   const containerState: ContainerState = {
     taskResultId,
     containerId: "", // filled after launch
@@ -381,6 +382,7 @@ async function launchTask(task: GtdTask): Promise<void> {
     volumeName: `ellie-overnight-vol-${taskResultId}`,
     startedAt: Date.now(),
     gtdTaskId: task.id,
+    sessionId,
   };
 
   _runningContainers.set(taskResultId, containerState);
@@ -411,12 +413,16 @@ async function onTaskComplete(
   gtdTaskId: string,
   result: { exitCode: number; logs: string },
 ): Promise<void> {
-  // Capture startedAt BEFORE deleting from map (ELLIE-1139: fix race condition)
-  const startedAt = _runningContainers.get(taskResultId)?.startedAt ?? Date.now();
+  // Capture state BEFORE deleting from map (ELLIE-1139: fix race condition)
+  const containerState = _runningContainers.get(taskResultId);
+  const startedAt = containerState?.startedAt ?? Date.now();
+  const sessionId = containerState?.sessionId;
   _runningContainers.delete(taskResultId);
 
   const { supabase } = getRelayDeps();
-  if (!supabase || !_config) return;
+  // ELLIE-1160: Use sessionId from ContainerState, not _config — _config may be null
+  // if the session was stopped while this container was still running
+  if (!supabase || !sessionId) return;
 
   const success = result.exitCode === 0;
   const timedOut = result.exitCode === DOCKER_CONSTANTS.TIMEOUT_EXIT_CODE;
@@ -452,7 +458,7 @@ async function onTaskComplete(
 
   // Update session counters (ELLIE-1141: use helper with proper fallback)
   const counterField = success ? "tasks_completed" : "tasks_failed";
-  await incrementSessionCounter(supabase, _config.sessionId, counterField);
+  await incrementSessionCounter(supabase, sessionId, counterField);
 
   logger.info("Task completed", {
     taskResultId,
@@ -463,12 +469,15 @@ async function onTaskComplete(
 }
 
 async function onTaskError(taskResultId: string, gtdTaskId: string, err: unknown): Promise<void> {
-  // Capture startedAt BEFORE deleting from map (ELLIE-1139: fix race condition)
-  const startedAt = _runningContainers.get(taskResultId)?.startedAt ?? Date.now();
+  // Capture state BEFORE deleting from map (ELLIE-1139: fix race condition)
+  const containerState = _runningContainers.get(taskResultId);
+  const startedAt = containerState?.startedAt ?? Date.now();
+  const sessionId = containerState?.sessionId;
   _runningContainers.delete(taskResultId);
 
   const { supabase } = getRelayDeps();
-  if (!supabase || !_config) return;
+  // ELLIE-1160: Use sessionId from ContainerState, not _config
+  if (!supabase || !sessionId) return;
 
   const message = err instanceof Error ? err.message : String(err);
 
@@ -488,7 +497,7 @@ async function onTaskError(taskResultId: string, gtdTaskId: string, err: unknown
     .eq("id", gtdTaskId);
 
   // ELLIE-1141: use helper with proper fallback
-  await incrementSessionCounter(supabase, _config.sessionId, "tasks_failed");
+  await incrementSessionCounter(supabase, sessionId, "tasks_failed");
 
   logger.error("Task errored", { taskResultId, error: message });
 }
@@ -571,8 +580,13 @@ export function _resetForTesting(): void {
   }
 }
 
+export function _clearConfigForTesting(): void {
+  _config = null;
+}
+
 export function _setContainerStateForTesting(taskResultId: string, state: ContainerState): void {
   _runningContainers.set(taskResultId, state);
 }
 
 export const _onTaskCompleteForTesting = onTaskComplete;
+export const _onTaskErrorForTesting = onTaskError;
