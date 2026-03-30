@@ -331,25 +331,38 @@ async function _handleEllieChatMessage(
     ws.send(JSON.stringify({ type: "typing", ts: Date.now(), channelId, agent: "general" }));
   }
 
-  // /plan on|off — toggle planning mode
-  const ecPlanMatch = text.match(/^\/plan\s+(on|off)$/i);
-  if (ecPlanMatch) {
-    setPlanningMode(ecPlanMatch[1].toLowerCase() === "on");
-    const msg = getPlanningMode()
-      ? "Planning mode ON — conversation will persist for up to 60 minutes of idle time."
-      : "Planning mode OFF — reverting to 10-minute idle timeout.";
-    logger.info(msg);
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "response", text: msg, agent: "system", ts: Date.now() }));
+  // ── Centralized Command Registry (ELLIE-1162) ──────────────
+  // All slash commands dispatched through the registry.
+  // /ticket is still handled below (needs Claude + async context).
+  if (text.trim().startsWith("/") && !text.startsWith("/ticket")) {
+    const { dispatchCommand } = await import("./command-registry.ts");
+    const cmdResult = await dispatchCommand(text, {
+      text,
+      channel: "ellie-chat",
+      userId: ecUserId || "dashboard",
+      sendResponse: async (msg) => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "response", text: msg, agent: "system", ts: Date.now(), channelId }));
+        }
+      },
+    });
+    if (cmdResult.handled) {
+      if (cmdResult.response && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "response", text: cmdResult.response, agent: "system", ts: Date.now(), channelId }));
+      }
+      // /plan needs extra side effects
+      if (text.match(/^\/plan\s/i)) {
+        resetTelegramIdleTimer();
+        resetGchatIdleTimer();
+        resetEllieChatIdleTimer();
+        broadcastExtension({ type: "planning_mode", active: getPlanningMode() });
+      }
+      return;
     }
-    resetTelegramIdleTimer();
-    resetGchatIdleTimer();
-    resetEllieChatIdleTimer();
-    broadcastExtension({ type: "planning_mode", active: getPlanningMode() });
-    return;
+    // Not handled by registry — fall through to instant commands / coordinator
   }
 
-  // /ticket — create Plane ticket from context
+  // /ticket — create Plane ticket from context (needs Claude, stays here)
   if (text.startsWith("/ticket")) {
     const ticketText = text.slice(7).trim();
     (async () => {
@@ -391,95 +404,6 @@ async function _handleEllieChatMessage(
         }
       }
     })();
-    return;
-  }
-
-  // /foundation [list|<name>] — switch active foundation
-  if (text.startsWith("/foundation")) {
-    const registry = await getFoundationRegistry();
-    const cmd = parseFoundationCommand(text);
-    const result = await executeFoundationCommand(cmd, registry);
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "response", text: result.output, agent: "system", ts: Date.now() }));
-    }
-    return;
-  }
-
-  // /agentmail [status|list] — direct agentmail commands (no Claude needed)
-  if (text.startsWith("/agentmail")) {
-    const parts = text.trim().split(/\s+/);
-    const sub = parts[1] || "";
-
-    try {
-      if (sub === "status") {
-        const { isAgentMailEnabled, getAgentMailConfig } = await import("./agentmail.ts");
-        const enabled = isAgentMailEnabled();
-        const config = enabled ? getAgentMailConfig() : null;
-        const output = enabled
-          ? `AgentMail is configured.\nInbox: ${config?.inboxEmail || "unknown"}`
-          : "AgentMail is not configured. Missing AGENTMAIL_API_KEY, AGENTMAIL_INBOX_EMAIL, or AGENTMAIL_WEBHOOK_SECRET in .env";
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "response", text: output, agent: "system", ts: Date.now() }));
-        }
-        return;
-      }
-
-      if (sub === "list") {
-        const { isAgentMailEnabled, listThreads } = await import("./agentmail.ts");
-        if (!isAgentMailEnabled()) {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "response", text: "AgentMail is not configured. Run /agentmail status for details.", agent: "system", ts: Date.now() }));
-          }
-          return;
-        }
-        const limit = parseInt(parts[2] || "10", 10);
-        const result = await listThreads();
-        if (!result || !result.threads || result.threads.length === 0) {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "response", text: "No email threads found.", agent: "system", ts: Date.now() }));
-          }
-          return;
-        }
-        const lines = result.threads.slice(0, limit).map((t: Record<string, unknown>) =>
-          `- ${t.subject || "(no subject)"} — ${t.updated_at || ""}`
-        );
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "response", text: `Email threads (${lines.length}):\n${lines.join("\n")}`, agent: "system", ts: Date.now() }));
-        }
-        return;
-      }
-    } catch (err) {
-      logger.warn("agentmail command error", { sub, error: String(err) });
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "response", text: `AgentMail error: ${(err as Error).message}`, agent: "system", ts: Date.now() }));
-      }
-      return;
-    }
-    // Other /agentmail subcommands (help, send, reply) fall through to instant commands or coordinator
-  }
-
-  // /skills [help] — list all available skills
-  if (text.trim() === "/skills" || text.trim() === "/skills help" || text.trim() === "/skills list") {
-    try {
-      const { getSkillCommands } = await import("./skills/commands.ts");
-      const commands = await getSkillCommands();
-      const lines = [
-        "Available skills — say /<name> help for details",
-        "",
-        ...commands.map(cmd => `  /${cmd.name} — ${cmd.description}`),
-        "",
-        "  /foundation — Manage agent teams and foundations",
-        "  /skills — This help",
-      ];
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "response", text: lines.join("\n"), agent: "system", ts: Date.now(), channelId }));
-      }
-    } catch (err) {
-      logger.warn("Failed to list skills", { error: String(err) });
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "response", text: "Could not load skills list.", agent: "system", ts: Date.now() }));
-      }
-    }
     return;
   }
 
