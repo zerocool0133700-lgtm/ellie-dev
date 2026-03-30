@@ -13,7 +13,7 @@
 
 import { log } from "../logger.ts";
 import { getRelayDeps } from "../relay-state.ts";
-import { buildContainerEnv, runOvernightTask } from "./docker-executor.ts";
+import { buildContainerEnv, runOvernightTask, CONSTANTS as DOCKER_CONSTANTS } from "./docker-executor.ts";
 // Lazy-imported to avoid pulling ellie-forest into the module graph at load time
 // import { buildOvernightPrompt } from "./prompt-builder.ts";
 import type { ContainerState, SchedulerConfig, StopReason } from "./types.ts";
@@ -363,9 +363,12 @@ async function launchTask(task: GtdTask): Promise<void> {
   });
 
   // Build container env
+  // SECURITY (ELLIE-1142): GH_TOKEN must NEVER be embedded in REPO_URL.
+  // The container receives GH_TOKEN as a separate env var and uses git
+  // credential helpers for auth — the URL stays credential-free.
   const ghToken = process.env.OVERNIGHT_GH_TOKEN || process.env.GH_TOKEN || "";
   const oauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN || "";
-  const repoUrl = process.env.OVERNIGHT_REPO_URL || (ghToken ? `https://${ghToken}@github.com/evelife/ellie-dev.git` : "");
+  const repoUrl = process.env.OVERNIGHT_REPO_URL || "https://github.com/evelife/ellie-dev.git";
 
   const branchName = `overnight/${task.work_item_id ?? task.id}`;
 
@@ -423,18 +426,26 @@ async function onTaskComplete(
   if (!supabase || !_config) return;
 
   const success = result.exitCode === 0;
-  const prUrl = extractPrUrl(result.logs);
+  const timedOut = result.exitCode === DOCKER_CONSTANTS.TIMEOUT_EXIT_CODE;
+  const cleanLogs = sanitizeLogs(result.logs);
+  const prUrl = extractPrUrl(cleanLogs);
   const prNumber = prUrl ? parseInt(prUrl.match(/\/pull\/(\d+)/)?.[1] ?? "0", 10) || null : null;
 
   // Update task result
+  const errorMsg = success
+    ? null
+    : timedOut
+      ? "Container timed out — killed after exceeding deadline"
+      : `Exit code: ${result.exitCode}`;
+
   await supabase
     .from("overnight_task_results")
     .update({
       status: success ? "completed" : "failed",
       pr_url: prUrl,
       pr_number: prNumber,
-      summary: result.logs.slice(-2000), // last 2KB of logs as summary
-      error: success ? null : `Exit code: ${result.exitCode}`,
+      summary: cleanLogs.slice(-2000), // last 2KB of sanitized logs
+      error: errorMsg,
       completed_at: new Date().toISOString(),
       duration_ms: Date.now() - (_runningContainers.get(taskResultId)?.startedAt ?? Date.now()),
     })
@@ -498,6 +509,21 @@ async function onTaskError(taskResultId: string, gtdTaskId: string, err: unknown
 function extractPrUrl(logs: string): string | null {
   const match = logs.match(PR_URL_PATTERN);
   return match ? match[0] : null;
+}
+
+/**
+ * Strip tokens/credentials from log output before storing in DB.
+ * SECURITY (ELLIE-1142): Prevents credential leaks via stored container logs.
+ */
+export function sanitizeLogs(logs: string): string {
+  return logs
+    // GitHub tokens (classic ghp_ and fine-grained github_pat_)
+    .replace(/ghp_[A-Za-z0-9_]{36,}/g, "ghp_***REDACTED***")
+    .replace(/github_pat_[A-Za-z0-9_]{22,}/g, "github_pat_***REDACTED***")
+    // Tokens embedded in URLs: https://TOKEN@github.com/...
+    .replace(/https:\/\/[^@\s]+@github\.com/g, "https://***REDACTED***@github.com")
+    // Generic bearer/token patterns in headers
+    .replace(/(Authorization:\s*(?:Bearer|token)\s+)\S+/gi, "$1***REDACTED***");
 }
 
 // ── Testing Exports ─────────────────────────────────────────

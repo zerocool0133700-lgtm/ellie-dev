@@ -18,9 +18,12 @@ const logger = log.child("docker-executor");
 const DOCKER_SOCKET = "/var/run/docker.sock";
 const OVERNIGHT_IMAGE = "ghcr.io/anthropics/claude-code:latest";
 const CONTAINER_PREFIX = "ellie-overnight-";
+const ISOLATED_NETWORK_NAME = "ellie-overnight-isolated";
 
 const DEFAULT_MEMORY_LIMIT = 536870912;  // 512MB
 const DEFAULT_NANOCPUS = 1000000000;      // 1 CPU
+const DEFAULT_CONTAINER_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const TIMEOUT_EXIT_CODE = -2;
 
 // ── Env Whitelist ────────────────────────────────────────────
 
@@ -176,6 +179,11 @@ export function buildHostConfig(volumeName: string): Record<string, unknown> {
     NanoCpus: nanoCpus,
     AutoRemove: true,
     SecurityOpt: ["no-new-privileges"],
+    NetworkMode: ISOLATED_NETWORK_NAME,
+    ExtraHosts: [
+      "host.docker.internal:0.0.0.0",
+      "gateway.docker.internal:0.0.0.0",
+    ],
     Binds: [`${volumeName}:/home/coding-agent`],
   };
 }
@@ -208,6 +216,56 @@ export async function removeVolume(name: string): Promise<void> {
   throw new Error(`Docker volume remove failed (${status}): ${data?.message}`);
 }
 
+// ── Network Isolation (ELLIE-1144) ──────────────────────────
+
+let networkReady = false;
+
+/**
+ * Ensure the isolated Docker network exists.
+ * Creates a bridge network that allows outbound internet but blocks host access
+ * via ExtraHosts DNS poisoning (set in buildHostConfig).
+ *
+ * Idempotent — safe to call multiple times.
+ */
+export async function ensureIsolatedNetwork(): Promise<void> {
+  if (networkReady) return;
+
+  // Check if network already exists
+  const inspectRes = await dockerApi("GET",
+    `/networks/${encodeURIComponent(ISOLATED_NETWORK_NAME)}`,
+  );
+  if (inspectRes.status === 200) {
+    networkReady = true;
+    logger.info(`Isolated network already exists: ${ISOLATED_NETWORK_NAME}`);
+    return;
+  }
+
+  // Create the network
+  const createRes = await dockerApi("POST", "/networks/create", {
+    Name: ISOLATED_NETWORK_NAME,
+    Driver: "bridge",
+    Labels: { "ellie.overnight": "true" },
+    Options: {
+      "com.docker.network.bridge.enable_icc": "false",
+    },
+  });
+
+  if (createRes.status !== 201 && createRes.status !== 200) {
+    logger.error(`Failed to create isolated network (${createRes.status}): ${createRes.data?.message}`);
+    throw new Error(`Docker network create failed (${createRes.status}): ${createRes.data?.message}`);
+  }
+
+  networkReady = true;
+  logger.info(`Created isolated network: ${ISOLATED_NETWORK_NAME}`);
+}
+
+/**
+ * Reset the network-ready flag. Exported for testing only.
+ */
+export function _resetNetworkReadyForTesting(): void {
+  networkReady = false;
+}
+
 // ── Container Lifecycle ──────────────────────────────────────
 
 /**
@@ -219,6 +277,9 @@ export async function launchContainer(
   volumeName: string,
   env: string[],
 ): Promise<string> {
+  // Ensure isolated network exists before launching (ELLIE-1144)
+  await ensureIsolatedNetwork();
+
   const hostConfig = buildHostConfig(volumeName);
 
   const createRes = await dockerApi("POST",
@@ -321,25 +382,58 @@ export async function isContainerRunning(containerId: string): Promise<boolean> 
   }
 }
 
+/**
+ * Force-kill and remove a container. Used for timeout enforcement.
+ * Idempotent — safe to call on already-stopped or nonexistent containers.
+ */
+export async function killContainer(containerId: string): Promise<void> {
+  try {
+    await dockerApi("POST", `/containers/${containerId}/kill`);
+    logger.info("Killed container", { containerId });
+  } catch (err) {
+    // Container may already be stopped — that's fine
+    logger.debug("Kill container failed (may already be stopped)", {
+      containerId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  // Force remove in case AutoRemove didn't trigger
+  try {
+    await dockerApi("DELETE", `/containers/${containerId}?force=true`);
+  } catch {
+    // Best-effort cleanup
+  }
+}
+
 // ── Full Lifecycle ───────────────────────────────────────────
 
 /**
  * Run a complete overnight task: create volume, launch container, wait, collect logs, cleanup.
+ * Enforces a container timeout — hung containers are killed after the deadline.
+ * Timeout is configurable via OVERNIGHT_CONTAINER_TIMEOUT env var (milliseconds).
  */
 export async function runOvernightTask(
   taskId: string,
   env: string[],
+  opts?: { timeoutMs?: number },
 ): Promise<OvernightTaskResult> {
   const containerName = `${CONTAINER_PREFIX}${taskId}`;
   const volumeName = `${CONTAINER_PREFIX}vol-${taskId}`;
+  const timeoutMs = opts?.timeoutMs
+    ?? (process.env.OVERNIGHT_CONTAINER_TIMEOUT
+      ? parseInt(process.env.OVERNIGHT_CONTAINER_TIMEOUT, 10)
+      : DEFAULT_CONTAINER_TIMEOUT_MS);
+
+  let containerId = "";
 
   try {
     await createVolume(volumeName);
-    const containerId = await launchContainer(containerName, volumeName, env);
+    containerId = await launchContainer(containerName, volumeName, env);
 
-    logger.info(`Task ${taskId} running`, { containerId, containerName });
+    logger.info(`Task ${taskId} running`, { containerId, containerName, timeoutMs });
 
-    const exitCode = await waitForContainer(containerId);
+    // Race: container completion vs timeout
+    const exitCode = await waitWithTimeout(containerId, timeoutMs, taskId);
 
     // Logs may fail if AutoRemove already cleaned up the container
     let logs = "";
@@ -351,10 +445,18 @@ export async function runOvernightTask(
       });
     }
 
+    if (exitCode === TIMEOUT_EXIT_CODE) {
+      logs += `\n[ellie] Container killed after ${Math.round(timeoutMs / 1000)}s timeout`;
+    }
+
     return { exitCode, logs };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error(`Task ${taskId} failed`, { error: message });
+    // If we have a container, ensure it's cleaned up
+    if (containerId) {
+      await killContainer(containerId).catch(() => {});
+    }
     return { exitCode: -1, logs: `Error: ${message}` };
   } finally {
     // Always try to clean up the volume
@@ -366,6 +468,39 @@ export async function runOvernightTask(
   }
 }
 
+/**
+ * Wait for container with a timeout. Kills the container if it exceeds the deadline.
+ */
+async function waitWithTimeout(
+  containerId: string,
+  timeoutMs: number,
+  taskId: string,
+): Promise<number> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+
+  const timeoutPromise = new Promise<number>((resolve) => {
+    timeoutHandle = setTimeout(async () => {
+      timedOut = true;
+      logger.warn(`Task ${taskId} timed out after ${Math.round(timeoutMs / 1000)}s — killing container`, {
+        containerId,
+      });
+      await killContainer(containerId);
+      resolve(TIMEOUT_EXIT_CODE);
+    }, timeoutMs);
+  });
+
+  try {
+    const exitCode = await Promise.race([
+      waitForContainer(containerId),
+      timeoutPromise,
+    ]);
+    return exitCode;
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
 // ── Exports for Testing ──────────────────────────────────────
 
 export { dockerApi as _dockerApiForTesting };
@@ -373,7 +508,10 @@ export const CONSTANTS = {
   DOCKER_SOCKET,
   OVERNIGHT_IMAGE,
   CONTAINER_PREFIX,
+  ISOLATED_NETWORK_NAME,
   DEFAULT_MEMORY_LIMIT,
   DEFAULT_NANOCPUS,
+  DEFAULT_CONTAINER_TIMEOUT_MS,
+  TIMEOUT_EXIT_CODE,
   ENV_WHITELIST: [...ENV_WHITELIST],
 } as const;
