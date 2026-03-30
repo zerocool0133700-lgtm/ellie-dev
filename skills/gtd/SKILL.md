@@ -179,6 +179,53 @@ curl http://localhost:3000/api/gtd/status
 curl http://localhost:3000/api/gtd/items?list=inbox
 ```
 
+## Orchestration Pattern (ELLIE-1141)
+
+When coordinating multi-agent work, use GTD to track every dispatch.
+
+### Creating orchestration items
+
+1. **Parent item** — your tracking anchor:
+   - `POST /api/gtd/items` with `is_orchestration: true`, `assigned_to: "ellie"`, `created_by: "ellie"`
+   - Link to ticket: `source_ref: "ELLIE-XXX"`
+
+2. **Child items** — one per agent dispatch:
+   - `POST /api/gtd/items` with `parent_id: {parent}`, `assigned_agent`, `assigned_to: {agent_name}`, `created_by: "ellie"`, `is_orchestration: true`
+
+3. **Question items** — when an agent needs Dave's input:
+   - `POST /api/gtd/items` with `parent_id: {agent_item}`, `assigned_to: "dave"`, `created_by: {agent}`, `urgency: "blocking"`, `is_orchestration: true`
+   - Narrate: "Brian has a question — check the dispatch panel"
+
+### Handling answers
+
+Answers appear in your working memory `context_anchors` as structured JSON:
+```json
+{"type": "agent_answer", "question_item_id": "...", "parent_item_id": "...", "agent": "brian", "answer": "..."}
+```
+Route the answer to the correct agent and resume their work.
+
+### Tracking completion
+
+- Parent auto-completes at API level — don't track this yourself
+- When parent status is `done`: synthesize results, respond to Dave
+- When parent status is `waiting_for`: some children failed — report and ask Dave
+
+### Recovery after compaction
+
+- Read: `GET /api/gtd/items?assigned_to=ellie&is_orchestration=true&status=open`
+- Check children for each parent to see what's in flight
+- `timed_out` / `failed` children need attention
+- This is your source of truth — not the conversation history
+
+### Narration
+
+Proactively narrate key moments via `update_user`:
+- "Dispatching Brian (critique) and James (tests)."
+- "Brian has a blocking question — check the dispatch panel."
+- "James is done. Still waiting on Brian."
+- "Brian timed out. Retry or skip?"
+- "All done. Here's the synthesis..."
+
 ---
 
 **Time saved:** ~3 min per task capture, ~10 min per status check
