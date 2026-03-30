@@ -23,6 +23,7 @@
  * DEPTH 1 — Depends on depth-0 phases:
  *   bot (← config)
  *   orchestration (← supabase)
+ *   overnight (← supabase) — ELLIE-1148
  *   discord (← supabase)
  *   model-costs (← supabase)
  *   classifiers (← anthropic + supabase)
@@ -108,7 +109,7 @@ import { reconcilePlaneState, isWorkItemDone } from "./plane.ts";
 import { reconcileDashboard } from "./active-tickets-dashboard.ts";
 import { setWatchdogNotify, stopWatchdog } from "./orchestration-tracker.ts";
 import { stopReconciler } from "./orchestration-reconciler.ts";
-import { setMonitorDependencies, startOrchestrationMonitor, stopOrchestrationMonitor } from "./orchestration-monitor.ts";
+import { setMonitorDependencies, startOrchestrationMonitor, stopOrchestrationMonitor, recoverOrphanedOrchestration } from "./orchestration-monitor.ts";
 import { restoreModeState } from "./context-mode.ts";
 import { registerJobVines } from "./jobs-ledger.ts";
 import { initOrchestration } from "./orchestration-init.ts";
@@ -117,6 +118,7 @@ import { setBroadcastToEllieChat } from "./tool-approval.ts";
 import { stopAllTasks } from "./periodic-task.ts";
 import { initPeriodicTasks, runStartupTasks } from "./periodic-tasks.ts";
 import { initIdentitySystem, shutdownIdentitySystem } from "./identity-startup.ts";
+import { initOvernight, shutdownOvernight } from "./overnight/init.ts";
 
 // ── Startup phase timer (ELLIE-497) ─────────────────────────
 const _startupBegin = Date.now();
@@ -218,6 +220,16 @@ let _lastBotRestartAt = 0;
     });
 }
 
+// ELLIE-1148: Initialize overnight scheduler (recover interrupted sessions)
+{ const _done = startPhase("overnight");
+  initOvernight(supabase)
+    .then(({ recoveredSessions }) => {
+      if (recoveredSessions > 0) logger.info("Overnight init: recovered stale sessions", { recoveredSessions });
+      _done();
+    })
+    .catch(err => { _done(); logger.warn("Overnight init failed (non-fatal)", { error: err instanceof Error ? err.message : String(err) }); });
+}
+
 // ELLIE-455: Register J scope tree-level vines on startup
 { const _done = startPhase("job-vines");
   registerJobVines().then(() => _done()).catch(err => { _done(); logger.warn("Startup registration failed", { err: err.message }); });
@@ -292,6 +304,13 @@ setWatchdogNotify(notify, getNotifyCtx());
 // ELLIE-924: Wire orchestration monitor (GTD task stall detection)
 if (supabase) {
   setMonitorDependencies(supabase, notify, getNotifyCtx());
+  startOrchestrationMonitor();
+  // ELLIE-1152: Recover orphaned orchestration trees on startup
+  recoverOrphanedOrchestration().then((count) => {
+    if (count > 0) logger.info(`Recovered ${count} orphaned orchestration tree(s)`);
+  }).catch((err) => {
+    logger.warn("Orphaned orchestration recovery failed (non-fatal)", { error: err instanceof Error ? err.message : String(err) });
+  });
 }
 setAnthropicClient(anthropic);
 setQueueBroadcast(broadcastExtension);
@@ -506,6 +525,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
   stopWatchdog();      // orchestration watchdog
   stopReconciler();    // orchestration reconciler
   stopOrchestrationMonitor(); // GTD task stall monitor
+  await shutdownOvernight(); // ELLIE-1148: stop overnight scheduler
   stopPlaneQueueWorker(); // plane-queue
   logger.info("Background tasks stopped");
 

@@ -95,6 +95,8 @@ export interface CoordinatorPausedState {
   totalTokensIn: number;
   totalTokensOut: number;
   iteration: number;
+  orchestrationParentId?: string | null;  // ELLIE-1152: Survive resume without forking GTD tree
+  lastDispatchChildId?: string | null;    // ELLIE-1152: Last agent's GTD child item for question parenting
 }
 
 export interface CoordinatorResult {
@@ -184,11 +186,16 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
   let hitSafetyRail = false;
   let loopStartIteration = 0;
   let orchestrationParentId: string | null = null; // ELLIE-1152: GTD dispatch tracking
+  let lastDispatchChildId: string | null = null;   // ELLIE-1152: Last agent's GTD child item for question parenting
 
   // ELLIE-1101: Resume from ask_user pause
   if (opts.resumeState) {
     const rs = opts.resumeState;
     logger.info("Resuming coordinator from ask_user pause", { toolUseId: rs.toolUseId, question: rs.question.slice(0, 100) });
+
+    // ELLIE-1152: Restore GTD parent/child IDs so we don't fork the tree on resume
+    orchestrationParentId = rs.orchestrationParentId ?? null;
+    lastDispatchChildId = rs.lastDispatchChildId ?? null;
 
     // Restore conversation history
     for (const msg of rs.messages) {
@@ -359,16 +366,21 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
         logger.info("ask_user pausing loop", { question: askInput.question.slice(0, 200), toolUseId: tool.id });
 
         // ELLIE-1152: Create question item in GTD for dispatch panel visibility
+        // Parent under the last dispatched agent's child item if available,
+        // otherwise fall back to the orchestration root parent.
+        // NOTE: If multiple agents were dispatched in parallel, lastDispatchChildId
+        // points to the last one resolved — may not be the agent that triggered the question.
         if (orchestrationParentId) {
           try {
-            const { createQuestionItem } = await import("./gtd-orchestration.ts");
-            await createQuestionItem({
-              parentId: orchestrationParentId,
+            const gtdMod = await import("./gtd-orchestration.ts");
+            const questionParent = lastDispatchChildId || orchestrationParentId;
+            await gtdMod.createQuestionItem({
+              parentId: questionParent,
               content: askInput.question,
               createdBy: "ellie",
               urgency: askInput.urgency === "high" ? "blocking" : "normal",
-            }).catch(() => {});
-          } catch { /* fire-and-forget */ }
+            }).catch((err: unknown) => logger.warn("GTD question item creation failed", { error: err instanceof Error ? err.message : String(err) }));
+          } catch (err) { logger.warn("GTD question import failed", { error: err instanceof Error ? err.message : String(err) }); }
         }
 
         // Add the assistant message with the ask_user tool_use to context before saving
@@ -386,6 +398,8 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
           totalTokensIn,
           totalTokensOut,
           iteration: loopIterations,
+          orchestrationParentId,       // ELLIE-1152: Preserve GTD tree across resume
+          lastDispatchChildId,         // ELLIE-1152: Preserve for question parenting
         };
 
         // Return with paused state — the handler will store this
@@ -412,6 +426,12 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
     }
 
     if (shouldBreak) break;
+
+    // ELLIE-1152: Cache GTD module import — avoid repeated dynamic imports in the dispatch loop
+    const gtdModule = await import("./gtd-orchestration.ts").catch((err) => {
+      logger.warn("GTD orchestration module unavailable", { error: err instanceof Error ? err.message : String(err) });
+      return null;
+    });
 
     // Run all dispatch_agent calls in parallel
     if (dispatchCalls.length > 0) {
@@ -450,31 +470,35 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
 
         // ELLIE-1152: Create GTD items for dispatch tracking
         let gtdItem: { id: string } | null = null;
-        try {
-          const { createDispatchChild, createOrchestrationParent } = await import("./gtd-orchestration.ts");
+        if (gtdModule) {
+          try {
+            // Create parent on first dispatch
+            if (!orchestrationParentId) {
+              const parent = await gtdModule.createOrchestrationParent({
+                content: message.slice(0, 200),
+                createdBy: "ellie",
+                sourceRef: workItemId,
+              });
+              if (parent) orchestrationParentId = parent.id;
+            }
 
-          // Create parent on first dispatch
-          if (!orchestrationParentId) {
-            const parent = await createOrchestrationParent({
-              content: message.slice(0, 200),
-              createdBy: "ellie",
-              sourceRef: workItemId,
-            }).catch(() => null);
-            if (parent) orchestrationParentId = parent.id;
+            // Create child for this dispatch
+            if (orchestrationParentId) {
+              gtdItem = await gtdModule.createDispatchChild({
+                parentId: orchestrationParentId,
+                content: input.task.slice(0, 200),
+                assignedAgent: input.agent,
+                assignedTo: input.agent,
+                createdBy: "ellie",
+                dispatchEnvelopeId: specEnvelope.id,
+              });
+              // ELLIE-1152: Track last dispatch child for question parenting
+              if (gtdItem) lastDispatchChildId = gtdItem.id;
+            }
+          } catch (err) {
+            logger.warn("GTD dispatch tracking failed", { error: err instanceof Error ? err.message : String(err) });
           }
-
-          // Create child for this dispatch
-          if (orchestrationParentId) {
-            gtdItem = await createDispatchChild({
-              parentId: orchestrationParentId,
-              content: input.task.slice(0, 200),
-              assignedAgent: input.agent,
-              assignedTo: input.agent,
-              createdBy: "ellie",
-              dispatchEnvelopeId: specEnvelope.id,
-            }).catch(() => null);
-          }
-        } catch { /* GTD writes are fire-and-forget */ }
+        }
 
         try {
           const specResult = await deps.callSpecialist(
@@ -499,12 +523,13 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
           try { await deps.logEnvelope(completed); } catch { /* best-effort */ }
 
           // ELLIE-1152: Update GTD item with specialist result
-          if (gtdItem) {
+          if (gtdItem && gtdModule) {
             try {
-              const { updateItemStatus } = await import("./gtd-orchestration.ts");
               const gtdStatus = specResult.status === "completed" ? "done" : "failed";
-              await updateItemStatus(gtdItem.id, gtdStatus, { output_preview: specResult.output?.slice(0, 500) }).catch(() => {});
-            } catch { /* fire-and-forget */ }
+              await gtdModule.updateItemStatus(gtdItem.id, gtdStatus, { output_preview: specResult.output?.slice(0, 500) });
+            } catch (err) {
+              logger.warn("GTD status update failed", { itemId: gtdItem.id, error: err instanceof Error ? err.message : String(err) });
+            }
           }
 
           // ELLIE-1099: Send spawn_announcement so dashboard shows completion
@@ -588,19 +613,23 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
       ctx.rebuildFromSummary(summary);
       logger.warn("Context rebuilt from working memory", { iteration });
 
-      // ELLIE-1152: Recover dispatch state from GTD after compaction
+      // ELLIE-1152: Recover dispatch state from GTD after compaction — APPEND to existing task_stack
       try {
-        const { getActiveOrchestrationTrees } = await import("./gtd-orchestration.ts");
-        const trees = await getActiveOrchestrationTrees();
+        const gtdMod = gtdModule ?? await import("./gtd-orchestration.ts");
+        const trees = await gtdMod.getActiveOrchestrationTrees();
         if (trees.length > 0) {
           const gtdSummary = trees.map(t => {
-            const childSummaries = t.children.map(c =>
+            const childSummaries = t.children.map((c: { assigned_to?: string; assigned_agent?: string; status: string; content: string }) =>
               `  - ${c.assigned_to || c.assigned_agent} (${c.status}): ${c.content.slice(0, 80)}`
             ).join("\n");
             return `${t.content.slice(0, 100)} [${t.status}]\n${childSummaries}`;
           }).join("\n\n");
           if (deps.updateWorkingMemory) {
-            await deps.updateWorkingMemory({ task_stack: `## Active Orchestration (recovered from GTD)\n${gtdSummary}` });
+            // Read existing working memory summary to extract current task_stack (avoid clobbering)
+            const wmSummary = await deps.getWorkingMemorySummary().catch(() => "");
+            const taskStackMatch = wmSummary.match(/## task_stack\n([\s\S]*?)(?=\n## |\n*$)/);
+            const existingStack = taskStackMatch?.[1]?.trim() || "";
+            await deps.updateWorkingMemory({ task_stack: existingStack + "\n\n## Active Orchestration (recovered from GTD)\n" + gtdSummary });
           }
         }
       } catch (e) {
