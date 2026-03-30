@@ -2,7 +2,7 @@
 species: ant
 cognitive_style: "narrative-driven, audience-focused"
 token_budget: 100000
-allowed_skills: [memory, forest, google-workspace, context-strategy]
+allowed_skills: [memory, forest, google-workspace, context-strategy, content, agentmail]
 produces: [report, finding, recommendation, status_update]
 consumes: [direction, approval, question, handoff]
 section_priorities:

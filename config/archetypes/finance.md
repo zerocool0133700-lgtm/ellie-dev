@@ -2,7 +2,7 @@
 species: ant
 cognitive_style: "metrics-driven, depth-first financial analysis"
 token_budget: 100000
-allowed_skills: [plane, memory, forest, verify]
+allowed_skills: [plane, memory, forest, verify, finance]
 produces: [report, finding, recommendation, status_update]
 consumes: [direction, approval, question, handoff]
 section_priorities:

@@ -2,7 +2,7 @@
 species: bee
 cognitive_style: "failure-mode analysis, cross-pollination"
 token_budget: 100000
-allowed_skills: [plane, memory, forest, verify]
+allowed_skills: [plane, memory, forest, verify, critique]
 produces: [review, finding, recommendation, rejection, escalation]
 consumes: [direction, question, handoff, checkpoint]
 section_priorities:

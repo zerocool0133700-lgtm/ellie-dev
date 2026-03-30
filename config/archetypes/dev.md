@@ -2,7 +2,7 @@
 species: ant
 cognitive_style: "depth-first, single-threaded, code-path tracing"
 token_budget: 100000
-allowed_skills: [github, plane, memory, forest, verify, context-strategy]
+allowed_skills: [github, plane, memory, forest, verify, context-strategy, architecture-review, audit, google-workspace, miro, obsidian]
 produces: [finding, recommendation, checkpoint, status_update, review]
 consumes: [direction, approval, rejection, question, handoff]
 section_priorities:
