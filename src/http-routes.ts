@@ -156,6 +156,7 @@ import {
   handleToolCallComplete,
   resolveToolApproval,
   clearSessionApprovals,
+  getPendingApprovalCount,
 } from "./tool-approval.ts";
 import { handleGatewayRoute } from "./api/gateway-intake.ts";
 import { handleGtdRoute } from "./api/gtd.ts";
@@ -6679,6 +6680,310 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         res.end(JSON.stringify({ error: err?.message || "Invalid request body" }));
       }
     });
+    return;
+  }
+
+  // ── ELLIE-1149: Overnight Task Approval/Rejection ────────
+  if (url.pathname.startsWith("/api/overnight/tasks/") && req.method === "POST") {
+    (async () => {
+      try {
+        const { approveOvernightTask, rejectOvernightTask } = await import("./api/overnight.ts");
+
+        const mockRes: import("./api/types.ts").ApiResponse = {
+          status: (code: number) => ({
+            json: (data: unknown) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(data));
+            },
+          }),
+          json: (data: unknown) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(data));
+          },
+        };
+
+        const path = url.pathname.replace("/api/overnight/tasks/", "");
+
+        // POST /api/overnight/tasks/:id/approve
+        const approveMatch = path.match(/^([^/]+)\/approve$/);
+        if (approveMatch) {
+          return await approveOvernightTask(
+            { params: { id: approveMatch[1] } },
+            mockRes, supabase,
+          );
+        }
+
+        // POST /api/overnight/tasks/:id/reject
+        const rejectMatch = path.match(/^([^/]+)\/reject$/);
+        if (rejectMatch) {
+          // Parse JSON body
+          let body: Record<string, unknown> = {};
+          try {
+            const chunks: Buffer[] = [];
+            for await (const chunk of req) chunks.push(chunk as Buffer);
+            if (chunks.length) body = JSON.parse(Buffer.concat(chunks).toString());
+          } catch { /* no body is fine */ }
+          return await rejectOvernightTask(
+            { params: { id: rejectMatch[1] }, body },
+            mockRes, supabase,
+          );
+        }
+
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Unknown overnight endpoint" }));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
+  // ── ELLIE-1146: Overnight Dashboard API ──────────────────
+  if (url.pathname.startsWith("/api/overnight/") && req.method === "GET") {
+    (async () => {
+      try {
+        const {
+          getOvernightStatus,
+          getOvernightSessions,
+          getOvernightSessionDetail,
+          getOvernightSessionTasks,
+          getOvernightTaskDetail,
+        } = await import("./api/overnight.ts");
+
+        const mockRes: import("./api/types.ts").ApiResponse = {
+          status: (code: number) => ({
+            json: (data: unknown) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(data));
+            },
+          }),
+          json: (data: unknown) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(data));
+          },
+        };
+
+        const path = url.pathname.replace("/api/overnight/", "");
+
+        // GET /api/overnight/status
+        if (path === "status") {
+          return await getOvernightStatus({}, mockRes, supabase);
+        }
+
+        // GET /api/overnight/sessions
+        if (path === "sessions") {
+          const query: Record<string, string> = {};
+          url.searchParams.forEach((v, k) => { query[k] = v; });
+          return await getOvernightSessions({ query }, mockRes, supabase);
+        }
+
+        // GET /api/overnight/sessions/:id/tasks
+        const tasksMatch = path.match(/^sessions\/([^/]+)\/tasks$/);
+        if (tasksMatch) {
+          const query: Record<string, string> = {};
+          url.searchParams.forEach((v, k) => { query[k] = v; });
+          return await getOvernightSessionTasks(
+            { params: { id: tasksMatch[1] }, query },
+            mockRes, supabase,
+          );
+        }
+
+        // GET /api/overnight/sessions/:id
+        const sessionMatch = path.match(/^sessions\/([^/]+)$/);
+        if (sessionMatch) {
+          return await getOvernightSessionDetail(
+            { params: { id: sessionMatch[1] } },
+            mockRes, supabase,
+          );
+        }
+
+        // GET /api/overnight/tasks/:id
+        const taskMatch = path.match(/^tasks\/([^/]+)$/);
+        if (taskMatch) {
+          return await getOvernightTaskDetail(
+            { params: { id: taskMatch[1] } },
+            mockRes, supabase,
+          );
+        }
+
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Unknown overnight endpoint" }));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
+  // ELLIE-1153: Dispatch orchestration routes
+  if (url.pathname === "/api/dispatches/active" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getActiveOrchestrationTrees } = await import("./gtd-orchestration.ts");
+        const trees = await getActiveOrchestrationTrees();
+        res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
+        res.end(JSON.stringify(trees));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/dispatches/answer" && req.method === "POST") {
+    (async () => {
+      try {
+        let body = "";
+        req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+        req.on("end", async () => {
+          try {
+            const data = JSON.parse(body || "{}");
+            const { answerQuestion } = await import("./gtd-orchestration.ts");
+            const parentId = await answerQuestion(data.question_item_id, data.answer_text);
+
+            // Write answer to coordinator's working memory context_anchors
+            try {
+              const { updateWorkingMemory, readWorkingMemory } = await import("./working-memory.ts");
+              const wm = await readWorkingMemory({ agent: "ellie" });
+              const existingAnchors = (wm as any)?.sections?.context_anchors || "";
+              const answerJson = JSON.stringify({
+                type: "agent_answer",
+                question_item_id: data.question_item_id,
+                parent_item_id: parentId,
+                answer: data.answer_text,
+                answered_at: new Date().toISOString(),
+              });
+              await updateWorkingMemory({
+                agent: "ellie",
+                sections: { context_anchors: existingAnchors + "\n" + answerJson },
+              });
+            } catch (e) {
+              logger.warn("Failed to write answer to working memory", { error: (e as Error).message });
+            }
+
+            // Nudge coordinator via ellie-chat
+            broadcastToEllieChatClients({ type: "system_note", text: "Dave answered an agent question — check context" });
+
+            res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
+            res.end(JSON.stringify({ ok: true, parent_id: parentId }));
+          } catch (err: any) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+          }
+        });
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/dispatches/cancel" && req.method === "POST") {
+    (async () => {
+      try {
+        let body = "";
+        req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+        req.on("end", async () => {
+          try {
+            const data = JSON.parse(body || "{}");
+            const { cancelItem } = await import("./gtd-orchestration.ts");
+            await cancelItem(data.item_id);
+            res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
+            res.end(JSON.stringify({ ok: true }));
+          } catch (err: any) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+          }
+        });
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/dispatches/badge" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getOrchestrationBadgeCount } = await import("./gtd-orchestration.ts");
+        const needs_attention = await getOrchestrationBadgeCount();
+        const approvalCount = getPendingApprovalCount();
+        res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
+        res.end(JSON.stringify({ needs_attention: needs_attention + approvalCount }));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
+  // Tool approvals list — for dashboard dispatch panel (ELLIE-1153)
+  if (url.pathname === "/api/tool-approvals" && req.method === "GET") {
+    (async () => {
+      try {
+        // Return count of pending approvals (full list managed via WebSocket)
+        const count = getPendingApprovalCount();
+        res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
+        res.end(JSON.stringify({ pending_count: count }));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/tool-approval/approve" && req.method === "POST") {
+    (async () => {
+      try {
+        let body = "";
+        req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+        req.on("end", () => {
+          try {
+            const data = JSON.parse(body || "{}");
+            const resolved = resolveToolApproval(data.id, true, data.remember ?? false);
+            res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
+            res.end(JSON.stringify({ ok: resolved }));
+          } catch (err: any) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+          }
+        });
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
+  if (url.pathname === "/api/tool-approval/deny" && req.method === "POST") {
+    (async () => {
+      try {
+        let body = "";
+        req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+        req.on("end", () => {
+          try {
+            const data = JSON.parse(body || "{}");
+            const resolved = resolveToolApproval(data.id, false, false);
+            res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
+            res.end(JSON.stringify({ ok: resolved }));
+          } catch (err: any) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+          }
+        });
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+      }
+    })();
     return;
   }
 

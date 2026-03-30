@@ -169,6 +169,11 @@ export function getSessionApprovals(): string[] {
   return [...sessionApprovals.keys()];
 }
 
+/** Return the number of tool approvals currently waiting for a decision (ELLIE-1153). */
+export function getPendingApprovalCount(): number {
+  return pendingApprovals.size;
+}
+
 /** Get the effective TTL — longer when dispatches are active */
 function getEffectiveTTL(): number {
   return _activeDispatches > 0 ? DISPATCHED_SESSION_APPROVAL_TTL_MS : SESSION_APPROVAL_TTL_MS;

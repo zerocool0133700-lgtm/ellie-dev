@@ -122,6 +122,11 @@ export function broadcastToEllieChatClients(event: Record<string, unknown>): voi
   }
 }
 
+/** Broadcast a dispatch state-change event to all ellie-chat clients (ELLIE-1153). */
+export function broadcastDispatchEvent(event: Record<string, unknown>): void {
+  broadcastToEllieChatClients({ ...event, _dispatch: true });
+}
+
 // ── Notification context ───────────────────────────────────
 
 export function getNotifyCtx(): NotifyContext {

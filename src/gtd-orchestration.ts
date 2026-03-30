@@ -8,7 +8,7 @@
  * All functions use the Supabase client from getRelayDeps().
  */
 
-import { getRelayDeps } from "./relay-state.ts";
+import { getRelayDeps, broadcastDispatchEvent } from "./relay-state.ts";
 import { log } from "./logger.ts";
 import type { TodoRow } from "./api/gtd-types.ts";
 
@@ -124,6 +124,7 @@ export async function createDispatchChild(opts: {
     parent_id: opts.parentId,
     assigned_agent: opts.assignedAgent,
   });
+  broadcastDispatchEvent({ type: "dispatch_update" });
   return data as TodoRow;
 }
 
@@ -294,6 +295,7 @@ export async function updateItemStatus(
   }
 
   logger.info("Updated item status", { id, status });
+  broadcastDispatchEvent({ type: "dispatch_update" });
 }
 
 export async function checkParentCompletion(parentId: string): Promise<void> {
@@ -390,6 +392,7 @@ export async function cancelItem(id: string): Promise<void> {
   }
 
   logger.info("Cancelled item and children", { id });
+  broadcastDispatchEvent({ type: "dispatch_update" });
 }
 
 // ── Answer question ───────────────────────────────────────────
@@ -435,6 +438,7 @@ export async function answerQuestion(
   }
 
   logger.info("Answered question", { questionId, parent_id: question?.parent_id });
+  broadcastDispatchEvent({ type: "dispatch_update" });
   return question?.parent_id ?? null;
 }
 
