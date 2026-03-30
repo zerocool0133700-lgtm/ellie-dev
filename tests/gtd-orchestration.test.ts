@@ -23,6 +23,7 @@ mock.module("../src/relay-state.ts", () => ({
     if (!_testSupabase) throw new Error("Test Supabase not initialized");
     return { supabase: _testSupabase, bot: null, anthropic: null };
   },
+  broadcastDispatchEvent: () => {},  // no-op — relay-state not initialized in tests
 }));
 
 // ── Now import the module under test ──────────────────────────
@@ -445,5 +446,88 @@ describe("getOrchestrationBadgeCount", () => {
     await answerQuestion(q1.id, "answered");
     const afterAnswer = await getOrchestrationBadgeCount();
     expect(afterAnswer).toBe(before + 1);
+  });
+});
+
+describe("findOrphanedParents", () => {
+  it("finds old open parents past the age threshold", async () => {
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
+
+    const parent = await createOrchestrationParent({
+      content: "Orphan test parent",
+      createdBy: "test-agent",
+    });
+    track(parent.id);
+
+    // With maxAgeMs=0 (everything is "old"), should find the parent we just created
+    const orphans = await findOrphanedParents(0);
+    const found = orphans.find((o) => o.id === parent.id);
+    expect(found).toBeDefined();
+    expect(found!.status).toBe("open");
+    expect(found!.parent_id).toBeNull();
+
+    // With a very large maxAgeMs, should NOT find it (it's too new)
+    const noOrphans = await findOrphanedParents(999_999_999);
+    const notFound = noOrphans.find((o) => o.id === parent.id);
+    expect(notFound).toBeUndefined();
+  });
+});
+
+describe("timeoutStaleChildren", () => {
+  it("times out old open children of a parent", async () => {
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
+
+    const parent = await createOrchestrationParent({
+      content: "Timeout test parent",
+      createdBy: "test-agent",
+    });
+    track(parent.id);
+
+    const child = await createDispatchChild({
+      parentId: parent.id,
+      content: "Stale child",
+      assignedAgent: "dev",
+      assignedTo: "dev",
+      createdBy: "test-agent",
+    });
+    track(child.id);
+
+    // With maxAgeMs=0 (everything is "stale"), should timeout the child
+    const count = await timeoutStaleChildren(parent.id, 0);
+    expect(count).toBe(1);
+
+    // Verify child status changed
+    const { data: childRow } = await _testSupabase!
+      .from("todos")
+      .select("status")
+      .eq("id", child.id)
+      .single();
+
+    expect(childRow!.status).toBe("timed_out");
+
+    // Parent should auto-complete to waiting_for (since child timed out)
+    const { data: parentRow } = await _testSupabase!
+      .from("todos")
+      .select("status")
+      .eq("id", parent.id)
+      .single();
+
+    expect(parentRow!.status).toBe("waiting_for");
+  });
+});
+
+describe("updateItemStatus — invalid status rejection", () => {
+  it("throws on invalid status", async () => {
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
+
+    const parent = await createOrchestrationParent({
+      content: "Invalid status test parent",
+      createdBy: "test-agent",
+    });
+    track(parent.id);
+
+    await expect(updateItemStatus(parent.id, "bogus")).rejects.toThrow(
+      'Invalid status "bogus"',
+    );
   });
 });

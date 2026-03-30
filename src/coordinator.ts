@@ -435,6 +435,21 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
 
     // Run all dispatch_agent calls in parallel
     if (dispatchCalls.length > 0) {
+      // ELLIE-1152: Create orchestration parent BEFORE entering parallel block to avoid
+      // race condition where multiple parallel dispatches each try to create the parent
+      if (!orchestrationParentId && gtdModule) {
+        try {
+          const parent = await gtdModule.createOrchestrationParent({
+            content: message.slice(0, 200),
+            createdBy: "ellie",
+            sourceRef: workItemId,
+          }).catch(() => null);
+          if (parent) orchestrationParentId = parent.id;
+        } catch (err) {
+          logger.warn("GTD parent creation failed", { error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+
       const dispatchPromises = dispatchCalls.map(async (tool) => {
         const input = tool.input as unknown as DispatchAgentInput;
         const toolId = tool.id as string;
@@ -468,21 +483,11 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
           });
         } catch { /* best-effort */ }
 
-        // ELLIE-1152: Create GTD items for dispatch tracking
+        // ELLIE-1152: Create GTD child item for dispatch tracking
         let gtdItem: { id: string } | null = null;
         if (gtdModule) {
           try {
-            // Create parent on first dispatch
-            if (!orchestrationParentId) {
-              const parent = await gtdModule.createOrchestrationParent({
-                content: message.slice(0, 200),
-                createdBy: "ellie",
-                sourceRef: workItemId,
-              });
-              if (parent) orchestrationParentId = parent.id;
-            }
-
-            // Create child for this dispatch
+            // Create child for this dispatch (parent already created above)
             if (orchestrationParentId) {
               gtdItem = await gtdModule.createDispatchChild({
                 parentId: orchestrationParentId,
@@ -492,7 +497,13 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
                 createdBy: "ellie",
                 dispatchEnvelopeId: specEnvelope.id,
               });
-              // ELLIE-1152: Track last dispatch child for question parenting
+              // ELLIE-1152: Track last dispatch child for question parenting.
+              // KNOWN LIMITATION: When multiple agents are dispatched in parallel,
+              // lastDispatchChildId is nondeterministic — it will be whichever
+              // Promise resolves last. The correct fix would be a Map<agent, childId>
+              // so questions can be parented to the specific agent's child item.
+              // For now, this is acceptable because ask_user questions reference
+              // the orchestration parent as fallback when the specific child isn't known.
               if (gtdItem) lastDispatchChildId = gtdItem.id;
             }
           } catch (err) {

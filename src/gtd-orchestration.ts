@@ -31,7 +31,9 @@ export interface DispatchTree {
   children: DispatchTree[];
 }
 
-const VALID_STATUSES = new Set([
+export { UUID_RE };
+
+export const VALID_STATUSES = new Set([
   "inbox", "open", "waiting_for", "someday", "done", "cancelled", "failed", "timed_out",
 ]);
 
@@ -39,10 +41,17 @@ const TERMINAL_STATUSES = new Set(["done", "cancelled", "failed", "timed_out"]);
 
 // ── Helpers ───────────────────────────────────────────────────
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function getSupabase() {
   const { supabase } = getRelayDeps();
   if (!supabase) throw new Error("Supabase client not available");
   return supabase;
+}
+
+/** Sanitize an array of UUIDs for use in .or() filter strings. */
+function sanitizeUuids(ids: string[]): string[] {
+  return ids.filter((id) => UUID_RE.test(id));
 }
 
 function toDispatchTree(row: TodoRow): DispatchTree {
@@ -172,6 +181,13 @@ export async function createQuestionItem(opts: {
 export async function getActiveOrchestrationTrees(): Promise<DispatchTree[]> {
   const supabase = getSupabase();
 
+  // OPTIMIZATION NOTE: These 2-3 sequential queries could be replaced with a single
+  // recursive CTE via supabase.rpc() (RPC is available in this project). A function like:
+  //   CREATE FUNCTION get_active_orchestration_trees() RETURNS SETOF todos ...
+  //   WITH RECURSIVE tree AS (SELECT * FROM todos WHERE is_orchestration AND parent_id IS NULL ...)
+  // would fetch the full tree in one round-trip. Left as sequential for now — works correctly,
+  // just slower (~3 round-trips vs 1). Filed as future optimization.
+
   // Step 1: Fetch up to 50 most recent non-terminal parent items
   const terminalList = [...TERMINAL_STATUSES];
   const { data: parents, error: parentError } = await supabase
@@ -192,11 +208,15 @@ export async function getActiveOrchestrationTrees(): Promise<DispatchTree[]> {
   if (parentIds.length === 0) return [];
 
   // Step 2: Fetch all descendants of those parents
+  // IDs come from our own query (Step 1), not user input — but sanitize anyway for defense-in-depth
+  const safeParentIds = sanitizeUuids(parentIds);
+  if (safeParentIds.length === 0) return [];
+
   const { data, error } = await supabase
     .from("todos")
     .select("*")
     .eq("is_orchestration", true)
-    .or(`id.in.(${parentIds.join(",")}),parent_id.in.(${parentIds.join(",")})`)
+    .or(`id.in.(${safeParentIds.join(",")}),parent_id.in.(${safeParentIds.join(",")})`)
     .order("created_at", { ascending: false });
 
   if (error) {

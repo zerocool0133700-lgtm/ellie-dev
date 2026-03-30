@@ -6834,6 +6834,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
   }
 
   if (url.pathname === "/api/dispatches/answer" && req.method === "POST") {
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     (async () => {
       try {
         let body = "";
@@ -6841,6 +6842,14 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         req.on("end", async () => {
           try {
             const data = JSON.parse(body || "{}");
+
+            // Validate question_item_id is a valid UUID before passing to CRUD layer
+            if (!data.question_item_id || !UUID_RE.test(data.question_item_id)) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "Invalid question_item_id" }));
+              return;
+            }
+
             const { answerQuestion } = await import("./gtd-orchestration.ts");
             const parentId = await answerQuestion(data.question_item_id, data.answer_text);
 
@@ -6870,19 +6879,28 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
             res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
             res.end(JSON.stringify({ ok: true, parent_id: parentId }));
           } catch (err: any) {
-            res.writeHead(500, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+            if (!res.headersSent) {
+              res.writeHead(500, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+            } else {
+              logger.error("Error after headers sent in /api/dispatches/answer", { error: (err as Error).message });
+            }
           }
         });
       } catch (err: any) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+        } else {
+          logger.error("Error after headers sent in /api/dispatches/answer (outer)", { error: (err as Error).message });
+        }
       }
     })();
     return;
   }
 
   if (url.pathname === "/api/dispatches/cancel" && req.method === "POST") {
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     (async () => {
       try {
         let body = "";
@@ -6890,18 +6908,34 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         req.on("end", async () => {
           try {
             const data = JSON.parse(body || "{}");
+
+            // Validate item_id is a valid UUID before passing to CRUD layer
+            if (!data.item_id || !UUID_RE.test(data.item_id)) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "Invalid item_id" }));
+              return;
+            }
+
             const { cancelItem } = await import("./gtd-orchestration.ts");
             await cancelItem(data.item_id);
             res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
             res.end(JSON.stringify({ ok: true }));
           } catch (err: any) {
-            res.writeHead(500, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+            if (!res.headersSent) {
+              res.writeHead(500, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+            } else {
+              logger.error("Error after headers sent in /api/dispatches/cancel", { error: (err as Error).message });
+            }
           }
         });
       } catch (err: any) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+        } else {
+          logger.error("Error after headers sent in /api/dispatches/cancel (outer)", { error: (err as Error).message });
+        }
       }
     })();
     return;
