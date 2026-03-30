@@ -31,6 +31,13 @@ export interface TodoRow {
   context: string | null;
   scheduled_at: string | null;
   is_reference: boolean;
+  // ELLIE-1141: Orchestration support
+  parent_id: string | null;
+  created_by: string | null;
+  is_orchestration: boolean;
+  urgency: "blocking" | "normal" | "low" | null;
+  dispatch_envelope_id: string | null;
+  metadata: Record<string, unknown>;
 }
 
 export interface TodoProject {
