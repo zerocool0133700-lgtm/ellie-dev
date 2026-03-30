@@ -636,11 +636,12 @@ async function handleTool(
     case "start_overnight": {
       const { startOvernightSession } = await import("./overnight/scheduler.ts");
       try {
-        const sessionId = await startOvernightSession({
+        const { sessionId, endsAt } = await startOvernightSession({
           endTime: input.end_time as string | undefined,
           concurrency: input.concurrency as number | undefined,
         });
-        return JSON.stringify({ result: `Overnight session started (ID: ${sessionId}). I'll work through the scheduled GTD tasks until ${input.end_time || '6 AM'}. Check /overnight on the dashboard in the morning for results.` });
+        const endsAtStr = endsAt.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+        return JSON.stringify({ result: `Overnight session started (ID: ${sessionId}). I'll work through the scheduled GTD tasks until ${endsAtStr}. Check /overnight on the dashboard in the morning for results.` });
       } catch (err) {
         return JSON.stringify({ result: `Failed to start overnight session: ${(err as Error).message}` });
       }
