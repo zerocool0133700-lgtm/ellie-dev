@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS overnight_sessions (
   tasks_completed INT NOT NULL DEFAULT 0,
   tasks_failed INT NOT NULL DEFAULT 0,
   stop_reason TEXT
-    CHECK (stop_reason IN ('time_limit', 'user_activity', 'manual', 'all_done'))
+    CHECK (stop_reason IN ('time_limit', 'user_activity', 'manual', 'all_done', 'relay_restart'))
 );
 
 -- Per-task results
