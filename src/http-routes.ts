@@ -6687,6 +6687,27 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
   if (url.pathname.startsWith("/api/overnight/tasks/") && req.method === "POST") {
     (async () => {
       try {
+        // ELLIE-1163: Authenticate bridge key for mutating overnight endpoints
+        const { authenticateBridgeKey } = await import("./api/bridge.ts");
+        const authMockRes: import("./api/types.ts").ApiResponse = {
+          status: (code: number) => ({
+            json: (data: unknown) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(data));
+            },
+          }),
+          json: (data: unknown) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(data));
+          },
+        };
+        const bridgeKey = await authenticateBridgeKey(
+          req.headers["x-bridge-key"] as string | undefined,
+          authMockRes,
+          "write",
+        );
+        if (!bridgeKey) return; // authenticateBridgeKey already sent the 401/403 response
+
         const { approveOvernightTask, rejectOvernightTask } = await import("./api/overnight.ts");
 
         const mockRes: import("./api/types.ts").ApiResponse = {

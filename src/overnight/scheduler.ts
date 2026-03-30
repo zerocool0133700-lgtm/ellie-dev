@@ -56,6 +56,7 @@ export function isOvernightRunning(): boolean {
 export function parseEndTime(input?: string, now?: Date): Date {
   const ref = now ?? new Date();
   let hour = 6; // default
+  let minutes = 0;
 
   if (input) {
     const trimmed = input.trim().toLowerCase();
@@ -64,6 +65,7 @@ export function parseEndTime(input?: string, now?: Date): Date {
     const amMatch = trimmed.match(/^(\d{1,2})\s*am$/i);
     if (amMatch) {
       hour = parseInt(amMatch[1], 10);
+      if (hour === 12) hour = 0;
     }
 
     // Match "4pm", "6 pm" — convert to 24h
@@ -73,10 +75,11 @@ export function parseEndTime(input?: string, now?: Date): Date {
       hour = h === 12 ? 12 : h + 12;
     }
 
-    // Match "06:00", "14:30" — take the hour
+    // Match "06:00", "14:30" — take both hour and minutes
     const timeMatch = trimmed.match(/^(\d{1,2}):(\d{2})$/);
     if (timeMatch) {
       hour = parseInt(timeMatch[1], 10);
+      minutes = parseInt(timeMatch[2], 10);
     }
 
     // Plain number: "6" -> 6 AM
@@ -86,7 +89,7 @@ export function parseEndTime(input?: string, now?: Date): Date {
   }
 
   const endsAt = new Date(ref);
-  endsAt.setHours(hour, 0, 0, 0);
+  endsAt.setHours(hour, minutes, 0, 0);
 
   // If the time is before now, push to next day
   if (endsAt.getTime() <= ref.getTime()) {

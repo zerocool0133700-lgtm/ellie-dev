@@ -12,6 +12,7 @@
 
 import http from "node:http";
 import { log } from "../logger.ts";
+import type { ContainerResult } from "./types.ts";
 
 const logger = log.child("docker-executor");
 
@@ -50,11 +51,6 @@ export interface ContainerEnvOpts {
   PROMPT?: string;
   SYSTEM_PROMPT?: string;
   [key: string]: string | undefined;
-}
-
-export interface OvernightTaskResult {
-  exitCode: number;
-  logs: string;
 }
 
 // ── Docker API Client ────────────────────────────────────────
@@ -177,6 +173,9 @@ export function buildHostConfig(volumeName: string): Record<string, unknown> {
   return {
     Memory: memoryLimit,
     NanoCpus: nanoCpus,
+    PidsLimit: 256,
+    CapDrop: ["ALL"],
+    CapAdd: ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"],
     SecurityOpt: ["no-new-privileges"],
     NetworkMode: ISOLATED_NETWORK_NAME,
     ExtraHosts: [
@@ -415,7 +414,7 @@ export async function runOvernightTask(
   taskId: string,
   env: string[],
   opts?: { timeoutMs?: number },
-): Promise<OvernightTaskResult> {
+): Promise<ContainerResult> {
   const containerName = `${CONTAINER_PREFIX}${taskId}`;
   const volumeName = `${CONTAINER_PREFIX}vol-${taskId}`;
   const timeoutMs = opts?.timeoutMs
@@ -506,6 +505,62 @@ async function waitWithTimeout(
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
   }
+}
+
+// ── Orphan Cleanup (ELLIE-1163) ─────────────────────────────
+
+/**
+ * Find and remove any Docker containers left over from a prior relay instance.
+ * Targets containers with the `ellie-overnight-` name prefix.
+ * Called during overnight init on relay startup.
+ */
+export async function cleanupOrphanedContainers(): Promise<number> {
+  const filterParam = encodeURIComponent(JSON.stringify({ name: [`${CONTAINER_PREFIX}`] }));
+  const { status, data } = await dockerApi("GET", `/containers/json?all=true&filters=${filterParam}`);
+  if (status !== 200 || !Array.isArray(data)) return 0;
+
+  let cleaned = 0;
+  for (const container of data) {
+    const id = container.Id;
+    const name = (container.Names?.[0] ?? "").replace(/^\//, "");
+    try {
+      // Stop if running
+      if (container.State === "running") {
+        await dockerApi("POST", `/containers/${id}/stop?t=10`);
+        logger.info("Stopped orphaned container", { id, name });
+      }
+      // Force remove
+      await dockerApi("DELETE", `/containers/${id}?force=true`);
+      logger.info("Removed orphaned container", { id, name });
+      cleaned++;
+    } catch (err) {
+      logger.warn("Failed to clean up orphaned container", {
+        id,
+        name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Also clean up orphaned volumes
+  try {
+    const volFilterParam = encodeURIComponent(JSON.stringify({ label: ["ellie.overnight=true"] }));
+    const volRes = await dockerApi("GET", `/volumes?filters=${volFilterParam}`);
+    if (volRes.status === 200 && volRes.data?.Volumes) {
+      for (const vol of volRes.data.Volumes) {
+        try {
+          await dockerApi("DELETE", `/volumes/${encodeURIComponent(vol.Name)}`);
+          logger.info("Removed orphaned volume", { name: vol.Name });
+        } catch {
+          // Best-effort
+        }
+      }
+    }
+  } catch {
+    // Volume cleanup is best-effort
+  }
+
+  return cleaned;
 }
 
 // ── Exports for Testing ──────────────────────────────────────

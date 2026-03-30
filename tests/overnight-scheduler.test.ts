@@ -67,6 +67,19 @@ describe("parseEndTime", () => {
     expect(result.getDate()).toBe(30);
   });
 
+  it("preserves minutes from '14:30' format", () => {
+    const result = parseEndTime("14:30", lateNight);
+    expect(result.getHours()).toBe(14);
+    expect(result.getMinutes()).toBe(30);
+    expect(result.getDate()).toBe(30); // next day since 14:30 < 23:00
+  });
+
+  it("preserves minutes from '06:45' format", () => {
+    const result = parseEndTime("06:45", lateNight);
+    expect(result.getHours()).toBe(6);
+    expect(result.getMinutes()).toBe(45);
+  });
+
   it("handles plain number input", () => {
     const result = parseEndTime("5", lateNight);
     expect(result.getHours()).toBe(5);

@@ -47,6 +47,12 @@ export interface ContainerState {
   sessionId: string;
 }
 
+/** Result from running a container — distinct from the DB OvernightTaskResult record */
+export interface ContainerResult {
+  exitCode: number;
+  logs: string;
+}
+
 export interface SchedulerConfig {
   endsAt: Date;
   concurrencyLimit: number;

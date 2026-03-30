@@ -48,7 +48,7 @@ interface BridgeKey {
 
 // ── Auth ─────────────────────────────────────────────────────
 
-async function authenticateBridgeKey(
+export async function authenticateBridgeKey(
   rawKey: string | undefined,
   res: ApiResponse,
   requiredPermission?: 'read' | 'write',
