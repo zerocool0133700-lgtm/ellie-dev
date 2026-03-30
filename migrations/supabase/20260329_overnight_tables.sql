@@ -35,6 +35,6 @@ CREATE TABLE IF NOT EXISTS overnight_task_results (
   duration_ms INT
 );
 
-CREATE INDEX idx_overnight_results_session ON overnight_task_results(session_id);
-CREATE INDEX idx_overnight_results_status ON overnight_task_results(status);
-CREATE INDEX idx_overnight_sessions_status ON overnight_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_overnight_results_session ON overnight_task_results(session_id);
+CREATE INDEX IF NOT EXISTS idx_overnight_results_status ON overnight_task_results(status);
+CREATE INDEX IF NOT EXISTS idx_overnight_sessions_status ON overnight_sessions(status);

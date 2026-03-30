@@ -49,9 +49,12 @@ ALTER TABLE formation_sessions
 ALTER TABLE work_sessions
   ADD COLUMN IF NOT EXISTS company_id UUID REFERENCES companies(id);
 
--- agent_budgets
-ALTER TABLE agent_budgets
-  ADD COLUMN IF NOT EXISTS company_id UUID REFERENCES companies(id);
+-- agent_budgets (may not exist yet — created by formation_costs migration)
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'agent_budgets') THEN
+    ALTER TABLE agent_budgets ADD COLUMN IF NOT EXISTS company_id UUID REFERENCES companies(id);
+  END IF;
+END $$;
 
 -- ============================================================
 -- BACKFILL EXISTING DATA TO DEFAULT COMPANY
@@ -68,9 +71,11 @@ UPDATE work_sessions
   SET company_id = '00000000-0000-0000-0000-000000000001'
   WHERE company_id IS NULL;
 
-UPDATE agent_budgets
-  SET company_id = '00000000-0000-0000-0000-000000000001'
-  WHERE company_id IS NULL;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'agent_budgets') THEN
+    UPDATE agent_budgets SET company_id = '00000000-0000-0000-0000-000000000001' WHERE company_id IS NULL;
+  END IF;
+END $$;
 
 -- ============================================================
 -- INDEXES FOR COMPANY SCOPING
@@ -84,8 +89,11 @@ CREATE INDEX IF NOT EXISTS idx_formation_sessions_company
 CREATE INDEX IF NOT EXISTS idx_work_sessions_company
   ON work_sessions(company_id);
 
-CREATE INDEX IF NOT EXISTS idx_agent_budgets_company
-  ON agent_budgets(company_id);
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'agent_budgets') THEN
+    CREATE INDEX IF NOT EXISTS idx_agent_budgets_company ON agent_budgets(company_id);
+  END IF;
+END $$;
 
 -- ============================================================
 -- ROW LEVEL SECURITY

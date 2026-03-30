@@ -47,7 +47,6 @@ CREATE POLICY "company_isolation_agents" ON agents
 -- ============================================================
 DROP POLICY IF EXISTS "Allow all for service role" ON formation_sessions;
 
-DROP POLICY IF EXISTS "company_isolation_formation_sessions" ON formation_sessions;
 CREATE POLICY "company_isolation_formation_sessions" ON formation_sessions
   FOR ALL
   USING (
@@ -60,7 +59,6 @@ CREATE POLICY "company_isolation_formation_sessions" ON formation_sessions
 -- ============================================================
 DROP POLICY IF EXISTS "Allow all for service role" ON work_sessions;
 
-DROP POLICY IF EXISTS "company_isolation_work_sessions" ON work_sessions;
 CREATE POLICY "company_isolation_work_sessions" ON work_sessions
   FOR ALL
   USING (
@@ -69,24 +67,20 @@ CREATE POLICY "company_isolation_work_sessions" ON work_sessions
   );
 
 -- ============================================================
--- RLS POLICIES: AGENT_BUDGETS
+-- RLS POLICIES: AGENT_BUDGETS (may not exist yet)
 -- ============================================================
-DROP POLICY IF EXISTS "Allow all for service role" ON agent_budgets;
-
-DROP POLICY IF EXISTS "company_isolation_agent_budgets" ON agent_budgets;
-CREATE POLICY "company_isolation_agent_budgets" ON agent_budgets
-  FOR ALL
-  USING (
-    company_id = current_company_id()
-    OR current_company_id() IS NULL
-  );
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'agent_budgets') THEN
+    EXECUTE 'DROP POLICY IF EXISTS "Allow all for service role" ON agent_budgets';
+    EXECUTE 'CREATE POLICY "company_isolation_agent_budgets" ON agent_budgets FOR ALL USING (company_id = current_company_id() OR current_company_id() IS NULL)';
+  END IF;
+END $$;
 
 -- ============================================================
 -- RLS POLICIES: AGENT_AUDIT_LOG
 -- ============================================================
 DROP POLICY IF EXISTS "Allow all for service role" ON agent_audit_log;
 
-DROP POLICY IF EXISTS "company_isolation_agent_audit_log" ON agent_audit_log;
 CREATE POLICY "company_isolation_agent_audit_log" ON agent_audit_log
   FOR ALL
   USING (
@@ -101,7 +95,6 @@ CREATE POLICY "company_isolation_agent_audit_log" ON agent_audit_log
 -- Scoped via a join check rather than a direct column.
 DROP POLICY IF EXISTS "Allow all for service role" ON agent_delegations;
 
-DROP POLICY IF EXISTS "company_isolation_agent_delegations" ON agent_delegations;
 CREATE POLICY "company_isolation_agent_delegations" ON agent_delegations
   FOR ALL
   USING (

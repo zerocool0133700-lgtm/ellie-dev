@@ -12,6 +12,6 @@ CREATE TABLE IF NOT EXISTS routing_decisions (
   skills_loaded TEXT[]
 );
 
-CREATE INDEX idx_routing_decisions_session ON routing_decisions(session_id);
-CREATE INDEX idx_routing_decisions_timestamp ON routing_decisions(timestamp DESC);
-CREATE INDEX idx_routing_decisions_confidence ON routing_decisions(confidence) WHERE confidence < 0.7;
+CREATE INDEX IF NOT EXISTS idx_routing_decisions_session ON routing_decisions(session_id);
+CREATE INDEX IF NOT EXISTS idx_routing_decisions_timestamp ON routing_decisions(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_routing_decisions_confidence ON routing_decisions(confidence) WHERE confidence < 0.7;
