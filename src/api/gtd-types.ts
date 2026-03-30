@@ -31,7 +31,7 @@ export interface TodoRow {
   context: string | null;
   scheduled_at: string | null;
   is_reference: boolean;
-  // ELLIE-1141: Orchestration support
+  // ELLIE-1151: Orchestration support
   parent_id: string | null;
   created_by: string | null;
   is_orchestration: boolean;

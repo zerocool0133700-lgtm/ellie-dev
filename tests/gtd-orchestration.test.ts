@@ -2,7 +2,7 @@
  * GTD Orchestration CRUD — Integration Tests (ELLIE-1151)
  *
  * Tests the orchestration CRUD library against the actual Supabase database.
- * Each test creates items and cleans up by cancelling them afterwards.
+ * Each test creates items and hard-deletes them in afterAll cleanup.
  */
 
 import { describe, it, expect, beforeAll, afterAll, mock } from "bun:test";
@@ -52,18 +52,23 @@ beforeAll(() => {
     _testSupabase = createClient(url, key);
     supabaseAvailable = true;
   } else {
-    console.warn("SUPABASE_URL/SUPABASE_ANON_KEY not set — integration tests will be skipped");
+    console.warn(
+      "[SKIP] SUPABASE_URL/SUPABASE_ANON_KEY not set — all GTD orchestration integration tests will be skipped. " +
+      "Set these env vars to run against a real Supabase instance.",
+    );
   }
 });
 
 afterAll(async () => {
-  // Clean up: cancel all created items
+  // Hard-delete all created test items (children first to avoid FK constraint issues)
   if (_testSupabase && createdIds.length > 0) {
-    for (const id of createdIds) {
+    // Reverse order: children/grandchildren were tracked after parents
+    const idsToDelete = [...createdIds].reverse();
+    for (const id of idsToDelete) {
       try {
         await _testSupabase
           .from("todos")
-          .update({ status: "cancelled" })
+          .delete()
           .eq("id", id);
       } catch {
         // Ignore cleanup errors
@@ -81,7 +86,7 @@ function track(id: string): string {
 
 describe("createOrchestrationParent", () => {
   it("creates a parent item with correct fields", async () => {
-    if (!supabaseAvailable) return;
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
 
     const parent = await createOrchestrationParent({
       content: "Test orchestration parent",
@@ -104,7 +109,7 @@ describe("createOrchestrationParent", () => {
 
 describe("createDispatchChild", () => {
   it("creates a child item linked to parent", async () => {
-    if (!supabaseAvailable) return;
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
 
     const parent = await createOrchestrationParent({
       content: "Parent for child test",
@@ -136,7 +141,7 @@ describe("createDispatchChild", () => {
 
 describe("createQuestionItem", () => {
   it("creates a blocking grandchild question", async () => {
-    if (!supabaseAvailable) return;
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
 
     const parent = await createOrchestrationParent({
       content: "Parent for question test",
@@ -170,7 +175,7 @@ describe("createQuestionItem", () => {
   });
 
   it("accepts custom urgency", async () => {
-    if (!supabaseAvailable) return;
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
 
     const parent = await createOrchestrationParent({
       content: "Parent for low urgency question",
@@ -192,7 +197,7 @@ describe("createQuestionItem", () => {
 
 describe("getActiveOrchestrationTrees", () => {
   it("returns correct tree structure", async () => {
-    if (!supabaseAvailable) return;
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
 
     const parent = await createOrchestrationParent({
       content: "Tree test parent",
@@ -245,7 +250,7 @@ describe("getActiveOrchestrationTrees", () => {
 
 describe("cancelItem", () => {
   it("cascades cancel to children", async () => {
-    if (!supabaseAvailable) return;
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
 
     const parent = await createOrchestrationParent({
       content: "Cancel test parent",
@@ -289,7 +294,7 @@ describe("cancelItem", () => {
 
 describe("updateItemStatus", () => {
   it("triggers parent auto-completion when all children done", async () => {
-    if (!supabaseAvailable) return;
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
 
     const parent = await createOrchestrationParent({
       content: "Auto-complete test parent",
@@ -331,7 +336,7 @@ describe("updateItemStatus", () => {
   });
 
   it("sets parent to waiting_for when a child fails", async () => {
-    if (!supabaseAvailable) return;
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
 
     const parent = await createOrchestrationParent({
       content: "Failure test parent",
@@ -374,7 +379,7 @@ describe("updateItemStatus", () => {
 
 describe("answerQuestion", () => {
   it("stores answer in metadata and returns parent_id", async () => {
-    if (!supabaseAvailable) return;
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
 
     const parent = await createOrchestrationParent({
       content: "Answer test parent",
@@ -408,7 +413,7 @@ describe("answerQuestion", () => {
 
 describe("getOrchestrationBadgeCount", () => {
   it("counts open questions assigned to dave", async () => {
-    if (!supabaseAvailable) return;
+    if (!supabaseAvailable) { console.log("  [SKIP] Supabase unavailable"); return; }
 
     const parent = await createOrchestrationParent({
       content: "Badge count test parent",

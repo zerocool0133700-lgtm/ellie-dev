@@ -31,7 +31,11 @@ export interface DispatchTree {
   children: DispatchTree[];
 }
 
-const TERMINAL_STATUSES = ["done", "cancelled"];
+const VALID_STATUSES = new Set([
+  "inbox", "open", "waiting_for", "someday", "done", "cancelled", "failed", "timed_out",
+]);
+
+const TERMINAL_STATUSES = new Set(["done", "cancelled", "failed", "timed_out"]);
 
 // ── Helpers ───────────────────────────────────────────────────
 
@@ -168,12 +172,31 @@ export async function createQuestionItem(opts: {
 export async function getActiveOrchestrationTrees(): Promise<DispatchTree[]> {
   const supabase = getSupabase();
 
-  // Fetch all orchestration items that are not terminal,
-  // or whose parent/child might still be active
+  // Step 1: Fetch up to 50 most recent non-terminal parent items
+  const terminalList = [...TERMINAL_STATUSES];
+  const { data: parents, error: parentError } = await supabase
+    .from("todos")
+    .select("id")
+    .eq("is_orchestration", true)
+    .is("parent_id", null)
+    .not("status", "in", `(${terminalList.join(",")})`)
+    .order("created_at", { ascending: false })
+    .limit(50);
+
+  if (parentError) {
+    logger.error("Failed to fetch orchestration parents", parentError);
+    throw parentError;
+  }
+
+  const parentIds = (parents ?? []).map((p) => p.id);
+  if (parentIds.length === 0) return [];
+
+  // Step 2: Fetch all descendants of those parents
   const { data, error } = await supabase
     .from("todos")
     .select("*")
     .eq("is_orchestration", true)
+    .or(`id.in.(${parentIds.join(",")}),parent_id.in.(${parentIds.join(",")})`)
     .order("created_at", { ascending: false });
 
   if (error) {
@@ -181,7 +204,25 @@ export async function getActiveOrchestrationTrees(): Promise<DispatchTree[]> {
     throw error;
   }
 
-  const rows = (data ?? []) as TodoRow[];
+  let rows = (data ?? []) as TodoRow[];
+
+  // Step 3: Fetch grandchildren (children of children)
+  const childIds = rows.filter((r) => r.parent_id && parentIds.includes(r.parent_id)).map((r) => r.id);
+  if (childIds.length > 0) {
+    const { data: grandchildren, error: gcError } = await supabase
+      .from("todos")
+      .select("*")
+      .eq("is_orchestration", true)
+      .in("parent_id", childIds);
+
+    if (gcError) {
+      logger.error("Failed to fetch grandchildren", gcError);
+      throw gcError;
+    }
+    if (grandchildren) {
+      rows = rows.concat(grandchildren as TodoRow[]);
+    }
+  }
 
   // Index by id and group by parent
   const byId = new Map<string, TodoRow>();
@@ -237,7 +278,7 @@ function buildTree(row: TodoRow, childrenOf: Map<string, TodoRow[]>): DispatchTr
 }
 
 function hasNonTerminal(tree: DispatchTree): boolean {
-  if (!TERMINAL_STATUSES.includes(tree.status)) return true;
+  if (!TERMINAL_STATUSES.has(tree.status)) return true;
   return tree.children.some((c) => hasNonTerminal(c));
 }
 
@@ -248,50 +289,39 @@ export async function updateItemStatus(
   status: string,
   metadata?: Record<string, unknown>,
 ): Promise<void> {
+  // Validate status
+  if (!VALID_STATUSES.has(status)) {
+    throw new Error(`Invalid status "${status}". Must be one of: ${[...VALID_STATUSES].join(", ")}`);
+  }
+
   const supabase = getSupabase();
+
+  // Fetch current item (need parent_id, and metadata if merging)
+  const selectFields = metadata ? "metadata, parent_id" : "parent_id";
+  const { data: current } = await supabase
+    .from("todos")
+    .select(selectFields)
+    .eq("id", id)
+    .single();
 
   // Build update payload
   const update: Record<string, unknown> = { status };
   if (status === "done") update.completed_at = new Date().toISOString();
 
   if (metadata) {
-    // Merge metadata with existing — fetch current first
-    const { data: current } = await supabase
-      .from("todos")
-      .select("metadata, parent_id")
-      .eq("id", id)
-      .single();
-
     const existing = (current?.metadata as Record<string, unknown>) ?? {};
     update.metadata = { ...existing, ...metadata };
+  }
 
-    const { error } = await supabase.from("todos").update(update).eq("id", id);
-    if (error) {
-      logger.error("Failed to update item status", { id, status }, error);
-      throw error;
-    }
+  const { error } = await supabase.from("todos").update(update).eq("id", id);
+  if (error) {
+    logger.error("Failed to update item status", { id, status }, error);
+    throw error;
+  }
 
-    // Check parent completion if item has a parent
-    if (current?.parent_id) {
-      await checkParentCompletion(current.parent_id);
-    }
-  } else {
-    // No metadata merge needed — simpler path
-    const { data: current } = await supabase
-      .from("todos")
-      .select("parent_id")
-      .eq("id", id)
-      .single();
-
-    const { error } = await supabase.from("todos").update(update).eq("id", id);
-    if (error) {
-      logger.error("Failed to update item status", { id, status }, error);
-      throw error;
-    }
-
-    if (current?.parent_id) {
-      await checkParentCompletion(current.parent_id);
-    }
+  // Check parent completion if item has a parent
+  if (current?.parent_id) {
+    await checkParentCompletion(current.parent_id);
   }
 
   logger.info("Updated item status", { id, status });
@@ -315,9 +345,7 @@ export async function checkParentCompletion(parentId: string): Promise<void> {
   if (!children || children.length === 0) return;
 
   // Check if all children are in terminal states
-  const allTerminal = children.every((c) =>
-    TERMINAL_STATUSES.includes(c.status) || c.status === "failed" || c.status === "timed_out",
-  );
+  const allTerminal = children.every((c) => TERMINAL_STATUSES.has(c.status));
 
   if (!allTerminal) return;
 
@@ -374,25 +402,52 @@ export async function cancelItem(id: string): Promise<void> {
     throw error;
   }
 
-  // Cascade: cancel all open children
-  const { error: childError } = await supabase
-    .from("todos")
-    .update({ status: "cancelled" })
-    .eq("parent_id", id)
-    .in("status", ["open", "inbox", "waiting_for"]);
-
-  if (childError) {
-    logger.error("Failed to cascade cancel to children", { id }, childError);
-    throw childError;
-  }
+  // Recursively cancel all non-terminal descendants
+  await cancelDescendants(id);
 
   // Check parent completion if this item has a parent
   if (item?.parent_id) {
     await checkParentCompletion(item.parent_id);
   }
 
-  logger.info("Cancelled item and children", { id });
+  logger.info("Cancelled item and all descendants", { id });
   broadcastDispatchEvent({ type: "dispatch_update" });
+}
+
+async function cancelDescendants(parentId: string): Promise<void> {
+  const supabase = getSupabase();
+  const nonTerminalStatuses = [...VALID_STATUSES].filter((s) => !TERMINAL_STATUSES.has(s));
+
+  // Find all non-terminal children of this parent
+  const { data: children, error } = await supabase
+    .from("todos")
+    .select("id")
+    .eq("parent_id", parentId)
+    .in("status", nonTerminalStatuses);
+
+  if (error) {
+    logger.error("Failed to fetch descendants for cancel", { parentId }, error);
+    throw error;
+  }
+
+  if (!children || children.length === 0) return;
+
+  // Cancel these children
+  const childIds = children.map((c) => c.id);
+  const { error: updateError } = await supabase
+    .from("todos")
+    .update({ status: "cancelled" })
+    .in("id", childIds);
+
+  if (updateError) {
+    logger.error("Failed to cascade cancel to descendants", { parentId }, updateError);
+    throw updateError;
+  }
+
+  // Recurse into each child to cancel their children
+  for (const childId of childIds) {
+    await cancelDescendants(childId);
+  }
 }
 
 // ── Answer question ───────────────────────────────────────────

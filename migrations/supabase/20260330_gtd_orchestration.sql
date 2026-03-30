@@ -1,4 +1,4 @@
--- ELLIE-1141: GTD orchestration support
+-- ELLIE-1151: GTD orchestration support
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS parent_id UUID REFERENCES todos(id);
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS created_by TEXT;
 ALTER TABLE todos ADD COLUMN IF NOT EXISTS is_orchestration BOOLEAN NOT NULL DEFAULT false;
