@@ -46,7 +46,7 @@ export async function getOvernightStatus(
       .order("started_at", { ascending: false });
 
     return res.status(200).json({
-      running: true,
+      running: isOvernightRunning(),
       session,
       tasks: tasks ?? [],
     });

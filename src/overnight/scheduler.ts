@@ -11,6 +11,7 @@
  * 5. Stops on: end time reached, Dave sends a message, manual stop, or all tasks done
  */
 
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { log } from "../logger.ts";
 import { getRelayDeps } from "../relay-state.ts";
 import { buildContainerEnv, runOvernightTask, CONSTANTS as DOCKER_CONSTANTS } from "./docker-executor.ts";
@@ -87,6 +88,10 @@ export function parseEndTime(input?: string, now?: Date): Date {
       hour = parseInt(trimmed, 10);
     }
   }
+
+  // Validate hour and minutes ranges
+  if (hour < 0 || hour > 23) hour = 6;
+  if (minutes < 0 || minutes > 59) minutes = 0;
 
   const endsAt = new Date(ref);
   endsAt.setHours(hour, minutes, 0, 0);
@@ -516,7 +521,7 @@ type CounterField = "tasks_total" | "tasks_completed" | "tasks_failed";
  * with a non-atomic value derived from _runningContainers.size.
  */
 export async function incrementSessionCounter(
-  supabase: any,
+  supabase: SupabaseClient,
   sessionId: string,
   field: CounterField,
 ): Promise<void> {
