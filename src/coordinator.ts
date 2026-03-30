@@ -111,9 +111,15 @@ export interface CoordinatorResult {
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
-const DEFAULT_MAX_ITERATIONS = 10;
-const DEFAULT_SESSION_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
-const DEFAULT_COST_CAP_USD = 2.0;
+/**
+ * LIMITS RELAXED (2026-03-30): Single-user Mac subscription — the original
+ * values (10 iterations, 20min timeout, $2 cost cap) were cutting off complex
+ * coordinator work. Original intent: prevent runaway loops and costs in
+ * multi-user scenarios. Tighten these when onboarding external users.
+ */
+const DEFAULT_MAX_ITERATIONS = 50;           // was 10
+const DEFAULT_SESSION_TIMEOUT_MS = 60 * 60 * 1000; // was 20min, now 60min
+const DEFAULT_COST_CAP_USD = 50.0;           // was $2.00
 const MAX_CONTEXT_TOKENS = 200_000;
 
 // ── Main Loop ───────────────────────────────────────────────────────────────
@@ -234,13 +240,13 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
       break;
     }
 
-    // Check cost cap (coordinator tokens + specialist costs)
+    // Check cost cap — ONLY coordinator API cost counts (specialists run on Max subscription via CLI)
+    // ELLIE-1136: Specialist cost is computed but not real — CLI uses subscription, not API credits
     const coordinatorCost = computeCost(effectiveModel, totalTokensIn, totalTokensOut);
-    const currentCost = coordinatorCost + specialistCostUsd;
-    if (currentCost > effectiveCostCap) {
+    if (coordinatorCost > effectiveCostCap) {
       hitSafetyRail = true;
       response = "I've reached the cost limit for this session. Here's what I've accomplished so far.";
-      logger.warn("Cost cap reached", { iteration, cost: currentCost, coordinatorCost, specialistCost: specialistCostUsd, cap: effectiveCostCap });
+      logger.warn("Cost cap reached", { iteration, coordinatorCost, specialistCost: specialistCostUsd, cap: effectiveCostCap });
       break;
     }
 
