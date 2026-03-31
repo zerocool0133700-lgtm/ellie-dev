@@ -230,6 +230,12 @@ let _lastBotRestartAt = 0;
     .catch(err => { _done(); logger.warn("Overnight init failed (non-fatal)", { error: err instanceof Error ? err.message : String(err) }); });
 }
 
+// ELLIE-1164: Initialize heartbeat scheduler
+{ const _done = startPhase("heartbeat");
+  const { initHeartbeat } = await import("./heartbeat/init.ts");
+  initHeartbeat().then(() => _done()).catch(err => { _done(); logger.warn("Heartbeat init failed (non-fatal)", { error: err instanceof Error ? err.message : String(err) }); });
+}
+
 // ELLIE-455: Register J scope tree-level vines on startup
 { const _done = startPhase("job-vines");
   registerJobVines().then(() => _done()).catch(err => { _done(); logger.warn("Startup registration failed", { err: err.message }); });
@@ -526,6 +532,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
   stopReconciler();    // orchestration reconciler
   stopOrchestrationMonitor(); // GTD task stall monitor
   await shutdownOvernight(); // ELLIE-1148: stop overnight scheduler
+  try { const { shutdownHeartbeat } = await import("./heartbeat/init.ts"); await shutdownHeartbeat(); } catch { /* heartbeat may not be initialized */ } // ELLIE-1164
   stopPlaneQueueWorker(); // plane-queue
   logger.info("Background tasks stopped");
 

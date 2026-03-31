@@ -130,6 +130,13 @@ export class FoundationRegistry {
     this.cache.set(name, activated);
     this.activeName = name;
 
+    // ELLIE-1164: Restart heartbeat with new foundation config
+    try {
+      const { stopHeartbeat, startHeartbeat } = await import("./heartbeat/timer.ts");
+      stopHeartbeat();
+      startHeartbeat();
+    } catch { /* heartbeat may not be initialized */ }
+
     return activated;
   }
 

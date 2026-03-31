@@ -260,3 +260,33 @@ registerCommand({
     return { handled: false };
   },
 });
+
+// /heartbeat — show status or enable/disable heartbeat
+registerCommand({
+  name: "heartbeat",
+  description: "Show heartbeat status or enable/disable",
+  category: "system",
+  subcommands: ["enable", "disable"],
+  handler: async (args) => {
+    const { getHeartbeatState, updateConfig } = await import("./heartbeat/state.ts");
+    const sub = args.trim().split(/\s+/)[0];
+    if (sub === "enable") {
+      await updateConfig({ enabled: true } as any);
+      const { startHeartbeat } = await import("./heartbeat/timer.ts");
+      startHeartbeat();
+      return { handled: true, response: "Heartbeat enabled." };
+    }
+    if (sub === "disable") {
+      await updateConfig({ enabled: false } as any);
+      const { stopHeartbeat } = await import("./heartbeat/timer.ts");
+      stopHeartbeat();
+      return { handled: true, response: "Heartbeat disabled." };
+    }
+    const state = await getHeartbeatState();
+    if (!state) return { handled: true, response: "Heartbeat state not found." };
+    return {
+      handled: true,
+      response: `Heartbeat: ${state.enabled ? "ON" : "OFF"}\nInterval: ${state.interval_ms / 60000}m\nLast tick: ${state.last_tick_at || "never"}\nSources: ${state.sources?.join(", ")}`,
+    };
+  },
+});
