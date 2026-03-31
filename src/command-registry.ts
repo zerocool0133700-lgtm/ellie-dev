@@ -266,7 +266,7 @@ registerCommand({
   name: "heartbeat",
   description: "Show heartbeat status or enable/disable",
   category: "system",
-  subcommands: ["enable", "disable"],
+  subcommands: ["enable", "disable", "dry-run"],
   handler: async (args) => {
     const { getHeartbeatState, updateConfig } = await import("./heartbeat/state.ts");
     const sub = args.trim().split(/\s+/)[0];
@@ -282,11 +282,17 @@ registerCommand({
       stopHeartbeat();
       return { handled: true, response: "Heartbeat disabled." };
     }
+    if (sub === "dry-run") {
+      const parts = args.trim().split(/\s+/);
+      const onOff = parts[1] === "off" ? false : true;
+      await updateConfig({ dry_run: onOff } as any);
+      return { handled: true, response: `Heartbeat dry-run: ${onOff ? "ON (logging only)" : "OFF (live delivery)"}` };
+    }
     const state = await getHeartbeatState();
     if (!state) return { handled: true, response: "Heartbeat state not found." };
     return {
       handled: true,
-      response: `Heartbeat: ${state.enabled ? "ON" : "OFF"}\nInterval: ${state.interval_ms / 60000}m\nLast tick: ${state.last_tick_at || "never"}\nSources: ${state.sources?.join(", ")}`,
+      response: `Heartbeat: ${state.enabled ? "ON" : "OFF"}\nDry-run: ${state.dry_run ? "ON (logging only)" : "OFF (live delivery)"}\nInterval: ${state.interval_ms / 60000}m\nLast tick: ${state.last_tick_at || "never"}\nSources: ${state.sources?.join(", ")}`,
     };
   },
 });

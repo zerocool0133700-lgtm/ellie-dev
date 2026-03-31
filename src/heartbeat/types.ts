@@ -41,6 +41,7 @@ export interface HeartbeatState extends HeartbeatConfig {
   last_snapshot: HeartbeatSnapshot | null;
   source_cooldowns: Record<string, string>;
   consecutive_skips: number;
+  dry_run: boolean;
 }
 
 export interface TickRecord {

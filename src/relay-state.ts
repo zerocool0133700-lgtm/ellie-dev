@@ -97,6 +97,18 @@ export function sweepPhoneHistories(ttlMs: number = 24 * 60 * 60_000): number {
   return removed;
 }
 
+// ── Message processing flag (ELLIE-1164) ─────────────────────
+
+let _processingMessage = false;
+
+export function setProcessingMessage(active: boolean): void {
+  _processingMessage = active;
+}
+
+export function isProcessingMessage(): boolean {
+  return _processingMessage;
+}
+
 // ── Broadcast helpers ──────────────────────────────────────
 
 /** Fire-and-forget broadcast to all connected extension clients. */

@@ -17,6 +17,7 @@ import {
   getActiveAgent, setActiveAgent,
   wsAppUserMap, ellieChatPhoneHistories, ellieChatClients,
   broadcastExtension, broadcastToEllieChatClients, getRelayDeps, getNotifyCtx, touchPhoneHistory,
+  setProcessingMessage,
 } from "./relay-state.ts";
 import { resolveEntityName } from "./agent-entity-map.ts";
 import { resetEllieChatIdleTimer, resetTelegramIdleTimer, resetGchatIdleTimer } from "./relay-idle.ts";
@@ -250,6 +251,9 @@ async function _handleEllieChatMessage(
   const { bot, anthropic, supabase } = getRelayDeps();
   logger.info("User message received", { phoneMode, hasImage: !!image, mode, channelId: channelId?.substring(0, 8) });
   acknowledgeChannel("ellie-chat");
+
+  setProcessingMessage(true);
+  try {
 
   // ELLIE-1136: Flag user activity so overnight scheduler stops
   const { flagUserActivity, isOvernightRunning } = await import("./overnight/scheduler.ts");
@@ -1489,6 +1493,10 @@ async function _handleEllieChatMessage(
 
     resetEllieChatIdleTimer();
   }, text.substring(0, 100));
+
+  } finally {
+    setProcessingMessage(false);
+  }
 }
 
 // getSpecialistAck is imported from relay-utils.ts

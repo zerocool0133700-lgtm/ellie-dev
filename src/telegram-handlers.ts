@@ -15,6 +15,7 @@ import {
 import {
   getActiveAgent, setActiveAgent,
   broadcastExtension, getRelayDeps, getNotifyCtx,
+  setProcessingMessage,
 } from "./relay-state.ts";
 import { resolveEntityName } from "./agent-entity-map.ts";
 import {
@@ -165,6 +166,9 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   // Rate limit check (ELLIE-228)
   const rateLimited = checkMessageRate(userId, "telegram");
   if (rateLimited) { await ctx.reply(rateLimited); return; }
+
+  setProcessingMessage(true);
+  try {
 
   // ELLIE-1136: Flag user activity so overnight scheduler stops
   const { flagUserActivity, isOvernightRunning } = await import("./overnight/scheduler.ts");
@@ -786,6 +790,10 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   }
 
   resetTelegramIdleTimer();
+
+  } finally {
+    setProcessingMessage(false);
+  }
 })));
 
 // Voice messages

@@ -5,6 +5,7 @@
  */
 
 import { log } from "../logger.ts";
+import { isProcessingMessage } from "../relay-state.ts";
 import {
   getHeartbeatState,
   atomicClaimTick,
@@ -56,11 +57,24 @@ async function tick(): Promise<void> {
 
   if (!state || !state.enabled) return;
 
+  // Resolve foundation name for logging
+  let foundationName = "unknown";
+  try {
+    const { FoundationRegistry, createSupabaseFoundationStore } = await import("../foundation-registry.ts");
+    const { getRelayDeps } = await import("../relay-state.ts");
+    const { supabase } = getRelayDeps();
+    if (supabase) {
+      const reg = new FoundationRegistry(createSupabaseFoundationStore(supabase));
+      await reg.refresh();
+      foundationName = reg.getActive()?.name || "unknown";
+    }
+  } catch { /* fall back to "unknown" */ }
+
   // Check skip guards
   const skipReason = shouldSkipTick({
     relayStartedAt: _relayStartedAt,
     startupGraceMs: state.startup_grace_ms,
-    isProcessingMessage: false, // No global processing flag exists yet — always false
+    isProcessingMessage: isProcessingMessage(),
     isPhase2Running: _phase2Running,
     isInActiveHours: isInActiveHours(state.active_start, state.active_end),
   });
@@ -72,7 +86,7 @@ async function tick(): Promise<void> {
       deltas: [],
       cost_usd: 0,
       duration_ms: Date.now() - tickStart,
-      foundation: "unknown",
+      foundation: foundationName,
       skipped_reason: skipReason,
     });
     return;
@@ -107,7 +121,7 @@ async function tick(): Promise<void> {
       deltas,
       cost_usd: 0,
       duration_ms: Date.now() - tickStart,
-      foundation: "unknown",
+      foundation: foundationName,
     });
     return;
   }
@@ -138,7 +152,8 @@ async function tick(): Promise<void> {
       return;
     }
 
-    const foundationName = registry?.getActive()?.name || "software-dev";
+    // Update foundationName from Phase 2 registry (more specific fallback)
+    foundationName = registry?.getActive()?.name || foundationName || "software-dev";
     const systemPrompt = registry
       ? await registry.getCoordinatorPrompt()
       : "You are Ellie, a coordinator. Review the heartbeat changes and act as needed.";
@@ -155,18 +170,22 @@ async function tick(): Promise<void> {
       deps: buildCoordinatorDeps({
         sessionId: "coordinator:heartbeat",
         channel: "heartbeat",
-        sendFn: async (_ch, msg) => {
-          // Deliver to Telegram via the notify context
-          try {
-            const { getNotifyCtx } = await import("../relay-state.ts");
-            const notifyCtx = getNotifyCtx();
-            if (notifyCtx?.bot && notifyCtx?.telegramUserId) {
-              await notifyCtx.bot.api.sendMessage(Number(notifyCtx.telegramUserId), msg);
-              return;
+        sendFn: state.dry_run
+          ? async (_ch: string, msg: string) => {
+              logger.info("DRY RUN would send", { msg: msg.slice(0, 200) });
             }
-          } catch { /* fallback to log */ }
-          logger.info("Heartbeat Phase 2 message (no delivery channel)", { msg: msg.slice(0, 200) });
-        },
+          : async (_ch: string, msg: string) => {
+              // Deliver to Telegram via the notify context
+              try {
+                const { getNotifyCtx } = await import("../relay-state.ts");
+                const notifyCtx = getNotifyCtx();
+                if (notifyCtx?.bot && notifyCtx?.telegramUserId) {
+                  await notifyCtx.bot.api.sendMessage(Number(notifyCtx.telegramUserId), msg);
+                  return;
+                }
+              } catch { /* fallback to log */ }
+              logger.info("Heartbeat Phase 2 message (no delivery channel)", { msg: msg.slice(0, 200) });
+            },
         forestReadFn: async (query) => {
           try {
             const res = await fetch("http://localhost:3001/api/bridge/read", {
