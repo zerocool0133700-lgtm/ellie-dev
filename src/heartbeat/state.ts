@@ -136,6 +136,22 @@ export async function logTick(record: TickRecord): Promise<void> {
 }
 
 /**
+ * Count today's Phase 2 ticks for daily cap enforcement.
+ */
+export async function getTodayPhase2Count(): Promise<number> {
+  const { supabase } = getRelayDeps();
+  if (!supabase) return 0;
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const { count } = await supabase
+    .from("heartbeat_ticks")
+    .select("*", { count: "exact", head: true })
+    .eq("phase_reached", 2)
+    .gte("tick_at", todayStart.toISOString());
+  return count ?? 0;
+}
+
+/**
  * Partial update of heartbeat_state config fields (enabled, interval_ms, active_start, etc.).
  */
 export async function updateConfig(updates: Partial<HeartbeatState>): Promise<void> {

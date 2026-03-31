@@ -38,7 +38,7 @@ export async function check(snapshot: HeartbeatSnapshot | null): Promise<{
 
     const now = new Date();
     const open = todos.filter((t) => t.status === "open");
-    const overdue = open.filter((t) => t.due_date && new Date(t.due_date) < now);
+    const overdue = open.filter((t) => t.due_date && new Date(t.due_date) <= now);
     const since = snapshot?.captured_at || new Date(Date.now() - 15 * 60 * 1000).toISOString();
     const recentlyCompleted = todos.filter(
       (t) => t.status === "done" && t.completed_at && t.completed_at > since,

@@ -13,6 +13,7 @@ import {
   updateCooldown,
   logTick,
   isInActiveHours,
+  getTodayPhase2Count,
 } from "./state.ts";
 import { runPreCheck, filterCooledDown } from "./pre-check.ts";
 import { buildHeartbeatPrompt } from "./prompt.ts";
@@ -127,11 +128,28 @@ async function tick(): Promise<void> {
   }
 
   // Phase 2: build prompt and run coordinator loop
+  const PHASE2_TIMEOUT_MS = 60_000;
+  const MAX_PHASE2_PER_DAY = 20;
   _phase2Running = true;
   let costUsd = 0;
   let actionsTaken: unknown = null;
 
   try {
+    // Daily Phase 2 cap check
+    const todayCount = await getTodayPhase2Count();
+    if (todayCount >= MAX_PHASE2_PER_DAY) {
+      logger.warn("Daily Phase 2 cap reached", { todayCount, cap: MAX_PHASE2_PER_DAY });
+      await logTick({
+        phase_reached: 1,
+        deltas,
+        cost_usd: 0,
+        duration_ms: Date.now() - tickStart,
+        foundation: foundationName,
+        skipped_reason: "daily_cap_reached",
+      });
+      return;
+    }
+
     const { runCoordinatorLoop, buildCoordinatorDeps } = await import("../coordinator.ts");
     const { FoundationRegistry, createSupabaseFoundationStore } = await import("../foundation-registry.ts");
     const { getRelayDeps } = await import("../relay-state.ts");
@@ -148,7 +166,6 @@ async function tick(): Promise<void> {
 
     if (!heartbeatPrompt) {
       // buildHeartbeatPrompt returns "" if no changed deltas — shouldn't happen here, but guard
-      _phase2Running = false;
       return;
     }
 
@@ -158,7 +175,10 @@ async function tick(): Promise<void> {
       ? await registry.getCoordinatorPrompt()
       : "You are Ellie, a coordinator. Review the heartbeat changes and act as needed.";
 
-    const result = await runCoordinatorLoop({
+    const RELAY_URL = process.env.RELAY_URL || "http://localhost:3001";
+
+    // Wrap Phase 2 coordinator call in a timeout
+    const phase2Promise = runCoordinatorLoop({
       message: heartbeatPrompt,
       channel: "heartbeat",
       userId: "system",
@@ -188,7 +208,7 @@ async function tick(): Promise<void> {
             },
         forestReadFn: async (query) => {
           try {
-            const res = await fetch("http://localhost:3001/api/bridge/read", {
+            const res = await fetch(`${RELAY_URL}/api/bridge/read`, {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
@@ -205,6 +225,13 @@ async function tick(): Promise<void> {
         registry,
       }),
     });
+
+    const result = await Promise.race([
+      phase2Promise,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Phase 2 timeout after 60s")), PHASE2_TIMEOUT_MS),
+      ),
+    ]);
 
     costUsd = result.totalCost ?? 0;
     actionsTaken = result.actions ?? null;

@@ -14,8 +14,9 @@ export async function check(snapshot: HeartbeatSnapshot | null): Promise<{
 }> {
   try {
     const bridgeKey = process.env.BRIDGE_KEY || "";
+    const RELAY_URL = process.env.RELAY_URL || "http://localhost:3001";
 
-    const res = await fetch("http://localhost:3001/api/bridge/read", {
+    const res = await fetch(`${RELAY_URL}/api/bridge/read`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

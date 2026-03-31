@@ -29,23 +29,33 @@ export async function check(snapshot: HeartbeatSnapshot | null): Promise<{
     if (!res.ok) throw new Error(`Plane API returned ${res.status}`);
 
     const data = await res.json();
-    const latest = data.results?.[0];
-    const latestUpdated: string = latest?.updated_at || "";
+    const results: any[] = data.results ?? [];
 
-    const prevUpdated = snapshot?.plane_last_updated_at ?? "";
-    const changed = latestUpdated !== "" && latestUpdated !== prevUpdated;
+    // Only consider tickets with meaningful state fields — filter out noise from
+    // timestamp-only bumps (e.g. views, reorders) by hashing status + priority.
+    const meaningful = results.filter((t: any) => t.state_detail?.name || t.priority);
+    const stateHash = meaningful
+      .map((t: any) => `${t.sequence_id}:${t.state_detail?.name}:${t.priority}`)
+      .join(",");
+
+    const prevHash = snapshot?.plane_last_updated_at ?? "";
+    const changed = stateHash !== "" && stateHash !== prevHash;
+
+    const changedTickets = changed
+      ? meaningful.map((t: any) => t.sequence_id ?? t.id ?? "unknown")
+      : [];
 
     return {
       delta: {
         source: "plane",
         changed,
         summary: changed
-          ? `Ticket updated: ${latest?.sequence_id ?? latest?.id ?? "unknown"}`
-          : "No ticket changes",
-        count: changed ? 1 : 0,
-        details: changed ? { id: latest?.id, sequence_id: latest?.sequence_id, updated_at: latestUpdated } : undefined,
+          ? `Ticket state changed: ${changedTickets.join(", ")}`
+          : "No meaningful ticket changes",
+        count: changedTickets.length,
+        details: changed ? { tickets: meaningful.map((t: any) => ({ id: t.id, sequence_id: t.sequence_id, state: t.state_detail?.name, priority: t.priority })) } : undefined,
       },
-      snapshotUpdate: { plane_last_updated_at: latestUpdated },
+      snapshotUpdate: { plane_last_updated_at: stateHash },
     };
   } catch (err) {
     return {
