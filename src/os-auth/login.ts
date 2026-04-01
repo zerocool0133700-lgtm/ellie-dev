@@ -40,6 +40,10 @@ export function validateLoginInput(input: LoginInput): LoginValidation {
     return { valid: false, error: "Password is required" }
   }
 
+  if (input.password.length > 128) {
+    return { valid: false, error: "Password must be no more than 128 characters" }
+  }
+
   const email = input.email.toLowerCase().trim()
   const audience = typeof input.audience === "string" ? input.audience : "life"
 
@@ -83,6 +87,10 @@ export async function loginWithPassword(
 
   if (account.status === "suspended") {
     return { ok: false, error: "Account is suspended" }
+  }
+
+  if (account.status === "pending_verification") {
+    return { ok: false, error: "Please verify your email before signing in" }
   }
 
   if (!account.password_hash) {

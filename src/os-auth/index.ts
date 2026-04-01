@@ -28,6 +28,9 @@ import { log } from "../logger.ts"
 
 const logger = log.child("os-auth")
 
+/** All product audiences that OS auth tokens may target. */
+export const OS_AUTH_AUDIENCES = ["life", "learn"] as const
+
 // ── Route Parsing (pure) ────────────────────────────────────
 
 export interface OsAuthRouteMatch {
@@ -230,7 +233,7 @@ export async function handleOsAuthRoute(
         const keys = await getSigningKeys(deps)
         // Try all common audiences
         let payload: OsAccessTokenPayload | null = null
-        for (const aud of ["life", "learn"]) {
+        for (const aud of OS_AUTH_AUDIENCES) {
           payload = verifyAccessToken(token, keys.publicKey, aud)
           if (payload) break
         }
@@ -278,7 +281,7 @@ export async function handleOsAuthRoute(
           }
           const keys = await getSigningKeys(deps)
           let payload: OsAccessTokenPayload | null = null
-          for (const aud of ["life", "learn"]) {
+          for (const aud of OS_AUTH_AUDIENCES) {
             payload = verifyAccessToken(token, keys.publicKey, aud)
             if (payload) break
           }
