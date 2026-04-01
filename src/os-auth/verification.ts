@@ -48,24 +48,26 @@ export async function consumeVerificationToken(
   sql: Sql,
   token: string,
 ): Promise<{ ok: true; accountId: string } | { ok: false; error: string }> {
+  // Atomic consume: SELECT + UPDATE in one statement to prevent TOCTOU races.
+  // If two requests arrive simultaneously, only one gets the RETURNING row.
   const [row] = await sql`
-    SELECT id, account_id, expires_at, consumed_at
-    FROM os_email_verification_tokens
-    WHERE token = ${token}
-  `
-
-  if (!row) return { ok: false, error: "Invalid verification token" }
-  if (row.consumed_at) return { ok: false, error: "Token has already been used" }
-  if (new Date(row.expires_at).getTime() < Date.now()) {
-    return { ok: false, error: "Verification token has expired" }
-  }
-
-  // Mark consumed
-  await sql`
     UPDATE os_email_verification_tokens
     SET consumed_at = now()
-    WHERE id = ${row.id}
+    WHERE token = ${token}
+      AND consumed_at IS NULL
+      AND expires_at > now()
+    RETURNING id, account_id
   `
+
+  if (!row) {
+    // Distinguish error cases for user-facing messages
+    const [existing] = await sql`
+      SELECT consumed_at, expires_at FROM os_email_verification_tokens WHERE token = ${token}
+    `
+    if (!existing) return { ok: false, error: "Invalid verification token" }
+    if (existing.consumed_at) return { ok: false, error: "Token has already been used" }
+    return { ok: false, error: "Verification token has expired" }
+  }
 
   logger.info("Verification token consumed", { accountId: row.account_id })
   return { ok: true, accountId: row.account_id }

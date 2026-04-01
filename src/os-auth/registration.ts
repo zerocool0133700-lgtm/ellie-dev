@@ -128,11 +128,9 @@ export async function registerAccount(
     metadata: { method: "email_password", entity_type: input.entity_type ?? "user" },
   })
 
-  // Log the verification URL (email sending is a future concern)
   logger.info("Account registered — verification token created", {
     accountId: account.id,
     email: input.email,
-    verifyUrl: `/api/os-auth/verify-email?token=${verificationToken}`,
   })
 
   return { ok: true, account, verificationToken }
