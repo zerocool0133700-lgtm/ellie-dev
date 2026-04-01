@@ -203,6 +203,7 @@ import { handleAlertsRoute } from "./api/routes/alerts.ts";
 import { handleReactionsRoute } from "./api/routes/reactions.ts";
 import { handleEmojiPrefsRoute } from "./api/routes/emoji-prefs.ts";
 import { handleAgentMemoryRoute } from "./api/routes/agent-memory.ts";
+import { handleOsAuthRoute, parseOsAuthRoute } from "./os-auth/index.ts";
 import { handleAvatarRoutes } from "./avatar-routes.ts";
 import { ingestDocument, ingestUrl, canIngest } from "./document-ingestion.ts";
 // ELLIE-547: CORS whitelist (replaces wildcard *)
@@ -236,6 +237,7 @@ async function getFoundationRegistry(): Promise<FoundationRegistry | null> {
  *   - /api/auth/token     — issues tokens, must be reachable unauthenticated
  *   - /api/bridge/*       — uses its own x-bridge-key scheme
  *   - /api/app-auth/*     — handles its own auth flow
+ *   - /api/os-auth/*      — OS identity, handles its own auth
  *   - /api/agentmail/webhooks — uses HMAC signature verification
  *   - Localhost IPs       — on-machine agents bypass auth
  */
@@ -244,6 +246,8 @@ export function requiresApiAuth(pathname: string, clientIp: string): boolean {
   if (pathname === "/api/auth/token") return false;
   if (pathname.startsWith("/api/bridge/")) return false;
   if (pathname.startsWith("/api/app-auth/")) return false;
+  if (pathname.startsWith("/api/os-auth/")) return false;
+  if (pathname === "/.well-known/jwks.json") return false;
   if (pathname === "/api/agentmail/webhooks") return false;
   const isLocalhost = clientIp === "127.0.0.1" || clientIp === "::1" || clientIp === "::ffff:127.0.0.1";
   if (isLocalhost) return false;
@@ -4352,6 +4356,74 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
       req.on("end", () => handleBridgeRequest(body));
     } else {
       handleBridgeRequest();
+    }
+    return;
+  }
+
+  // OS Auth API — unified identity (Phase 0)
+  if (url.pathname.startsWith("/api/os-auth/") || url.pathname === "/.well-known/jwks.json") {
+    const isPost = req.method === "POST";
+
+    const handleOsAuthRequest = async (body?: string) => {
+      try {
+        let data: Record<string, unknown> = {};
+        if (isPost && body) {
+          try { data = JSON.parse(body); } catch {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Invalid JSON body" }));
+            return;
+          }
+        }
+
+        const { sql } = await import("../../ellie-forest/src/index");
+        const { retrieveSecret, storeSecret } = await import("../../ellie-forest/src/hollow");
+
+        const mockReq: ApiRequest & { headers: Record<string, string> } = {
+          body: data,
+          headers: {
+            authorization: (req.headers["authorization"] || "") as string,
+            "x-forwarded-for": (req.headers["x-forwarded-for"] || "") as string,
+            "x-real-ip": (req.headers["x-real-ip"] || "") as string,
+            "user-agent": (req.headers["user-agent"] || "") as string,
+          },
+        };
+
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({
+            json: (resData: unknown) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(resData));
+            },
+          }),
+          json: (resData: unknown) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(resData));
+          },
+        };
+
+        const handled = await handleOsAuthRoute(
+          mockReq, mockRes,
+          url.pathname, req.method || "GET",
+          { sql, retrieveSecret, storeSecret },
+        );
+
+        if (!handled) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Unknown os-auth endpoint" }));
+        }
+      } catch (err) {
+        logger.error("OS-auth error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    };
+
+    if (isPost) {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+      req.on("end", () => handleOsAuthRequest(body));
+    } else {
+      handleOsAuthRequest();
     }
     return;
   }
