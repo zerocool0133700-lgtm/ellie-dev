@@ -204,8 +204,10 @@ import { handleReactionsRoute } from "./api/routes/reactions.ts";
 import { handleEmojiPrefsRoute } from "./api/routes/emoji-prefs.ts";
 import { handleAgentMemoryRoute } from "./api/routes/agent-memory.ts";
 import { handleOsAuthRoute, parseOsAuthRoute } from "./os-auth/index.ts";
+import { getRedisClient } from "./os-auth/redis.ts";
 import { handleAvatarRoutes } from "./avatar-routes.ts";
 import { ingestDocument, ingestUrl, canIngest } from "./document-ingestion.ts";
+import { handleAskUserRoute } from "./api/routes/ask-user.ts";
 // ELLIE-547: CORS whitelist (replaces wildcard *)
 import { handlePreflight, corsHeader } from "./cors.ts";
 import { runCoordinatorLoop, buildCoordinatorDeps } from "./coordinator.ts";
@@ -4406,7 +4408,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         const handled = await handleOsAuthRoute(
           mockReq, mockRes,
           url.pathname, req.method || "GET",
-          { sql, retrieveSecret, storeSecret },
+          { sql, redis: getRedisClient(), retrieveSecret, storeSecret },
           url.searchParams,
         );
 
@@ -4432,7 +4434,24 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
   }
 
   // App Auth API — phone app onboarding (ELLIE-176)
+  // DEPRECATED: Legacy auth — migrate to /api/os-auth/* by 2026-07-01 (ELLIE-1258)
   if (url.pathname.startsWith("/api/app-auth/") && (req.method === "POST" || req.method === "GET")) {
+    // Hard kill switch: reject all legacy auth requests after sunset date (ELLIE-1263)
+    const LEGACY_AUTH_SUNSET = new Date("2026-07-01T00:00:00Z")
+    if (Date.now() >= LEGACY_AUTH_SUNSET.getTime()) {
+      logger.error("Legacy app-auth request rejected — past sunset date 2026-07-01", { path: url.pathname })
+      res.writeHead(410, { "Content-Type": "application/json" })
+      res.end(JSON.stringify({
+        error: "This authentication endpoint has been retired. Use /api/os-auth/* instead.",
+        sunset: "2026-07-01",
+        migration: "/api/os-auth/register",
+      }))
+      return
+    }
+    logger.warn("Legacy app-auth endpoint hit — deprecated, sunset 2026-07-01, migrate to /api/os-auth/*", { path: url.pathname })
+    res.setHeader("Deprecation", "true")
+    res.setHeader("Sunset", "Tue, 01 Jul 2026 00:00:00 GMT")
+    res.setHeader("Link", '</api/os-auth/register>; rel="successor-version"')
     const isPost = req.method === "POST";
 
     const handleAppAuthRequest = async (body?: string) => {
@@ -7115,6 +7134,34 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
       }
     })();
     return;
+  }
+
+  // ── ELLIE-1267: Ask-user question routing ──
+  if (url.pathname.startsWith("/api/ask-user/")) {
+    const handled = await handleAskUserRoute(req, res, url.pathname, {
+      onQuestion: (q) => {
+        const attribution = `${q.agentName} asks`;
+        const optionsText = q.options?.length ? `\nOptions: ${q.options.join(", ")}` : "";
+        const message = `${attribution}: ${q.question}${optionsText}`;
+        const notifyCtx = getNotifyCtx();
+        notify(notifyCtx, {
+          event: "ask_user",
+          workItemId: q.workItemId,
+          telegramMessage: message,
+          gchatMessage: message,
+        }).catch(() => {});
+        broadcastToEllieChatClients({
+          type: "agent_question",
+          questionId: q.id,
+          agentName: q.agentName,
+          question: q.question,
+          options: q.options,
+          urgency: q.urgency,
+          workItemId: q.workItemId,
+        });
+      },
+    });
+    if (handled) return;
   }
 
   res.writeHead(404);

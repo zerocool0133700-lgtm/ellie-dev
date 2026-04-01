@@ -58,6 +58,7 @@ import {
 import { searchElastic } from "./elasticsearch.ts";
 import { log } from "./logger.ts";
 import { deliverResponse, markProcessing, clearProcessing } from "./ws-delivery.ts";
+import { getPendingQuestions, answerQuestion } from "./ask-user-queue.ts";
 import { runCoordinatorLoop, buildCoordinatorDeps, type CoordinatorPausedState } from "./coordinator.ts";
 import { capturePrompt } from "./api/agent-prompts.ts";
 import type { FoundationRegistry } from "./foundation-registry.ts";
@@ -266,6 +267,20 @@ async function _handleEllieChatMessage(
 
   await saveMessage("user", text, image ? { image_name: image.name, image_mime: image.mime_type } : {}, "ellie-chat", ecUserId, clientId, "user");
   broadcastExtension({ type: "message_in", channel: "ellie-chat", preview: text.substring(0, 200) });
+
+  // ELLIE-1267: Check if any dispatched agents are waiting for user answers
+  const pendingAgentQuestions = getPendingQuestions();
+  if (pendingAgentQuestions.length > 0) {
+    const oldest = pendingAgentQuestions[0];
+    logger.info("[ask-user] Routing reply to agent question", {
+      questionId: oldest.id.slice(0, 8),
+      agentName: oldest.agentName,
+      question: oldest.question.slice(0, 100),
+    });
+    answerQuestion(oldest.id, text);
+    deliverResponse(ws, { type: "response", text: `Answer sent to ${oldest.agentName}.`, agent: "system", ts: Date.now() });
+    return;
+  }
 
   // ELLIE-426: Resolve archetype profile from mode
   let channelProfile: import("./api/mode-profile.ts").ChannelContextProfile | null = null;
