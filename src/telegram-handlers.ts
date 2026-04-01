@@ -46,6 +46,7 @@ import {
 } from "./claude-cli.ts";
 import { withQueue } from "./message-queue.ts";
 import { checkMessageRate, checkVoiceRate } from "./rate-limiter.ts";
+import { getPendingQuestions, answerQuestion } from "./ask-user-queue.ts";
 import {
   saveMessage,
   sendResponse,
@@ -166,6 +167,19 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   // Rate limit check (ELLIE-228)
   const rateLimited = checkMessageRate(userId, "telegram");
   if (rateLimited) { await ctx.reply(rateLimited); return; }
+
+  // ELLIE-1267: Route reply to pending agent question if any
+  const pendingAgentQuestions = getPendingQuestions();
+  if (pendingAgentQuestions.length > 0) {
+    const oldest = pendingAgentQuestions[0];
+    logger.info("[ask-user] Routing Telegram reply to agent question", {
+      questionId: oldest.id.slice(0, 8),
+      agentName: oldest.agentName,
+    });
+    answerQuestion(oldest.id, text);
+    await ctx.reply(`Answer sent to ${oldest.agentName}.`);
+    return;
+  }
 
   setProcessingMessage(true);
   try {
