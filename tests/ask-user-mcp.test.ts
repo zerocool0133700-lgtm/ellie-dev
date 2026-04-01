@@ -155,3 +155,96 @@ describe("ELLIE-1267: ask-user HTTP endpoints", () => {
     expect(handled).toBe(false);
   });
 });
+
+// ── Task 6: Integration tests (ELLIE-1267) ──
+
+describe("ELLIE-1267: end-to-end question/answer flow", () => {
+  beforeEach(() => {
+    clearQuestionQueue();
+  });
+
+  test("full flow: enqueue → notify → answer → resolve", async () => {
+    // Simulate: agent asks question via queue
+    const id = enqueueQuestion("james", "Should I use REST or GraphQL?", {
+      workItemId: "ELLIE-500",
+      options: ["REST", "GraphQL"],
+    });
+
+    // Verify question is pending
+    const pending = getPendingQuestions();
+    expect(pending).toHaveLength(1);
+    expect(pending[0].agentName).toBe("james");
+    expect(pending[0].options).toEqual(["REST", "GraphQL"]);
+
+    // Get the promise before answering
+    const answerPromise = waitForAnswer(id)!;
+    expect(answerPromise).not.toBeNull();
+
+    // Simulate: user replies
+    const answered = answerQuestion(id, "Use REST");
+    expect(answered).toBe(true);
+
+    // Verify: agent receives the answer
+    const result = await answerPromise;
+    expect(result).toBe("Use REST");
+
+    // Verify: question is removed from queue
+    expect(getPendingQuestions()).toHaveLength(0);
+  });
+
+  test("concurrent questions from different agents", async () => {
+    const id1 = enqueueQuestion("james", "Q from James?");
+    const id2 = enqueueQuestion("kate", "Q from Kate?");
+
+    const p1 = waitForAnswer(id1)!;
+    const p2 = waitForAnswer(id2)!;
+
+    // Answer in reverse order
+    answerQuestion(id2, "Answer for Kate");
+    answerQuestion(id1, "Answer for James");
+
+    expect(await p1).toBe("Answer for James");
+    expect(await p2).toBe("Answer for Kate");
+  });
+
+  test("HTTP question endpoint enqueues and long-polls", async () => {
+    // Enqueue a question, then answer it while the HTTP handler waits
+    const questionBody = {
+      agent_name: "brian",
+      question: "Approve this refactor?",
+      work_item_id: "ELLIE-700",
+      urgency: "high",
+      options: ["Yes", "No"],
+    };
+
+    let notifiedQuestion: any = null;
+    const req = mockReq("POST", "/api/ask-user/question");
+    const res = mockRes();
+
+    // Start the long-polling handler
+    const handlerPromise = handleAskUserRoute(req, res, "/api/ask-user/question", {
+      readBody: async () => questionBody,
+      onQuestion: (q) => { notifiedQuestion = q; },
+    });
+
+    // Wait a tick for the question to be enqueued
+    await new Promise(r => setTimeout(r, 10));
+
+    // Verify question was enqueued and notification fired
+    expect(notifiedQuestion).not.toBeNull();
+    expect(notifiedQuestion.agentName).toBe("brian");
+    expect(notifiedQuestion.question).toBe("Approve this refactor?");
+
+    // Answer the question
+    const pending = getPendingQuestions();
+    expect(pending).toHaveLength(1);
+    answerQuestion(pending[0].id, "Yes, approved");
+
+    // Wait for handler to complete
+    await handlerPromise;
+
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res._body);
+    expect(body.answer).toBe("Yes, approved");
+  });
+});
