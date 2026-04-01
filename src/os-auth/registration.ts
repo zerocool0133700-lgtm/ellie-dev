@@ -49,7 +49,16 @@ export function validateRegistrationInput(input: RegistrationInput): ValidationR
     return { valid: false, error: "Password must be at least 8 characters" }
   }
 
-  const entity_type = (input.entity_type as OsAccount['entity_type']) || "user"
+  if (input.password.length > 128) {
+    return { valid: false, error: "Password must be no more than 128 characters" }
+  }
+
+  const VALID_ENTITY_TYPES: OsAccount['entity_type'][] = ['user', 'minor', 'org_service_account']
+  const rawEntityType = input.entity_type ?? "user"
+  if (typeof rawEntityType !== "string" || !VALID_ENTITY_TYPES.includes(rawEntityType as OsAccount['entity_type'])) {
+    return { valid: false, error: `Invalid entity_type — must be one of: ${VALID_ENTITY_TYPES.join(', ')}` }
+  }
+  const entity_type = rawEntityType as OsAccount['entity_type']
   const display_name = typeof input.display_name === "string" ? input.display_name.trim() || null : null
 
   return { valid: true, email, password: input.password, display_name, entity_type }
