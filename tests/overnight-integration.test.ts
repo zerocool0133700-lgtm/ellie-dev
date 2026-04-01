@@ -123,9 +123,7 @@ import {
 
 describe("startOvernightSession", () => {
   beforeEach(() => {
-    _resetForTesting();
-    // Reset running state by stopping any prior session
-    // _resetForTesting sets _running=false, so this is clean
+    _resetForTesting({ running: false });
   });
 
   afterEach(() => {
@@ -232,11 +230,11 @@ describe("startOvernightSession", () => {
 
 describe("stopOvernightSession", () => {
   beforeEach(() => {
-    _resetForTesting();
+    _resetForTesting({ running: false });
   });
 
   afterEach(() => {
-    _resetForTesting();
+    _resetForTesting({ running: false });
   });
 
   it("updates session record with stop reason and status", async () => {
@@ -778,8 +776,8 @@ describe("sanitizeLogs edge cases", () => {
 // ── Coordinator Integration ────────────────────────────────
 
 describe("coordinator start_overnight integration", () => {
-  beforeEach(() => _resetForTesting());
-  afterEach(() => _resetForTesting());
+  beforeEach(() => _resetForTesting({ running: false }));
+  afterEach(() => _resetForTesting({ running: false }));
 
   it("startOvernightSession accepts endTime and concurrency options", async () => {
     const insertPayloads: unknown[] = [];
@@ -867,8 +865,8 @@ describe("concurrency enforcement", () => {
 // ── End-to-End Flow (mocked) ──────────────────────────────
 
 describe("end-to-end overnight flow", () => {
-  beforeEach(() => _resetForTesting());
-  afterEach(() => _resetForTesting());
+  beforeEach(() => _resetForTesting({ running: false }));
+  afterEach(() => _resetForTesting({ running: false }));
 
   it("full lifecycle: start session → task completes → counters updated", async () => {
     const rpcCalls: Array<{ fn: string; params: unknown }> = [];
@@ -1065,11 +1063,10 @@ describe("end-to-end overnight flow", () => {
 // ── Session State Guards ───────────────────────────────────
 
 describe("session state guards", () => {
-  beforeEach(() => _resetForTesting());
-  afterEach(() => _resetForTesting());
+  beforeEach(() => _resetForTesting({ running: false }));
+  afterEach(() => _resetForTesting({ running: false }));
 
   it("isOvernightRunning returns false initially", () => {
-    // _resetForTesting sets _running = false
     expect(isOvernightRunning()).toBe(false);
   });
 
@@ -1115,8 +1112,8 @@ describe("session state guards", () => {
 // ── Edge Cases ─────────────────────────────────────────────
 
 describe("edge cases", () => {
-  beforeEach(() => _resetForTesting());
-  afterEach(() => _resetForTesting());
+  beforeEach(() => _resetForTesting({ running: false }));
+  afterEach(() => _resetForTesting({ running: false }));
 
   it("onTaskComplete bails gracefully when container state is missing (no sessionId)", async () => {
     const updates: Record<string, unknown>[] = [];

@@ -577,9 +577,12 @@ export function sanitizeLogs(logs: string): string {
 
 // ── Testing Exports ─────────────────────────────────────────
 
-export function _resetForTesting(): void {
-  _running = false;
-  _config = { endsAt: new Date(Date.now() + 3_600_000), concurrencyLimit: 2, sessionId: "test-session" };
+export function _resetForTesting(opts?: { running?: boolean }): void {
+  const running = opts?.running ?? true;
+  _running = running;
+  _config = running
+    ? { endsAt: new Date(Date.now() + 3_600_000), concurrencyLimit: 2, sessionId: "test-session" }
+    : null;
   _userActivityFlag = false;
   _runningContainers.clear();
   if (_pollTimer) {

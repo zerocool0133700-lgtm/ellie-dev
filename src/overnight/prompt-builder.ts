@@ -5,8 +5,8 @@
  */
 
 import { log } from "../logger.ts";
-import { getSkillsForCreature } from "../../ellie-forest/src/creature-skills.ts";
-import sql from "../../ellie-forest/src/db.ts";
+import { getSkillsForCreature } from "../../../ellie-forest/src/creature-skills.ts";
+import sql from "../../../ellie-forest/src/db.ts";
 
 const logger = log.child("overnight-prompt");
 
