@@ -144,6 +144,8 @@ function createStatefulSql(): any {
         row.refresh_token = vals[1]
         row.token_family = vals[2]
         row.audience = vals[3] // Already an array from sql.array()
+        // vals[4] is ip_address — the SQL template includes a ::inet cast in the
+        // text, but that's irrelevant for in-memory storage; we store the raw value.
         row.ip_address = vals[4]
         row.user_agent = vals[5]
         row.expires_at = vals[6]
@@ -224,6 +226,10 @@ function createStatefulSql(): any {
     }
 
     // ── UPDATE os_sessions SET revoked_at ────────────────────
+    // Discriminated by WHERE clause keyword (table-driven, not SQL-text-driven):
+    //   WHERE id = $1            → revoke single session (logout single)
+    //   WHERE token_family = $1  → revoke entire family (replay detection)
+    //   WHERE account_id = $1   → revoke all sessions for account (logout all)
     if (lower.startsWith("update") && table === "os_sessions") {
       // Revoke by ID: WHERE id = $1
       if (lower.includes("where id =")) {
@@ -286,6 +292,8 @@ function createStatefulSql(): any {
           return result
         }
         // SELECT ... FROM os_accounts WHERE id = $1
+        // Both /me (full account + memberships) and /refresh (account lookup) hit this branch
+        // with different column projections, but the mock returns the full row which covers both.
         if (lower.includes("where id")) {
           const id = vals[0]
           const rows = tables.os_accounts.filter((a: any) => a.id === id)
@@ -613,6 +621,9 @@ describe("OS Auth — Integration Tests", () => {
     })
 
     test("returns 429 after login threshold (10 requests)", async () => {
+      // All 10 requests return 401 (account doesn't exist) — intentional.
+      // The rate limiter counts every attempt regardless of auth outcome,
+      // so failed logins still consume quota and trigger the 429 on the 11th.
       for (let i = 0; i < 10; i++) {
         const res = mockRes()
         await handleOsAuthRoute(
@@ -901,25 +912,22 @@ async function registerVerifyLogin(
   deps: any,
   audience = "life",
 ): Promise<{ accessToken: string; refreshToken: string; accountId: string }> {
-  // Register
+  const email = "dave@example.com"
+
+  // Register — each test gets a fresh sql instance so this always yields 201
   const regRes = mockRes()
   await handleOsAuthRoute(
-    mockReq({ email: "dave@example.com", password: "securePass99", display_name: "Dave" }),
+    mockReq({ email, password: "securePass99", display_name: "Dave" }),
     regRes,
     "/api/os-auth/register",
     "POST",
     deps,
   )
-  if (regRes.getStatus() === 409) {
-    // Already registered in this sql instance — skip to login
-  } else {
-    expect(regRes.getStatus()).toBe(201)
-  }
+  expect(regRes.getStatus()).toBe(201)
 
-  const accountId = sql._tables.os_accounts[0].id
-
-  // Verify email (if still pending)
-  const acct = sql._tables.os_accounts[0]
+  // Look up the account by email rather than relying on array position
+  const acct = sql._tables.os_accounts.find((a: any) => a.email === email)
+  const accountId = acct.id
   if (acct.status === "pending_verification") {
     const verToken = sql._tables.os_email_verification_tokens[0]?.token
     const verRes = mockRes()
