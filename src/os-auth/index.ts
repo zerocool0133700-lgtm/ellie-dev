@@ -86,21 +86,21 @@ export async function handleOsAuthRoute(
   const match = parseOsAuthRoute(pathname, method)
   if (!match) return false
 
-  const ipAddress = req.headers?.["x-forwarded-for"] || req.headers?.["x-real-ip"] || null
+  const ipAddress = req.headers?.["x-forwarded-for"]?.split(",")[0]?.trim()
+    || req.headers?.["x-real-ip"] || null
   const userAgent = req.headers?.["user-agent"] || null
 
   // Apply rate limiting to mutation endpoints before any DB work
   if (match.handler === "register" || match.handler === "login" || match.handler === "refresh") {
     const rl = checkRateLimit(ipAddress, match.handler)
     if (!rl.allowed) {
+      if (typeof res.setHeader === "function") {
+        res.setHeader("Retry-After", String(rl.retryAfter))
+      }
       res.status(429).json({
         error: "Too many requests",
         retryAfter: rl.retryAfter,
       })
-      // Set Retry-After header
-      if (typeof res.setHeader === "function") {
-        res.setHeader("Retry-After", String(rl.retryAfter))
-      }
       return true
     }
   }

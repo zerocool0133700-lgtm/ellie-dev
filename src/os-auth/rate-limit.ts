@@ -54,6 +54,11 @@ export function checkRateLimit(
   // Retrieve existing timestamps, pruning anything outside the window
   const timestamps = (requestLog.get(key) ?? []).filter(ts => ts > windowStart)
 
+  // Evict stale keys to prevent unbounded map growth from scanning traffic
+  if (timestamps.length === 0 && requestLog.has(key)) {
+    requestLog.delete(key)
+  }
+
   if (timestamps.length >= maxRequests) {
     // Oldest timestamp in window — time until it falls out
     const oldestInWindow = timestamps[0]
