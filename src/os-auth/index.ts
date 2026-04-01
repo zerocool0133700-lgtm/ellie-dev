@@ -75,6 +75,7 @@ interface OsAuthDeps {
 /**
  * Main route handler — call from http-routes.ts.
  * Returns true if the route was handled, false if not an os-auth route.
+ * @param query — optional URLSearchParams forwarded from the incoming request URL
  */
 export async function handleOsAuthRoute(
   req: ApiRequest & { headers?: Record<string, string> },
@@ -82,6 +83,7 @@ export async function handleOsAuthRoute(
   pathname: string,
   method: string,
   deps: OsAuthDeps,
+  query?: URLSearchParams,
 ): Promise<boolean> {
   const match = parseOsAuthRoute(pathname, method)
   if (!match) return false
@@ -247,10 +249,18 @@ export async function handleOsAuthRoute(
           return true
         }
 
+        // Optional ?audience= query param — if provided, verify against that audience only
+        const audienceParam = query?.get("audience") ?? null
+        if (audienceParam !== null && !(OS_AUTH_AUDIENCES as readonly string[]).includes(audienceParam)) {
+          res.status(400).json({ error: `Invalid audience. Must be one of: ${OS_AUTH_AUDIENCES.join(", ")}` })
+          return true
+        }
+
         const keys = await getSigningKeys(deps)
-        // Try all common audiences
+        // If audience param given, try only that audience; otherwise try all
+        const audiencesToTry = audienceParam ? [audienceParam] : OS_AUTH_AUDIENCES
         let payload: OsAccessTokenPayload | null = null
-        for (const aud of OS_AUTH_AUDIENCES) {
+        for (const aud of audiencesToTry) {
           payload = verifyAccessToken(token, keys.publicKey, aud)
           if (payload) break
         }

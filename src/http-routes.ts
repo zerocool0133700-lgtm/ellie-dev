@@ -4407,6 +4407,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           mockReq, mockRes,
           url.pathname, req.method || "GET",
           { sql, retrieveSecret, storeSecret },
+          url.searchParams,
         );
 
         if (!handled) {
