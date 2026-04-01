@@ -18,9 +18,12 @@ mock.module("../src/os-auth/audit", () => ({
 
 import { validateLoginInput, loginWithPassword } from "../src/os-auth/login"
 
-// Minimal tagged-template SQL mock that returns canned rows
+// Minimal tagged-template SQL mock that returns canned rows.
+// Includes a begin() shim so loginWithPassword's transaction wrapper doesn't throw.
 function mockSql(rows: unknown[]) {
   const fn = (_strings: TemplateStringsArray, ..._values: unknown[]) => rows
+  // Simulate sql.begin() by running the callback with a no-op transaction handle
+  fn.begin = async (cb: (tx: any) => unknown) => cb(fn)
   return fn as any
 }
 

@@ -136,14 +136,19 @@ export async function loginWithPassword(
     memberships: membershipMap,
   })
 
-  // Create refresh token + session
+  // Create refresh token + session.
+  // Wrapped in a transaction so that if the INSERT fails the caller gets a clean error
+  // and no partial state exists. (Single write, but consistent with the OS Auth hardening
+  // goal of explicit transaction boundaries on all session writes.)
   const refreshToken = generateRefreshToken()
-  await createSession(sql, {
-    accountId: account.id,
-    refreshToken,
-    audience: [input.audience],
-    ipAddress: opts?.ipAddress,
-    userAgent: opts?.userAgent,
+  await sql.begin(async (tx) => {
+    await createSession(tx, {
+      accountId: account.id,
+      refreshToken,
+      audience: [input.audience],
+      ipAddress: opts?.ipAddress,
+      userAgent: opts?.userAgent,
+    })
   })
 
   await writeAudit(sql, {

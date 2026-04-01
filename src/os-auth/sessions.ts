@@ -7,7 +7,7 @@
  */
 
 import { randomUUID } from "crypto"
-import type { Sql } from "postgres"
+import type { Sql, TransactionSql } from "postgres"
 import type { OsSession } from "./schema"
 import { generateRefreshToken } from "./tokens"
 import { writeAudit, AUDIT_EVENTS } from "./audit"
@@ -56,9 +56,9 @@ export function isSessionRevoked(session: Pick<SessionLike, 'revoked_at'>): bool
 
 // ── DB Operations ───────────────────────────────────────────
 
-/** Create a new session row in the database. */
+/** Create a new session row in the database. Accepts a plain connection or a transaction handle. */
 export async function createSession(
-  sql: Sql,
+  sql: Sql | TransactionSql,
   input: NewSessionInput,
 ): Promise<OsSession> {
   const s = buildNewSession(input)
@@ -73,7 +73,7 @@ export async function createSession(
 
 /** Look up a session by refresh token. */
 export async function findSessionByRefreshToken(
-  sql: Sql,
+  sql: Sql | TransactionSql,
   refreshToken: string,
 ): Promise<OsSession | null> {
   const [row] = await sql<OsSession[]>`
@@ -119,27 +119,30 @@ export async function rotateRefreshToken(
     return { session: null, replayDetected: false }
   }
 
-  // Revoke the old token
-  await sql`
-    UPDATE os_sessions SET revoked_at = now() WHERE id = ${oldSession.id}
-  `
-
-  // Issue a new token in the same family
+  // Atomically revoke the old token and issue a new one in the same family.
+  // If the INSERT fails after the UPDATE, the transaction rolls back and the
+  // old token remains valid — no broken session state.
   const newRefreshToken = generateRefreshToken()
-  const newSession = await createSession(sql, {
-    accountId: oldSession.account_id,
-    refreshToken: newRefreshToken,
-    audience: oldSession.audience,
-    tokenFamily: oldSession.token_family,
-    ipAddress: opts?.ipAddress,
-    userAgent: opts?.userAgent,
+  const newSession = await sql.begin(async (tx) => {
+    await tx`
+      UPDATE os_sessions SET revoked_at = now() WHERE id = ${oldSession.id}
+    `
+
+    return createSession(tx, {
+      accountId: oldSession.account_id,
+      refreshToken: newRefreshToken,
+      audience: oldSession.audience,
+      tokenFamily: oldSession.token_family,
+      ipAddress: opts?.ipAddress,
+      userAgent: opts?.userAgent,
+    })
   })
 
   return { session: newSession, replayDetected: false }
 }
 
 /** Revoke all sessions in a token family. */
-export async function revokeFamilySessions(sql: Sql, tokenFamily: string): Promise<number> {
+export async function revokeFamilySessions(sql: Sql | TransactionSql, tokenFamily: string): Promise<number> {
   const result = await sql`
     UPDATE os_sessions SET revoked_at = now()
     WHERE token_family = ${tokenFamily} AND revoked_at IS NULL
@@ -148,7 +151,7 @@ export async function revokeFamilySessions(sql: Sql, tokenFamily: string): Promi
 }
 
 /** Revoke all sessions for an account (e.g., on logout-everywhere or password change). */
-export async function revokeAllAccountSessions(sql: Sql, accountId: string): Promise<number> {
+export async function revokeAllAccountSessions(sql: Sql | TransactionSql, accountId: string): Promise<number> {
   const result = await sql`
     UPDATE os_sessions SET revoked_at = now()
     WHERE account_id = ${accountId} AND revoked_at IS NULL
