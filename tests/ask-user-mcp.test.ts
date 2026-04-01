@@ -80,3 +80,78 @@ describe("ELLIE-1267: ask-user question queue", () => {
     expect(q.options).toEqual(["Yes", "No", "Needs refactor"]);
   });
 });
+
+// ── Task 2: HTTP endpoint tests ──
+
+import {
+  handleAskUserRoute,
+} from "../src/api/routes/ask-user";
+
+function mockReq(method: string, url: string): any {
+  return {
+    method,
+    url,
+    headers: { "content-type": "application/json" },
+  };
+}
+
+function mockRes(): any {
+  const res: any = {
+    statusCode: 200,
+    _headers: {} as Record<string, string>,
+    _body: "",
+    setHeader(k: string, v: string) { res._headers[k] = v; },
+    writeHead(code: number, headers?: Record<string, string>) {
+      res.statusCode = code;
+      if (headers) Object.assign(res._headers, headers);
+    },
+    end(body?: string) { res._body = body || ""; res._ended = true; },
+    _ended: false,
+  };
+  return res;
+}
+
+describe("ELLIE-1267: ask-user HTTP endpoints", () => {
+  beforeEach(() => {
+    clearQuestionQueue();
+  });
+
+  test("GET /api/ask-user/pending returns empty list initially", async () => {
+    const req = mockReq("GET", "/api/ask-user/pending");
+    const res = mockRes();
+    const handled = await handleAskUserRoute(req, res, "/api/ask-user/pending");
+    expect(handled).toBe(true);
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(res._body);
+    expect(body.questions).toEqual([]);
+  });
+
+  test("POST /api/ask-user/answer/:id answers a pending question", async () => {
+    const id = enqueueQuestion("james", "Test question?");
+    const waitPromise = waitForAnswer(id);
+
+    const req = mockReq("POST", `/api/ask-user/answer/${id}`);
+    const res = mockRes();
+    const handled = await handleAskUserRoute(req, res, `/api/ask-user/answer/${id}`, { readBody: async () => ({ answer: "Test answer" }) });
+    expect(handled).toBe(true);
+    expect(res.statusCode).toBe(200);
+
+    const answer = await waitPromise;
+    expect(answer).toBe("Test answer");
+  });
+
+  test("POST /api/ask-user/answer/:id returns 404 for unknown question", async () => {
+    const req = mockReq("POST", "/api/ask-user/answer/nonexistent");
+    const res = mockRes();
+    const handled = await handleAskUserRoute(req, res, "/api/ask-user/answer/nonexistent", { readBody: async () => ({ answer: "x" }) });
+    expect(handled).toBe(true);
+    expect(res.statusCode).toBe(404);
+  });
+
+  test("unmatched route returns false", async () => {
+    const req = mockReq("GET", "/api/something-else");
+    const res = mockRes();
+    const handled = await handleAskUserRoute(req, res, "/api/something-else");
+    expect(handled).toBe(false);
+  });
+});
