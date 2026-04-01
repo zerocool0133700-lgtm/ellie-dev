@@ -6,7 +6,22 @@
  */
 
 import type { Sql } from "postgres"
-import type { OsProductMembership } from "./schema"
+import type { OsProductMembership, OsAccessTokenPayload } from "./schema"
+
+/** Build a membership map from raw membership rows (for JWT payload). */
+export function buildMembershipMap(
+  memberships: { product: string; roles: string[]; entitlements: Record<string, unknown>; org_id: string | null }[],
+): OsAccessTokenPayload['memberships'] {
+  const map: OsAccessTokenPayload['memberships'] = {}
+  for (const m of memberships) {
+    map[m.product] = {
+      roles: m.roles,
+      entitlements: m.entitlements,
+      ...(m.org_id ? { org_id: m.org_id } : {}),
+    }
+  }
+  return map
+}
 
 /** Get all active memberships for an account. */
 export async function getAccountMemberships(

@@ -6,11 +6,12 @@
  */
 
 import type { Sql } from "postgres"
-import type { OsAccount, OsAccessTokenPayload } from "./schema"
+import type { OsAccount } from "./schema"
 import { verifyPassword } from "./passwords"
 import { signAccessToken, generateRefreshToken } from "./tokens"
 import { createSession } from "./sessions"
 import { writeAudit, AUDIT_EVENTS } from "./audit"
+import { getAccountMemberships, buildMembershipMap } from "./memberships"
 import { log } from "../logger.ts"
 
 const logger = log.child("os-auth-login")
@@ -110,20 +111,8 @@ export async function loginWithPassword(
   }
 
   // Load product memberships for token
-  const memberships = await sql<{ product: string; roles: string[]; entitlements: Record<string, unknown>; org_id: string | null }[]>`
-    SELECT product, roles, entitlements, org_id
-    FROM os_product_memberships
-    WHERE account_id = ${account.id} AND status = 'active'
-  `
-
-  const membershipMap: OsAccessTokenPayload['memberships'] = {}
-  for (const m of memberships) {
-    membershipMap[m.product] = {
-      roles: m.roles,
-      entitlements: m.entitlements,
-      ...(m.org_id ? { org_id: m.org_id } : {}),
-    }
-  }
+  const memberships = await getAccountMemberships(sql, account.id)
+  const membershipMap = buildMembershipMap(memberships)
 
   // Sign access token
   const accessToken = await signAccessToken({

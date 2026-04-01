@@ -21,7 +21,7 @@ import { validateLoginInput, loginWithPassword } from "./login"
 import { rotateRefreshToken, revokeAllAccountSessions, findSessionByRefreshToken } from "./sessions"
 import { signAccessToken, verifyAccessToken } from "./tokens"
 import { getSigningKeys, publicKeyToJwk, buildJwksResponse, _resetKeyCache } from "./keys"
-import { getAccountMemberships } from "./memberships"
+import { getAccountMemberships, buildMembershipMap } from "./memberships"
 import { writeAudit, AUDIT_EVENTS } from "./audit"
 import type { OsAccessTokenPayload } from "./schema"
 import { checkRateLimit, _resetRateLimits } from "./rate-limit"
@@ -207,14 +207,7 @@ export async function handleOsAuthRoute(
 
         // Load memberships
         const memberships = await getAccountMemberships(deps.sql, account.id)
-        const membershipMap: OsAccessTokenPayload['memberships'] = {}
-        for (const m of memberships) {
-          membershipMap[m.product] = {
-            roles: m.roles,
-            entitlements: m.entitlements,
-            ...(m.org_id ? { org_id: m.org_id } : {}),
-          }
-        }
+        const membershipMap = buildMembershipMap(memberships)
 
         const audience = newSession.audience[0] || "life"
         const accessToken = await signAccessToken({
