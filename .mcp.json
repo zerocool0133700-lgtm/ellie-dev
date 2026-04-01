@@ -14,11 +14,24 @@
     "plane": {
       "type": "stdio",
       "command": "uvx",
-      "args": ["plane-mcp-server", "stdio"],
+      "args": [
+        "plane-mcp-server",
+        "stdio"
+      ],
       "env": {
         "PLANE_API_KEY": "plane_api_72989c376e944a6c8e036e58dbf32db4",
         "PLANE_WORKSPACE_SLUG": "evelife",
         "PLANE_BASE_URL": "https://plane.ellie-labs.dev"
+      }
+    },
+    "ask-user": {
+      "type": "stdio",
+      "command": "bun",
+      "args": [
+        "/home/ellie/ellie-dev/mcp-ask-user.ts"
+      ],
+      "env": {
+        "RELAY_URL": "http://localhost:3001"
       }
     }
   }
