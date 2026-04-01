@@ -93,6 +93,9 @@ export async function rotateRefreshToken(
   oldRefreshToken: string,
   opts?: { ipAddress?: string; userAgent?: string },
 ): Promise<{ session: OsSession; replayDetected: false } | { session: null; replayDetected: boolean }> {
+  // Note: The SELECT is outside the transaction. A concurrent refresh with the same
+  // token could race here (TOCTOU). Replay detection catches this after the fact, but
+  // a future hardening pass could use SELECT ... FOR UPDATE inside the transaction.
   const oldSession = await findSessionByRefreshToken(sql, oldRefreshToken)
 
   if (!oldSession) {
