@@ -10,7 +10,7 @@
  *   refresh  : 30 requests / 15 min / IP
  */
 
-export type RateLimitedEndpoint = "register" | "login" | "refresh"
+export type RateLimitedEndpoint = "register" | "login" | "refresh" | "verify-email"
 
 export interface RateLimitConfig {
   maxRequests: number
@@ -25,9 +25,10 @@ export interface RateLimitResult {
 
 // Default per-endpoint configs
 export const RATE_LIMIT_CONFIGS: Record<RateLimitedEndpoint, RateLimitConfig> = {
-  register: { maxRequests: 5,  windowMs: 15 * 60 * 1000 },
-  login:    { maxRequests: 10, windowMs: 15 * 60 * 1000 },
-  refresh:  { maxRequests: 30, windowMs: 15 * 60 * 1000 },
+  register:       { maxRequests: 5,  windowMs: 15 * 60 * 1000 },
+  login:          { maxRequests: 10, windowMs: 15 * 60 * 1000 },
+  refresh:        { maxRequests: 30, windowMs: 15 * 60 * 1000 },
+  "verify-email": { maxRequests: 10, windowMs: 15 * 60 * 1000 },
 }
 
 // Map of "<endpoint>:<ip>" → sorted list of request timestamps (ms)

@@ -30,6 +30,15 @@ describe("os-auth route parsing", () => {
     expect(match).toEqual({ handler: "jwks", method: "GET" })
   })
 
+  test("matches POST /api/os-auth/verify-email", () => {
+    const match = parseOsAuthRoute("/api/os-auth/verify-email", "POST")
+    expect(match).toEqual({ handler: "verify-email", method: "POST" })
+  })
+
+  test("rejects GET /api/os-auth/verify-email (wrong method)", () => {
+    expect(parseOsAuthRoute("/api/os-auth/verify-email", "GET")).toBeNull()
+  })
+
   test("returns null for non-matching routes", () => {
     expect(parseOsAuthRoute("/api/bridge/read", "POST")).toBeNull()
     expect(parseOsAuthRoute("/api/os-auth/register", "GET")).toBeNull()

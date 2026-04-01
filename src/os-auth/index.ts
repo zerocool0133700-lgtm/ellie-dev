@@ -10,14 +10,16 @@
  *   POST /api/os-auth/login     — email/password login
  *   POST /api/os-auth/refresh   — rotate refresh token
  *   GET  /api/os-auth/me        — get current account from access token
- *   POST /api/os-auth/logout    — revoke session
- *   GET  /.well-known/jwks.json — public key for token verification
+ *   POST /api/os-auth/logout        — revoke session
+ *   POST /api/os-auth/verify-email  — consume email verification token
+ *   GET  /.well-known/jwks.json     — public key for token verification
  */
 
 import type { Sql } from "postgres"
 import type { ApiRequest, ApiResponse } from "../api/types.ts"
-import { validateRegistrationInput, registerAccount } from "./registration"
+import { validateRegistrationInput, registerAccount, verifyAccountEmail } from "./registration"
 import { validateLoginInput, loginWithPassword } from "./login"
+import { consumeVerificationToken } from "./verification"
 import { rotateRefreshToken, revokeAllAccountSessions, findSessionByRefreshToken } from "./sessions"
 import { signAccessToken, verifyAccessToken } from "./tokens"
 import { getSigningKeys, publicKeyToJwk, buildJwksResponse, _resetKeyCache } from "./keys"
@@ -35,7 +37,7 @@ export const OS_AUTH_AUDIENCES = ["life", "learn"] as const
 // ── Route Parsing (pure) ────────────────────────────────────
 
 export interface OsAuthRouteMatch {
-  handler: "register" | "login" | "refresh" | "me" | "logout" | "jwks"
+  handler: "register" | "login" | "refresh" | "me" | "logout" | "jwks" | "verify-email"
   method: string
 }
 
@@ -59,6 +61,8 @@ export function parseOsAuthRoute(pathname: string, method: string): OsAuthRouteM
       return method === "GET" ? { handler: "me", method } : null
     case "logout":
       return method === "POST" ? { handler: "logout", method } : null
+    case "verify-email":
+      return method === "POST" ? { handler: "verify-email", method } : null
     default:
       return null
   }
@@ -93,7 +97,7 @@ export async function handleOsAuthRoute(
   const userAgent = req.headers?.["user-agent"] || null
 
   // Apply rate limiting to mutation endpoints before any DB work
-  if (match.handler === "register" || match.handler === "login" || match.handler === "refresh") {
+  if (match.handler === "register" || match.handler === "login" || match.handler === "refresh" || match.handler === "verify-email") {
     const rl = checkRateLimit(ipAddress, match.handler)
     if (!rl.allowed) {
       if (typeof res.setHeader === "function") {
@@ -332,6 +336,34 @@ export async function handleOsAuthRoute(
         } else {
           res.status(400).json({ error: "refresh_token or all:true is required" })
         }
+        return true
+      }
+
+      case "verify-email": {
+        const token = typeof req.body?.token === "string" ? req.body.token : null
+        if (!token) {
+          res.status(400).json({ error: "token is required" })
+          return true
+        }
+
+        const result = await consumeVerificationToken(deps.sql, token)
+        if (!result.ok) {
+          res.status(400).json({ error: result.error })
+          return true
+        }
+
+        // Activate the account
+        const activated = await verifyAccountEmail(deps.sql, result.accountId, {
+          ipAddress: ipAddress ?? undefined,
+        })
+
+        if (!activated) {
+          // Account was already active or in a non-pending state
+          res.status(400).json({ error: "Account is not pending verification" })
+          return true
+        }
+
+        res.json({ ok: true })
         return true
       }
     }

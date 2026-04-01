@@ -9,6 +9,7 @@ import type { Sql } from "postgres"
 import type { OsAccount } from "./schema"
 import { hashPassword } from "./passwords"
 import { writeAudit, AUDIT_EVENTS } from "./audit"
+import { createVerificationToken } from "./verification"
 import { log } from "../logger.ts"
 
 const logger = log.child("os-auth-registration")
@@ -69,6 +70,7 @@ export function validateRegistrationInput(input: RegistrationInput): ValidationR
 interface RegisterResult {
   ok: boolean
   account?: OsAccount
+  verificationToken?: string
   error?: string
 }
 
@@ -85,9 +87,10 @@ export async function registerAccount(
   const passwordHash = await hashPassword(input.password)
 
   let account: OsAccount
+  let verificationToken: string
 
   try {
-    account = await sql.begin(async (tx) => {
+    const txResult = await sql.begin(async (tx) => {
       const [created] = await tx<OsAccount[]>`
         INSERT INTO os_accounts (email, display_name, password_hash, entity_type, status)
         VALUES (${input.email}, ${input.display_name ?? null}, ${passwordHash},
@@ -101,8 +104,14 @@ export async function registerAccount(
         VALUES (${created.id}, 'email_password')
       `
 
-      return created
+      // Create email verification token — inside transaction so it rolls back with the account
+      const token = await createVerificationToken(tx as any, created.id)
+
+      return { account: created, verificationToken: token }
     })
+
+    account = txResult.account
+    verificationToken = txResult.verificationToken
   } catch (err: any) {
     if (err?.code === "23505") { // unique_violation
       return { ok: false, error: "An account with this email already exists" }
@@ -119,8 +128,14 @@ export async function registerAccount(
     metadata: { method: "email_password", entity_type: input.entity_type ?? "user" },
   })
 
-  logger.info("Account registered", { accountId: account.id, email: input.email })
-  return { ok: true, account }
+  // Log the verification URL (email sending is a future concern)
+  logger.info("Account registered — verification token created", {
+    accountId: account.id,
+    email: input.email,
+    verifyUrl: `/api/os-auth/verify-email?token=${verificationToken}`,
+  })
+
+  return { ok: true, account, verificationToken }
 }
 
 /**
