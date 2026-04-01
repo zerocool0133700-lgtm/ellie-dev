@@ -84,36 +84,43 @@ export async function registerAccount(
 ): Promise<RegisterResult> {
   const passwordHash = await hashPassword(input.password)
 
+  let account: OsAccount
+
   try {
-    const [account] = await sql<OsAccount[]>`
-      INSERT INTO os_accounts (email, display_name, password_hash, entity_type, status)
-      VALUES (${input.email}, ${input.display_name ?? null}, ${passwordHash},
-              ${input.entity_type ?? 'user'}, 'pending_verification')
-      RETURNING *
-    `
+    account = await sql.begin(async (tx) => {
+      const [created] = await tx<OsAccount[]>`
+        INSERT INTO os_accounts (email, display_name, password_hash, entity_type, status)
+        VALUES (${input.email}, ${input.display_name ?? null}, ${passwordHash},
+                ${input.entity_type ?? 'user'}, 'pending_verification')
+        RETURNING *
+      `
 
-    // Record auth method
-    await sql`
-      INSERT INTO os_auth_methods (account_id, method)
-      VALUES (${account.id}, 'email_password')
-    `
+      // Record auth method — inside transaction so both rows are atomic
+      await tx`
+        INSERT INTO os_auth_methods (account_id, method)
+        VALUES (${created.id}, 'email_password')
+      `
 
-    await writeAudit(sql, {
-      account_id: account.id,
-      event_type: AUDIT_EVENTS.ACCOUNT_CREATE,
-      ip_address: opts?.ipAddress,
-      user_agent: opts?.userAgent,
-      metadata: { method: "email_password", entity_type: input.entity_type ?? "user" },
+      return created
     })
-
-    logger.info("Account registered", { accountId: account.id, email: input.email })
-    return { ok: true, account }
   } catch (err: any) {
     if (err?.code === "23505") { // unique_violation
       return { ok: false, error: "An account with this email already exists" }
     }
     throw err
   }
+
+  // Audit write is outside the transaction — audit failure does NOT roll back registration
+  await writeAudit(sql, {
+    account_id: account.id,
+    event_type: AUDIT_EVENTS.ACCOUNT_CREATE,
+    ip_address: opts?.ipAddress,
+    user_agent: opts?.userAgent,
+    metadata: { method: "email_password", entity_type: input.entity_type ?? "user" },
+  })
+
+  logger.info("Account registered", { accountId: account.id, email: input.email })
+  return { ok: true, account }
 }
 
 /**
