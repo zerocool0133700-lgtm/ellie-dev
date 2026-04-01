@@ -36,6 +36,37 @@ interface BufferedMessage {
 
 const _memoryBuffer = new Map<string, BufferedMessage[]>();
 
+// Periodic sweep: evict expired entries every 5 minutes to prevent unbounded growth
+const SWEEP_INTERVAL_MS = 5 * 60_000;
+let _sweepTimer: ReturnType<typeof setInterval> | null = null;
+
+function startBufferSweep(): void {
+  if (_sweepTimer) return;
+  _sweepTimer = setInterval(() => {
+    const now = Date.now();
+    for (const [userId, buf] of _memoryBuffer) {
+      const fresh = buf.filter(m => now - m.bufferedAt < BUFFER_TTL_MS);
+      if (fresh.length === 0) {
+        _memoryBuffer.delete(userId);
+      } else if (fresh.length < buf.length) {
+        _memoryBuffer.set(userId, fresh);
+      }
+    }
+  }, SWEEP_INTERVAL_MS);
+  // Don't prevent process exit
+  if (_sweepTimer && typeof _sweepTimer === "object" && "unref" in _sweepTimer) {
+    (_sweepTimer as NodeJS.Timeout).unref();
+  }
+}
+
+// Start sweep on module load
+startBufferSweep();
+
+/** Exposed for testing — get current buffer size. */
+export function _getBufferSizeForTesting(): number {
+  return _memoryBuffer.size;
+}
+
 function pushToMemoryBuffer(userId: string, payload: Record<string, unknown>): void {
   if (!userId) return;
   let buf = _memoryBuffer.get(userId);
@@ -93,8 +124,8 @@ export function clearProcessing(userId: string) {
 export function getProcessingState(userId: string): { startedAt: number; text: string } | null {
   const state = processingUsers.get(userId);
   if (!state) return null;
-  // Auto-expire after 10 minutes (safety net)
-  if (Date.now() - state.startedAt > 600_000) {
+  // Auto-expire after 15 minutes (safety net)
+  if (Date.now() - state.startedAt > 900_000) {
     processingUsers.delete(userId);
     return null;
   }

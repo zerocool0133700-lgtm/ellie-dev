@@ -10,6 +10,16 @@
         "BRIDGE_KEY": "bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e740f6577a",
         "BRIDGE_URL": "http://localhost:3001/api/bridge"
       }
+    },
+    "plane": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["plane-mcp-server", "stdio"],
+      "env": {
+        "PLANE_API_KEY": "plane_api_72989c376e944a6c8e036e58dbf32db4",
+        "PLANE_WORKSPACE_SLUG": "evelife",
+        "PLANE_BASE_URL": "https://plane.ellie-labs.dev"
+      }
     }
   }
 }

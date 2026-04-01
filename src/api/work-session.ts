@@ -42,6 +42,7 @@ import {
 } from "../work-trail-writer.ts";
 import { verifyDispatch } from "../dispatch-verifier.ts";
 import { journalDispatchStart, journalDispatchEnd } from "../dispatch-journal.ts";
+import { resilientTask } from "../resilient-task.ts";
 import { guardWorkSession, resolveRbacEntityId, formatDenialMessage } from "../permission-guard.ts";
 import { logCheck } from "../permission-audit.ts";
 import { getTrackedMemoryIds, clearTrackedMemoryIds } from "../dispatch-memory-tracker.ts";
@@ -218,14 +219,16 @@ export async function startWorkSession(req: ApiRequest, res: ApiResponse, bot: B
     // ELLIE-531: Create work trail document (fire-and-forget, non-fatal)
     writeWorkTrailStart(work_item_id, title, agent).catch(e => logRiverWriteFailure("writeWorkTrailStart", e));
 
-    // ELLIE-565: Log dispatch start to daily journal (fire-and-forget)
-    journalDispatchStart({
-      workItemId: work_item_id,
-      title,
-      agent,
-      sessionId: tree.id,
-      pid: process.pid,
-    }).catch(e => logRiverWriteFailure("journalDispatchStart", e));
+    // ELLIE-565: Log dispatch start to daily journal (resilient — retries on failure)
+    resilientTask("journalDispatchStart", "critical", () =>
+      journalDispatchStart({
+        workItemId: work_item_id,
+        title,
+        agent,
+        sessionId: tree.id,
+        pid: process.pid,
+      }),
+    );
 
     // ELLIE-566: Update active tickets dashboard (fire-and-forget)
     dashboardOnStart({
@@ -564,14 +567,16 @@ export async function completeWorkSession(req: ApiRequest, res: ApiResponse, bot
 
     // ELLIE-565 + ELLIE-632: Log dispatch end with tracked Forest memory IDs
     const memoryIds = getTrackedMemoryIds(work_item_id);
-    journalDispatchEnd({
-      workItemId: work_item_id,
-      agent,
-      outcome: "completed",
-      summary,
-      memoryIds: memoryIds.length > 0 ? memoryIds : undefined,
-    }).then(() => clearTrackedMemoryIds(work_item_id))
-      .catch(e => logRiverWriteFailure("journalDispatchEnd/complete", e));
+    resilientTask("journalDispatchEnd/complete", "critical", async () => {
+      await journalDispatchEnd({
+        workItemId: work_item_id,
+        agent,
+        outcome: "completed",
+        summary,
+        memoryIds: memoryIds.length > 0 ? memoryIds : undefined,
+      });
+      clearTrackedMemoryIds(work_item_id);
+    });
 
     // ELLIE-566: Update active tickets dashboard (fire-and-forget)
     dashboardOnComplete({
@@ -825,14 +830,16 @@ export async function pauseWorkSession(req: ApiRequest, res: ApiResponse, bot: B
 
     // ELLIE-565 + ELLIE-632: Log dispatch pause with tracked Forest memory IDs
     const pauseMemoryIds = getTrackedMemoryIds(work_item_id);
-    journalDispatchEnd({
-      workItemId: work_item_id,
-      agent,
-      outcome: "paused",
-      summary: reason,
-      memoryIds: pauseMemoryIds.length > 0 ? pauseMemoryIds : undefined,
-    }).then(() => clearTrackedMemoryIds(work_item_id))
-      .catch(e => logRiverWriteFailure("journalDispatchEnd/pause", e));
+    resilientTask("journalDispatchEnd/pause", "critical", async () => {
+      await journalDispatchEnd({
+        workItemId: work_item_id,
+        agent,
+        outcome: "paused",
+        summary: reason,
+        memoryIds: pauseMemoryIds.length > 0 ? pauseMemoryIds : undefined,
+      });
+      clearTrackedMemoryIds(work_item_id);
+    });
 
     // ELLIE-566: Update active tickets dashboard (fire-and-forget)
     dashboardOnPause(work_item_id).catch(e => logRiverWriteFailure("dashboardOnPause", e));

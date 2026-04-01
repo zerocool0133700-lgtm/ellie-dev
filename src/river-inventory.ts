@@ -51,6 +51,7 @@ export const RIVER_DOC_REGISTRY: { key: string; path: string }[] = [
   { key: "playbook-commands", path: "prompts/protocols/playbook-commands.md" },
   { key: "work-commands", path: "prompts/protocols/work-commands.md" },
   { key: "planning-mode", path: "prompts/protocols/planning-mode.md" },
+  { key: "commitment-framework", path: "frameworks/commitment-framework.md" },
 ];
 
 /** Which agents consume each River doc. */
@@ -65,6 +66,7 @@ export const DOC_AGENT_MAP: Record<string, string[]> = {
   "playbook-commands": ["general"],
   "work-commands": ["general", "dev"],
   "planning-mode": ["general", "dev", "research", "strategy"],
+  "commitment-framework": ["general"],
 };
 
 // ── Inventory Builder ───────────────────────────────────────

@@ -236,8 +236,8 @@ None
     });
 
     const result = await invokeFormation(deps, "test", "Review this code");
-    // Should still succeed — failed agents are recorded but don't stop the formation
-    expect(result.success).toBe(true);
+    // When all roster agents fail, formation is marked as failed (even if synthesis runs)
+    expect(result.success).toBe(false);
     expect(result.agentOutputs.some(o => o.content.includes("Agent error"))).toBe(true);
   });
 });

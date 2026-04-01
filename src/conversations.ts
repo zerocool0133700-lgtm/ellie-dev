@@ -673,13 +673,14 @@ export async function getConversationById(
 ): Promise<{
   conversation: any;
   messages: any[];
+  memories: any[];
   total: number;
 } | null> {
   const limit = Math.min(opts?.limit ?? 50, 200);
   const offset = opts?.offset ?? 0;
 
   try {
-    const [convoResult, msgsResult, countResult] = await Promise.all([
+    const [convoResult, msgsResult, countResult, memoriesResult] = await Promise.all([
       supabase
         .from("conversations")
         .select("id, channel, agent, status, summary, message_count, started_at, ended_at")
@@ -695,6 +696,11 @@ export async function getConversationById(
         .from("messages")
         .select("id", { count: "exact", head: true })
         .eq("conversation_id", conversationId),
+      supabase
+        .from("memory")
+        .select("id, type, content, created_at")
+        .eq("conversation_id", conversationId)
+        .order("created_at", { ascending: true }),
     ]);
 
     if (convoResult.error || !convoResult.data) return null;
@@ -702,6 +708,7 @@ export async function getConversationById(
     return {
       conversation: convoResult.data,
       messages: msgsResult.data || [],
+      memories: memoriesResult.data || [],
       total: countResult.count ?? 0,
     };
   } catch (err) {

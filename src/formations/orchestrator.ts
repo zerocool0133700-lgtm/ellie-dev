@@ -12,6 +12,7 @@
  */
 
 import { log } from "../logger.ts";
+import { createFormationGrove } from "../forest-grove.ts";
 import {
   parseFormation,
   validateFormation,
@@ -243,13 +244,35 @@ export async function invokeFormation(
 
   logger.info("Formation invoked", { slug, sessionId: session.id, facilitator, agents: fm.agents.map(a => a.agent) });
 
+  // 3b. ELLIE-818: Auto-create grove for this formation
+  try {
+    const grove = await createFormationGrove(
+      slug,
+      session.id,
+      fm.agents.map(a => a.agent),
+    );
+    if (grove) {
+      logger.info("Formation grove created", { slug, groveId: grove.id, scopePath: grove.scope_path });
+    }
+  } catch (err) {
+    // Non-fatal — grove creation failure shouldn't block formation execution
+    logger.warn("Formation grove creation failed (non-fatal)", { slug, error: err instanceof Error ? err.message : String(err) });
+  }
+
   // 4. Execute protocol
   try {
     const result = await executeProtocol(deps, session, schema, userPrompt, config);
     return result;
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
-    await failSession(deps.protocolDeps, session.id, errorMsg).catch(() => {});
+    await failSession(deps.protocolDeps, session.id, errorMsg).catch((failErr) => {
+      logger.error("Formation cleanup failed — session may be in limbo", {
+        sessionId: session.id,
+        formation: fm.name,
+        originalError: errorMsg,
+        cleanupError: failErr instanceof Error ? failErr.message : String(failErr),
+      });
+    });
     return {
       sessionId: session.id,
       formationName: fm.name,
@@ -350,6 +373,9 @@ async function executeFanOutProtocol(
   // Advance round
   await advanceRound(deps.protocolDeps, session.id);
 
+  // Check if all agents failed
+  const allAgentsFailed = agentOutputs.length > 0 && agentOutputs.every(o => o.content.startsWith("[Agent error:"));
+
   // Facilitator synthesizes
   const synthesis = await synthesize(deps, session, fm, userPrompt, agentOutputs, config);
 
@@ -362,7 +388,7 @@ async function executeFanOutProtocol(
     synthesis,
     agentOutputs,
     roundsExecuted: 1,
-    success: true,
+    success: !allAgentsFailed,
   };
 }
 
@@ -421,6 +447,9 @@ async function executeDebateProtocol(
     await advanceRound(deps.protocolDeps, session.id);
   }
 
+  // Check if all agents failed
+  const allAgentsFailed = agentOutputs.length > 0 && agentOutputs.every(o => o.content.startsWith("[Agent error:"));
+
   // Facilitator synthesizes
   const synthesis = await synthesize(deps, session, fm, userPrompt, agentOutputs, config);
 
@@ -432,7 +461,7 @@ async function executeDebateProtocol(
     synthesis,
     agentOutputs,
     roundsExecuted: maxRounds,
-    success: true,
+    success: !allAgentsFailed,
   };
 }
 
@@ -491,6 +520,9 @@ async function executePipelineProtocol(
     }
   }
 
+  // Check if all agents failed
+  const allAgentsFailed = agentOutputs.length > 0 && agentOutputs.every(o => o.content.startsWith("[Agent error:"));
+
   // Final agent's output can be the synthesis, or facilitator synthesizes
   const facilitator = fm.protocol.coordinator;
   let synthesis: string;
@@ -512,7 +544,7 @@ async function executePipelineProtocol(
     synthesis,
     agentOutputs,
     roundsExecuted: turnOrder.length,
-    success: true,
+    success: !allAgentsFailed,
   };
 }
 

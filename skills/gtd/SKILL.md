@@ -56,15 +56,18 @@ Include green indicator if:
 
 ## API Endpoints
 
-GTD runs at `http://localhost:3000/api/gtd`:
+GTD runs at `http://localhost:3001/api/gtd`:
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/api/gtd/items` | GET | List items (supports `?list=inbox|next_actions|waiting|someday|projects`) |
-| `/api/gtd/items` | POST | Create new item |
-| `/api/gtd/items/{id}` | PATCH | Update item (move between lists, mark complete, change priority) |
-| `/api/gtd/items/{id}` | DELETE | Delete item |
-| `/api/gtd/status` | GET | Summary counts for all lists |
+| `/api/gtd/inbox` | POST | Capture new items to inbox |
+| `/api/gtd/next-actions` | GET | List open tasks (supports `?agent=TYPE` filter, `?limit=N`) |
+| `/api/gtd/todos/{id}` | PATCH | Update task (status, priority, content, project_id, etc.) |
+| `/api/gtd/summary` | GET | Quick state snapshot (inbox/open/waiting counts) |
+| `/api/gtd/review-state` | GET | Weekly review status and nudges |
+| `/api/gtd/team` | GET | Team-wide workload overview |
+| `/api/gtd/delegate` | POST | Delegate task to another agent |
+| `/api/gtd/delegate/complete` | POST | Complete delegated task |
 
 ## Conversational Triggers (Active Mode Only)
 
@@ -77,19 +80,20 @@ When user mentions something they need to do:
 **Response:**
 > "Want me to add that to your GTD inbox? [Yes/No]"
 
-If yes, POST to `/api/gtd/items`:
+If yes, POST to `/api/gtd/inbox`:
 ```json
 {
-  "title": "extracted task description",
-  "list": "inbox",
-  "source": "ellie-chat",
-  "notes": "optional context from conversation"
+  "content": "extracted task description",
+  "source_type": "ellie-chat",
+  "source_ref": "conversation_id",
+  "priority": "medium",
+  "tags": []
 }
 ```
 
 ### Context Surfacing
 When discussing a project or work area, check if there are related GTD items:
-- Search `/api/gtd/items?list=next_actions&search={topic}`
+- Query `/api/gtd/next-actions` and filter by tags or content match
 - If matches found, mention: *"By the way, you have 2 next actions related to this: [item 1], [item 2]"*
 
 ### Inbox Nudging
@@ -106,13 +110,157 @@ Explicit GTD commands always work, regardless of mode:
 
 | User says | You do |
 |-----------|--------|
-| "show my inbox" / "what's in my inbox" | GET `/api/gtd/items?list=inbox`, display as list |
-| "show next actions" | GET `/api/gtd/items?list=next_actions` |
-| "what's waiting" | GET `/api/gtd/items?list=waiting` |
-| "gtd status" | GET `/api/gtd/status`, show summary |
-| "add task: {title}" | POST to `/api/gtd/items` |
-| "mark {id} done" | PATCH `/api/gtd/items/{id}` with `status: "completed"` |
-| "move {id} to next actions" | PATCH with `list: "next_actions"` |
+| "show my inbox" / "what's in my inbox" | GET `/api/gtd/next-actions` filtered by status=inbox |
+| "show next actions" | GET `/api/gtd/next-actions` |
+| "what's waiting" | GET `/api/gtd/next-actions` filtered by status=waiting_for |
+| "gtd status" | GET `/api/gtd/summary`, show summary |
+| "add task: {title}" | POST to `/api/gtd/inbox` |
+| "mark {id} done" | PATCH `/api/gtd/todos/{id}` with `status: "done"` |
+| "move {id} to waiting" | PATCH with `status: "waiting_for"` |
+
+## Multi-Agent Coordination
+
+This section explains how agents use GTD to coordinate work between themselves and with Dave.
+
+### Agent-to-Agent Delegation
+
+When one agent completes their part of a workflow and needs another specialist to continue:
+
+**Delegation API:**
+```
+POST /api/gtd/delegate
+{
+  "todo_id": "uuid",
+  "to_agent": "content" | "dev" | "research" | "critic" | "strategy" | "ops",
+  "delegated_by": "general",
+  "note": "Context for the delegated agent"
+}
+```
+
+**Agent types map to display names:**
+- `general` → Ellie
+- `dev` → James
+- `research` → Kate
+- `content` → Amy
+- `critic` → Brian
+- `strategy` → Alan
+- `ops` → Jason
+
+**When to delegate:**
+- Dev finishes research → delegate design to Strategy
+- Research completes analysis → delegate writing to Content
+- Content drafts post → delegate review to Critic
+- Any agent hits a blocker requiring different expertise
+
+**Example flow:**
+1. Research agent (Kate) finishes competitor analysis
+2. Kate: POST `/api/gtd/delegate` with `delegated_to: "amy"`, notes: "Analysis complete, ready for blog post"
+3. Amy sees delegated item in her GTD queue
+4. Amy writes the post
+5. Amy: POST `/api/gtd/delegate` with `delegated_to: "brian"`, notes: "Draft complete, needs review"
+6. Brian reviews and either completes or delegates back with feedback
+
+### Workflow Pipelines
+
+Common multi-agent workflows that use GTD as coordination:
+
+**Research → Content → Critic:**
+```
+Kate (research) → Amy (content) → Brian (critic) → Dave (review)
+```
+
+**Strategy → Dev → Ops:**
+```
+Alan (strategy) → James (dev) → Jason (ops/deploy)
+```
+
+**Support flow:**
+```
+General → Specialist → Critic → General (respond to user)
+```
+
+### Role Assignment in Meetings
+
+During board meetings or multi-agent sessions, assign roles via GTD:
+
+**Example:**
+> "Amy, you're taking notes for this board meeting."
+
+This creates a GTD item:
+```json
+{
+  "title": "Board Meeting Notes - March 18",
+  "list": "next_actions",
+  "assigned_to": "amy",
+  "context": "board-meeting",
+  "priority": "high",
+  "due_date": "2026-03-18"
+}
+```
+
+**Common role assignments:**
+- Note-taker (capture decisions, action items)
+- Facilitator (keep discussion on track, time management)
+- Researcher (fact-check claims made during meeting)
+- Devil's advocate (challenge assumptions)
+
+### Team Workload Views
+
+Agents can query team capacity before delegating:
+
+**Check workload:**
+```
+GET /api/gtd/team/workload
+```
+
+Returns:
+```json
+{
+  "amy": {"total": 12, "high_priority": 3, "overdue": 0},
+  "james": {"total": 8, "high_priority": 5, "overdue": 1},
+  "kate": {"total": 15, "high_priority": 2, "overdue": 0},
+  ...
+}
+```
+
+**Smart delegation:**
+Before delegating, check who has capacity. Prefer agents with:
+- Lower total count
+- Fewer high-priority items
+- No overdue items
+
+**Velocity tracking:**
+```
+GET /api/gtd/team/velocity?days=7
+```
+
+Shows completion rates per agent over the last N days — helps identify bottlenecks.
+
+### Delegation Rules
+
+1. **Always include context** — the receiving agent needs to know why they got this
+2. **Check capacity first** — don't overload agents who are already swamped
+3. **Respect expertise** — delegate to the right specialist for the task
+4. **Follow up** — if a delegated item sits for >24h, check in
+5. **Escalate blockers** — if an agent can't complete, they should delegate back with explanation
+6. **Close the loop** — when work completes, notify the original delegator
+
+### Multi-Agent Output Format
+
+When showing delegation status:
+
+```
+**Delegated Items**
+
+From Kate (research):
+→ Amy: "Draft blog post from competitor analysis" (delegated 2h ago)
+
+From Amy (content):
+→ Brian: "Review blog post for tone and accuracy" (delegated 30m ago)
+
+From James (dev):
+→ Jason: "Deploy ELLIE-349 to production" (delegated yesterday, ⚠ overdue)
+```
 
 ## Output Format
 
@@ -175,8 +323,9 @@ Added to inbox: "Review ELLIE-285 PR"
 
 Verify with:
 ```bash
-curl http://localhost:3000/api/gtd/status
-curl http://localhost:3000/api/gtd/items?list=inbox
+curl http://localhost:3001/api/gtd/summary
+curl http://localhost:3001/api/gtd/next-actions
+curl http://localhost:3001/api/gtd/team
 ```
 
 ## Orchestration Pattern (ELLIE-1141)

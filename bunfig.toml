@@ -1,3 +1,4 @@
 [test]
 # Load global test setup before running any tests
 preload = ["./tests/helpers/global-setup.ts"]
+coverageThreshold = 0.7

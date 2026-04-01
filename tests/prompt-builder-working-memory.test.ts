@@ -129,7 +129,7 @@ describe("buildPrompt — fullWorkingMemory=true (ELLIE-539)", () => {
       undefined, undefined, undefined, "telegram", DEV_AGENT,
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined, true, // fullWorkingMemory
+      undefined, undefined, undefined, undefined, undefined, undefined, true, // fullWorkingMemory
     );
 
     expect(result).toContain("WORKING MEMORY — dev:");
@@ -158,7 +158,7 @@ describe("buildPrompt — fullWorkingMemory=true (ELLIE-539)", () => {
       undefined, undefined, undefined, "telegram", DEV_AGENT,
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined, true,
+      undefined, undefined, undefined, undefined, undefined, undefined, true,
     );
 
     expect(result).toContain("WORKING MEMORY — dev:");
@@ -180,7 +180,7 @@ describe("buildPrompt — fullWorkingMemory=true (ELLIE-539)", () => {
       undefined, undefined, undefined, "telegram", undefined,
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined, true,
+      undefined, undefined, undefined, undefined, undefined, undefined, true,
     );
 
     expect(result).not.toContain("WORKING MEMORY");
@@ -194,7 +194,7 @@ describe("buildPrompt — fullWorkingMemory=true (ELLIE-539)", () => {
       undefined, undefined, undefined, "telegram", RESEARCH_AGENT,
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined, true,
+      undefined, undefined, undefined, undefined, undefined, undefined, true,
     );
 
     expect(result).toContain("WORKING MEMORY — research:");
@@ -279,7 +279,7 @@ describe("buildPrompt — working memory section labels in metrics (ELLIE-539)",
       undefined, undefined, undefined, "telegram", DEV_AGENT,
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined, true,
+      undefined, undefined, undefined, undefined, undefined, undefined, true,
     );
     const metrics = getLastBuildMetrics()!;
     expect(metrics.sections.find(s => s.label === "working-memory-full")).toBeDefined();

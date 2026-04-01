@@ -155,7 +155,7 @@ describe("ELLIE-797: Permission management API", () => {
       const sql = mockSql([]);
       await updateEntity(sql, "entity-1", { name: "Updated" });
       expect(sql.calls.length).toBe(1);
-      expect(sql.calls[0].type).toBe("unsafe");
+      expect(sql.calls[0].type).toBe("tagged");
     });
 
     it("adds roles", async () => {

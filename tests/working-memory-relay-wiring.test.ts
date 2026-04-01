@@ -195,7 +195,7 @@ describe("primeWorkingMemoryCache — end-to-end with buildPrompt (ELLIE-541)", 
       undefined, undefined, undefined, "telegram", { name: agent },
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
       undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, undefined, undefined, undefined, true, // fullWorkingMemory
+      undefined, undefined, undefined, undefined, undefined, undefined, true, // fullWorkingMemory
     );
 
     expect(result).toContain("WORKING MEMORY — dev:");

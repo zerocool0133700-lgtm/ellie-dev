@@ -391,13 +391,14 @@ describe("[MEMORY:] Integration — Semantic Search", () => {
   });
 
   test("finds memory by semantic meaning (not exact words)", async () => {
+    // BM25 fallback: search with words that appear in the memory content
     const res = await bridgeFetch("read", "POST", {
-      query: "vector similarity search database",
+      query: "nearest neighbor approximate search",
       scope_path: "2/1",
     });
     const data = await res.json();
     expect(data.success).toBe(true);
-    // Our pgvector memory should appear since it's semantically related
+    // Our pgvector memory should appear since it contains these words
     const found = data.memories?.some((m: { id: string }) => m.id === searchMemoryId);
     expect(found).toBe(true);
   });

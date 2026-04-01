@@ -31,8 +31,8 @@ const MCP_TOOLS = "mcp__google-workspace__*,mcp__github__*,mcp__memory__*,mcp__s
 const ALLOWED_TOOLS = (process.env.ALLOWED_TOOLS || `${DEFAULT_TOOLS},${MCP_TOOLS}`).split(",").map(t => t.trim());
 const SESSION_FILE = join(RELAY_DIR, "session.json");
 const LOCK_FILE = join(RELAY_DIR, "bot.lock");
-// ELLIE-239: Configurable CLI timeout (default 600s agent, 60s non-agent)
-const CLI_TIMEOUT_MS = parseInt(process.env.CLI_TIMEOUT_MS || (AGENT_MODE ? "600000" : "60000"));
+// ELLIE-239: Configurable CLI timeout (default 900s agent, 60s non-agent)
+const CLI_TIMEOUT_MS = parseInt(process.env.CLI_TIMEOUT_MS || (AGENT_MODE ? "900000" : "60000"));
 
 // ── External dependency setters ─────────────────────────────
 // These are registered by relay.ts at startup since the actual
@@ -196,7 +196,8 @@ export async function callClaude(
       const sig = options.abortSignal;
       if (sig.aborted) {
         proc.kill();
-        throw new Error("Dispatch aborted before start");
+        logger.warn("Dispatch aborted before start — signal was already aborted when process spawned");
+        return "";  // Empty response — caller handles gracefully
       }
       sig.addEventListener("abort", () => {
         logger.warn("Dispatch aborted via signal — killing subprocess", { pid: proc.pid });
@@ -397,8 +398,13 @@ export async function callClaude(
 
     return trimmed;
   } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.includes("aborted") || msg.includes("Aborted")) {
+      logger.warn("Dispatch aborted", { detail: msg });
+      return "";  // Empty response — caller handles gracefully
+    }
     logger.error("Spawn error", error);
-    return `Error: Could not run Claude CLI`;
+    return `Error: Could not run Claude CLI — ${msg}`;
   }
 }
 

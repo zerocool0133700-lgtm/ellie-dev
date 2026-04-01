@@ -701,28 +701,29 @@ describe("E2E: full Google Contacts sync flow", () => {
     expect(writer1.getWritten().length).toBe(4);
     expect(r1.syncState.syncVersion).toBe(1);
 
-    // Incremental sync: 3 contacts returned, but only 1 updated since last sync
+    // Incremental sync: 3 contacts returned, but only 2 updated since last sync
+    // Use future timestamps (2026-03-14 = today) so they pass the incremental filter
     const incrementalContacts: GoogleContactRaw[] = [
       _makeMockGoogleContactRaw({
         resourceName: "people/c2",
         displayName: "Bob Updated",
         emails: ["bob@corp.com", "bob.new@corp.com"],
         phones: ["+15551110002"],
-        updatedAt: "2026-03-11T15:00:00Z", // after last sync
+        updatedAt: "2026-03-14T15:00:00Z", // recently updated
       }),
       _makeMockGoogleContactRaw({
         resourceName: "people/c3",
         displayName: "Charlie",
         emails: ["charlie@corp.com"],
         phones: ["+15551110003"],
-        updatedAt: "2026-03-10T10:00:00Z", // before last sync
+        updatedAt: "2026-03-10T10:00:00Z", // old — before last sync (should skip)
       }),
       _makeMockGoogleContactRaw({
         resourceName: "people/c6",
         displayName: "New Person",
         emails: ["newperson@corp.com"],
         phones: ["+15551110006"],
-        updatedAt: "2026-03-11T16:00:00Z", // after last sync
+        updatedAt: "2026-03-14T16:00:00Z", // recently added
       }),
     ];
 

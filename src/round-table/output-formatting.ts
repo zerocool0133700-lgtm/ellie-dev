@@ -678,6 +678,7 @@ export function formatDuration(ms: number): string {
 
 /** Truncate text to a maximum length, adding ellipsis. */
 export function truncateText(text: string, maxLength: number): string {
+  if (!text) return "";
   if (text.length <= maxLength) return text;
   return text.slice(0, maxLength - 3) + "...";
 }

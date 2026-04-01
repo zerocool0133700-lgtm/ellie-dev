@@ -7,6 +7,7 @@
 const LIST_ITEM_RE = /^(\d+[\.\)]\s|[-*+]\s)/;
 const HEADING_RE = /^#{1,6}\s/;
 const CODE_FENCE_RE = /^```/;
+const HORIZONTAL_RULE_RE = /^-{3,}\s*$/;
 
 function isBlank(line: string): boolean {
   return line.trim() === "";
@@ -22,6 +23,10 @@ function isHeading(line: string): boolean {
 
 function isCodeFence(line: string): boolean {
   return CODE_FENCE_RE.test(line);
+}
+
+function isHorizontalRule(line: string): boolean {
+  return HORIZONTAL_RULE_RE.test(line);
 }
 
 /**
@@ -96,10 +101,46 @@ export function fixCodeBlockSpacing(text: string): string {
 }
 
 /**
- * Collapse triple+ blank lines to double blank lines
+ * Ensure blank lines exist before and after horizontal rules (---).
+ * Also splits inline `---` onto its own line when surrounded by text.
+ */
+export function fixHorizontalRuleSpacing(text: string): string {
+  // First pass: split inline `---` onto its own line
+  // Matches " --- " (with surrounding text) mid-line
+  let normalized = text.replace(/([^\n]) ---( )/g, "$1\n\n---\n\n");
+  // Handle trailing " ---" at end of line (no text after)
+  normalized = normalized.replace(/([^\n]) ---$/gm, "$1\n\n---");
+
+  // Second pass: ensure blank lines around standalone --- lines
+  const lines = normalized.split("\n");
+  const result: string[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const prev = i > 0 ? lines[i - 1] : undefined;
+    const next = i < lines.length - 1 ? lines[i + 1] : undefined;
+
+    if (isHorizontalRule(line)) {
+      if (prev !== undefined && !isBlank(prev)) {
+        result.push("");
+      }
+      result.push(line);
+      if (next !== undefined && !isBlank(next)) {
+        result.push("");
+      }
+    } else {
+      result.push(line);
+    }
+  }
+
+  return result.join("\n");
+}
+
+/**
+ * Collapse excessive blank lines — normalize to standard paragraph separation (one blank line).
  */
 export function collapseExcessiveBlankLines(text: string): string {
-  return text.replace(/\n{4,}/g, "\n\n\n");
+  return text.replace(/\n{3,}/g, "\n\n");
 }
 
 /**
@@ -110,6 +151,7 @@ export function fixMarkdown(text: string): string {
   result = fixListSpacing(result);
   result = fixHeadingSpacing(result);
   result = fixCodeBlockSpacing(result);
+  result = fixHorizontalRuleSpacing(result);
   result = collapseExcessiveBlankLines(result);
   return result;
 }

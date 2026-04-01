@@ -136,33 +136,33 @@ export async function addCapture(sql: any, input: AddCaptureInput): Promise<Capt
 }
 
 export async function listQueue(sql: any, filters: QueueFilters = {}): Promise<{ items: CaptureItem[]; total: number }> {
-  const conditions: string[] = [];
-  const values: any[] = [];
-
-  if (filters.status) {
-    conditions.push(`status = '${filters.status}'`);
-  }
-  if (filters.channel) {
-    conditions.push(`channel = '${filters.channel}'`);
-  }
-  if (filters.content_type) {
-    conditions.push(`content_type = '${filters.content_type}'`);
-  }
-  if (filters.from_date) {
-    conditions.push(`created_at >= '${filters.from_date}'`);
-  }
-  if (filters.to_date) {
-    conditions.push(`created_at <= '${filters.to_date}'`);
-  }
-
-  const where = conditions.length > 0 ? conditions.join(" AND ") : "1=1";
-  const limit = Math.min(filters.limit ?? 50, 200);
+  const rawLimit = Number(filters.limit);
+  const limit = Math.min(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 50, 200);
   const offset = filters.offset ?? 0;
+  const status = filters.status ?? null;
+  const channel = filters.channel ?? null;
+  const contentType = filters.content_type ?? null;
+  const fromDate = filters.from_date ?? null;
+  const toDate = filters.to_date ?? null;
 
-  const countRows = await sql.unsafe(`SELECT COUNT(*)::int as total FROM capture_queue WHERE ${where}`);
-  const items = await sql.unsafe(
-    `SELECT * FROM capture_queue WHERE ${where} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`
-  );
+  const countRows = await sql`
+    SELECT COUNT(*)::int as total FROM capture_queue
+    WHERE (${status}::text IS NULL OR status::text = ${status})
+    AND (${channel}::text IS NULL OR channel = ${channel})
+    AND (${contentType}::text IS NULL OR content_type::text = ${contentType})
+    AND (${fromDate}::timestamptz IS NULL OR created_at >= ${fromDate}::timestamptz)
+    AND (${toDate}::timestamptz IS NULL OR created_at <= ${toDate}::timestamptz)
+  `;
+  const items = await sql`
+    SELECT * FROM capture_queue
+    WHERE (${status}::text IS NULL OR status::text = ${status})
+    AND (${channel}::text IS NULL OR channel = ${channel})
+    AND (${contentType}::text IS NULL OR content_type::text = ${contentType})
+    AND (${fromDate}::timestamptz IS NULL OR created_at >= ${fromDate}::timestamptz)
+    AND (${toDate}::timestamptz IS NULL OR created_at <= ${toDate}::timestamptz)
+    ORDER BY created_at DESC
+    LIMIT ${limit} OFFSET ${offset}
+  `;
 
   return { items, total: countRows[0].total };
 }
@@ -175,18 +175,21 @@ export async function getCapture(sql: any, id: string): Promise<CaptureItem | nu
 
 export async function updateCapture(sql: any, id: string, input: UpdateCaptureInput): Promise<CaptureItem | null> {
   if (!isValidUUID(id)) return null;
-  const sets: string[] = [];
-  if (input.refined_content !== undefined) sets.push(`refined_content = '${input.refined_content.replace(/'/g, "''")}'`);
-  if (input.suggested_path !== undefined) sets.push(`suggested_path = '${input.suggested_path.replace(/'/g, "''")}'`);
-  if (input.suggested_section !== undefined) sets.push(`suggested_section = '${input.suggested_section.replace(/'/g, "''")}'`);
-  if (input.content_type !== undefined) sets.push(`content_type = '${input.content_type}'`);
-  if (input.status !== undefined) sets.push(`status = '${input.status}'`);
 
-  if (sets.length === 0) return null;
+  const hasField = input.refined_content !== undefined || input.suggested_path !== undefined ||
+    input.suggested_section !== undefined || input.content_type !== undefined || input.status !== undefined;
+  if (!hasField) return null;
 
-  const rows = await sql.unsafe(
-    `UPDATE capture_queue SET ${sets.join(", ")} WHERE id = '${id}' RETURNING *`
-  );
+  const rows = await sql`
+    UPDATE capture_queue SET
+      refined_content = COALESCE(${input.refined_content ?? null}, refined_content),
+      suggested_path = COALESCE(${input.suggested_path ?? null}, suggested_path),
+      suggested_section = COALESCE(${input.suggested_section ?? null}, suggested_section),
+      content_type = COALESCE(${input.content_type ?? null}::capture_content_type, content_type),
+      status = COALESCE(${input.status ?? null}::capture_status, status)
+    WHERE id = ${id}
+    RETURNING *
+  `;
   return rows[0] ?? null;
 }
 

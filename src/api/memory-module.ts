@@ -29,6 +29,7 @@ export async function listFacts(
   const offset = Number(req.query?.offset) || 0;
   const type = req.query?.type;       // comma-separated: fact,preference,decision
   const category = req.query?.category;
+  const tag = req.query?.tag;         // single tag to filter by
   const status = req.query?.status || "active";
   const minConfidence = req.query?.min_confidence ? Number(req.query.min_confidence) : undefined;
   const sort = req.query?.sort || "created_at";
@@ -45,6 +46,7 @@ export async function listFacts(
         AND archived_at IS NULL
         ${types ? forestSql`AND type::text = ANY(${types})` : forestSql``}
         ${category ? forestSql`AND category::text = ${category}` : forestSql``}
+        ${tag ? forestSql`AND tags @> ${forestSql.array([tag])}` : forestSql``}
         ${minConfidence !== undefined ? forestSql`AND confidence >= ${minConfidence}` : forestSql``}
       ORDER BY ${sort === "confidence" ? forestSql`confidence` : sort === "updated_at" ? forestSql`updated_at` : forestSql`created_at`} ${order === "ASC" ? forestSql`ASC` : forestSql`DESC`}
       LIMIT ${limit} OFFSET ${offset}
@@ -55,6 +57,7 @@ export async function listFacts(
       WHERE status = ${status} AND archived_at IS NULL
         ${types ? forestSql`AND type::text = ANY(${types})` : forestSql``}
         ${category ? forestSql`AND category::text = ${category}` : forestSql``}
+        ${tag ? forestSql`AND tags @> ${forestSql.array([tag])}` : forestSql``}
         ${minConfidence !== undefined ? forestSql`AND confidence >= ${minConfidence}` : forestSql``}
     `;
 
@@ -83,7 +86,7 @@ export async function createFact(
   }
 
   try {
-    const { writeMemory } = await import("../../../ellie-forest/src/shared-memory");
+    const { writeMemory } = await import("../../../ellie-forest/src/index");
     const result = await writeMemory({
       content,
       type: type || "fact",
@@ -93,7 +96,13 @@ export async function createFact(
       tags: Array.isArray(tags) ? tags : [],
     });
 
-    res.json({ success: true, fact: result.memory });
+    res.json({
+      success: true,
+      fact: {
+        ...result,
+        extraction_method: "manual",
+      }
+    });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Create fact failed" });
   }
@@ -170,36 +179,42 @@ export async function deleteFact(
 // ── Goals: List ───────────────────────────────────────────────
 
 export async function listGoals(
-  req: ApiRequest, res: ApiResponse, supabase: SupabaseClient,
+  req: ApiRequest, res: ApiResponse, _supabase: SupabaseClient,
 ): Promise<void> {
   const statusFilter = req.query?.status || "active"; // active, completed, overdue, all
 
   try {
-    let query = supabase
-      .from("conversation_facts")
-      .select("*");
+    let statusCondition = forestSql``;
+    let typeFilter = forestSql``;
 
     if (statusFilter === "active") {
-      query = query.in("type", ["goal"]).eq("status", "active");
+      typeFilter = forestSql`AND type = 'goal'::memory_type`;
+      statusCondition = forestSql`AND status = 'active'`;
     } else if (statusFilter === "completed") {
-      query = query.eq("type", "completed_goal");
+      typeFilter = forestSql`AND type = 'goal'::memory_type`;
+      statusCondition = forestSql`AND status = 'archived'`;
     } else if (statusFilter === "overdue") {
-      query = query
-        .eq("type", "goal")
-        .eq("status", "active")
-        .not("deadline", "is", null)
-        .lte("deadline", new Date().toISOString());
+      typeFilter = forestSql`AND type = 'goal'::memory_type`;
+      statusCondition = forestSql`AND status = 'active'
+        AND goal_deadline IS NOT NULL
+        AND goal_deadline <= now()`;
     } else {
-      // all
-      query = query.in("type", ["goal", "completed_goal"]);
+      // all — show both active and archived goals
+      typeFilter = forestSql`AND type = 'goal'::memory_type`;
     }
 
-    query = query.order("created_at", { ascending: false });
+    const rows = await forestSql`
+      SELECT id, content, type, category, confidence, tags, status,
+             goal_deadline as deadline, goal_status, goal_progress,
+             created_at, updated_at
+      FROM shared_memories
+      WHERE archived_at IS NULL
+        ${typeFilter}
+        ${statusCondition}
+      ORDER BY created_at DESC
+    `;
 
-    const { data, error } = await query;
-    if (error) throw error;
-
-    res.json({ success: true, goals: data, count: data?.length ?? 0, status: statusFilter });
+    res.json({ success: true, goals: rows, count: rows?.length ?? 0, status: statusFilter });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "List goals failed" });
   }
@@ -208,42 +223,48 @@ export async function listGoals(
 // ── Goals: Complete ───────────────────────────────────────────
 
 export async function completeGoal(
-  req: ApiRequest, res: ApiResponse, supabase: SupabaseClient,
+  req: ApiRequest, res: ApiResponse, _supabase: SupabaseClient,
 ): Promise<void> {
   const id = req.params?.id;
   if (!id) { res.status(400).json({ error: "Goal ID required" }); return; }
 
   try {
     // Verify it's actually an active goal
-    const { data: existing, error: fetchErr } = await supabase
-      .from("conversation_facts")
-      .select("id, type, status")
-      .eq("id", id)
-      .single();
+    const existing = await forestSql<{ id: string; type: string; status: string }[]>`
+      SELECT id, type::text, status
+      FROM shared_memories
+      WHERE id = ${id}
+    `;
 
-    if (fetchErr || !existing) {
+    if (!existing || existing.length === 0) {
       res.status(404).json({ error: "Goal not found" });
       return;
     }
-    if (existing.type !== "goal" || existing.status !== "active") {
+
+    const goal = existing[0];
+    if (goal.type !== "goal" || goal.status !== "active") {
       res.status(400).json({ error: "Can only complete active goals" });
       return;
     }
 
-    const { data, error } = await supabase
-      .from("conversation_facts")
-      .update({
+    const [updated] = await forestSql<{ id: string; type: string; status: string }[]>`
+      UPDATE shared_memories
+      SET status = 'archived',
+          goal_status = 'completed',
+          updated_at = now()
+      WHERE id = ${id}
+      RETURNING id, type::text, status, goal_status, goal_deadline, goal_progress,
+                content, category, confidence, tags, created_at, updated_at
+    `;
+
+    res.json({
+      success: true,
+      goal: {
+        ...updated,
         type: "completed_goal",
-        status: "archived",
         completed_at: new Date().toISOString(),
-      })
-      .eq("id", id)
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    res.json({ success: true, goal: data });
+      }
+    });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Complete goal failed" });
   }

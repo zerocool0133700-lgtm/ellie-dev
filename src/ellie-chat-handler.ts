@@ -218,10 +218,11 @@ export async function handleEllieChatMessage(
   clientId?: string,
   mode?: string,
   abortSignal?: AbortSignal,
+  replyTo?: { id: string; text: string; role: string; agent?: string }, // ELLIE-1090
 ): Promise<void> {
   // ELLIE-461: Top-level error boundary — any uncaught error gets a user-facing message
   try {
-    return await withTrace(async () => _handleEllieChatMessage(ws, text, phoneMode, image, channelId, clientId, mode, abortSignal));
+    return await withTrace(async () => _handleEllieChatMessage(ws, text, phoneMode, image, channelId, clientId, mode, abortSignal, replyTo));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Don't send error to user for aborted dispatches — they closed the connection
@@ -247,6 +248,7 @@ async function _handleEllieChatMessage(
   clientId?: string,
   mode?: string,
   abortSignal?: AbortSignal,
+  replyTo?: { id: string; text: string; role: string; agent?: string }, // ELLIE-1090
 ): Promise<void> {
   const { bot, anthropic, supabase } = getRelayDeps();
   logger.info("User message received", { phoneMode, hasImage: !!image, mode, channelId: channelId?.substring(0, 8) });
@@ -736,7 +738,7 @@ async function _handleEllieChatMessage(
       clearProcessing(ecUserId || "anonymous");
 
       resetEllieChatIdleTimer();
-    }, text.substring(0, 100));
+    }, (text || "(empty)").substring(0, 100));
     return;
   }
 
@@ -791,6 +793,11 @@ async function _handleEllieChatMessage(
 
     const agentResult = await routeAndDispatch(supabase, text, "ellie-chat", "dashboard", ellieChatWorkItem, mentionOverride || skillOnlyOverride);
     let effectiveText = agentResult?.route.strippedMessage || text;
+    // ELLIE-1090: Prepend reply context so Ellie knows which message the user is responding to
+    if (replyTo?.text) {
+      const replyAuthor = replyTo.role === "user" ? "Dave" : (replyTo.agent || "Ellie");
+      effectiveText = `[Replying to ${replyAuthor}: "${replyTo.text.substring(0, 500)}"]\n\n${effectiveText}`;
+    }
     // Prepend image file reference so Claude Code CLI can see the image
     if (imagePath) {
       effectiveText = `[Image: ${imagePath}]\n\n${effectiveText || "Analyze this image."}`;
@@ -1492,7 +1499,7 @@ async function _handleEllieChatMessage(
     if (imagePath) unlink(imagePath).catch(() => {});
 
     resetEllieChatIdleTimer();
-  }, text.substring(0, 100));
+  }, (text || "(empty)").substring(0, 100));
 
   } finally {
     setProcessingMessage(false);

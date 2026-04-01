@@ -83,7 +83,7 @@ export interface RoundTableOrchestratorDeps {
 export interface RoundTableConfig {
   /** Timeout per phase in ms. Default: 120000 (2 min). */
   phaseTimeoutMs: number;
-  /** Timeout for the entire session in ms. Default: 600000 (10 min). */
+  /** Timeout for the entire session in ms. Default: 900000 (15 min). */
   sessionTimeoutMs: number;
   /** Agent used for the convene phase analysis. Default: "strategy". */
   conveneAgent: string;
@@ -93,7 +93,7 @@ export interface RoundTableConfig {
 
 const DEFAULT_CONFIG: RoundTableConfig = {
   phaseTimeoutMs: 120_000,
-  sessionTimeoutMs: 600_000,
+  sessionTimeoutMs: 900_000,
   conveneAgent: "strategy",
   deliverAgent: "strategy",
 };
@@ -255,12 +255,13 @@ export async function runRoundTable(
     query: query.slice(0, 100),
   });
 
-  // Set up session timeout
+  // Set up session timeout — shared deadline prevents phase overshoot
   const sessionStart = Date.now();
+  const sessionDeadline = sessionStart + config.sessionTimeoutMs;
 
   try {
     // ── Phase 1: Convene ──────────────────────────────────────
-    const conveneResult = await executeConvenePhase(deps, session, query, config);
+    const conveneResult = await executeConvenePhase(deps, session, query, config, sessionDeadline);
     phaseResults.push(conveneResult);
 
     if (!conveneResult.success) {
@@ -273,7 +274,7 @@ export async function runRoundTable(
 
     // ── Phase 2: Discuss ──────────────────────────────────────
     const discussResult = await executeDiscussPhase(
-      deps, session, query, conveneResult.output, config,
+      deps, session, query, conveneResult.output, config, sessionDeadline,
     );
     phaseResults.push(discussResult);
 
@@ -287,7 +288,7 @@ export async function runRoundTable(
 
     // ── Phase 3: Converge ─────────────────────────────────────
     const convergeResult = await executeConvergePhase(
-      deps, session, query, conveneResult.output, discussResult, config,
+      deps, session, query, conveneResult.output, discussResult, config, sessionDeadline,
     );
     phaseResults.push(convergeResult);
 
@@ -301,7 +302,7 @@ export async function runRoundTable(
 
     // ── Phase 4: Deliver ──────────────────────────────────────
     const deliverResult = await executeDeliverPhase(
-      deps, session, query, convergeResult.output, config,
+      deps, session, query, convergeResult.output, config, sessionDeadline,
     );
     phaseResults.push(deliverResult);
 
@@ -340,19 +341,22 @@ async function executeConvenePhase(
   session: RoundTableSession,
   query: string,
   config: RoundTableConfig,
+  sessionDeadline: number,
 ): Promise<PhaseResult> {
   logger.info("Executing convene phase", { sessionId: session.id });
 
   try {
     const prompt = buildConvenePrompt(query);
+    const effectiveTimeout = cappedTimeout(config.phaseTimeoutMs, sessionDeadline);
     const output = await withTimeout(
       deps.callAgent(config.conveneAgent, prompt),
-      config.phaseTimeoutMs,
+      effectiveTimeout,
       "Convene phase timed out",
     );
 
     return { phase: "convene", output, formationsUsed: [], success: true };
   } catch (err) {
+    if (err instanceof Error && err.message === "SESSION_TIMEOUT") throw err;
     const errorMsg = err instanceof Error ? err.message : String(err);
     logger.error("Convene phase failed", { error: errorMsg });
     return { phase: "convene", output: "", formationsUsed: [], success: false, error: errorMsg };
@@ -368,6 +372,7 @@ async function executeDiscussPhase(
   query: string,
   conveneOutput: string,
   config: RoundTableConfig,
+  sessionDeadline: number,
 ): Promise<PhaseResult & { contributions?: { formation: string; output: string }[] }> {
   logger.info("Executing discuss phase", { sessionId: session.id });
 
@@ -394,12 +399,13 @@ async function executeDiscussPhase(
       const prompt = buildDiscussPrompt(query, conveneOutput, slug);
 
       try {
+        const effectiveTimeout = cappedTimeout(config.phaseTimeoutMs, sessionDeadline);
         const result = await withTimeout(
           deps.invokeFormation(slug, prompt, {
             channel: session.channel,
             workItemId: session.work_item_id ?? undefined,
           }),
-          config.phaseTimeoutMs,
+          effectiveTimeout,
           `Formation "${slug}" timed out`,
         );
 
@@ -430,6 +436,7 @@ async function executeDiscussPhase(
       contributions,
     };
   } catch (err) {
+    if (err instanceof Error && err.message === "SESSION_TIMEOUT") throw err;
     const errorMsg = err instanceof Error ? err.message : String(err);
     logger.error("Discuss phase failed", { error: errorMsg });
     return { phase: "discuss", output: "", formationsUsed: [], success: false, error: errorMsg };
@@ -446,6 +453,7 @@ async function executeConvergePhase(
   conveneOutput: string,
   discussResult: PhaseResult & { contributions?: { formation: string; output: string }[] },
   config: RoundTableConfig,
+  sessionDeadline: number,
 ): Promise<PhaseResult> {
   logger.info("Executing converge phase", { sessionId: session.id });
 
@@ -459,9 +467,10 @@ async function executeConvergePhase(
           { formation: "discussion", output: discussResult.output },
         ]);
 
+    const effectiveTimeout = cappedTimeout(config.phaseTimeoutMs, sessionDeadline);
     const output = await withTimeout(
       deps.callAgent(config.deliverAgent, prompt),
-      config.phaseTimeoutMs,
+      effectiveTimeout,
       "Converge phase timed out",
     );
 
@@ -472,6 +481,7 @@ async function executeConvergePhase(
       success: true,
     };
   } catch (err) {
+    if (err instanceof Error && err.message === "SESSION_TIMEOUT") throw err;
     const errorMsg = err instanceof Error ? err.message : String(err);
     logger.error("Converge phase failed", { error: errorMsg });
     return { phase: "converge", output: "", formationsUsed: [], success: false, error: errorMsg };
@@ -487,19 +497,22 @@ async function executeDeliverPhase(
   query: string,
   convergeOutput: string,
   config: RoundTableConfig,
+  sessionDeadline: number,
 ): Promise<PhaseResult> {
   logger.info("Executing deliver phase", { sessionId: session.id });
 
   try {
     const prompt = buildDeliverPrompt(query, convergeOutput);
+    const effectiveTimeout = cappedTimeout(config.phaseTimeoutMs, sessionDeadline);
     const output = await withTimeout(
       deps.callAgent(config.deliverAgent, prompt),
-      config.phaseTimeoutMs,
+      effectiveTimeout,
       "Deliver phase timed out",
     );
 
     return { phase: "deliver", output, formationsUsed: [], success: true };
   } catch (err) {
+    if (err instanceof Error && err.message === "SESSION_TIMEOUT") throw err;
     const errorMsg = err instanceof Error ? err.message : String(err);
     logger.error("Deliver phase failed", { error: errorMsg });
     return { phase: "deliver", output: "", formationsUsed: [], success: false, error: errorMsg };
@@ -528,6 +541,13 @@ function checkTimeout(startTime: number, timeoutMs: number): void {
   if (Date.now() - startTime > timeoutMs) {
     throw new Error("SESSION_TIMEOUT");
   }
+}
+
+/** Cap a phase timeout to the remaining session budget, preventing overshoot. */
+function cappedTimeout(phaseTimeoutMs: number, sessionDeadline: number): number {
+  const remaining = sessionDeadline - Date.now();
+  // Use at least 1ms — the between-phases checkTimeout() handles fully expired sessions
+  return Math.max(1, Math.min(phaseTimeoutMs, remaining));
 }
 
 async function withTimeout<T>(

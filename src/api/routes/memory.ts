@@ -119,6 +119,25 @@ export async function handleMemoryRoute(
       return true;
     }
 
+    // GET /api/memory/:id/related — ELLIE-1044: semantic edges
+    const relatedMatch = url.pathname.match(/^\/api\/memory\/([a-f0-9-]+)\/related$/);
+    if (relatedMatch && req.method === "GET") {
+      const memoryId = relatedMatch[1];
+      const limit = queryParams.limit ? parseInt(queryParams.limit, 10) : 10;
+      const minSimilarity = queryParams.min_similarity ? parseFloat(queryParams.min_similarity) : undefined;
+      try {
+        const { getRelatedMemories } = await import("../../../../ellie-forest/src/semantic-edges");
+        const { default: forestSql } = await import("../../../../ellie-forest/src/db");
+        const related = await getRelatedMemories(forestSql, memoryId, { limit, minSimilarity });
+        const mockR = makeRes(res);
+        mockR.json({ success: true, memory_id: memoryId, related, count: related.length });
+      } catch (err) {
+        logger.error("Failed to get related memories", err);
+        sendError(res, 500, "Failed to get related memories");
+      }
+      return true;
+    }
+
     // Memory analytics catch-all (GET): stats, timeline, by-agent
     if (req.method === "GET") {
       const { handleGetStats, handleGetTimeline, handleGetByAgent } = await import("../memory-analytics.ts");

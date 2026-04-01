@@ -2,7 +2,6 @@
 name: forest
 description: Manage the Forest knowledge library — search, browse, write, and organize knowledge
 userInvocable: true
-agent: dev
 always: true
 triggers: [forest, tree, branch, grove, leaf, plant, library, knowledge base]
 instant_commands: [help]

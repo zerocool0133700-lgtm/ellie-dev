@@ -21,6 +21,7 @@ import {
   buildAgentReport,
   buildMetricsSummary,
   _resetMetricsForTesting,
+  _markHydratedForTesting,
 } from "../src/growth-metrics-collector";
 
 import {
@@ -73,6 +74,7 @@ function setupDevAgent() {
 
 beforeEach(() => {
   _resetMetricsForTesting();
+  _markHydratedForTesting();
   _resetArchetypeLoaderForTesting();
   _resetBindingsForTesting();
 });
@@ -319,13 +321,13 @@ describe("computeMetricSummary", () => {
 // ── buildAgentReport ────────────────────────────────────────────────────────
 
 describe("buildAgentReport", () => {
-  it("builds full report with definitions and summaries", () => {
+  it("builds full report with definitions and summaries", async () => {
     setupDevAgent();
     recordMetric("dev", "s1", "Task completion rate", 0.85);
     recordMetric("dev", "s2", "Task completion rate", 0.90);
     recordMetric("dev", "s1", "Investigation depth", 8);
 
-    const report = buildAgentReport("dev");
+    const report = await buildAgentReport("dev");
     expect(report.agentName).toBe("dev");
     expect(report.archetype).toBe("ant");
     expect(report.definitions).toHaveLength(4);
@@ -334,8 +336,8 @@ describe("buildAgentReport", () => {
     expect(report.sessionCount).toBe(2);
   });
 
-  it("returns empty report for unknown agent", () => {
-    const report = buildAgentReport("unknown");
+  it("returns empty report for unknown agent", async () => {
+    const report = await buildAgentReport("unknown");
     expect(report.archetype).toBeNull();
     expect(report.definitions).toEqual([]);
     expect(report.summaries).toEqual([]);
@@ -343,9 +345,9 @@ describe("buildAgentReport", () => {
     expect(report.sessionCount).toBe(0);
   });
 
-  it("returns definitions even with no data points", () => {
+  it("returns definitions even with no data points", async () => {
     setupDevAgent();
-    const report = buildAgentReport("dev");
+    const report = await buildAgentReport("dev");
     expect(report.definitions).toHaveLength(4);
     expect(report.summaries).toEqual([]);
     expect(report.dataPoints).toEqual([]);
@@ -355,33 +357,33 @@ describe("buildAgentReport", () => {
 // ── buildMetricsSummary ─────────────────────────────────────────────────────
 
 describe("buildMetricsSummary", () => {
-  it("returns no-data message for unknown agent", () => {
-    const summary = buildMetricsSummary("dev");
+  it("returns no-data message for unknown agent", async () => {
+    const summary = await buildMetricsSummary("dev");
     expect(summary).toContain("No metrics recorded");
   });
 
-  it("includes agent name and archetype", () => {
+  it("includes agent name and archetype", async () => {
     setupDevAgent();
     recordMetric("dev", "s1", "completion", 0.9);
-    const summary = buildMetricsSummary("dev");
+    const summary = await buildMetricsSummary("dev");
     expect(summary).toContain("dev");
     expect(summary).toContain("ant");
   });
 
-  it("includes metric averages", () => {
+  it("includes metric averages", async () => {
     setupDevAgent();
     recordMetric("dev", "s1", "completion", 0.8);
     recordMetric("dev", "s2", "completion", 0.9);
-    const summary = buildMetricsSummary("dev");
+    const summary = await buildMetricsSummary("dev");
     expect(summary).toContain("completion");
     expect(summary).toContain("avg=0.85");
   });
 
-  it("includes session count", () => {
+  it("includes session count", async () => {
     setupDevAgent();
     recordMetric("dev", "s1", "m1", 1);
     recordMetric("dev", "s2", "m1", 2);
-    const summary = buildMetricsSummary("dev");
+    const summary = await buildMetricsSummary("dev");
     expect(summary).toContain("sessions: 2");
   });
 });
@@ -389,7 +391,7 @@ describe("buildMetricsSummary", () => {
 // ── Full scenario ───────────────────────────────────────────────────────────
 
 describe("full scenario", () => {
-  it("ant-dev agent: record metrics across sessions and build report", () => {
+  it("ant-dev agent: record metrics across sessions and build report", async () => {
     setupDevAgent();
 
     // Session 1: completed 4/5 tasks, read 12 files, blocker in 2 turns
@@ -415,7 +417,7 @@ describe("full scenario", () => {
       { name: "Scope discipline", value: 0.8, metadata: { outOfScope: ["refactored utils"] } },
     ]);
 
-    const report = buildAgentReport("dev");
+    const report = await buildAgentReport("dev");
     expect(report.sessionCount).toBe(3);
     expect(report.dataPoints).toHaveLength(11);
     expect(report.definitions).toHaveLength(4);
@@ -435,12 +437,12 @@ describe("full scenario", () => {
     expect(scopeSummary!.average).toBeCloseTo(0.933, 2);
 
     // Summary string
-    const summaryText = buildMetricsSummary("dev");
+    const summaryText = await buildMetricsSummary("dev");
     expect(summaryText).toContain("ant");
     expect(summaryText).toContain("sessions: 3");
   });
 
-  it("multiple agents tracked independently", () => {
+  it("multiple agents tracked independently", async () => {
     setupDevAgent();
     _injectArchetypeForTesting({
       species: "owl",
@@ -463,11 +465,11 @@ describe("full scenario", () => {
     expect(getAgentDataPoints("dev")).toHaveLength(1);
     expect(getAgentDataPoints("research")).toHaveLength(1);
 
-    const devReport = buildAgentReport("dev");
+    const devReport = await buildAgentReport("dev");
     expect(devReport.archetype).toBe("ant");
     expect(devReport.definitions).toHaveLength(4);
 
-    const researchReport = buildAgentReport("research");
+    const researchReport = await buildAgentReport("research");
     expect(researchReport.archetype).toBe("owl");
     expect(researchReport.definitions).toHaveLength(1);
     expect(researchReport.definitions[0].name).toBe("Research breadth");

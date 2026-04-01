@@ -14,7 +14,7 @@
 
 import { createHash } from 'crypto'
 import {
-  readMemories, writeMemory,
+  readMemories, readMemoriesForAgent, writeMemory,
   getScope, getChildScopes, getBreadcrumb,
   isAncestor,
   sql,
@@ -24,6 +24,7 @@ import {
 } from '../../../ellie-forest/src/index'
 import { createQueueItemDirect } from './agent-queue'
 import { searchRiver } from './bridge-river.ts'
+import { canAgentReadScope, canAgentWriteScope } from '../forest-grove.ts'
 import type { ApiRequest, ApiResponse } from "./types.ts";
 import { log } from "../logger.ts";
 
@@ -85,7 +86,7 @@ export async function authenticateBridgeKey(
     UPDATE bridge_keys
     SET last_used_at = NOW(), request_count = request_count + 1
     WHERE id = ${key.id}
-  `.catch(() => {})
+  `.catch(err => logger.error("[bridge] Failed to update key usage stats", err))
 
   return key
 }
@@ -101,7 +102,7 @@ export async function bridgeReadEndpoint(req: ApiRequest, res: ApiResponse) {
   if (!key) return
 
   try {
-    const { query, scope_path, tree_id, match_count, match_threshold, category, cognitive_type, author } = req.body
+    const { query, scope_path, tree_id, match_count, match_threshold, category, cognitive_type, author, agent, ticketProject } = req.body
 
     if (!query) {
       return res.status(400).json({ error: 'Missing required field: query' })
@@ -112,6 +113,15 @@ export async function bridgeReadEndpoint(req: ApiRequest, res: ApiResponse) {
 
     if (scope_path && !isRiverScope && !isWithinAllowedScopes(scope_path, key.allowed_scopes)) {
       return res.status(403).json({ error: `Scope path '${scope_path}' is outside your allowed scopes` })
+    }
+
+    // ELLIE-818: Grove-based access control for agent scopes (path prefix 3/)
+    if (scope_path?.startsWith('3/') && key.entity_id) {
+      const hasGroveAccess = await canAgentReadScope(key.entity_id, scope_path)
+      if (!hasGroveAccess) {
+        logger.info(`${key.key_prefix} (${key.collaborator}) grove read denied for ${scope_path}`)
+        return res.status(403).json({ error: `No grove membership for scope '${scope_path}'` })
+      }
     }
 
     // ELLIE-457: R/R scope routes to QMD search instead of Forest memories
@@ -135,7 +145,9 @@ export async function bridgeReadEndpoint(req: ApiRequest, res: ApiResponse) {
 
     const effectiveScopePath = scope_path || key.allowed_scopes[0]
 
-    let results = await readMemories({
+    // Use agent-scoped search when agent name is provided (ELLIE-1045 wiring)
+    const readFn = agent ? readMemoriesForAgent : readMemories;
+    let results = await readFn({
       query,
       scope_path: effectiveScopePath,
       tree_id,
@@ -144,6 +156,7 @@ export async function bridgeReadEndpoint(req: ApiRequest, res: ApiResponse) {
       category,
       cognitive_type,
       include_global: false,
+      ...(agent ? { agent, ticketProject } : {}),
     })
 
     // ELLIE-255: Filter by author (bridge_collaborator in metadata)
@@ -197,6 +210,15 @@ export async function bridgeWriteEndpoint(req: ApiRequest, res: ApiResponse) {
 
     if (!isWithinAllowedScopes(scope_path, key.allowed_scopes)) {
       return res.status(403).json({ error: `Scope path '${scope_path}' is outside your allowed scopes` })
+    }
+
+    // ELLIE-818: Grove-based write access control for agent scopes
+    if (scope_path.startsWith('3/') && key.entity_id) {
+      const hasGroveWrite = await canAgentWriteScope(key.entity_id, scope_path)
+      if (!hasGroveWrite) {
+        logger.info(`${key.key_prefix} (${key.collaborator}) grove write denied for ${scope_path}`)
+        return res.status(403).json({ error: `No write access to grove scope '${scope_path}'` })
+      }
     }
 
     const allowedTypes = ['fact', 'decision', 'finding', 'hypothesis', 'preference']

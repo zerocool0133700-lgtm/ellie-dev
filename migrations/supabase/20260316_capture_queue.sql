@@ -58,11 +58,14 @@ CREATE TRIGGER trg_capture_queue_updated_at
 -- RLS
 ALTER TABLE capture_queue ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS capture_queue_authenticated_read ON capture_queue;
 CREATE POLICY capture_queue_authenticated_read ON capture_queue
   FOR SELECT TO authenticated USING (true);
 
+DROP POLICY IF EXISTS capture_queue_authenticated_insert ON capture_queue;
 CREATE POLICY capture_queue_authenticated_insert ON capture_queue
   FOR INSERT TO authenticated WITH CHECK (true);
 
+DROP POLICY IF EXISTS capture_queue_authenticated_update ON capture_queue;
 CREATE POLICY capture_queue_authenticated_update ON capture_queue
   FOR UPDATE TO authenticated USING (true) WITH CHECK (true);

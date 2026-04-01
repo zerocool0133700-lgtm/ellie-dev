@@ -256,7 +256,7 @@ describe("fetchContacts (via harvest)", () => {
 
     const ctCall = calls.find((c) => c.tool === "mcp__google-workspace__list_contacts");
     expect(ctCall).toBeDefined();
-    expect(ctCall!.args.user_google_email).toBe("zerocool0133700@gmail.com");
+    expect(ctCall!.args.user_google_email).toBe("dave@ellie-labs.dev");
   });
 
   test("maps contacts to HarvestItems correctly", async () => {

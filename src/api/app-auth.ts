@@ -224,7 +224,7 @@ export async function meEndpoint(req: ApiRequest, res: ApiResponse) {
     }
 
     // Update last_seen
-    sql`UPDATE app_users SET last_seen_at = NOW() WHERE id = ${user.id}`.catch(() => {})
+    sql`UPDATE app_users SET last_seen_at = NOW() WHERE id = ${user.id}`.catch(err => logger.error("[app-auth] Failed to update last_seen_at", err))
 
     return res.json({
       ok: true,

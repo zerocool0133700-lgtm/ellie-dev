@@ -176,7 +176,9 @@ export async function journalDispatchStart(
   entry: JournalStartEntry,
 ): Promise<boolean> {
   const content = buildStartEntry(entry);
-  return appendJournalEntry(content);
+  // Extract date from timestamp if provided, otherwise use today
+  const date = entry.startedAt ? entry.startedAt.slice(0, 10) : undefined;
+  return appendJournalEntry(content, date);
 }
 
 /**
@@ -186,5 +188,7 @@ export async function journalDispatchEnd(
   entry: JournalEndEntry,
 ): Promise<boolean> {
   const content = buildEndEntry(entry);
-  return appendJournalEntry(content);
+  // Extract date from timestamp if provided, otherwise use today
+  const date = entry.endedAt ? entry.endedAt.slice(0, 10) : undefined;
+  return appendJournalEntry(content, date);
 }

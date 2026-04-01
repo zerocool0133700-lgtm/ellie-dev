@@ -431,13 +431,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
       if (msg.type === "message" && (msg.text || msg.image)) {
         // ELLIE-461: Fresh AbortController per message dispatch
         const abortCtrl = getOrCreateAbortController(ws);
-        // Prepend reply context so the agent sees what message is being replied to
-        let effectiveText = msg.text || "";
-        if (msg.reply_to?.text) {
-          const who = msg.reply_to.role === "user" ? "Dave" : (msg.reply_to.agent || "Ellie");
-          effectiveText = `[Replying to ${who}: "${msg.reply_to.text.substring(0, 300)}"]\n\n${effectiveText}`;
-        }
-        handleEllieChatMessage(ws, effectiveText, !!msg.phone_mode, msg.image, msg.channel_id, msg.id, msg.mode, abortCtrl.signal);
+        handleEllieChatMessage(ws, msg.text || "", !!msg.phone_mode, msg.image, msg.channel_id, msg.id, msg.mode, abortCtrl.signal, msg.reply_to);
         return;
       }
 

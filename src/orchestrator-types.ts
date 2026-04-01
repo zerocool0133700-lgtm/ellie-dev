@@ -141,11 +141,11 @@ export class PipelineValidationError extends Error {
 // ────────────────────────────────────────────────────────────────
 
 export const MAX_PIPELINE_DEPTH = 5;
-export const MAX_PIPELINE_TIMEOUT_MS = 120_000; // 2 minutes total
-/** ELLIE-521: Per-step timeout for light skills (30 seconds). */
-export const STEP_TIMEOUT_LIGHT_MS = 30_000;
-/** ELLIE-521: Per-step timeout for heavy skills (60 seconds). */
-export const STEP_TIMEOUT_HEAVY_MS = 60_000;
+export const MAX_PIPELINE_TIMEOUT_MS = 300_000; // 5 minutes total — research pipelines need headroom
+/** ELLIE-521: Per-step timeout for light skills (45 seconds). */
+export const STEP_TIMEOUT_LIGHT_MS = 45_000;
+/** ELLIE-521: Per-step timeout for heavy skills (120 seconds) — web_search + synthesis needs time. */
+export const STEP_TIMEOUT_HEAVY_MS = 120_000;
 export const MAX_PREVIOUS_OUTPUT_CHARS = 8_000;
 export const MAX_INSTRUCTION_CHARS = 500;
 export const MAX_CRITIC_ROUNDS = 3;

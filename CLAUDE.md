@@ -577,6 +577,327 @@ To edit prompts: open the River vault in Obsidian, edit the relevant `.md` file 
 
 ---
 
+### Agent MCP Access Matrix
+
+Each agent has different tool and MCP access based on their role. This matrix defines which MCPs each agent should use:
+
+| MCP | Ellie (General) | James (Dev) | Kate (Research) | Alan (Strategy) | Brian (Critic) | Amy (Content) | Marcus (Finance) | Jason (Ops) |
+|-----|----------------|-------------|-----------------|-----------------|----------------|---------------|-----------------|-------------|
+| **Google Workspace** | | | | | | | | |
+| - Gmail | ✅ [CONFIRM:] | ❌ | ⚠️ [CONFIRM:] | ⚠️ Docs only | ❌ | ✅ [CONFIRM:] | ❌ | ❌ |
+| - Calendar | ✅ [CONFIRM:] | ❌ | ❌ | ✅ Roadmaps | ❌ | ❌ | ❌ | ❌ |
+| - Tasks | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| - Drive | ✅ | ⚠️ Docs only | ✅ Reports | ✅ Strategy docs | ❌ | ✅ Content | ⚠️ Sheets (future) | ⚠️ Runbooks |
+| - Docs | ✅ | ⚠️ Read-only | ✅ Reports | ✅ Strategy docs | ❌ | ✅ Content | ❌ | ⚠️ Runbooks |
+| - Sheets | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ⚠️ (future) | ❌ |
+| - Contacts | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **GitHub** | ⚠️ Status only | ✅ Full | ❌ | ⚠️ Read-only | ✅ PRs/reviews | ❌ | ❌ | ✅ Deploys |
+| **Plane** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Brave Search** | ✅ | ✅ | ✅ Core | ✅ Markets | ❌ | ✅ Content | ❌ | ✅ Ops tools |
+| **Miro** | ❌ | ❌ | ⚠️ Optional | ✅ Diagrams | ❌ | ⚠️ Visuals | ❌ | ❌ |
+| **Forest Bridge** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **QMD (River)** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Memory** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **Sequential Thinking** | ❌ | ⚠️ Complex arch | ✅ Deep analysis | ✅ Strategy | ✅ Quality | ❌ | ❌ | ❌ |
+
+**Legend:**
+- ✅ Full access — Core tool for this agent
+- ⚠️ Limited access — Specific use cases only (noted in cell)
+- ❌ No access — Not relevant to this agent's role
+- [CONFIRM:] — Requires user approval before executing (write/send operations)
+
+**Access Notes:**
+
+**Ellie (General — Coordinator):**
+- Full Google Workspace access — manages Dave's day-to-day (email, calendar, tasks, docs)
+- GitHub read-only — can check status and issues, cannot modify code
+- All knowledge tools (Forest, QMD, Memory) — coordinates cross-agent knowledge
+- No deep analysis tools (Miro, Sequential Thinking) — delegates to specialists
+
+**James (Dev — Developer):**
+- Full GitHub access — core development tool (PRs, issues, code)
+- Google Workspace limited to reading docs — doesn't manage Dave's email/calendar
+- All knowledge tools — writes technical findings to Forest
+- Sequential Thinking only for complex architectural decisions — not routine dev work
+
+**Kate (Research — Researcher):**
+- Brave Search is core — primary research tool
+- Google Workspace for research reports (Drive, Docs) and outreach (Gmail with [CONFIRM:])
+- Sequential Thinking for deep analysis chains
+- Miro optional for research visualization
+- No GitHub — research is external, not code-focused
+
+**Alan (Strategy — Strategist):**
+- Brave Search for market research and competitive intel
+- Google Workspace: Calendar for roadmaps, Docs/Drive for strategy documents
+- Miro for visual diagrams (roadmaps, market maps)
+- Sequential Thinking for deep strategic analysis
+- GitHub read-only to understand technical constraints
+
+**Brian (Critic — Quality Reviewer):**
+- GitHub for reviewing PRs and code
+- Sequential Thinking for deep quality analysis
+- No external tools (Brave Search, Google Workspace, Miro) — assessments are internal
+
+**Amy (Content — Content Creator):**
+- Google Workspace: Docs for writing, Drive for storage, Gmail with [CONFIRM:] for outreach
+- Brave Search for content research
+- Miro optional for visual content planning
+- No GitHub or Sequential Thinking — content creation is creative, not analytical
+
+**Marcus (Finance — Financial Analyst):**
+- Google Sheets (future) for financial tracking — currently uses Supabase
+- All data is internal — no Brave Search, GitHub, or external tools
+- No deep analysis tools — financial analysis is structured
+
+**Jason (Ops — Operations Engineer):**
+- GitHub for deployments, CI/CD, releases
+- Brave Search for ops tools and best practices
+- Google Drive/Docs (future) for runbooks
+- No deep analysis tools — ops work is action-oriented
+
+**Future Enhancements:**
+- Tool access control enforcement (currently behavioral guidelines only)
+- Per-agent MCP filtering in agent-router.ts
+- Usage monitoring and audit logging
+
+---
+
+### Inter-Agent Communication Protocol
+
+Agents communicate through multiple mechanisms, each suited to different scenarios. This protocol defines **when to use which path** and the **rules of engagement**.
+
+#### Communication Mechanisms (Ordered by Complexity)
+
+| # | Mechanism | File | When to Use |
+|---|-----------|------|-------------|
+| 1 | **Agent Queue** | `src/api/agent-queue.ts` | Async work items — "do this when you can" |
+| 2 | **Agent Request** | `src/agent-request.ts` | One-off task requests — "I need help with X" |
+| 3 | **Agent Exchange** | `src/agent-exchange.ts` | Direct collaboration after request is approved |
+| 4 | **Delegations** | `src/agent-delegations.ts` | Manager→direct report task delegation |
+| 5 | **Formations** | `src/formations/orchestrator.ts` | Structured multi-agent parallel/sequential work |
+| 6 | **Round Table** | `src/round-table/orchestrator.ts` | 4-phase structured discussions (convene→discuss→converge→deliver) |
+| 7 | **AgentMail** | `src/agentmail.ts` | Email-based inter-agent messaging |
+| 8 | **Dispatch** | `src/orchestration-dispatch.ts` | Formal tracked dispatch with concurrency control |
+
+#### Decision Tree — Which Path to Use
+
+```
+Is this a quick, fire-and-forget task?
+  YES → Agent Queue (POST /api/queue/create)
+  NO ↓
+
+Does it require back-and-forth collaboration?
+  YES → Agent Request → Agent Exchange (after approval)
+  NO ↓
+
+Is this a manager delegating to a direct report?
+  YES → Delegation (createDelegation)
+  NO ↓
+
+Does it need multiple agents working on the same problem?
+  YES → Is it structured (defined protocol)?
+    YES → Formation (invokeFormation)
+    NO → Round Table (runRoundTable)
+  NO ↓
+
+Is it a formal work dispatch with tracking?
+  YES → Orchestration Dispatch (executeTrackedDispatch)
+  NO → Direct agent call via agent-router
+```
+
+#### Routing Rules
+
+**1. Everything routes through Ellie (coordinator) by default.**
+- Ellie receives the user message, decides who handles it
+- Specialists do NOT independently decide to involve other agents
+- Exception: Formations and Round Tables have their own internal routing
+
+**2. Specialists CAN request help from other specialists.**
+- Use `Agent Request` → coordinator (Ellie) approves or denies
+- After approval, `Agent Exchange` opens a direct channel
+- Example: Brian (critic) finds a bug → requests James (dev) to fix it
+- Example: Kate (research) needs Amy (content) to write up findings
+
+**3. Delegations follow the org chart.**
+- Only valid between manager and direct report (`reports_to` field)
+- Delegate: manager → direct report (downward)
+- Escalate: direct report → manager (upward)
+- Cannot skip levels — must go through the chain
+
+**4. Formations are self-contained.**
+- Once a formation is invoked, agents within it communicate through the formation protocol
+- Fan-out: all agents work in parallel, facilitator synthesizes
+- Debate: agents take turns arguing positions
+- Pipeline: agents execute sequentially, each building on the previous
+- No external agent communication during a formation
+
+**5. Round Tables are the highest-level coordination.**
+- Use for complex, multi-phase work requiring multiple formations
+- 4 phases: Convene → Discuss → Converge → Deliver
+- Each phase can invoke formations internally
+- Reserved for strategic decisions, not routine tasks
+
+#### Agent Queue — Async Work Items
+
+**Use when:** An agent has work for another agent that doesn't need immediate response.
+
+```
+POST /api/queue/create
+{ source: "brian", target: "james", priority: "high",
+  category: "bug-fix", title: "Fix null check in router",
+  content: "Details...", work_item_id: "ELLIE-999" }
+```
+
+**Priority levels:** `critical` | `high` | `medium` | `low`
+
+**Lifecycle:** `new` → `acknowledged` → `completed`
+
+**Auto-expiry:** Items older than 7 days are auto-archived.
+
+**Target agent checks inbox:**
+```
+GET /api/queue/list?target=james&status=new
+```
+
+#### Agent Request + Exchange — Collaborative Work
+
+**Step 1:** Agent submits request
+```ts
+submitAgentRequest({
+  requestingAgent: "brian",
+  targetAgent: "james",
+  reason: "Found critical bug in dispatch logic",
+  estimatedDuration: "30m",
+  requiredCapability: "code-edit"
+})
+```
+
+**Step 2:** Coordinator (Ellie) approves → sub-commitment created
+
+**Step 3:** Exchange opens for direct communication
+```ts
+openExchange(requestId, { context: "Bug details..." })
+// Agents exchange messages directly
+addMessage(exchangeId, { from: "brian", content: "The bug is in line 42..." })
+addMessage(exchangeId, { from: "james", content: "Fixed. Here's what I changed..." })
+completeExchange(exchangeId, { summary: "Fixed null check" })
+```
+
+**Step 4:** Coordinator notified of completion
+
+**Timeouts:**
+- Request: 10 minutes to get approval
+- Exchange: 10 minutes of inactivity
+- Commitment: 30 minutes total
+
+#### Delegations — Org Chart Work
+
+**Use when:** A manager needs a direct report to handle a task, or a report needs to escalate.
+
+```ts
+// Manager delegates down
+createDelegation({
+  direction: "delegate",
+  from_agent_id: "ellie",
+  to_agent_id: "james",
+  summary: "Implement the new API endpoint",
+  work_item_id: "ELLIE-500"
+})
+
+// Direct report escalates up
+createDelegation({
+  direction: "escalate",
+  from_agent_id: "james",
+  to_agent_id: "ellie",
+  summary: "Need decision on API design approach"
+})
+```
+
+**Lifecycle:** `pending` → `accepted` → `completed` | `failed` | `rejected`
+
+**Audit trail:** `getDelegationChain(work_item_id)` returns full delegation history.
+
+#### Formations — Structured Multi-Agent Work
+
+**Use when:** A defined protocol exists for how agents should collaborate.
+
+**3 protocol patterns:**
+
+| Pattern | How It Works | Example |
+|---------|-------------|---------|
+| **Fan-out** | All agents work in parallel, facilitator synthesizes | "Everyone analyze this from your perspective" |
+| **Debate** | Agents take turns for N rounds | "Dev and Critic debate this architecture" |
+| **Pipeline** | Sequential execution, each builds on previous | "Research → Strategy → Content pipeline" |
+
+**Invocation:**
+```ts
+invokeFormation(deps, "architecture-review", userPrompt, {
+  timeout: 30000,  // per-agent timeout
+  synthesisTimeout: 60000  // facilitator timeout
+})
+```
+
+**Returns:** `FormationInvocationResult` with synthesis + individual agent outputs.
+
+#### Round Table — Complex Discussions
+
+**Use when:** The problem requires structured analysis across multiple phases.
+
+**4 phases:**
+
+| Phase | Purpose | Default Agent |
+|-------|---------|--------------|
+| **Convene** | Analyze query, determine scope | Strategy |
+| **Discuss** | Invoke relevant formations | (Formation agents) |
+| **Converge** | Synthesize all formation outputs | Strategy |
+| **Deliver** | Produce final polished deliverable | Strategy |
+
+**Config:**
+- Phase timeout: 120s per phase
+- Session timeout: 15 min total (shared deadline prevents overshoot)
+- Max concurrent dispatches: 3
+
+#### Dispatch Tracking — Observability
+
+Every agent dispatch is tracked through:
+
+1. **Orchestration Dispatch** (`src/orchestration-dispatch.ts`) — generates `run_id`, enforces concurrency cap (max 3)
+2. **Orchestration Tracker** (`src/orchestration-tracker.ts`) — tracks active runs, detects stalls
+3. **Orchestration Ledger** (`src/orchestration-ledger.ts`) — event log (dispatched, completed, failed, timeout)
+4. **Dispatch Journal** (`src/dispatch-journal.ts`) — daily markdown files in River (`dispatch-journal/YYYY-MM-DD.md`)
+
+**Concurrency rules:**
+- Max 3 concurrent dispatches (prevents OOM)
+- Work item locking prevents duplicate dispatches to same ticket
+- Queue on busy: if agent is occupied, work is queued instead of rejected
+
+#### Anti-Patterns
+
+- **Don't bypass the coordinator.** Specialists should not independently decide to invoke other agents without going through the request system.
+- **Don't use formations for simple tasks.** If one agent can handle it, just dispatch directly.
+- **Don't use round tables for routine work.** Reserve for strategic decisions requiring multi-phase analysis.
+- **Don't mix mechanisms.** Pick one communication path per interaction. Don't start with a queue item and then also open an exchange.
+- **Don't forget timeouts.** All mechanisms have auto-timeout. Design work to complete within the window.
+
+#### Key Files Reference
+
+| File | Purpose |
+|------|---------|
+| `src/agent-request.ts` | Request + approval workflow (ELLIE-600) |
+| `src/agent-exchange.ts` | Direct agent-to-agent channel (ELLIE-601) |
+| `src/agent-queue.ts` + `src/api/agent-queue.ts` | Async work queue (ELLIE-200/201) |
+| `src/agent-delegations.ts` | Org-chart delegation (ELLIE-727) |
+| `src/agent-registry.ts` | In-memory agent session tracking (ELLIE-599) |
+| `src/commitment-ledger.ts` | Commitment + sub-commitment tracking (ELLIE-598) |
+| `src/formations/orchestrator.ts` | Multi-agent formation protocols (ELLIE-675) |
+| `src/round-table/orchestrator.ts` | 4-phase round table discussions (ELLIE-695) |
+| `src/orchestration-dispatch.ts` | Tracked dispatch with concurrency (ELLIE-352) |
+| `src/dispatch-journal.ts` | Daily dispatch audit trail (ELLIE-565) |
+| `src/agentmail.ts` | Email-based inter-agent comms (ELLIE-785) |
+
+---
+
 - **Relay:** `src/relay.ts` — Telegram bot + HTTP server + voice calls + Google Chat webhook
 - **Google Chat:** `src/google-chat.ts` — Service account auth, message sending, webhook parsing
 - **Memory:** `src/memory.ts` — Supabase-backed conversation history + semantic search

@@ -3,6 +3,7 @@ import {
   fixListSpacing,
   fixHeadingSpacing,
   fixCodeBlockSpacing,
+  fixHorizontalRuleSpacing,
   collapseExcessiveBlankLines,
   fixMarkdown,
 } from "../src/markdown-fixer.ts";
@@ -93,17 +94,54 @@ describe("ELLIE-787: Markdown list spacing fixer", () => {
     });
   });
 
-  describe("collapseExcessiveBlankLines", () => {
-    it("collapses 4+ newlines to 3", () => {
-      expect(collapseExcessiveBlankLines("a\n\n\n\nb")).toBe("a\n\n\nb");
+  describe("fixHorizontalRuleSpacing", () => {
+    it("adds blank line before horizontal rule", () => {
+      const input = "Some text\n---\n### Next Section";
+      expect(fixHorizontalRuleSpacing(input)).toBe("Some text\n\n---\n\n### Next Section");
     });
 
-    it("leaves double blank lines alone", () => {
-      expect(collapseExcessiveBlankLines("a\n\n\nb")).toBe("a\n\n\nb");
+    it("adds blank line after horizontal rule", () => {
+      const input = "Text\n\n---\nMore text";
+      expect(fixHorizontalRuleSpacing(input)).toBe("Text\n\n---\n\nMore text");
+    });
+
+    it("does not double-space already spaced rules", () => {
+      const input = "Text\n\n---\n\nMore text";
+      expect(fixHorizontalRuleSpacing(input)).toBe(input);
+    });
+
+    it("handles multiple horizontal rules", () => {
+      const input = "Part 1\n---\nPart 2\n---\nPart 3";
+      expect(fixHorizontalRuleSpacing(input)).toBe("Part 1\n\n---\n\nPart 2\n\n---\n\nPart 3");
+    });
+
+    it("handles rule at start of text", () => {
+      const input = "---\nHeading";
+      expect(fixHorizontalRuleSpacing(input)).toBe("---\n\nHeading");
+    });
+
+    it("handles rule at end of text", () => {
+      const input = "Text\n---";
+      expect(fixHorizontalRuleSpacing(input)).toBe("Text\n\n---");
+    });
+
+    it("does not treat list items as horizontal rules", () => {
+      const input = "Items:\n- one\n- two";
+      expect(fixHorizontalRuleSpacing(input)).toBe(input);
+    });
+  });
+
+  describe("collapseExcessiveBlankLines", () => {
+    it("collapses 3+ newlines to 2", () => {
+      expect(collapseExcessiveBlankLines("a\n\n\n\nb")).toBe("a\n\nb");
+    });
+
+    it("leaves standard paragraph separation alone", () => {
+      expect(collapseExcessiveBlankLines("a\n\nb")).toBe("a\n\nb");
     });
 
     it("collapses very large gaps", () => {
-      expect(collapseExcessiveBlankLines("a\n\n\n\n\n\n\nb")).toBe("a\n\n\nb");
+      expect(collapseExcessiveBlankLines("a\n\n\n\n\n\n\nb")).toBe("a\n\nb");
     });
   });
 
@@ -134,6 +172,12 @@ describe("ELLIE-787: Markdown list spacing fixer", () => {
       const result = fixMarkdown(input);
       expect(result).toContain("\n\n## Summary");
       expect(result).toContain("here\n\n1. Change A");
+    });
+
+    it("fixes horizontal rule before heading (Dave's report)", () => {
+      const input = "Test with Brian and Amy --- ### Phase 4: Team Projects";
+      const result = fixMarkdown(input);
+      expect(result).toContain("Amy\n\n---\n\n### Phase 4");
     });
 
     it("is idempotent", () => {

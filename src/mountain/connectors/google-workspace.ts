@@ -107,7 +107,7 @@ export class GoogleWorkspaceMountainSource extends MCPConnectorSource {
     }>("mcp__google-workspace__search_gmail_messages", {
       query,
       max_results: limit,
-      user_google_email: job.filters?.email ?? "zerocool0133700@gmail.com",
+      user_google_email: job.filters?.email ?? "dave@ellie-labs.dev",
     });
 
     return (results.messages ?? []).map((msg) => ({
@@ -139,7 +139,7 @@ export class GoogleWorkspaceMountainSource extends MCPConnectorSource {
     }>("mcp__google-workspace__search_drive_files", {
       query: query ?? "",
       max_results: limit,
-      user_google_email: job.filters?.email ?? "zerocool0133700@gmail.com",
+      user_google_email: job.filters?.email ?? "dave@ellie-labs.dev",
     });
 
     return (results.files ?? []).map((file) => ({
@@ -160,7 +160,7 @@ export class GoogleWorkspaceMountainSource extends MCPConnectorSource {
     job: HarvestJob,
     limit: number,
   ): Promise<HarvestItem[]> {
-    const email = (job.filters?.email as string) ?? "zerocool0133700@gmail.com";
+    const email = (job.filters?.email as string) ?? "dave@ellie-labs.dev";
     const calendarId = (job.filters?.calendarId as string) ?? "primary";
     const timeMin = job.since?.toISOString() ?? new Date(Date.now() - 7 * 86400_000).toISOString();
     const timeMax = job.until?.toISOString() ?? new Date().toISOString();
@@ -211,7 +211,7 @@ export class GoogleWorkspaceMountainSource extends MCPConnectorSource {
     job: HarvestJob,
     limit: number,
   ): Promise<HarvestItem[]> {
-    const email = (job.filters?.email as string) ?? "zerocool0133700@gmail.com";
+    const email = (job.filters?.email as string) ?? "dave@ellie-labs.dev";
     const allContacts: HarvestItem[] = [];
     let pageToken: string | undefined;
 
@@ -279,7 +279,7 @@ export class GoogleWorkspaceMountainSource extends MCPConnectorSource {
       await this.callWithRetry("mcp__google-workspace__search_gmail_messages", {
         query: "newer_than:1d",
         max_results: 1,
-        user_google_email: "zerocool0133700@gmail.com",
+        user_google_email: "dave@ellie-labs.dev",
       });
       return true;
     } catch {

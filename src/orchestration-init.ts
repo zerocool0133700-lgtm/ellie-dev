@@ -16,6 +16,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { startWatchdog, recoverActiveRuns } from "./orchestration-tracker.ts";
 import { reconcileOnStartup, startReconciler } from "./orchestration-reconciler.ts";
+import { startOrchestrationMonitor } from "./orchestration-monitor.ts";
 import { cleanupOrphanedJobs } from "./jobs-ledger.ts";
 import { recoverSpawnRegistry } from "./session-spawn.ts";
 import { log } from "./logger.ts";
@@ -51,9 +52,10 @@ export async function initOrchestration(supabase: SupabaseClient | null): Promis
   // Step 3: Reconcile with Supabase
   await reconcileOnStartup(supabase);
 
-  // Step 4 & 5: Start background monitors
+  // Step 4 & 5 & 6: Start background monitors
   startWatchdog();
   startReconciler(supabase);
+  startOrchestrationMonitor(); // ELLIE-924: GTD task stall detection
 
   logger.info("Orchestration initialization complete");
 

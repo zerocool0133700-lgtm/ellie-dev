@@ -28,6 +28,10 @@ export class CircuitBreaker {
   private readonly failureThreshold: number;
   private readonly resetTimeoutMs: number;
   private readonly callTimeoutMs: number;
+  private _lastError: unknown = null;
+
+  /** The last error that caused the breaker to return fallback. */
+  get lastError(): unknown { return this._lastError; }
 
   constructor(opts: CircuitBreakerOpts) {
     this.name = opts.name;
@@ -94,6 +98,7 @@ export class CircuitBreaker {
       return result;
     } catch (err) {
       if (timer !== undefined) clearTimeout(timer);
+      this._lastError = err;
       this.recordFailure();
       if (state === "half_open") {
         logger.warn(`${this.name} half-open test failed — re-opening`, { service: this.name });

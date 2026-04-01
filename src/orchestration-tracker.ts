@@ -51,8 +51,8 @@ const REAPER_THRESHOLD_MS = 300_000; // 5min stale with dead process = reap
 // Heavy-thinking creatures (dev, strategy, critic) get longer leashes.
 // Fast-turnaround creatures (road-runner, ops) keep shorter thresholds.
 const CREATURE_STALE_THRESHOLDS: Record<string, number> = {
-  dev: 600_000,         // 10min — code reviews, architecture, multi-file changes
-  strategy: 600_000,    // 10min — deep analysis, planning
+  dev: 900_000,         // 15min — code reviews, architecture, multi-file changes
+  strategy: 900_000,    // 15min — deep analysis, planning
   critic: 480_000,      // 8min — thorough reviews
   research: 480_000,    // 8min — web research, data gathering
   content: 300_000,     // 5min — writing, drafting
@@ -60,7 +60,7 @@ const CREATURE_STALE_THRESHOLDS: Record<string, number> = {
   general: 180_000,     // 3min — general chat
   "road-runner": 120_000, // 2min — quick tasks
   ops: 120_000,         // 2min — deployments, restarts
-  orchestrator: 600_000, // 10min — multi-step pipelines
+  orchestrator: 900_000, // 15min — multi-step pipelines
 };
 
 function getStaleThreshold(agentType: string): number {
@@ -252,7 +252,9 @@ export function startWatchdog(): void {
               workItemId: run.workItemId || runId.slice(0, 8),
               telegramMessage: `⚠️ ${run.agentType} stalled (no heartbeat ${staleMin}min) on ${run.workItemId || "unknown"}`,
               gchatMessage: `${run.agentType} agent stalled — no heartbeat for ${staleMin} minutes on ${run.workItemId || "unknown task"}`,
-            }).catch(() => {});
+            }).catch((err) => {
+              logger.error("Watchdog stall notification failed", { runId, agentType: run.agentType, workItem: run.workItemId, error: err });
+            });
           }
         }
 
@@ -294,7 +296,9 @@ export function startWatchdog(): void {
           workItemId: run.workItemId || runId.slice(0, 8),
           telegramMessage: `❌ ${run.agentType} failed — process died after ${staleMin}min stall on ${run.workItemId || "unknown"}`,
           gchatMessage: `${run.agentType} agent failed — process died after ${staleMin} minutes stalled on ${run.workItemId || "unknown task"}. Run reaped.`,
-        }).catch(() => {});
+        }).catch((err) => {
+          logger.error("Watchdog reaper notification failed", { runId, agentType: run.agentType, workItem: run.workItemId, error: err });
+        });
       }
       endRun(runId, "failed");
     }

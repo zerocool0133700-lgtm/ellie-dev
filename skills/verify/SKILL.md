@@ -2,7 +2,7 @@
 name: verify
 description: Verify factual claims against primary sources before presenting assessments to the user
 always: true
-agent: dev
+agent: [dev, critic, research]
 triggers: [verify, fact-check, check yourself, double check, are you sure]
 requires:
   mcp: [mcp__plane__*, mcp__forest-bridge__*]
