@@ -4388,15 +4388,17 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           },
         };
 
+        const extraHeaders: Record<string, string> = {};
         const mockRes: ApiResponse = {
+          setHeader: (name: string, value: string) => { extraHeaders[name] = value; },
           status: (code: number) => ({
             json: (resData: unknown) => {
-              res.writeHead(code, { "Content-Type": "application/json" });
+              res.writeHead(code, { "Content-Type": "application/json", ...extraHeaders });
               res.end(JSON.stringify(resData));
             },
           }),
           json: (resData: unknown) => {
-            res.writeHead(200, { "Content-Type": "application/json" });
+            res.writeHead(200, { "Content-Type": "application/json", ...extraHeaders });
             res.end(JSON.stringify(resData));
           },
         };

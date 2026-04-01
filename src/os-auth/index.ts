@@ -24,6 +24,7 @@ import { getSigningKeys, publicKeyToJwk, buildJwksResponse, _resetKeyCache } fro
 import { getAccountMemberships } from "./memberships"
 import { writeAudit, AUDIT_EVENTS } from "./audit"
 import type { OsAccessTokenPayload } from "./schema"
+import { checkRateLimit, _resetRateLimits } from "./rate-limit"
 import { log } from "../logger.ts"
 
 const logger = log.child("os-auth")
@@ -87,6 +88,22 @@ export async function handleOsAuthRoute(
 
   const ipAddress = req.headers?.["x-forwarded-for"] || req.headers?.["x-real-ip"] || null
   const userAgent = req.headers?.["user-agent"] || null
+
+  // Apply rate limiting to mutation endpoints before any DB work
+  if (match.handler === "register" || match.handler === "login" || match.handler === "refresh") {
+    const rl = checkRateLimit(ipAddress, match.handler)
+    if (!rl.allowed) {
+      res.status(429).json({
+        error: "Too many requests",
+        retryAfter: rl.retryAfter,
+      })
+      // Set Retry-After header
+      if (typeof res.setHeader === "function") {
+        res.setHeader("Retry-After", String(rl.retryAfter))
+      }
+      return true
+    }
+  }
 
   try {
     switch (match.handler) {
@@ -325,4 +342,4 @@ export async function handleOsAuthRoute(
 }
 
 /** Re-export for testing */
-export { _resetKeyCache }
+export { _resetKeyCache, _resetRateLimits }

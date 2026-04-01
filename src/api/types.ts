@@ -22,4 +22,6 @@ export interface ApiRequest {
 export interface ApiResponse {
   json: (data: unknown) => void
   status: (code: number) => { json: (data: unknown) => void }
+  /** Optional: set a response header before calling json/status */
+  setHeader?: (name: string, value: string) => void
 }
