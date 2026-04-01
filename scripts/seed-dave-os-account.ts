@@ -10,6 +10,11 @@
  *   DAVE_OS_PASSWORD=secret bun run scripts/seed-dave-os-account.ts
  *
  * If DAVE_OS_PASSWORD is not set, defaults to "ellie-dev-local" for dev environments.
+ *
+ * Note: registerAccount() creates a verification token as part of the normal registration
+ * flow. This seed skips the token flow and calls verifyAccountEmail() directly, so that
+ * token is never consumed. This is intentional — the token expires naturally after 24h
+ * and causes no harm.
  */
 
 import postgres from "postgres"
@@ -22,6 +27,8 @@ const ENTITY_TYPE = "user" as const
 const DEFAULT_DEV_PASSWORD = "ellie-dev-local"
 
 async function main() {
+  console.log(`Seeding Dave OS account...`)
+
   const sql = postgres({
     host: "/var/run/postgresql",
     database: "ellie-forest",
@@ -47,7 +54,14 @@ async function main() {
 
       // Ensure verified + active even if a prior run was interrupted
       if (!existing.email_verified || existing.status !== "active") {
-        await verifyAccountEmail(sql, accountId)
+        const verified = await verifyAccountEmail(sql, accountId)
+        if (!verified) {
+          console.error(
+            `  Failed to verify account (id=${accountId}, status=${existing.status}). ` +
+              `The account may be suspended or deleted — check os_accounts directly.`
+          )
+          process.exit(1)
+        }
         console.log(`  Marked account as verified + active`)
       }
     } else {
