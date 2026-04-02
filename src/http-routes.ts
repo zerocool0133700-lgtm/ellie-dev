@@ -7162,6 +7162,57 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // ELLIE-1277: Dispatch progress events — query Forest orchestration_events by dispatch_envelope_id
+  const eventsMatch = url.pathname.match(/^\/api\/dispatches\/([^/]+)\/events$/);
+  if (eventsMatch && req.method === "GET") {
+    const itemId = eventsMatch[1];
+    (async () => {
+      try {
+        // 1. Look up dispatch_envelope_id from Supabase todos
+        const { supabase: sbClient } = getRelayDeps();
+        if (!sbClient) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Supabase unavailable" }));
+          return;
+        }
+
+        const { data: todo } = await sbClient
+          .from("todos")
+          .select("dispatch_envelope_id")
+          .eq("id", itemId)
+          .single();
+
+        if (!todo?.dispatch_envelope_id) {
+          res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
+          res.end(JSON.stringify({ events: [], dispatch_envelope_id: null }));
+          return;
+        }
+
+        // 2. Query Forest for orchestration events via orchestration-ledger
+        try {
+          const { getRunEvents } = await import("./orchestration-ledger.ts");
+          const allEvents = await getRunEvents(todo.dispatch_envelope_id);
+
+          // Apply pagination after fetching (getRunEvents returns ASC; reverse for DESC)
+          const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50", 10), 100);
+          const offset = parseInt(url.searchParams.get("offset") ?? "0", 10);
+          const events = allEvents.reverse().slice(offset, offset + limit);
+
+          res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
+          res.end(JSON.stringify({ events, dispatch_envelope_id: todo.dispatch_envelope_id, forest_unavailable: false }));
+        } catch {
+          // Forest unavailable — graceful degradation
+          res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
+          res.end(JSON.stringify({ events: [], dispatch_envelope_id: todo.dispatch_envelope_id, forest_unavailable: true }));
+        }
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Internal error" }));
+      }
+    })();
+    return;
+  }
+
   // Tool approvals list — for dashboard dispatch panel (ELLIE-1153)
   if (url.pathname === "/api/tool-approvals" && req.method === "GET") {
     (async () => {
