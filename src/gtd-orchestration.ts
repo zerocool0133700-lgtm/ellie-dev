@@ -418,9 +418,9 @@ export async function getOrchestrationBadgeCount(): Promise<number> {
   const { count, error } = await supabase
     .from("todos")
     .select("id", { count: "exact", head: true })
-    .eq("is_orchestration", true)
+    .eq("item_type", "agent_question")
     .eq("assigned_to", "dave")
-    .eq("status", "open");
+    .in("status", ["open", "waiting_for"]);
 
   if (error) {
     logger.error("Failed to get badge count", error);
