@@ -5,7 +5,7 @@
  * Each test creates items and hard-deletes them in afterAll cleanup.
  */
 
-import { describe, it, expect, beforeAll, afterAll, mock } from "bun:test";
+import { describe, it, test, expect, beforeAll, afterAll, mock } from "bun:test";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 // ── Mock logger before any src imports ────────────────────────
@@ -39,6 +39,7 @@ import {
   getOrchestrationBadgeCount,
   findOrphanedParents,
   timeoutStaleChildren,
+  generateQuestionId,
 } from "../src/gtd-orchestration.ts";
 
 // ── Setup ─────────────────────────────────────────────────────
@@ -84,6 +85,18 @@ function track(id: string): string {
 }
 
 // ── Tests ─────────────────────────────────────────────────────
+
+describe("generateQuestionId", () => {
+  test("returns q- prefix with 8 hex chars", () => {
+    const id = generateQuestionId();
+    expect(id).toMatch(/^q-[0-9a-f]{8}$/);
+  });
+
+  test("generates unique IDs", () => {
+    const ids = new Set(Array.from({ length: 100 }, () => generateQuestionId()));
+    expect(ids.size).toBe(100);
+  });
+});
 
 describe("createOrchestrationParent", () => {
   it("creates a parent item with correct fields", async () => {

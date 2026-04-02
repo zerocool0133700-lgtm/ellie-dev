@@ -43,6 +43,10 @@ const TERMINAL_STATUSES = new Set(["done", "cancelled", "failed", "timed_out"]);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+export function generateQuestionId(): string {
+  return `q-${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
+}
+
 function getSupabase() {
   const { supabase } = getRelayDeps();
   if (!supabase) throw new Error("Supabase client not available");
@@ -87,6 +91,7 @@ export async function createOrchestrationParent(opts: {
       status: "open",
       assigned_to: "ellie",
       is_orchestration: true,
+      item_type: "agent_dispatch",
       created_by: opts.createdBy,
       source_ref: opts.sourceRef ?? null,
     })
@@ -120,6 +125,7 @@ export async function createDispatchChild(opts: {
       assigned_agent: opts.assignedAgent,
       assigned_to: opts.assignedTo,
       is_orchestration: true,
+      item_type: "agent_dispatch",
       status: "open",
       created_by: opts.createdBy,
       dispatch_envelope_id: opts.dispatchEnvelopeId ?? null,
@@ -146,6 +152,13 @@ export async function createQuestionItem(opts: {
   content: string;
   createdBy: string;
   urgency?: "blocking" | "normal" | "low";
+  metadata?: {
+    question_id: string;
+    what_i_need: string;
+    decision_unlocked: string;
+    answer_format?: "text" | "choice" | "approve_deny";
+    choices?: string[] | null;
+  };
 }): Promise<TodoRow> {
   const supabase = getSupabase();
 
@@ -156,9 +169,11 @@ export async function createQuestionItem(opts: {
       content: opts.content,
       assigned_to: "dave",
       is_orchestration: true,
+      item_type: "agent_question",
       status: "open",
       created_by: opts.createdBy,
       urgency: opts.urgency ?? "blocking",
+      ...(opts.metadata ? { metadata: opts.metadata } : {}),
     })
     .select("*")
     .single();
