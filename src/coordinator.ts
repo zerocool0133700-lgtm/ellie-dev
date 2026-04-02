@@ -28,6 +28,7 @@ import {
   type DispatchEnvelope,
 } from "./dispatch-envelope.ts";
 import { rebuildDispatchStateFromGTD } from "./gtd-recovery.ts";
+import { formatQuestionMessage } from "./telegram-question-format.ts";
 
 const logger = log.child("coordinator");
 
@@ -98,6 +99,14 @@ export interface CoordinatorPausedState {
   iteration: number;
   orchestrationParentId?: string | null;  // ELLIE-1152: Survive resume without forking GTD tree
   lastDispatchChildId?: string | null;    // ELLIE-1152: Last agent's GTD child item for question parenting
+  questionMetadata?: {                    // ELLIE-1276: Structured metadata for formatted question messages
+    question_id: string;
+    what_i_need: string;
+    decision_unlocked: string;
+    answer_format?: string;
+    choices?: string[];
+    agentName: string;
+  };
 }
 
 export interface CoordinatorResult {
@@ -363,7 +372,26 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
       } else if (tool.name === "ask_user") {
         // ELLIE-1101: Pause the loop — save state so next message can resume
         const askInput = tool.input as unknown as AskUserInput;
-        await deps.sendMessage(channel, askInput.question);
+
+        // ELLIE-1276: Generate question ID upfront so it's shared between GTD item and paused state metadata
+        let questionId: string;
+        try {
+          const gtdMod = await import("./gtd-orchestration.ts");
+          questionId = gtdMod.generateQuestionId();
+        } catch {
+          questionId = `q-${Math.random().toString(16).slice(2, 10)}`;
+        }
+
+        // ELLIE-1276: Format the question with structured metadata before sending
+        const formattedQuestion = formatQuestionMessage({
+          agentName: "ellie",
+          questionId,
+          question: askInput.question,
+          whatINeed: askInput.what_i_need ?? "",
+          decisionUnlocked: askInput.decision_unlocked ?? "",
+          choices: askInput.choices,
+        });
+        await deps.sendMessage(channel, formattedQuestion);
         logger.info("ask_user pausing loop", { question: askInput.question.slice(0, 200), toolUseId: tool.id });
 
         // ELLIE-1152: Create question item in GTD for dispatch panel visibility
@@ -381,7 +409,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
               createdBy: "ellie",
               urgency: askInput.urgency === "high" ? "blocking" : "normal",
               metadata: {
-                question_id: gtdMod.generateQuestionId(),
+                question_id: questionId,
                 what_i_need: askInput.what_i_need,
                 decision_unlocked: askInput.decision_unlocked,
                 answer_format: askInput.answer_format ?? "text",
@@ -408,6 +436,14 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
           iteration: loopIterations,
           orchestrationParentId,       // ELLIE-1152: Preserve GTD tree across resume
           lastDispatchChildId,         // ELLIE-1152: Preserve for question parenting
+          questionMetadata: {          // ELLIE-1276: Metadata for formatted question display
+            question_id: questionId,
+            what_i_need: askInput.what_i_need ?? "",
+            decision_unlocked: askInput.decision_unlocked ?? "",
+            answer_format: askInput.answer_format,
+            choices: askInput.choices,
+            agentName: "ellie",
+          },
         };
 
         // Return with paused state — the handler will store this
@@ -688,7 +724,16 @@ async function handleTool(
       // ask_user is handled in the main loop (breaks the loop to pause for user input).
       // This case should not be reached — but handle defensively.
       const askInput = input as unknown as AskUserInput;
-      await deps.sendMessage(channel, askInput.question);
+      const defQuestionId = `q-${Math.random().toString(16).slice(2, 10)}`;
+      const defFormatted = formatQuestionMessage({
+        agentName: "ellie",
+        questionId: defQuestionId,
+        question: askInput.question,
+        whatINeed: askInput.what_i_need ?? "",
+        decisionUnlocked: askInput.decision_unlocked ?? "",
+        choices: askInput.choices,
+      });
+      await deps.sendMessage(channel, defFormatted);
       return JSON.stringify({ status: "paused", question: askInput.question });
     }
 

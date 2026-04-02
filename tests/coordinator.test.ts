@@ -226,12 +226,13 @@ describe("runCoordinatorLoop", () => {
 
     // The loop should have paused after ask_user
     expect(result.loopIterations).toBe(1);
-    // The question should be returned as the response
+    // The plain question is preserved as the response (for resume logic)
     expect(result.response).toBe("Which database should I use?");
-    // The question should have been sent to the user's channel
-    expect(sentMessages).toEqual([
-      { channel: "telegram", message: "Which database should I use?" },
-    ]);
+    // ELLIE-1276: The sent message is formatted with agent name, question ID, and metadata
+    expect(sentMessages.length).toBe(1);
+    expect(sentMessages[0].channel).toBe("telegram");
+    expect(sentMessages[0].message).toContain("ellie asks (");
+    expect(sentMessages[0].message).toContain("Which database should I use?");
     // Not a safety rail — this is intentional pausing
     expect(result.hitSafetyRail).toBe(false);
   });
