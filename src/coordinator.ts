@@ -27,6 +27,7 @@ import {
   computeCost,
   type DispatchEnvelope,
 } from "./dispatch-envelope.ts";
+import { rebuildDispatchStateFromGTD } from "./gtd-recovery.ts";
 
 const logger = log.child("coordinator");
 
@@ -624,28 +625,12 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
       ctx.rebuildFromSummary(summary);
       logger.warn("Context rebuilt from working memory", { iteration });
 
-      // ELLIE-1152: Recover dispatch state from GTD after compaction — APPEND to existing task_stack
-      try {
-        const gtdMod = gtdModule ?? await import("./gtd-orchestration.ts");
-        const trees = await gtdMod.getActiveOrchestrationTrees();
-        if (trees.length > 0) {
-          const gtdSummary = trees.map(t => {
-            const childSummaries = t.children.map((c: { assigned_to?: string; assigned_agent?: string; status: string; content: string }) =>
-              `  - ${c.assigned_to || c.assigned_agent} (${c.status}): ${c.content.slice(0, 80)}`
-            ).join("\n");
-            return `${t.content.slice(0, 100)} [${t.status}]\n${childSummaries}`;
-          }).join("\n\n");
-          if (deps.updateWorkingMemory) {
-            // Read existing working memory summary to extract current task_stack (avoid clobbering)
-            const wmSummary = await deps.getWorkingMemorySummary().catch(() => "");
-            const taskStackMatch = wmSummary.match(/## task_stack\n([\s\S]*?)(?=\n## |\n*$)/);
-            const existingStack = taskStackMatch?.[1]?.trim() || "";
-            await deps.updateWorkingMemory({ task_stack: existingStack + "\n\n## Active Orchestration (recovered from GTD)\n" + gtdSummary });
-          }
-        }
-      } catch (e) {
-        logger.warn("GTD recovery failed after compaction", { error: (e as Error).message });
-      }
+      // ELLIE-1273: Recover dispatch state from GTD after compaction via gtd-recovery module
+      void rebuildDispatchStateFromGTD(
+        channel,
+        orchestrationParentId,
+        deps.updateWorkingMemory,
+      );
     } else if (pressure === "hot" || pressure === "warm") {
       ctx.compact(pressure);
       logger.info("Context compacted", { pressure, iteration });

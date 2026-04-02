@@ -7,6 +7,7 @@
 
 import { describe, test, expect, beforeEach } from "bun:test";
 import { CoordinatorContext, type ContextPressureLevel } from "../src/coordinator-context.ts";
+import { formatDispatchSummary, formatPendingAnswers } from "../src/gtd-recovery.ts";
 
 describe("CoordinatorContext", () => {
   let ctx: CoordinatorContext;
@@ -148,5 +149,70 @@ describe("CoordinatorContext", () => {
     expect(summary.length).toBeGreaterThan(0);
     // Should mention dispatch_agent or the agent name
     expect(summary.toLowerCase()).toMatch(/dispatch|agent|kate|research/);
+  });
+});
+
+describe("GTD recovery formatting", () => {
+  const mockTree = {
+    id: "parent-1",
+    content: "Implement auth system",
+    status: "open",
+    item_type: "agent_dispatch",
+    children: [
+      {
+        id: "child-1",
+        content: "Implement auth middleware",
+        status: "open",
+        item_type: "agent_dispatch",
+        assigned_agent: "james",
+        children: [
+          {
+            id: "grandchild-1",
+            content: "JWT or session cookies?",
+            status: "open",
+            item_type: "agent_question",
+            metadata: {
+              question_id: "q-7f3a2b1c",
+              what_i_need: "Pick one",
+              decision_unlocked: "Will implement chosen approach",
+            },
+            children: [],
+          },
+        ],
+      },
+      {
+        id: "child-2",
+        content: "Research query optimization",
+        status: "open",
+        item_type: "agent_dispatch",
+        assigned_agent: "kate",
+        children: [],
+      },
+    ],
+  };
+
+  test("formatDispatchSummary produces structured text", () => {
+    const summary = formatDispatchSummary(mockTree);
+    expect(summary).toContain("james");
+    expect(summary).toContain("auth middleware");
+    expect(summary).toContain("waiting");
+    expect(summary).toContain("kate");
+    expect(summary).toContain("query optimization");
+  });
+
+  test("formatPendingAnswers extracts unanswered questions", () => {
+    const anchors = formatPendingAnswers(mockTree);
+    expect(anchors).toContain("q-7f3a2b1c");
+    expect(anchors).toContain("JWT or session cookies");
+    expect(anchors).toContain("Pick one");
+  });
+
+  test("formatPendingAnswers returns empty for no pending questions", () => {
+    const noQuestions = {
+      ...mockTree,
+      children: [{ ...mockTree.children[1], children: [] }],
+    };
+    const anchors = formatPendingAnswers(noQuestions);
+    expect(anchors).toBe("");
   });
 });
