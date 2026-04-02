@@ -380,6 +380,13 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
               content: askInput.question,
               createdBy: "ellie",
               urgency: askInput.urgency === "high" ? "blocking" : "normal",
+              metadata: {
+                question_id: gtdMod.generateQuestionId(),
+                what_i_need: askInput.what_i_need,
+                decision_unlocked: askInput.decision_unlocked,
+                answer_format: askInput.answer_format ?? "text",
+                choices: askInput.choices ?? null,
+              },
             }).catch((err: unknown) => logger.warn("GTD question item creation failed", { error: err instanceof Error ? err.message : String(err) }));
           } catch (err) { logger.warn("GTD question import failed", { error: err instanceof Error ? err.message : String(err) }); }
         }
