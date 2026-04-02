@@ -22,6 +22,10 @@ export interface PendingQuestion {
   workItemId?: string;
   enqueuedAt: number;
   promise: Promise<string>;
+  /** Structured question metadata from coordinator — used by Telegram disambiguation */
+  questionId?: string;       // q-{8hex} format from GTD
+  answerFormat?: "text" | "choice" | "approve_deny";
+  choices?: string[];
 }
 
 interface QueueEntry {

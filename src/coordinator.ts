@@ -373,6 +373,12 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
         // ELLIE-1101: Pause the loop — save state so next message can resume
         const askInput = tool.input as unknown as AskUserInput;
 
+        // ELLIE-1264: Validate choice format requires non-empty choices array
+        if (askInput.answer_format === 'choice' && (!askInput.choices || askInput.choices.length === 0)) {
+          logger.warn("ask_user with answer_format='choice' but no choices — falling back to text format");
+          askInput.answer_format = 'text';
+        }
+
         // ELLIE-1276: Generate question ID upfront so it's shared between GTD item and paused state metadata
         let questionId: string;
         try {
