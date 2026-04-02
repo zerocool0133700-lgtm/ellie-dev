@@ -59,6 +59,7 @@ import { searchElastic } from "./elasticsearch.ts";
 import { log } from "./logger.ts";
 import { deliverResponse, markProcessing, clearProcessing } from "./ws-delivery.ts";
 import { getPendingQuestions, answerQuestion } from "./ask-user-queue.ts";
+import { disambiguateAnswer, stripRoutingPrefix, formatQuestionMessage } from "./telegram-question-format.ts";
 import { runCoordinatorLoop, buildCoordinatorDeps, type CoordinatorPausedState } from "./coordinator.ts";
 import { capturePrompt } from "./api/agent-prompts.ts";
 import type { FoundationRegistry } from "./foundation-registry.ts";
@@ -254,6 +255,7 @@ async function _handleEllieChatMessage(
   const { bot, anthropic, supabase } = getRelayDeps();
   logger.info("User message received", { phoneMode, hasImage: !!image, mode, channelId: channelId?.substring(0, 8) });
   acknowledgeChannel("ellie-chat");
+  resetEllieChatIdleTimer();
 
   setProcessingMessage(true);
   try {
@@ -268,17 +270,36 @@ async function _handleEllieChatMessage(
   await saveMessage("user", text, image ? { image_name: image.name, image_mime: image.mime_type } : {}, "ellie-chat", ecUserId, clientId, "user");
   broadcastExtension({ type: "message_in", channel: "ellie-chat", preview: text.substring(0, 200) });
 
-  // ELLIE-1267: Check if any dispatched agents are waiting for user answers
+  // ELLIE-1276: Check if any dispatched agents are waiting for user answers (with disambiguation)
   const pendingAgentQuestions = getPendingQuestions();
   if (pendingAgentQuestions.length > 0) {
-    const oldest = pendingAgentQuestions[0];
+    const disambigQuestions = pendingAgentQuestions.map(q => ({
+      questionId: q.id,
+      agentName: q.agentName,
+      question: q.question,
+      choices: q.options,
+    }));
+
+    const match = disambiguateAnswer(text, disambigQuestions);
+
+    if (match === 'ambiguous') {
+      const lines = [`I have ${pendingAgentQuestions.length} questions waiting:\n`];
+      pendingAgentQuestions.forEach((q, i) => {
+        lines.push(`${i + 1}. ${q.agentName}: ${q.question.slice(0, 80)}`);
+      });
+      lines.push(`\nReply with the number, or answer on the dashboard.`);
+      deliverResponse(ws, { type: "response", text: lines.join('\n'), agent: "system", ts: Date.now() });
+      return;
+    }
+
+    const cleanAnswer = stripRoutingPrefix(text, match.agentName);
     logger.info("[ask-user] Routing reply to agent question", {
-      questionId: oldest.id.slice(0, 8),
-      agentName: oldest.agentName,
-      question: oldest.question.slice(0, 100),
+      questionId: match.questionId.slice(0, 8),
+      agentName: match.agentName,
+      question: match.question.slice(0, 100),
     });
-    answerQuestion(oldest.id, text);
-    deliverResponse(ws, { type: "response", text: `Answer sent to ${oldest.agentName}.`, agent: "system", ts: Date.now() });
+    answerQuestion(match.questionId, cleanAnswer);
+    deliverResponse(ws, { type: "response", text: `Answer sent to ${match.agentName}.`, agent: "system", ts: Date.now() });
     return;
   }
 
@@ -1223,9 +1244,20 @@ async function _handleEllieChatMessage(
           if (coordinatorResult.paused) {
             pushPendingAskUser(coordinatorResult.paused);
             log.info("[coordinator] Paused for ask_user", { question: coordinatorResult.paused.question.slice(0, 100), queueDepth: getPendingAskUserCount() });
-            // The question was already sent to the user by the coordinator's sendMessage
-            // Don't send a "response" — just save the question as a message
-            await saveMessage("assistant", coordinatorResult.response, {}, "ellie-chat", ecUserId);
+            // ELLIE-1276: Format the question with structured metadata for persistence
+            // The formatted version was already sent to the user by the coordinator's sendMessage
+            const paused = coordinatorResult.paused;
+            const formattedForSave = paused.questionMetadata
+              ? formatQuestionMessage({
+                  agentName: paused.questionMetadata.agentName ?? "ellie",
+                  questionId: paused.questionMetadata.question_id,
+                  question: paused.question,
+                  whatINeed: paused.questionMetadata.what_i_need,
+                  decisionUnlocked: paused.questionMetadata.decision_unlocked,
+                  choices: paused.questionMetadata.choices,
+                })
+              : coordinatorResult.response;
+            await saveMessage("assistant", formattedForSave, {}, "ellie-chat", ecUserId);
             return;
           }
 

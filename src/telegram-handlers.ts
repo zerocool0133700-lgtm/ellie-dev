@@ -47,6 +47,7 @@ import {
 import { withQueue } from "./message-queue.ts";
 import { checkMessageRate, checkVoiceRate } from "./rate-limiter.ts";
 import { getPendingQuestions, answerQuestion } from "./ask-user-queue.ts";
+import { disambiguateAnswer, stripRoutingPrefix } from "./telegram-question-format.ts";
 import {
   saveMessage,
   sendResponse,
@@ -168,16 +169,35 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
   const rateLimited = checkMessageRate(userId, "telegram");
   if (rateLimited) { await ctx.reply(rateLimited); return; }
 
-  // ELLIE-1267: Route reply to pending agent question if any
+  // ELLIE-1276: Route reply to pending agent question with disambiguation
   const pendingAgentQuestions = getPendingQuestions();
   if (pendingAgentQuestions.length > 0) {
-    const oldest = pendingAgentQuestions[0];
+    const disambigQuestions = pendingAgentQuestions.map(q => ({
+      questionId: q.id,
+      agentName: q.agentName,
+      question: q.question,
+      choices: q.options,
+    }));
+
+    const match = disambiguateAnswer(text, disambigQuestions);
+
+    if (match === 'ambiguous') {
+      const lines = [`I have ${pendingAgentQuestions.length} questions waiting:\n`];
+      pendingAgentQuestions.forEach((q, i) => {
+        lines.push(`${i + 1}. ${q.agentName}: ${q.question.slice(0, 80)}`);
+      });
+      lines.push(`\nReply with the number, or answer on the dashboard.`);
+      await ctx.reply(lines.join('\n'));
+      return;
+    }
+
+    const cleanAnswer = stripRoutingPrefix(text, match.agentName);
     logger.info("[ask-user] Routing Telegram reply to agent question", {
-      questionId: oldest.id.slice(0, 8),
-      agentName: oldest.agentName,
+      questionId: match.questionId.slice(0, 8),
+      agentName: match.agentName,
     });
-    answerQuestion(oldest.id, text);
-    await ctx.reply(`Answer sent to ${oldest.agentName}.`);
+    answerQuestion(match.questionId, cleanAnswer);
+    await ctx.reply(`Answer sent to ${match.agentName}.`);
     return;
   }
 
