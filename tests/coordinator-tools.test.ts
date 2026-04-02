@@ -82,4 +82,73 @@ describe("COORDINATOR_TOOL_DEFINITIONS", () => {
     expect(schema.required).toContain("response");
     expect(schema.properties["response"]).toBeDefined();
   });
+
+  // ── 5. ask_user mandatory question metadata (ELLIE-1270) ─────
+
+  test("ask_user requires question, what_i_need, and decision_unlocked", () => {
+    const tool = COORDINATOR_TOOL_DEFINITIONS.find(
+      (t) => t.name === "ask_user"
+    );
+    expect(tool).toBeDefined();
+
+    const schema = tool!.input_schema as {
+      required?: string[];
+      properties: Record<string, unknown>;
+    };
+
+    expect(schema.required).toContain("question");
+    expect(schema.required).toContain("what_i_need");
+    expect(schema.required).toContain("decision_unlocked");
+  });
+
+  test("ask_user has answer_format with enum ['text', 'choice', 'approve_deny']", () => {
+    const tool = COORDINATOR_TOOL_DEFINITIONS.find(
+      (t) => t.name === "ask_user"
+    );
+    expect(tool).toBeDefined();
+
+    const schema = tool!.input_schema as {
+      properties: Record<string, { type?: string; enum?: string[] }>;
+    };
+
+    const answerFormat = schema.properties["answer_format"];
+    expect(answerFormat).toBeDefined();
+    expect(answerFormat.enum).toBeDefined();
+    expect(answerFormat.enum).toContain("text");
+    expect(answerFormat.enum).toContain("choice");
+    expect(answerFormat.enum).toContain("approve_deny");
+    expect(answerFormat.enum).toHaveLength(3);
+  });
+
+  test("ask_user has choices as an array of strings", () => {
+    const tool = COORDINATOR_TOOL_DEFINITIONS.find(
+      (t) => t.name === "ask_user"
+    );
+    expect(tool).toBeDefined();
+
+    const schema = tool!.input_schema as {
+      properties: Record<string, { type?: string; items?: { type?: string } }>;
+    };
+
+    const choices = schema.properties["choices"];
+    expect(choices).toBeDefined();
+    expect(choices.type).toBe("array");
+    expect(choices.items).toBeDefined();
+    expect(choices.items!.type).toBe("string");
+  });
+
+  test("ask_user still has backward-compatible options, timeout_ms, and urgency fields", () => {
+    const tool = COORDINATOR_TOOL_DEFINITIONS.find(
+      (t) => t.name === "ask_user"
+    );
+    expect(tool).toBeDefined();
+
+    const schema = tool!.input_schema as {
+      properties: Record<string, unknown>;
+    };
+
+    expect(schema.properties["options"]).toBeDefined();
+    expect(schema.properties["timeout_ms"]).toBeDefined();
+    expect(schema.properties["urgency"]).toBeDefined();
+  });
 });

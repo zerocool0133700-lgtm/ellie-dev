@@ -32,7 +32,15 @@ export interface DispatchAgentInput {
 export interface AskUserInput {
   /** The question to display to the user */
   question: string;
-  /** Optional list of suggested answer options */
+  /** What specifically is needed from the user to move forward */
+  what_i_need: string;
+  /** What decision or action this question unlocks */
+  decision_unlocked: string;
+  /** Format expected for the answer: free text, a choice from a list, or approve/deny */
+  answer_format?: 'text' | 'choice' | 'approve_deny';
+  /** List of choices when answer_format is 'choice' */
+  choices?: string[];
+  /** Optional list of suggested answer options (legacy — prefer choices) */
   options?: string[];
   /** Maximum time to wait for the user's answer, in milliseconds */
   timeout_ms?: number;
@@ -125,8 +133,9 @@ export const COORDINATOR_TOOL_DEFINITIONS: Anthropic.Tool[] = [
   {
     name: "ask_user",
     description:
-      "Pause the coordinator loop and ask the user a question. Use when you need " +
-      "clarification or a decision before proceeding. The loop resumes when the user responds.",
+      "Pause the coordinator loop and ask the user a question. Every question must include " +
+      "what_i_need (what you require from the user) and decision_unlocked (what this answer enables). " +
+      "Use when you need clarification or a decision before proceeding. The loop resumes when the user responds.",
     input_schema: {
       type: "object",
       properties: {
@@ -134,10 +143,28 @@ export const COORDINATOR_TOOL_DEFINITIONS: Anthropic.Tool[] = [
           type: "string",
           description: "The question to present to the user.",
         },
+        what_i_need: {
+          type: "string",
+          description: "What specifically you need from the user — the concrete input required to move forward.",
+        },
+        decision_unlocked: {
+          type: "string",
+          description: "What decision or next action this answer unlocks — why the question matters.",
+        },
+        answer_format: {
+          type: "string",
+          enum: ["text", "choice", "approve_deny"],
+          description: "Expected format for the answer: 'text' (free text), 'choice' (pick from choices list), 'approve_deny' (yes/no approval).",
+        },
+        choices: {
+          type: "array",
+          items: { type: "string" },
+          description: "List of choices to present when answer_format is 'choice'.",
+        },
         options: {
           type: "array",
           items: { type: "string" },
-          description: "Optional list of suggested answer choices to display.",
+          description: "Legacy: optional list of suggested answer choices to display. Prefer choices with answer_format='choice'.",
         },
         timeout_ms: {
           type: "number",
@@ -149,7 +176,7 @@ export const COORDINATOR_TOOL_DEFINITIONS: Anthropic.Tool[] = [
           description: "Urgency level for the question. Affects how it is displayed.",
         },
       },
-      required: ["question"],
+      required: ["question", "what_i_need", "decision_unlocked"],
     },
   },
 
