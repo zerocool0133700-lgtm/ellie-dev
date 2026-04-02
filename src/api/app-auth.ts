@@ -1,6 +1,10 @@
 /**
  * App Auth API — ELLIE-176
  *
+ * @deprecated ELLIE-1258 — Sunset date: 2026-07-01.
+ * Migrate consumers to OS Auth (/api/os-auth/*) before the deadline.
+ * After the sunset date this module will be removed.
+ *
  * Conversational onboarding auth for the Ellie phone app.
  * Opaque session tokens, email verification codes, no signup forms.
  *

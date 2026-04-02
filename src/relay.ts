@@ -119,6 +119,7 @@ import { stopAllTasks } from "./periodic-task.ts";
 import { initPeriodicTasks, runStartupTasks } from "./periodic-tasks.ts";
 import { initIdentitySystem, shutdownIdentitySystem } from "./identity-startup.ts";
 import { initOvernight, shutdownOvernight } from "./overnight/init.ts";
+import { initEmailProvider } from "./os-auth/email.ts";
 
 // ── Startup phase timer (ELLIE-497) ─────────────────────────
 const _startupBegin = Date.now();
@@ -145,6 +146,9 @@ if (!BOT_TOKEN) {
   process.exit(1);
 }
 _doneConfig();
+
+// Email provider — auto-detect SMTP from env (ELLIE-1260)
+{ const _done = startPhase("email-provider"); initEmailProvider(); _done(); }
 
 // Create directories
 const _doneDirectories = startPhase("directories");

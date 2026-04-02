@@ -22,11 +22,12 @@ import { validateLoginInput, loginWithPassword } from "./login"
 import { consumeVerificationToken } from "./verification"
 import { rotateRefreshToken, revokeAllAccountSessions, findSessionByRefreshToken } from "./sessions"
 import { signAccessToken, verifyAccessToken } from "./tokens"
-import { getSigningKeys, publicKeyToJwk, buildJwksResponse, _resetKeyCache } from "./keys"
+import { getSigningKeys, publicKeyToJwk, buildJwksResponse, _resetKeyCache, getAllActivePublicKeys, findPublicKeyByKid } from "./keys"
 import { getAccountMemberships, buildMembershipMap } from "./memberships"
 import { writeAudit, AUDIT_EVENTS } from "./audit"
 import type { OsAccessTokenPayload } from "./schema"
-import { checkRateLimit, _resetRateLimits } from "./rate-limit"
+import { checkRateLimit, checkRateLimitPg, checkRateLimitRedis, _resetRateLimits } from "./rate-limit"
+import type Redis from "ioredis"
 import { log } from "../logger.ts"
 
 const logger = log.child("os-auth")
@@ -72,6 +73,7 @@ export function parseOsAuthRoute(pathname: string, method: string): OsAuthRouteM
 
 interface OsAuthDeps {
   sql: Sql
+  redis?: Redis | null
   retrieveSecret: (keychainId: string, key: string) => Promise<string | null>
   storeSecret?: (keychainId: string, key: string, value: string) => Promise<void>
 }
@@ -96,9 +98,20 @@ export async function handleOsAuthRoute(
     || req.headers?.["x-real-ip"] || null
   const userAgent = req.headers?.["user-agent"] || null
 
-  // Apply rate limiting to mutation endpoints before any DB work
+  // Apply rate limiting to mutation endpoints before any DB work.
+  // Try Redis first (fast, shared state), fall back to Postgres.
   if (match.handler === "register" || match.handler === "login" || match.handler === "refresh" || match.handler === "verify-email") {
-    const rl = checkRateLimit(ipAddress, match.handler)
+    let rl: import("./rate-limit").RateLimitResult
+    if (deps.redis) {
+      try {
+        rl = await checkRateLimitRedis(deps.redis, ipAddress, match.handler)
+      } catch {
+        // Redis unavailable — degrade to Postgres
+        rl = await checkRateLimitPg(deps.sql, ipAddress, match.handler)
+      }
+    } else {
+      rl = await checkRateLimitPg(deps.sql, ipAddress, match.handler)
+    }
     if (!rl.allowed) {
       if (typeof res.setHeader === "function") {
         res.setHeader("Retry-After", String(rl.retryAfter))
@@ -114,9 +127,8 @@ export async function handleOsAuthRoute(
   try {
     switch (match.handler) {
       case "jwks": {
-        const keys = await getSigningKeys(deps)
-        const jwk = publicKeyToJwk(keys.publicKey, keys.kid)
-        res.json(buildJwksResponse([jwk]))
+        const jwks = await getAllActivePublicKeys(deps)
+        res.json(buildJwksResponse(jwks))
         return true
       }
 

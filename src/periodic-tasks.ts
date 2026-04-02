@@ -510,6 +510,16 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     if (removed > 0) logger.info(`Sandbox cleanup: removed ${removed} expired container(s)`);
   }, 15 * 60_000, "sandbox-cleanup");
 
+  // ELLIE-1265: OS auth cleanup — purge expired verification tokens + sessions (every 6 hours)
+  periodicTask(async () => {
+    const forestSql = (await import("../../ellie-forest/src/db")).default;
+    const { runCleanup } = await import("./os-auth/cleanup.ts");
+    const result = await runCleanup(forestSql);
+    if (result.tokens > 0 || result.sessions > 0) {
+      logger.info("OS auth cleanup complete", { purgedTokens: result.tokens, purgedSessions: result.sessions });
+    }
+  }, 6 * 60 * 60_000, "os-auth-cleanup");
+
   logger.info("All background tasks registered");
 }
 

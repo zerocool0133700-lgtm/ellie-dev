@@ -10,6 +10,7 @@ import type { OsAccount } from "./schema"
 import { hashPassword } from "./passwords"
 import { writeAudit, AUDIT_EVENTS } from "./audit"
 import { createVerificationToken } from "./verification"
+import { sendVerificationEmail } from "./email"
 import { log } from "../logger.ts"
 
 const logger = log.child("os-auth-registration")
@@ -126,6 +127,15 @@ export async function registerAccount(
     ip_address: opts?.ipAddress,
     user_agent: opts?.userAgent,
     metadata: { method: "email_password", entity_type: input.entity_type ?? "user" },
+  })
+
+  // Send verification email (fire-and-forget — registration succeeds even if email fails)
+  sendVerificationEmail({
+    to: input.email,
+    token: verificationToken,
+    accountId: account.id,
+  }).catch((err) => {
+    logger.error("Verification email send failed", { accountId: account.id, error: err })
   })
 
   logger.info("Account registered — verification token created", {

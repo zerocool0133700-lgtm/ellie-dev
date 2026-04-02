@@ -41,6 +41,7 @@ interface TableStore {
   os_sessions: any[]
   os_product_memberships: any[]
   os_audit_log: any[]
+  os_rate_limits: any[]
 }
 
 function createStatefulSql(): any {
@@ -51,6 +52,7 @@ function createStatefulSql(): any {
     os_sessions: [],
     os_product_memberships: [],
     os_audit_log: [],
+    os_rate_limits: [],
   }
 
   /** Parse a SQL tagged template into a single string + interpolated values. */
@@ -68,6 +70,7 @@ function createStatefulSql(): any {
     const tableNames: (keyof TableStore)[] = [
       "os_email_verification_tokens",
       "os_product_memberships",
+      "os_rate_limits",
       "os_auth_methods",
       "os_audit_log",
       "os_accounts",
@@ -85,6 +88,20 @@ function createStatefulSql(): any {
     const { text, vals } = extractSql(strings, values)
     const lower = text.toLowerCase()
     const table = findTable(text)
+
+    // ── Rate limit CTE (WITH inserted AS ... INSERT INTO os_rate_limits ...) ─
+    if (lower.startsWith("with") && table === "os_rate_limits") {
+      const key = vals[0] as string
+      const windowStart = vals[2] as Date
+      tables.os_rate_limits.push({ key, timestamp: new Date() })
+      const recent = tables.os_rate_limits.filter(
+        (r: any) => r.key === key && r.timestamp > windowStart
+      )
+      const oldest = recent.length > 0
+        ? recent.reduce((min: any, r: any) => r.timestamp < min.timestamp ? r : min).timestamp
+        : null
+      return [{ cnt: String(recent.length), oldest }]
+    }
 
     // ── INSERT ──────────────────────────────────────────────
     if (lower.startsWith("insert into") && table) {
