@@ -1,224 +1,373 @@
-# GTD-Native Agent Coordination
+# GTD-Native Agent Coordination — Enhanced
 
 **Date:** 2026-04-02
-**Status:** Draft
+**Status:** Draft (revised after team review)
 **Inspired by:** [Optio](https://github.com/jonwiggins/optio) dispatch trees + per-task answer boxes, [Orloj](https://github.com/OrlojHQ/orloj) reconciliation loops + typed message envelopes
+**Builds on:** ELLIE-1150, ELLIE-1151, ELLIE-1152, ELLIE-1153, ELLIE-1154
 
 ## Problem
 
 Multi-agent coordination through Telegram chat has three failure modes:
 
-1. **Post-dispatch amnesia** — agents return results but the coordinator loses track after context compaction. GTD items exist (ELLIE-1152) but aren't used as the recovery source.
-2. **Ask/resume brittleness** — answers don't always land cleanly, or the coordinator resumes with stale context.
+1. **Post-dispatch amnesia** — agents return results but the coordinator loses track after context compaction. GTD orchestration items exist (ELLIE-1152) but aren't used as the recovery source during working memory rebuild.
+2. **Ask/resume brittleness** — answers don't always land cleanly, or the coordinator resumes with stale context. The in-memory ask-user queue (`ask-user-queue.ts`) has no structured metadata about what the agent actually needs.
 3. **Question multiplexing collisions** — when multiple agents ask questions simultaneously, they arrive as a serial stream in Telegram. Dave's answer to agent A gets attributed to agent B. One question can overwrite another. Questions are sometimes poorly framed, making answers ambiguous when fed back into the loop.
 
-Separately, there's no at-a-glance visibility into what agents are doing. The `/dispatches` page exists but is separate from the GTD system, creating fragmented tracking across in-memory orchestration tracker, dispatch envelopes, routing_decisions table, and GTD items.
+Separately, visibility is fragmented. The `/dispatches` page exists but isn't integrated into the GTD kanban workflow. Agent activity is tracked across the in-memory orchestration tracker, dispatch envelopes, orchestration_events (Forest), and GTD items (Supabase) — with no single view that ties them together.
+
+## Current State
+
+Significant infrastructure already exists:
+
+**Supabase `todos` table** (ELLIE-1151) already has:
+- `parent_id` (UUID) — tree structure for orchestration
+- `dispatch_envelope_id` (TEXT) — links to relay dispatch envelopes
+- `is_orchestration` (BOOLEAN) — marks orchestration items
+- `urgency` (TEXT) — 'blocking' | 'normal' | 'low'
+- `metadata` (JSONB) — stores answers via `metadata.answer`
+- `assigned_agent`, `assigned_to`, `created_by` — agent/user assignment
+- Status constraint includes: 'inbox', 'open', 'waiting_for', 'someday', 'done', 'cancelled', 'failed', 'timed_out'
+
+**`gtd-orchestration.ts`** (ELLIE-1152) implements:
+- 3-level tree: `createOrchestrationParent()` → `createDispatchChild()` → `createQuestionItem()`
+- `getActiveOrchestrationTrees()` — returns tree structures for UI
+
+**Atomic DB operations** (ELLIE-1154):
+- `check_parent_completion_atomic()` — serialized parent status updates
+- `answer_question_atomic()` — writes `metadata.answer`, marks done, checks parent
+- `cancel_item_cascade()` — recursive cancellation
+- `update_item_status_atomic()` — status + metadata merge + parent check
+
+**API endpoints** (ELLIE-1153):
+- `GET /api/dispatches/active` — returns dispatch trees (50 most recent, urgency-sorted)
+- `POST /api/dispatches/answer` — answer a question by item ID
+- `POST /api/dispatches/cancel` — cascade cancel
+- `GET /api/dispatches/badge` — count of items needing attention
+
+**In-memory ask-user queue** (`ask-user-queue.ts`, ELLIE-1267):
+- `enqueueQuestion()` / `answerQuestion()` with promise-based resolution
+- 5-minute timeout per question
+
+**orchestration_events table** (Forest DB):
+- Append-only audit trail: dispatched, heartbeat, progress, completed, failed, cancelled, retried, timeout
+- Fields: `run_id`, `event_type`, `agent_type`, `work_item_id`, `payload` (JSONB)
+
+**Working memory** (ELLIE-538/539):
+- 7-section session-scoped document surviving context compression
+- `context_anchors` section already stores answer routing data
+- Three-tier compaction: hot (messages) → warm (working memory) → cold (Forest snapshots)
 
 ## Solution
 
-Make GTD the single source of truth for all agent coordination. Every dispatch, every question, every answer lives as a GTD item in the `todos` table. The kanban board becomes mission control. A dedicated Agent Questions queue provides focused answer UI. Telegram remains a valid input path but is no longer the only one.
+This spec proposes **targeted enhancements** to the existing infrastructure, not a rebuild:
 
-## Data Model
+1. Add `item_type` enum for cleaner item classification (replacing boolean `is_orchestration`)
+2. Add structured question metadata to the existing `metadata` column
+3. Enforce mandatory "what I need from you" fields on every agent question
+4. Wire context compaction recovery through working memory (not a parallel system)
+5. Add Telegram question disambiguation with short IDs
+6. Build kanban integration and Agent Questions page in ellie-home
+7. Write progress events to the existing `orchestration_events` table (not a per-item activity log)
 
-### New fields on `todos` table
+## Data Model Changes
 
-| Field | Type | Description |
-|---|---|---|
-| `dispatch_envelope_id` | `text` | Links to relay dispatch envelope (null for manual items) |
-| `parent_todo_id` | `text` | Tree structure: coordinator parent → agent children → question grandchildren. New field — separate from existing `project_id` which links to `todo_projects`. Both can coexist: a dispatch tree item can optionally belong to a project too. |
-| `item_type` | `text` | `'task'` (default), `'agent_dispatch'`, `'agent_question'`, `'approval'` |
-| `agent_name` | `text` | Which agent (james/kate/alan). Replaces existing `assigned_agent` |
-| `question_metadata` | `jsonb` | Structured question/answer data (see below). Null for non-question items |
-| `activity_log` | `jsonb` | JSON array of `{timestamp, event, detail}` objects. Stored as `jsonb` (not Postgres array of jsonb) for simpler append operations. |
+### New: `item_type` column (Postgres enum)
 
-### question_metadata schema
+Add to `todos` table as a Postgres enum, replacing the boolean `is_orchestration`:
+
+```sql
+CREATE TYPE todo_item_type AS ENUM ('task', 'agent_dispatch', 'agent_question', 'approval');
+ALTER TABLE todos ADD COLUMN item_type todo_item_type NOT NULL DEFAULT 'task';
+
+-- Migrate existing data
+UPDATE todos SET item_type = 'agent_dispatch' WHERE is_orchestration = true AND assigned_to != 'dave';
+UPDATE todos SET item_type = 'agent_question' WHERE is_orchestration = true AND assigned_to = 'dave' AND urgency IS NOT NULL;
+```
+
+This is strictly better than `is_orchestration` boolean — it distinguishes dispatch items from questions from approvals without querying `assigned_to` or `urgency`.
+
+### Enhanced: `metadata` column conventions
+
+No new column. Use the existing `metadata` JSONB column with structured conventions for question items:
 
 ```json
 {
-  "question_id": "string — UUID, used for answer routing",
-  "what_i_need": "string — mandatory: what format/decision the agent needs",
-  "decision_unlocked": "string — what happens once answered",
-  "answer_format": "'text' | 'choice' | 'approve_deny'",
-  "choices": ["string[] — if answer_format is 'choice'"],
-  "answer": "string — filled when Dave responds",
-  "answered_at": "string — ISO timestamp",
-  "answered_via": "'dashboard' | 'telegram'"
+  "answer": "Use JWT",
+  "answered_at": "2026-04-02T12:07:00Z",
+  "answered_via": "dashboard",
+  "question_id": "q-7f3a2b",
+  "what_i_need": "Pick one. This decides the session store implementation and whether we need Redis.",
+  "decision_unlocked": "Session store implementation approach",
+  "answer_format": "choice",
+  "choices": ["JWT", "Session cookies"]
 }
 ```
 
+The `answer` field already exists (written by `answer_question_atomic()`). The new fields (`question_id`, `what_i_need`, `decision_unlocked`, `answer_format`, `choices`) are additive — old question items without them continue to work.
+
+### Existing fields used as-is
+
+| Field | Already exists | Used for |
+|---|---|---|
+| `parent_id` | Yes | Tree structure (3 levels) |
+| `dispatch_envelope_id` | Yes | Links to relay envelope |
+| `assigned_agent` | Yes | Which agent (james/kate/alan) |
+| `assigned_to` | Yes | 'dave' for questions, agent name for dispatches |
+| `urgency` | Yes | 'blocking' for critical questions |
+| `metadata` | Yes | Structured question/answer data |
+
+### No activity_log column
+
+Progress events go to the existing `orchestration_events` table in Forest DB. This avoids:
+- Write amplification from JSONB array appends on a hot table
+- Row-level contention when multiple agents update simultaneously
+- JSONB bloat on the todos table
+
+The orchestration_events table is purpose-built for append-only event streams with its own `run_id` grouping.
+
 ### Item type → kanban column mapping
 
-| Item type | Created by | Kanban column | Card appearance |
+| item_type | Created by | Kanban column | Card appearance |
 |---|---|---|---|
 | `task` | Dave (manual) | inbox → open → waiting → done | Normal GTD card |
-| `agent_dispatch` | Coordinator on dispatch | open (working) → done/cancelled | Agent avatar, colored left border, progress bar |
-| `agent_question` | Agent via ask_user | waiting | Agent avatar, question text, "What I need" box, answer controls |
-| `approval` | Agent needing tool approval | waiting | Agent avatar, approve/deny buttons |
+| `agent_dispatch` | Coordinator on dispatch | open → done/cancelled | Agent avatar, colored left border, progress bar |
+| `agent_question` | Agent via ask_user | waiting_for | Agent avatar, question text, "What I need" box, answer controls |
+| `approval` | Agent needing tool approval | waiting_for | Agent avatar, approve/deny buttons |
 
-### Tree structure
+## Coordinator Enhancements (Relay Side)
 
-- Coordinator session creates a parent `agent_dispatch` item
-- Each specialist dispatch creates a child `agent_dispatch` under the parent (via `parent_todo_id`)
-- When an agent calls `ask_user`, a child `agent_question` is created under that agent's dispatch item
-- When all children of the coordinator parent reach terminal status (done/cancelled), the parent auto-completes
+### Mandatory question metadata
 
-### Activity log entries
+Update the `ask_user` tool definition in `coordinator-tools.ts` to require structured fields:
 
-Appended as events happen:
-
-```json
-[
-  {"timestamp": "2026-04-02T12:03:00Z", "event": "dispatched", "detail": "Task sent to james"},
-  {"timestamp": "2026-04-02T12:04:00Z", "event": "reading", "detail": "src/auth-middleware.ts"},
-  {"timestamp": "2026-04-02T12:05:00Z", "event": "question_asked", "detail": "JWT or session cookies?"},
-  {"timestamp": "2026-04-02T12:07:00Z", "event": "answered", "detail": "Use JWT", "via": "dashboard"},
-  {"timestamp": "2026-04-02T12:09:00Z", "event": "completed", "detail": "PR opened: #142"}
-]
+```typescript
+{
+  name: 'ask_user',
+  input_schema: {
+    type: 'object',
+    required: ['question', 'what_i_need', 'decision_unlocked'],
+    properties: {
+      question: { type: 'string' },
+      what_i_need: { type: 'string', description: 'What format/decision you need from Dave' },
+      decision_unlocked: { type: 'string', description: 'What you will do once answered' },
+      answer_format: { enum: ['text', 'choice', 'approve_deny'], default: 'text' },
+      choices: { type: 'array', items: { type: 'string' } }
+    }
+  }
+}
 ```
 
-## Coordinator → GTD Sync (Relay Side)
+If Claude omits `what_i_need` or `decision_unlocked`, the tool call returns a validation error and Claude must retry. This ensures every question Dave sees is actionable.
 
-The relay already has Supabase access. It writes directly to the `todos` table at each coordination event.
+### GTD question creation with metadata
 
-### On coordinator dispatch
+When `ask_user` is called, `createQuestionItem()` in `gtd-orchestration.ts` now passes the structured metadata:
 
-1. If no parent GTD item exists for this coordinator session → create one:
-   - `item_type: 'agent_dispatch'`, `status: 'open'`, `content: "{user's original request}"`
-   - `activity_log: [{event: 'started', detail: 'Coordinator session began'}]`
+```typescript
+await createQuestionItem(supabase, {
+  parent_id: agentDispatchItemId,
+  content: question,
+  assigned_to: 'dave',
+  urgency: 'blocking',
+  metadata: {
+    question_id: generateShortId(), // e.g. "q-7f3a"
+    what_i_need: toolInput.what_i_need,
+    decision_unlocked: toolInput.decision_unlocked,
+    answer_format: toolInput.answer_format ?? 'text',
+    choices: toolInput.choices ?? null
+  }
+})
+```
 
-2. For each specialist dispatch → create a child:
-   - `parent_todo_id` → the coordinator's GTD item ID
-   - `item_type: 'agent_dispatch'`, `agent_name`, `status: 'open'`
-   - `dispatch_envelope_id` → links to existing envelope for cost/token tracking
-   - `content: "{task description sent to the agent}"`
-   - Append to parent's `activity_log`: `{event: 'dispatched', detail: 'Sent to james: ...'}`
+### Progress events to orchestration_events
 
-### On ask_user
+Instead of a per-item `activity_log`, the relay writes condensed progress events to the existing `orchestration_events` table in Forest:
 
-1. Create a child `agent_question` under that agent's dispatch item:
-   - `parent_todo_id` → the agent's GTD item ID
-   - `status: 'waiting_for'`
-   - `question_metadata` filled with `question_id` (UUID), `what_i_need`, `decision_unlocked`, `answer_format`, `choices`
-   - `content: "{the question text}"`
+```typescript
+await insertOrchestrationEvent({
+  run_id: dispatchEnvelopeId,
+  event_type: 'progress',
+  agent_type: 'james',
+  work_item_id: ticketId,
+  payload: { phase: 'reading', detail: 'src/auth-middleware.ts' }
+})
+```
 
-2. **Mandatory metadata enforcement**: the coordinator's system prompt requires `what_i_need` and `decision_unlocked` fields on every `ask_user` call. If Claude omits them, the tool call fails with a validation error and Claude must retry.
+Events are already grouped by `run_id` (which maps to `dispatch_envelope_id` on the todo). The dashboard queries by `run_id` to build the activity timeline for a given dispatch card.
 
-3. The coordinator loop pauses as today, but records the `question_id` so the answer routes back by ID, not by conversation position.
+### Context compaction recovery via working memory
 
-### On agent complete or fail
+**Who triggers:** The `CoordinatorContext` class, during its existing compaction handler (warm/hot/critical pressure levels).
 
-1. Update the agent's GTD item: `status: 'done'` or `status: 'cancelled'`
-2. Append to `activity_log`: `{event: 'completed', detail: '...'}` or `{event: 'failed', detail: '...'}`
-3. When ALL children of the coordinator parent reach terminal status → auto-complete the parent via a database transaction. Guard: only auto-complete if the coordinator loop itself has also finished (check dispatch envelope status). If the coordinator is still running, leave the parent as `open` — the coordinator's `complete` tool call will finalize it.
+**How it integrates:** After compaction, the coordinator calls a new function `rebuildDispatchStateFromGTD()` that:
 
-### On tool call events (progress tracking)
+1. Queries `getActiveOrchestrationTrees()` for this session's coordinator parent item
+2. Formats the tree state into a structured summary
+3. Writes it to the working memory `task_stack` section via the existing `PATCH /api/working-memory/update` endpoint
 
-The existing `AgentMonitorPanel` tracks Read, Edit, Bash, Grep, etc. Instead of only feeding that panel, the relay also writes condensed events to the GTD item's `activity_log`. Not every tool call — condensed milestones: "reading src/auth.ts", "editing 42 lines", "running tests".
+```typescript
+async function rebuildDispatchStateFromGTD(
+  sessionId: string, 
+  coordinatorParentId: string
+): Promise<void> {
+  const trees = await getActiveOrchestrationTrees(supabase)
+  const thisSession = trees.find(t => t.id === coordinatorParentId)
+  if (!thisSession) return
+
+  const summary = formatDispatchSummary(thisSession)
+  // e.g. "ACTIVE: james (auth middleware, waiting q-7f3a), kate (query optimization, 70%)\nPENDING: q-7f3a: JWT or session cookies?"
+  
+  await updateWorkingMemory(sessionId, 'coordinator', {
+    task_stack: summary,
+    context_anchors: formatPendingAnswers(thisSession)
+  })
+}
+```
+
+This feeds into the existing working memory system — no parallel recovery mechanism. The coordinator's system prompt already reads working memory sections, so the dispatch state is automatically available after compaction.
 
 ## Answer Routing
 
-### By question ID (primary mechanism)
+### By question_id (primary mechanism)
 
-Every question gets a UUID `question_id`. Answers are routed by this ID regardless of source:
+Every question gets a short ID (e.g. `q-7f3a`) stored in `metadata.question_id`. Answers are routed by this ID regardless of source.
 
 **Dashboard path:**
-- Click choice button or type answer → POST to relay with `question_id` and `answer`
-- Relay writes `question_metadata.answer`, `answered_at`, `answered_via: 'dashboard'`
-- GTD item status: `waiting_for` → `done`
-- Relay resumes coordinator with the answer injected as the tool result for the exact `ask_user` call that created it
+- Click choice button or type answer → `POST /api/dispatches/answer` with `{ question_item_id, answer_text }`
+- The existing `answer_question_atomic()` writes `metadata.answer`, marks done, checks parent
+- **Enhancement:** Also write `metadata.answered_at` and `metadata.answered_via: 'dashboard'`
+- Relay resolves the pending promise in the ask-user queue, coordinator resumes
 
 **Telegram path:**
 - Each question in Telegram is tagged: `"james asks (q-7f3a): Should the auth..."`
-- When Dave replies, Ellie checks: is there only one unanswered question? If yes, route there.
-- If multiple questions pending: Ellie asks "Is this for james (q-7f3a) or kate (q-8b2c)?" — or Dave can prefix: "james: use JWT"
-- If routing can't be resolved: Ellie says "I have 2 questions waiting — easier to answer on the dashboard" with a link
-- Once resolved, same write path as dashboard but `answered_via: 'telegram'`
+- Single pending question → route directly (no change from today)
+- Multiple pending questions → Ellie disambiguates:
+  - Checks if reply starts with agent name prefix: "james: use JWT"
+  - Otherwise asks: "Is this for james (q-7f3a) or kate (q-8b2c)?"
+  - If still ambiguous: "I have 2 questions waiting — easier to answer on the dashboard: [link]"
+- Once resolved, same `POST /api/dispatches/answer` path, `answered_via: 'telegram'`
 
-### Context compaction recovery
+### Error handling
 
-After any context compaction, the coordinator queries GTD to rebuild working memory:
+**Double-answer:** `answer_question_atomic()` checks status before writing. If already `done`, returns an error. Dashboard shows "Already answered" toast. Telegram: Ellie says "That question was already answered."
 
-1. Query all GTD items where `parent_todo_id` = this session's coordinator item AND `status != 'done'`
-2. Rebuild active state from their data:
-   ```
-   ACTIVE DISPATCHES (from GTD):
-   - james: "Implement auth middleware" — status: waiting (question q-7f3a pending)
-   - kate: "Forest query optimization" — status: open (working, 70% progress)
+**Timeout:** The in-memory ask-user queue has a 5-minute timeout. When it fires:
+- GTD item status updated to `timed_out` via `update_item_status_atomic()`
+- Orchestration event logged
+- Coordinator receives timeout error as tool result, can re-ask or proceed without answer
 
-   PENDING QUESTIONS:
-   - q-7f3a (james): "JWT or session cookies?" — unanswered
-   ```
-3. Inject this summary at the top of the compacted context
-
-GTD is the persistent ground truth that survives any context window compression. The coordinator can never lose track of what's happening.
+**Routing failure:** If Telegram can't resolve which question an answer belongs to, the answer is NOT written anywhere. Ellie asks for clarification or redirects to dashboard. No data loss, no misrouting.
 
 ## Dashboard UI
 
 ### Kanban integration (ellie-home gtd-kanban.vue)
 
-Agent items appear naturally on the existing 4-column kanban alongside manual tasks:
+Agent items appear on the existing 4-column kanban. The kanban currently fetches `GET /api/todos?limit=200` — this continues to work. The UI changes are in card rendering:
 
-- **Agent dispatch cards** have colored left borders per agent (james=cyan, kate=purple, alan=red), agent avatar, progress bar, condensed status line ("3 files touched, reading tests")
-- **Agent question cards** appear in the Waiting column with the question text, amber "What I need from you" box, and answer controls (choice buttons for `answer_format: 'choice'`, text input for `answer_format: 'text'`, approve/deny for `answer_format: 'approve_deny'`)
-- **Completed agent cards** in Done column show cost/token summary, faded
-- Click any agent card to expand the activity feed
+- **`item_type = 'agent_dispatch'`** cards: colored left border per agent (james=cyan, kate=purple, alan=red), agent avatar, progress indicator. Progress comes from most recent `orchestration_events` for that `dispatch_envelope_id`.
+- **`item_type = 'agent_question'`** cards in Waiting column: question text, amber "What I need from you" box (from `metadata.what_i_need`), answer controls based on `metadata.answer_format` (choice buttons, text input, or approve/deny).
+- **`item_type = 'agent_dispatch'` in Done**: cost/token summary from dispatch envelope, faded.
+- Click any agent card → expand to show `orchestration_events` timeline for that `dispatch_envelope_id`.
 
-Filtering: the existing agent filter dropdown works — select "james" to see only james's items, or "all" for everything.
+Existing agent filter dropdown works — filter by `assigned_agent`.
 
 ### Agent Questions queue (new page: /agent-questions)
 
-A dedicated focused view for handling agent questions:
+Dedicated focused view:
 
-- **Filter tabs**: Waiting (count), Answered today (count), All
-- **Cards sorted oldest first** — deal with the longest-waiting agent first
-- **Each card shows**: agent avatar + name, parent task context ("working on: ..."), the question, "What I need from you" box, answer controls
-- **Choice questions**: big tappable buttons for each choice, plus a free-text fallback ("or type a different answer")
-- **Yes/no decisions**: green "Yes" and red "No" styled buttons
-- **Answered questions**: collapsed, showing what you said and which channel
-- **Activity feed**: expandable per card
+- **Data source:** `GET /api/dispatches/active` (already returns trees with questions) + `GET /api/dispatches/badge` for counts
+- **Filter tabs:** Waiting (badge count), Answered today, All
+- **Cards sorted oldest first** — longest-waiting agent first
+- **Each card:** agent avatar + name, parent task context ("working on: ..."), question text, "What I need from you" box, answer controls
+- **Choice questions:** tappable buttons per choice + free-text fallback
+- **Yes/no decisions:** green/red styled buttons
+- **Answered questions:** collapsed, showing answer + channel
+- **Activity timeline:** expandable, from `orchestration_events` via `dispatch_envelope_id`
+- **Answer action:** `POST /api/dispatches/answer` (existing endpoint)
 
 ### Sidebar navigation
 
-- New "Agent Questions" entry in the sidebar under Work section
-- Amber pulsing badge shows count of unanswered questions
-- Badge visible from any page
+- New "Agent Questions" entry in sidebar under Work section
+- Amber pulsing badge from `GET /api/dispatches/badge` (existing endpoint, already returns `needs_attention` count)
+- Badge visible from any page via Supabase Realtime subscription on `todos` table (existing `useRealtime.ts`)
 
 ### Real-time updates
 
-All updates flow through Supabase Realtime, which is already wired up in `useRealtime.ts`:
-- Kanban cards update live as agents progress
-- Question badge count updates in real-time
-- Activity feed entries appear as they happen on expanded cards
-- No new WebSocket infrastructure needed
+All via existing Supabase Realtime on `todos` table:
+- Kanban cards update live as agent items change status
+- Badge count updates in real-time
+- No new WebSocket infrastructure
 
-## What This Replaces
+## What This Keeps vs. Replaces
 
-Once GTD-native coordination is stable:
+### Keeps (operational layer)
+- **In-memory orchestration tracker** — sub-millisecond heartbeat/stale detection for process health. GTD queries can't match this latency. Tracker handles operational concerns (is the process alive?), GTD handles coordination concerns (what's the status?).
+- **In-memory ask-user queue** — promise-based resolution for the coordinator loop. GTD is the persistence layer, but the in-memory queue is the signaling mechanism.
+- **Dispatch envelopes** — cost/token tracking remains here.
+- **orchestration_events table** — append-only audit trail, now also used for dashboard activity timelines.
 
-- **In-memory orchestration tracker** (`orchestration-tracker.ts`) → replaced by GTD queries
-- **Separate dispatch ledger** → dispatch envelopes remain for cost tracking, but GTD is the status source
-- **routing_decisions table** (historical only) → activity_log on GTD items serves the same purpose
-- **Fragmented visibility** across 4 systems → single GTD source of truth
+### Replaces
+- **`is_orchestration` boolean** → `item_type` enum (more expressive, no need to infer type from other fields)
+- **Unstructured question text** → structured metadata with `what_i_need`, `decision_unlocked`, `answer_format`
+- **Telegram-only answer path** → dashboard + Telegram with disambiguation
+- **Context compaction blind spot** → working memory rebuild from GTD state
 
-The existing `/dispatches` page can be kept as a redirect to the Agent Questions queue, or deprecated.
+## Migration Strategy
+
+### Schema migration (Supabase)
+
+```sql
+-- 1. Add item_type enum
+CREATE TYPE todo_item_type AS ENUM ('task', 'agent_dispatch', 'agent_question', 'approval');
+ALTER TABLE todos ADD COLUMN item_type todo_item_type NOT NULL DEFAULT 'task';
+
+-- 2. Backfill from existing data
+UPDATE todos SET item_type = 'agent_question'
+  WHERE is_orchestration = true AND assigned_to = 'dave' AND urgency IS NOT NULL;
+UPDATE todos SET item_type = 'agent_dispatch'
+  WHERE is_orchestration = true AND item_type = 'task';
+
+-- 3. Index for kanban queries
+CREATE INDEX idx_todos_item_type ON todos (item_type) WHERE item_type != 'task';
+
+-- 4. is_orchestration stays for now (backward compat), deprecated
+COMMENT ON COLUMN todos.is_orchestration IS 'DEPRECATED: use item_type instead. Will be removed in future migration.';
+```
+
+### Code migration (relay)
+
+1. Update `gtd-orchestration.ts` to set `item_type` on creation (alongside `is_orchestration` for backward compat)
+2. Update `coordinator-tools.ts` with mandatory `what_i_need` / `decision_unlocked` fields
+3. Add `rebuildDispatchStateFromGTD()` to coordinator-context compaction handler
+4. Update Telegram question formatting to include short question IDs
+5. Add disambiguation logic to relay message handler
+
+### Dashboard migration (ellie-home)
+
+1. Update `gtd-kanban.vue` card rendering to check `item_type`
+2. Add new `/agent-questions` page consuming existing `/api/dispatches/*` endpoints
+3. Add sidebar badge using existing `/api/dispatches/badge`
+4. Add orchestration_events timeline component (new API endpoint needed: `GET /api/dispatches/:id/events` proxying to Forest)
 
 ## Scope & Non-Goals
 
 **In scope:**
-- GTD schema extensions (migration)
-- Relay writes to GTD on dispatch/question/complete events
-- Mandatory question metadata enforcement in coordinator prompt
-- Answer routing by question_id from dashboard and Telegram
-- Context compaction recovery from GTD
+- `item_type` enum migration + backfill
+- Structured question metadata in existing `metadata` column
+- Mandatory `what_i_need` / `decision_unlocked` on `ask_user`
+- Context compaction recovery via working memory update
+- Telegram question ID tagging and disambiguation
 - Kanban UI for agent cards and inline answers
 - Agent Questions page with structured answer forms
 - Sidebar badge with real-time count
-- Activity feed per GTD item
+- Activity timeline from orchestration_events
 
 **Not in scope (future work):**
+- Removing `is_orchestration` column (keep for backward compat this cycle)
 - Agent-to-agent communication without coordinator (ELLIE-785 agentmail)
 - Chrome extension side panel
-- Full Orloj-style reconciliation loop replacing the coordinator's think-act-observe loop
-- Orloj-style message bus (NATS/JetStream) — Supabase Realtime is sufficient for now
-- Tool approval UI beyond approve/deny buttons (detailed tool call inspection)
+- Full Orloj-style reconciliation loop
+- Orloj-style message bus (NATS/JetStream)
+- Tool approval UI beyond approve/deny buttons
 - Drag-to-reorder on kanban
+- Removing in-memory orchestration tracker (keeps operational role)
