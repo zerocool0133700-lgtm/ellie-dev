@@ -135,6 +135,7 @@ import {
   listOpenIssues,
   createPlaneIssue,
 } from "./plane.ts";
+import { checkReadiness, formatReadinessResult } from "./dispatch-readiness.ts";
 import { extractPlaybookCommands, executePlaybookCommands, type PlaybookContext } from "./playbook.ts";
 import { notify } from "./notification-policy.ts";
 import {
@@ -2684,6 +2685,54 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
       const result = await handleTicketStatus(url.searchParams.get("id"));
       res.writeHead(result.status, { "Content-Type": "application/json" });
       res.end(JSON.stringify(result.body));
+    })();
+    return;
+  }
+
+  // Ticket readiness check — validates if a Plane work item is ready for dispatch
+  if (url.pathname === "/api/ticket/readiness" && req.method === "GET") {
+    (async () => {
+      try {
+        const workItemId = url.searchParams.get("id");
+        if (!workItemId) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Missing required query parameter: id (e.g. ELLIE-123)" }));
+          return;
+        }
+        if (!isPlaneConfigured()) {
+          res.writeHead(503, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Plane is not configured" }));
+          return;
+        }
+        const strict = url.searchParams.get("strict") === "true";
+        const details = await fetchWorkItemDetails(workItemId);
+        if (!details) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: `Work item ${workItemId} not found` }));
+          return;
+        }
+        const result = checkReadiness(details, strict ? { strictMode: true } : undefined);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          work_item_id: workItemId,
+          title: details.name,
+          ready: result.ready,
+          blockers: result.blockers,
+          warnings: result.warnings,
+          summary: formatReadinessResult(result, workItemId),
+          details: {
+            priority: details.priority,
+            state_group: details.stateGroup,
+            has_estimate: details.estimatePoint != null,
+            has_assignee: details.assignees.length > 0,
+            has_target_date: details.targetDate != null,
+            description_length: details.description.trim().length,
+          },
+        }));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Internal error" }));
+      }
     })();
     return;
   }
@@ -6965,8 +7014,49 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
               return;
             }
 
+            // Fetch the question item *before* answering so we can read metadata.question_id
+            const { supabase: sbClient } = getRelayDeps();
+            let questionMetadata: Record<string, unknown> = {};
+            if (sbClient) {
+              const { data: questionRow } = await sbClient
+                .from("todos")
+                .select("metadata")
+                .eq("id", data.question_item_id)
+                .single();
+              questionMetadata = (questionRow?.metadata as Record<string, unknown>) ?? {};
+            }
+
             const { answerQuestion } = await import("./gtd-orchestration.ts");
             const parentId = await answerQuestion(data.question_item_id, data.answer_text);
+
+            // Bridge to in-memory ask-user queue: resolve any pending coordinator promise
+            const inMemoryQuestionId = typeof questionMetadata.question_id === "string"
+              ? questionMetadata.question_id
+              : null;
+            if (inMemoryQuestionId) {
+              const { answerQuestion: answerQueueQuestion } = await import("./ask-user-queue.ts");
+              const resolved = answerQueueQuestion(inMemoryQuestionId, data.answer_text ?? "");
+              if (!resolved) {
+                logger.info("ask-user-queue: no pending promise for question (stale or already timed out)", {
+                  question_id: inMemoryQuestionId,
+                  question_item_id: data.question_item_id,
+                });
+              }
+            }
+
+            // Update metadata with answered_at and answered_via
+            const answeredAt = new Date().toISOString();
+            if (sbClient) {
+              const mergedMetadata = {
+                ...questionMetadata,
+                answered_at: answeredAt,
+                answered_via: "dashboard",
+              };
+              await sbClient
+                .from("todos")
+                .update({ metadata: mergedMetadata })
+                .eq("id", data.question_item_id);
+            }
 
             // Write answer to coordinator's working memory context_anchors
             try {
@@ -7149,7 +7239,12 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           workItemId: q.workItemId,
           telegramMessage: message,
           gchatMessage: message,
-        }).catch(() => {});
+        }).catch((err) => {
+          log.child("ask-user").error("Failed to notify for agent question", { questionId: q.id, agent: q.agentName }, err);
+        });
+        // TODO: Ellie Chat broadcasts are fire-and-forget — if no WebSocket clients
+        // are connected, the question is lost for that channel. Consider persisting
+        // pending questions and replaying them when a client connects.
         broadcastToEllieChatClients({
           type: "agent_question",
           questionId: q.id,
