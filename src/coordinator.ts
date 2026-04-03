@@ -527,6 +527,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
           work_item_id: workItemId,
         });
 
+        // DEPRECATED: Remove after dashboard migrates to dispatch_event (ELLIE-1308)
         // ELLIE-1099: Send spawn_status so dashboard shows agent activity
         try {
           await deps.sendEvent({
@@ -607,6 +608,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
             }
           }
 
+          // DEPRECATED: Remove after dashboard migrates to dispatch_event (ELLIE-1308)
           // ELLIE-1099: Send spawn_announcement so dashboard shows completion
           try {
             await deps.sendEvent({
@@ -912,6 +914,7 @@ async function executeRecipe(
   const inputText = typeof recipeInput.input === "string" ? recipeInput.input : JSON.stringify(recipeInput.input);
   logger.info("Executing recipe", { name: recipe.name, pattern: recipe.pattern, agents });
 
+  // DEPRECATED: Remove after dashboard migrates to dispatch_event (ELLIE-1308)
   // Notify UI
   try {
     await deps.sendEvent({
@@ -1027,6 +1030,7 @@ async function executeRecipe(
   const durationMs = Date.now() - startTime;
   logger.info("Recipe complete", { name: recipe.name, pattern: recipe.pattern, agents: agentOutputs.length, durationMs });
 
+  // DEPRECATED: Remove after dashboard migrates to dispatch_event (ELLIE-1308)
   // Notify UI of completion
   try {
     await deps.sendEvent({
