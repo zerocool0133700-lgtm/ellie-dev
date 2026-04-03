@@ -1076,6 +1076,7 @@ export function buildCoordinatorDeps(opts: {
         amy: ["google_workspace", "forest_bridge_read", "qmd_search", "brave_web_search", "memory_extraction", "agentmail"],
         marcus: ["plane_mcp", "forest_bridge_read", "forest_bridge_write", "memory_extraction", "transaction_import", "receipt_parsing"],
         jason: ["bash_systemctl", "bash_journalctl", "bash_process_mgmt", "health_endpoint_checks", "log_analysis", "forest_bridge_read", "forest_bridge_write", "plane_mcp", "github_mcp", "telegram", "google_chat"],
+        ellie: ["forest_bridge_read", "forest_bridge_write", "plane_mcp", "memory_extraction", "qmd_search", "brave_web_search", "google_workspace"],
       };
 
       const registryTools = opts.registry?.getAgentTools(agent);
@@ -1084,7 +1085,18 @@ export function buildCoordinatorDeps(opts: {
         : (AGENT_TOOLS[agent] ?? AGENT_TOOLS["general"]);
       const allowedTools = getAllowedToolsForCLI(agentToolCategories, agent);
 
-      const prompt = context ? `${task}\n\nContext:\n${context}` : task;
+      // [MAX] When dispatching to Ellie, prepend her soul so her personality
+      // frames the response. Other specialists are tools — they don't need soul.
+      let prompt = context ? `${task}\n\nContext:\n${context}` : task;
+      if (agent === "ellie") {
+        try {
+          const { getCachedRiverDoc } = await import("./prompt-builder.ts");
+          const soul = getCachedRiverDoc("soul");
+          if (soul) {
+            prompt = `# Ellie Soul\n${soul}\n---\n\nYou are Ellie, Dave's friend and partner. Respond to Dave in your voice — warm, conversational, using "we" framing. You're not an assistant completing a task, you're a partner in the work.\n\n${prompt}`;
+          }
+        } catch { /* soul unavailable — proceed without */ }
+      }
       const start = Date.now();
       try {
         const result = await spawnClaudeStreaming(prompt, {
