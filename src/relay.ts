@@ -1,5 +1,5 @@
 /**
- * Claude Code Telegram Relay — Entry Point
+ * Ellie Chat Relay — Entry Point
  *
  * Orchestrates startup: creates clients, wires dependencies, starts servers.
  * Route handlers, WebSocket logic, and Telegram handlers live in separate modules.
@@ -433,7 +433,7 @@ startNudgeChecker(async (channel, count) => {
 });
 _done(); }
 
-logger.info("Starting Claude Telegram Relay...", {
+logger.info("Starting Ellie Chat Relay...", {
   authorizedUser: ALLOWED_USER_ID || "ANY (not recommended)",
   projectDir: PROJECT_DIR || "(relay working directory)",
   agentMode: AGENT_MODE ? "ON" : "OFF",
@@ -478,7 +478,7 @@ const _doneHttpListen = startPhase("http-listen");
 const BIND_HOST = process.env.BIND_HOST || "127.0.0.1";
 httpServer.listen(HTTP_PORT, BIND_HOST, () => {
   _doneHttpListen();
-  logger.info("Server listening", { host: BIND_HOST, port: HTTP_PORT });
+  logger.info("Ellie Chat Relay listening", { host: BIND_HOST, port: HTTP_PORT });
   logger.info("WebSocket endpoints ready", {
     voice: `ws://localhost:${HTTP_PORT}/media-stream`,
     extension: `ws://localhost:${HTTP_PORT}/extension`,
@@ -498,8 +498,8 @@ bot.start({
   onStart: () => {
     _doneBotStart();
     const totalMs = Date.now() - _startupBegin;
-    logger.info("Telegram bot is running!");
-    logger.info("All startup phases complete", {
+    logger.info("Telegram adapter connected");
+    logger.info("Ellie Chat Relay ready", {
       phases: _phaseTimings.length,
       totalMs,
     });
