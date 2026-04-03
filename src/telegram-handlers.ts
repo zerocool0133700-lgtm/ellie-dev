@@ -687,12 +687,14 @@ bot.on("message:text", withQueue(async (ctx) => withTrace(async () => {
         userId: userId,
         registry: foundationRegistry || undefined,
         foundation: foundationRegistry?.getActive()?.name || "software-dev",
-        systemPrompt: (foundationRegistry ? await foundationRegistry.getCoordinatorPrompt() : null) || "You are Ellie, a coordinator for Dave. You manage a team of specialist agents. When a request needs specialist capabilities, ALWAYS dispatch the right agent using dispatch_agent. Check each agent's skills in the roster to match the right agent to the task. For greetings or simple chat, use complete directly.",
+        coordinatorAgent: foundationRegistry?.getCoordinatorAgent() || "max",
+        systemPrompt: (foundationRegistry ? await foundationRegistry.getCoordinatorPrompt() : null) || "You are Max, Dave's behind-the-scenes coordinator. Dave talks to Ellie — not you. Route efficiently, dispatch specialists, synthesize results in Ellie's voice. For general conversation or partnership, dispatch to ellie. For specialist tasks, dispatch the right agent.",
         model: foundationRegistry?.getBehavior()?.coordinator_model || agentModel || "claude-sonnet-4-6",
         agentRoster: foundationRegistry?.getAgentRoster() || ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
         deps: buildCoordinatorDeps({
           sessionId: session.sessionId,
           channel: "telegram",
+          coordinatorAgent: foundationRegistry?.getCoordinatorAgent() || "max",
           sendFn: async (_ch, msg) => { await ctx.reply(msg); },
           forestReadFn: async (query) => {
             const res = await fetch("http://localhost:3001/api/bridge/read", {
