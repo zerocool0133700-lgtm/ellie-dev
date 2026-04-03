@@ -89,7 +89,8 @@ export type OrchestrationEventType =
   | "failed"
   | "cancelled"
   | "retried"
-  | "timeout";
+  | "timeout"
+  | "stalled";
 
 export interface OrchestrationEvent {
   id: string;
