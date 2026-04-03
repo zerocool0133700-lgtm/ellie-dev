@@ -431,7 +431,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
       if (msg.type === "message" && (msg.text || msg.image)) {
         // ELLIE-461: Fresh AbortController per message dispatch
         const abortCtrl = getOrCreateAbortController(ws);
-        handleEllieChatMessage(ws, msg.text || "", !!msg.phone_mode, msg.image, msg.channel_id, msg.id, msg.mode, abortCtrl.signal, msg.reply_to);
+        handleEllieChatMessage(ws, msg.text || "", !!msg.phone_mode, msg.image, msg.channel_id, msg.id, msg.mode, abortCtrl.signal, msg.reply_to, msg.thread_id);
         return;
       }
 

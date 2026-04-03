@@ -77,6 +77,7 @@ export interface CoordinatorOpts {
   sessionTimeoutMs?: number;
   costCapUsd?: number;
   workItemId?: string;
+  rosterFilter?: string[];  // ELLIE-1374: thread participant filter (used in Task 9)
   resumeState?: CoordinatorPausedState;  // ELLIE-1101: resume from ask_user pause
   _testResponses?: Array<{
     stop_reason: string;

@@ -187,7 +187,7 @@ import { withTrace } from "./trace.ts";
 import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost } from "./jobs-ledger.ts";
 import { checkContextPressure, shouldNotify, getCompactionNotice, checkpointSessionToForest } from "./api/session-compaction.ts";
 import { resilientTask } from "./resilient-task.ts";
-import { primeWorkingMemoryCache } from "./working-memory.ts";
+import { primeWorkingMemoryCache, getSiblingThreadMemories, readWorkingMemory } from "./working-memory.ts";
 import { trackDispatchStart, trackDispatchComplete, trackDispatchFailure } from "./dispatch-commitment-tracker.ts";
 import { setPendingCommitmentsContext } from "./pending-commitments-prompt.ts";
 import { detectAndLogCommitments } from "./conversational-commitment-detector.ts";
@@ -210,6 +210,8 @@ import {
   classifyRoute,
   COMMAND_BAR_CHANNEL_ID,
 } from "./ellie-chat-utils.ts";
+import { getThread, getDefaultThread, getThreadParticipants, filterRosterByThread, buildCrossThreadAwareness } from "./thread-context.ts";
+import { buildDirectPrompt, runDirectChat } from "./direct-chat.ts";
 
 export async function handleEllieChatMessage(
   ws: WebSocket,
@@ -221,10 +223,11 @@ export async function handleEllieChatMessage(
   mode?: string,
   abortSignal?: AbortSignal,
   replyTo?: { id: string; text: string; role: string; agent?: string }, // ELLIE-1090
+  threadId?: string, // ELLIE-1374
 ): Promise<void> {
   // ELLIE-461: Top-level error boundary — any uncaught error gets a user-facing message
   try {
-    return await withTrace(async () => _handleEllieChatMessage(ws, text, phoneMode, image, channelId, clientId, mode, abortSignal, replyTo));
+    return await withTrace(async () => _handleEllieChatMessage(ws, text, phoneMode, image, channelId, clientId, mode, abortSignal, replyTo, threadId));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Don't send error to user for aborted dispatches — they closed the connection
@@ -251,8 +254,26 @@ async function _handleEllieChatMessage(
   mode?: string,
   abortSignal?: AbortSignal,
   replyTo?: { id: string; text: string; role: string; agent?: string }, // ELLIE-1090
+  threadId?: string, // ELLIE-1374
 ): Promise<void> {
   const { bot, anthropic, supabase } = getRelayDeps();
+
+  // ELLIE-1374: Resolve thread
+  let thread: Awaited<ReturnType<typeof getThread>> = null;
+  let threadAgents: string[] | null = null;
+  if (threadId && supabase) {
+    thread = await getThread(supabase, threadId);
+    if (thread) {
+      threadAgents = await getThreadParticipants(supabase, thread.id);
+    }
+  }
+  if (!thread && supabase) {
+    thread = await getDefaultThread(supabase);
+    if (thread) {
+      threadAgents = await getThreadParticipants(supabase, thread.id);
+    }
+  }
+  const effectiveThreadId = thread?.id || null;
   logger.info("User message received", { phoneMode, hasImage: !!image, mode, channelId: channelId?.substring(0, 8) });
   acknowledgeChannel("ellie-chat");
   resetEllieChatIdleTimer();
@@ -327,7 +348,7 @@ async function _handleEllieChatMessage(
 
   // Correction detection + calendar linking (ELLIE-250)
   if (supabase) {
-    const convId = await getOrCreateConversation(supabase, "ellie-chat", "general", channelId);
+    const convId = await getOrCreateConversation(supabase, "ellie-chat", "general", channelId, undefined, undefined, effectiveThreadId || undefined);
     if (convId) {
       // Correction detection — check if user is correcting last assistant response
       supabase.from("messages")
@@ -906,7 +927,7 @@ async function _handleEllieChatMessage(
       // Fire-and-forget: specialist runs outside the queue
       // ELLIE-479: WS-disconnect abort not used — specialist survives WS close since it's already acked
       // ELLIE-482: queue-timeout signal passed so specialist can be aborted on queue timeout
-      runSpecialistAsync(ws, supabase, effectiveText, text, agentResult, imagePath, ellieChatWorkItem, channelId, channelProfile, queueSignal).catch(err => {
+      runSpecialistAsync(ws, supabase, effectiveText, text, agentResult, imagePath, ellieChatWorkItem, channelId, channelProfile, queueSignal, effectiveThreadId || undefined).catch(err => {
         logger.error("Specialist async error", err);
       });
 
@@ -915,7 +936,7 @@ async function _handleEllieChatMessage(
     }
 
     const ellieChatActiveAgent = getActiveAgent("ellie-chat");
-    const ecConvoId = await getOrCreateConversation(supabase!, "ellie-chat", "general", channelId) || undefined;
+    const ecConvoId = await getOrCreateConversation(supabase!, "ellie-chat", "general", channelId, undefined, undefined, effectiveThreadId || undefined) || undefined;
 
     // ── ELLIE-325/334: Mode detection — channel profile overrides regex detection ──
     const ecConvoKey = ecConvoId || "ellie-chat-default";
@@ -1156,6 +1177,64 @@ async function _handleEllieChatMessage(
     // Prime cognitive load cache so buildPrompt can inject it (ELLIE-338)
     await getCognitiveLoadContext(supabase).catch(() => {});
 
+    // ELLIE-1374: Direct mode — bypass coordinator entirely
+    if (thread?.routing_mode === "direct" && thread.direct_agent) {
+      const directAgent = thread.direct_agent;
+      log.info("[direct-chat] Direct mode", { agent: directAgent, threadId: effectiveThreadId });
+
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "typing", agent: directAgent }));
+      }
+
+      try {
+        const wm = await readWorkingMemory({ agent: directAgent, thread_id: effectiveThreadId || undefined });
+        const wmSummary = wm ? Object.entries(wm.sections).filter(([, v]) => v).map(([k, v]) => `## ${k}\n${v}`).join("\n\n") : undefined;
+
+        // Cross-thread awareness
+        let crossThreadCtx: string | undefined;
+        if (effectiveThreadId) {
+          const siblings = await getSiblingThreadMemories(directAgent, effectiveThreadId);
+          if (siblings.length > 0 && supabase) {
+            const enriched = [];
+            for (const s of siblings) {
+              const t = await getThread(supabase, s.thread_id);
+              enriched.push({ thread_id: s.thread_id, thread_name: t?.name || "Unknown", context_anchors: s.context_anchors as string });
+            }
+            crossThreadCtx = buildCrossThreadAwareness(directAgent, effectiveThreadId, enriched) || undefined;
+          }
+        }
+
+        const prompt = buildDirectPrompt({
+          agent: directAgent,
+          message: text,
+          workingMemorySummary: wmSummary,
+          crossThreadAwareness: crossThreadCtx,
+        });
+
+        const result = await runDirectChat(prompt);
+        const memoryId = await saveMessage("assistant", result.response, {}, "ellie-chat", ecUserId);
+        deliverResponse(ws, {
+          type: "response",
+          text: result.response,
+          agent: directAgent,
+          thread_id: effectiveThreadId,
+          memoryId: memoryId || undefined,
+          ts: Date.now(),
+          duration_ms: result.duration_ms,
+        }, ecUserId);
+      } catch (err) {
+        log.error("[direct-chat] Error", { error: String(err) });
+        deliverResponse(ws, {
+          type: "response",
+          text: "Something went wrong in direct chat. Please try again.",
+          agent: thread.direct_agent,
+          thread_id: effectiveThreadId,
+          ts: Date.now(),
+        }, ecUserId);
+      }
+      return;
+    }
+
     // ── COORDINATOR_MODE: async fire-and-forget coordinator path (ELLIE-1098) ──
     // Ack immediately, run coordinator in background, deliver via WebSocket when done.
     // This frees the message queue so new user messages can be processed.
@@ -1236,7 +1315,10 @@ async function _handleEllieChatMessage(
             coordinatorAgent: foundationRegistry?.getCoordinatorAgent() || "max",
             systemPrompt: (foundationRegistry ? await foundationRegistry.getCoordinatorPrompt() : null) || "You are Max, Dave's behind-the-scenes coordinator. Dave talks to Ellie — not you. Route efficiently, dispatch specialists, synthesize results in Ellie's voice.",
             model: foundationRegistry?.getBehavior()?.coordinator_model || coordAgentModel || "claude-sonnet-4-6",
-            agentRoster: foundationRegistry?.getAgentRoster() || ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
+            agentRoster: threadAgents
+              ? filterRosterByThread(foundationRegistry?.getAgentRoster() || ["james", "brian", "kate", "alan", "jason", "amy", "marcus", "ellie"], threadAgents)
+              : foundationRegistry?.getAgentRoster() || ["james", "brian", "kate", "alan", "jason", "amy", "marcus", "ellie"],
+            rosterFilter: threadAgents || undefined,
             deps: coordinatorDeps,
             workItemId: coordWorkItem,
             resumeState: resumeState || undefined,
@@ -1276,6 +1358,7 @@ async function _handleEllieChatMessage(
             type: "response",
             text: coordResponse,
             agent: "ellie",
+            thread_id: effectiveThreadId,
             memoryId: memoryId || undefined,
             ts: Date.now(),
             duration_ms: coordinatorResult.durationMs,
@@ -1573,6 +1656,7 @@ export async function runSpecialistAsync(
   channelId?: string,
   channelProfile?: import("./api/mode-profile.ts").ChannelContextProfile | null,
   queueSignal?: AbortSignal,
+  threadId?: string, // ELLIE-1374
 ): Promise<void> {
   const { bot, anthropic } = getRelayDeps();
   const agentName = agentResult.dispatch.agent.name;
@@ -1624,7 +1708,7 @@ export async function runSpecialistAsync(
 
     // Gather context (same sources as sync path)
     const ellieChatActiveAgent = getActiveAgent("ellie-chat");
-    const specConvoId = await getOrCreateConversation(supabase!, "ellie-chat", "general", channelId) || undefined;
+    const specConvoId = await getOrCreateConversation(supabase!, "ellie-chat", "general", channelId, undefined, undefined, threadId) || undefined;
 
     // ── ELLIE-325/334: Use channel profile or conversation mode ──
     const specConvoKey = specConvoId || "ellie-chat-default";

@@ -149,6 +149,7 @@ export function deliverResponse(
     ts: number;
     duration_ms?: number;
     channelId?: string;
+    thread_id?: string | null;  // ELLIE-1374
   },
   userId?: string,
 ): boolean {
