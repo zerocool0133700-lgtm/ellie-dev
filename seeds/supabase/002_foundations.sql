@@ -81,6 +81,17 @@ VALUES
         "forest_bridge_read", "forest_bridge_write",
         "memory_extraction", "transaction_import", "receipt_parsing"
       ]
+    },
+    {
+      "name": "ellie",
+      "role": "partner",
+      "model": "claude-sonnet-4-6",
+      "tools": [
+        "forest_bridge_read", "forest_bridge_write",
+        "plane_mcp", "memory_extraction", "qmd_search",
+        "brave_web_search", "google_workspace"
+      ],
+      "prompt_key": "soul"
     }
   ]'::jsonb,
   '[
@@ -107,7 +118,8 @@ VALUES
     "max_loop_iterations": 10,
     "cost_cap_session": 2.00,
     "cost_cap_daily": 20.00,
-    "coordinator_model": "claude-sonnet-4-6"
+    "coordinator_model": "claude-sonnet-4-6",
+    "coordinator_agent": "max"
   }'::jsonb,
   true
 ),
@@ -175,7 +187,8 @@ VALUES
     "max_loop_iterations": 6,
     "cost_cap_session": 1.00,
     "cost_cap_daily": 10.00,
-    "coordinator_model": "claude-haiku-4-5"
+    "coordinator_model": "claude-haiku-4-5",
+    "coordinator_agent": "max"
   }'::jsonb,
   false
 );
@@ -262,7 +275,8 @@ VALUES
     "max_loop_iterations": 8,
     "cost_cap_session": 1.50,
     "cost_cap_daily": 15.00,
-    "coordinator_model": "claude-sonnet-4-6"
+    "coordinator_model": "claude-sonnet-4-6",
+    "coordinator_agent": "max"
   }'::jsonb,
   false
 );
