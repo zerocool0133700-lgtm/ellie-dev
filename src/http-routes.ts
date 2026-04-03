@@ -5481,7 +5481,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           json(d: unknown) { res.writeHead(_statusCode, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); },
         };
 
-        const { listThreads, createThread, getThreadWithParticipants, addParticipant, removeParticipant } =
+        const { listThreads, createThread, getThreadWithParticipants, addParticipant, removeParticipant, updateThread } =
           await import("./api/threads.ts");
 
         if (!threadId && req.method === "GET") {
@@ -5519,6 +5519,14 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
             return;
           }
           await removeParticipant(supabase, threadId, subId);
+          mockRes.json({ success: true });
+        } else if (threadId && !subResource && req.method === "PATCH") {
+          const { name, routing_mode, direct_agent } = data;
+          const updates: { name?: string; routing_mode?: string; direct_agent?: string | null } = {};
+          if (name !== undefined) updates.name = name as string;
+          if (routing_mode !== undefined) updates.routing_mode = routing_mode as string;
+          if (direct_agent !== undefined) updates.direct_agent = (direct_agent as string | null);
+          await updateThread(supabase, threadId, updates);
           mockRes.json({ success: true });
         } else if (threadId && req.method === "GET") {
           const result = await getThreadWithParticipants(supabase, threadId);

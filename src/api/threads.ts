@@ -143,6 +143,14 @@ export async function addParticipant(
     .upsert({ thread_id: threadId, agent });
 
   if (error) throw error;
+
+  try {
+    broadcastToEllieChatClients({
+      type: "thread_updated",
+      thread: { id: threadId },
+      change: { type: "participant_added", agent },
+    });
+  } catch { /* best-effort */ }
 }
 
 /**
@@ -160,4 +168,37 @@ export async function removeParticipant(
     .eq("agent", agent);
 
   if (error) throw error;
+
+  try {
+    broadcastToEllieChatClients({
+      type: "thread_updated",
+      thread: { id: threadId },
+      change: { type: "participant_removed", agent },
+    });
+  } catch { /* best-effort */ }
+}
+
+/**
+ * Update thread metadata (name, routing_mode, direct_agent).
+ */
+export async function updateThread(
+  supabase: SupabaseClient,
+  threadId: string,
+  updates: { name?: string; routing_mode?: string; direct_agent?: string | null },
+): Promise<void> {
+  const { error } = await supabase
+    .from("chat_threads")
+    .update(updates)
+    .eq("id", threadId);
+
+  if (error) throw new Error(error.message);
+
+  try {
+    broadcastToEllieChatClients({
+      type: "thread_updated",
+      thread: { id: threadId, ...updates },
+    });
+  } catch { /* best-effort */ }
+
+  logger.info("Thread updated", { id: threadId, updates });
 }
