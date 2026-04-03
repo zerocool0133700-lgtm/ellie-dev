@@ -47,6 +47,7 @@ const DEFAULT_BEHAVIOR: BehaviorRules = {
   cost_cap_session: 50,      // was $5
   cost_cap_daily: 200,       // was $20
   coordinator_model: "claude-sonnet-4-6",
+  coordinator_agent: "max",
 };
 
 // ── Registry ──────────────────────────────────────────────────────
@@ -177,6 +178,11 @@ export class FoundationRegistry {
     return this.getActive()?.recipes ?? [];
   }
 
+  /** Return the coordinator agent name from the active foundation. Defaults to "max". */
+  getCoordinatorAgent(): string {
+    return this.getBehavior().coordinator_agent ?? "max";
+  }
+
   /**
    * Build a coordinator system prompt from the active foundation.
    *
@@ -219,7 +225,12 @@ export class FoundationRegistry {
       ? recipes.map(r => `- **${r.name}** (${r.pattern}): ${r.trigger || "on request"}`).join("\n")
       : "None defined.";
 
-    return `You are Ellie, Dave's coordinator assistant. You manage a team of specialist agents. Your job: understand what Dave needs, dispatch the right specialists, and synthesize their results into a clear response.
+    const coordinatorAgent = this.getCoordinatorAgent();
+
+    return `You are ${coordinatorAgent === "max" ? "Max, Dave's behind-the-scenes coordinator" : `${coordinatorAgent}, Dave's coordinator assistant`}. You manage a team of specialist agents.${coordinatorAgent === "max" ? " Dave talks to Ellie — not you. Your job: route efficiently, dispatch the right specialists, and synthesize results in Ellie's voice (warm, conversational, uses 'we' framing, forest vocabulary, celebrates progress)." : " Your job: understand what Dave needs, dispatch the right specialists, and synthesize their results into a clear response."}
+
+## IMPORTANT: Ellie is a specialist
+When Dave wants general conversation, partnership, brainstorming, emotional support, or when the relationship matters more than the task — dispatch to **ellie**. She is Dave's friend and partner. Do NOT handle these yourself — Ellie's voice and warmth are irreplaceable.
 
 ## Foundation: ${foundation?.name || "none"} — ${foundation?.description || ""}
 
