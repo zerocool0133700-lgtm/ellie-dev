@@ -68,6 +68,7 @@ export interface CoordinatorOpts {
   agentRoster: string[];
   deps: CoordinatorDeps;
   registry?: FoundationRegistry;
+  coordinatorAgent?: string;  // Agent running the coordinator loop (default: "max")
   maxIterations?: number;
   sessionTimeoutMs?: number;
   costCapUsd?: number;
@@ -160,6 +161,9 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
   const effectiveCostCap = behavior?.cost_cap_session ?? costCapRaw;
   const effectiveModel = behavior?.coordinator_model ?? model;
   const effectiveRoster = opts.registry?.getAgentRoster() ?? agentRoster;
+  const effectiveCoordinatorAgent = opts.coordinatorAgent
+    ?? opts.registry?.getCoordinatorAgent()
+    ?? "max";
   const effectivePrompt = opts.registry ? await opts.registry.getCoordinatorPrompt() : systemPrompt;
 
   const startTime = Date.now();
@@ -181,7 +185,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
   // 2. Create coordinator envelope
   const coordEnvelope = createEnvelope({
     type: "coordinator",
-    agent: "ellie",
+    agent: effectiveCoordinatorAgent,
     foundation,
     model: effectiveModel,
     work_item_id: workItemId,
@@ -412,7 +416,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
             await gtdMod.createQuestionItem({
               parentId: questionParent,
               content: askInput.question,
-              createdBy: "ellie",
+              createdBy: effectiveCoordinatorAgent,
               urgency: askInput.urgency === "high" ? "blocking" : "normal",
               metadata: {
                 question_id: questionId,
@@ -491,7 +495,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
         try {
           const parent = await gtdModule.createOrchestrationParent({
             content: message.slice(0, 200),
-            createdBy: "ellie",
+            createdBy: effectiveCoordinatorAgent,
             sourceRef: workItemId,
           }).catch(() => null);
           if (parent) orchestrationParentId = parent.id;
@@ -544,7 +548,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
                 content: input.task.slice(0, 200),
                 assignedAgent: input.agent,
                 assignedTo: input.agent,
-                createdBy: "ellie",
+                createdBy: effectiveCoordinatorAgent,
                 dispatchEnvelopeId: specEnvelope.id,
               });
               // ELLIE-1152: Track last dispatch child for question parenting.
@@ -1026,8 +1030,10 @@ export function buildCoordinatorDeps(opts: {
   forestReadFn: (query: string) => Promise<string>;
   planeReadFn?: (query: string) => Promise<string>;
   registry?: FoundationRegistry;
+  coordinatorAgent?: string;
 }): CoordinatorDeps {
   const { sessionId, channel, sendFn, forestReadFn } = opts;
+  const coordAgent = opts.coordinatorAgent ?? "max";
 
   // Default Plane reader — uses the existing plane.ts API
   const defaultPlaneRead = async (query: string): Promise<string> => {
@@ -1142,7 +1148,7 @@ export function buildCoordinatorDeps(opts: {
 
     readMemory: async (query: string) => {
       const { readWorkingMemory } = await import("./working-memory.ts");
-      const record = await readWorkingMemory({ session_id: sessionId, agent: "ellie" });
+      const record = await readWorkingMemory({ session_id: sessionId, agent: coordAgent });
       return record ? JSON.stringify(record.sections) : "No working memory found.";
     },
 
@@ -1166,7 +1172,7 @@ export function buildCoordinatorDeps(opts: {
 
     getWorkingMemorySummary: async () => {
       const { readWorkingMemory } = await import("./working-memory.ts");
-      const record = await readWorkingMemory({ session_id: sessionId, agent: "ellie" });
+      const record = await readWorkingMemory({ session_id: sessionId, agent: coordAgent });
       if (!record) return "No working memory available.";
       return Object.entries(record.sections)
         .filter(([, v]) => v)
@@ -1176,7 +1182,7 @@ export function buildCoordinatorDeps(opts: {
 
     updateWorkingMemory: async (sections: Record<string, string>) => {
       const { updateWorkingMemory: update } = await import("./working-memory.ts");
-      await update({ session_id: sessionId, agent: "ellie", sections });
+      await update({ session_id: sessionId, agent: coordAgent, sections });
     },
 
     promoteToForest: async () => {
@@ -1184,7 +1190,7 @@ export function buildCoordinatorDeps(opts: {
         const res = await fetch("http://localhost:3001/api/working-memory/promote", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id: sessionId, agent: "ellie" }),
+          body: JSON.stringify({ session_id: sessionId, agent: coordAgent }),
         });
         if (!res.ok) logger.warn("Promote to Forest returned non-OK", { status: res.status });
       } catch (err) {
