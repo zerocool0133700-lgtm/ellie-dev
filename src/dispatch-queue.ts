@@ -21,6 +21,12 @@ const logger = log.child("dispatch-queue");
 
 // ── Types ────────────────────────────────────────────────────
 
+/** Max times a queued dispatch can be re-enqueued before being dropped. */
+export const MAX_QUEUE_RETRIES = 3;
+
+/** Max age (ms) for a queued dispatch before it expires (10 minutes). */
+export const QUEUE_TTL_MS = 10 * 60 * 1000;
+
 export interface QueuedDispatch {
   id: string;
   agentType: string;
@@ -28,6 +34,8 @@ export interface QueuedDispatch {
   channel: string;
   message?: string;
   enqueuedAt: number;
+  /** How many times this dispatch has been re-queued after failing to acquire a slot. */
+  retryCount: number;
   /** Callback that actually fires the dispatch. */
   execute: () => void;
   /** Notification context for user alerts. */
@@ -75,6 +83,7 @@ export function enqueue(item: QueuedDispatch): { queueId: string; position: numb
     agentType: item.agentType,
     workItemId,
     position,
+    retryCount: item.retryCount,
   });
 
   return { queueId: item.id, position };
@@ -85,6 +94,7 @@ export function enqueue(item: QueuedDispatch): { queueId: string; position: numb
 /**
  * Called when a run ends for a work item.
  * Dequeues and executes the next pending dispatch, if any.
+ * Drops items that have exceeded max retries or TTL.
  */
 export function drainNext(workItemId: string): void {
   const q = queues.get(workItemId);
@@ -96,11 +106,65 @@ export function drainNext(workItemId: string): void {
   const next = q.shift()!;
   if (q.length === 0) queues.delete(workItemId);
 
+  // Check TTL — drop if item has been waiting too long
+  const age = Date.now() - next.enqueuedAt;
+  if (age > QUEUE_TTL_MS) {
+    logger.warn("Queued dispatch expired (TTL exceeded)", {
+      queueId: next.id.slice(0, 8),
+      agentType: next.agentType,
+      workItemId,
+      ageMs: age,
+      ttlMs: QUEUE_TTL_MS,
+    });
+
+    emitEvent(next.id, "cancelled", next.agentType, next.workItemId, {
+      reason: "queue_ttl_expired",
+      age_ms: age,
+    });
+
+    notify(next.notifyCtx, {
+      event: "dispatch_confirm",
+      workItemId: next.workItemId,
+      telegramMessage: `⚠️ ${next.workItemId} dispatch expired after ${Math.round(age / 1000)}s in queue — dropping`,
+    }).catch(() => {});
+
+    // Continue draining — next item in queue may still be valid
+    drainNext(workItemId);
+    return;
+  }
+
+  // Check retry count — drop if re-queued too many times
+  if (next.retryCount >= MAX_QUEUE_RETRIES) {
+    logger.warn("Queued dispatch dropped (max retries exceeded)", {
+      queueId: next.id.slice(0, 8),
+      agentType: next.agentType,
+      workItemId,
+      retryCount: next.retryCount,
+      maxRetries: MAX_QUEUE_RETRIES,
+    });
+
+    emitEvent(next.id, "cancelled", next.agentType, next.workItemId, {
+      reason: "queue_max_retries",
+      retry_count: next.retryCount,
+    });
+
+    notify(next.notifyCtx, {
+      event: "dispatch_confirm",
+      workItemId: next.workItemId,
+      telegramMessage: `⚠️ ${next.workItemId} dispatch failed after ${next.retryCount} retries — work item may be permanently blocked`,
+    }).catch(() => {});
+
+    // Continue draining
+    drainNext(workItemId);
+    return;
+  }
+
   logger.info("Draining queued dispatch", {
     queueId: next.id.slice(0, 8),
     agentType: next.agentType,
     workItemId,
-    remaining: q.length,
+    retryCount: next.retryCount,
+    remaining: q?.length ?? 0,
   });
 
   // Fire the dispatch asynchronously

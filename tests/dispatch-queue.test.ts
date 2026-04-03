@@ -16,6 +16,8 @@ import {
   cancelAllForWorkItem,
   getQueueStatus,
   getQueueDepth,
+  MAX_QUEUE_RETRIES,
+  QUEUE_TTL_MS,
   type QueuedDispatch,
 } from "../src/dispatch-queue.ts";
 
@@ -31,6 +33,7 @@ function makeQueueItem(overrides: Partial<QueuedDispatch> = {}): QueuedDispatch 
     workItemId: "ELLIE-100",
     channel: "telegram",
     enqueuedAt: Date.now(),
+    retryCount: 0,
     execute: () => {},
     notifyCtx: {
       userId: "user-1",
@@ -270,5 +273,90 @@ describe("getQueueDepth", () => {
     enqueue(makeQueueItem({ workItemId: "ELLIE-901" }));
     drainNext("ELLIE-901");
     expect(getQueueDepth("ELLIE-901")).toBe(1);
+  });
+});
+
+// ── TTL expiry ──────────────────────────────────────────────
+
+describe("drainNext TTL expiry", () => {
+  test("drops items that exceed TTL", () => {
+    let executed = false;
+    const item = makeQueueItem({
+      workItemId: "ELLIE-950",
+      enqueuedAt: Date.now() - QUEUE_TTL_MS - 1000, // expired 1s ago
+      execute: () => { executed = true; },
+    });
+    enqueue(item);
+    drainNext("ELLIE-950");
+    expect(executed).toBe(false);
+    expect(getQueueDepth("ELLIE-950")).toBe(0);
+  });
+
+  test("skips expired items and executes valid ones", () => {
+    let executed = false;
+    const expired = makeQueueItem({
+      workItemId: "ELLIE-951",
+      enqueuedAt: Date.now() - QUEUE_TTL_MS - 5000,
+    });
+    const valid = makeQueueItem({
+      workItemId: "ELLIE-951",
+      enqueuedAt: Date.now(),
+      execute: () => { executed = true; },
+    });
+    enqueue(expired);
+    enqueue(valid);
+    drainNext("ELLIE-951");
+    expect(executed).toBe(true);
+  });
+});
+
+// ── Max retry limit ─────────────────────────────────────────
+
+describe("drainNext max retry limit", () => {
+  test("drops items at max retry count", () => {
+    let executed = false;
+    const item = makeQueueItem({
+      workItemId: "ELLIE-960",
+      retryCount: MAX_QUEUE_RETRIES, // at limit
+      execute: () => { executed = true; },
+    });
+    enqueue(item);
+    drainNext("ELLIE-960");
+    expect(executed).toBe(false);
+    expect(getQueueDepth("ELLIE-960")).toBe(0);
+  });
+
+  test("allows items below max retry count", () => {
+    let executed = false;
+    const item = makeQueueItem({
+      workItemId: "ELLIE-961",
+      retryCount: MAX_QUEUE_RETRIES - 1, // one below limit
+      execute: () => { executed = true; },
+    });
+    enqueue(item);
+    drainNext("ELLIE-961");
+    expect(executed).toBe(true);
+  });
+
+  test("skips over-retried items and executes valid ones", () => {
+    let executed = false;
+    const overRetried = makeQueueItem({
+      workItemId: "ELLIE-962",
+      retryCount: MAX_QUEUE_RETRIES + 5,
+    });
+    const valid = makeQueueItem({
+      workItemId: "ELLIE-962",
+      retryCount: 0,
+      execute: () => { executed = true; },
+    });
+    enqueue(overRetried);
+    enqueue(valid);
+    drainNext("ELLIE-962");
+    expect(executed).toBe(true);
+  });
+
+  test("MAX_QUEUE_RETRIES is a reasonable value", () => {
+    expect(MAX_QUEUE_RETRIES).toBeGreaterThanOrEqual(3);
+    expect(MAX_QUEUE_RETRIES).toBeLessThanOrEqual(5);
   });
 });

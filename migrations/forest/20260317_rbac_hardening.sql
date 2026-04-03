@@ -44,10 +44,11 @@ ON CONFLICT (name) DO NOTHING;
 
 -- 5. Fix permission coverage gaps
 
--- research_agent needs forest.read
+-- research_agent needs forest.read + plane.read_issue (ELLIE-1268: permission-guard alignment)
 INSERT INTO rbac_role_permissions (role_id, permission_id)
 SELECT 'a0000000-0000-0000-0000-000000000004', id FROM rbac_permissions
-WHERE resource = 'forest' AND action = 'read'
+WHERE (resource = 'forest' AND action = 'read')
+   OR (resource = 'plane' AND action = 'read_issue')
 ON CONFLICT DO NOTHING;
 
 -- critic_agent needs forest.read
@@ -73,18 +74,20 @@ WHERE (resource = 'plane' AND action = 'read_issue')
    OR (resource = 'memory' AND action = 'read')
 ON CONFLICT DO NOTHING;
 
--- content_agent: forest.write, forest.read, messages.send, memory.read, memory.write
+-- content_agent: forest.write, forest.read, messages.send, memory.read, memory.write, plane.read_issue
 INSERT INTO rbac_role_permissions (role_id, permission_id)
 SELECT 'a0000000-0000-0000-0000-000000000008', id FROM rbac_permissions
 WHERE (resource = 'forest' AND action IN ('read', 'write'))
    OR (resource = 'messages' AND action = 'send')
    OR (resource = 'memory' AND action IN ('read', 'write'))
+   OR (resource = 'plane' AND action = 'read_issue')
 ON CONFLICT DO NOTHING;
 
--- general_agent: messages.send, messages.read, memory.read, forest.read
+-- general_agent: messages.send, messages.read, memory.read, forest.read, plane.read_issue
 INSERT INTO rbac_role_permissions (role_id, permission_id)
 SELECT 'a0000000-0000-0000-0000-000000000009', id FROM rbac_permissions
 WHERE (resource = 'messages' AND action IN ('send', 'read'))
    OR (resource = 'memory' AND action = 'read')
    OR (resource = 'forest' AND action = 'read')
+   OR (resource = 'plane' AND action = 'read_issue')
 ON CONFLICT DO NOTHING;

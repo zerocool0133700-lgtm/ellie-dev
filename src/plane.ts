@@ -504,8 +504,26 @@ export interface WorkItemDetails {
   description: string;
   priority: string;
   state: string;
+  /** State group from Plane (e.g. "started", "completed", "cancelled") */
+  stateGroup: string | null;
   sequenceId: number;
   projectIdentifier: string;
+  /** Story point estimate (null if unset) */
+  estimatePoint: number | null;
+  /** Assigned user IDs */
+  assignees: string[];
+  /** Label IDs */
+  labels: string[];
+  /** Target/due date (ISO 8601 or null) */
+  targetDate: string | null;
+  /** Start date (ISO 8601 or null) */
+  startDate: string | null;
+  /** Creation timestamp (ISO 8601) */
+  createdAt: string;
+  /** Last update timestamp (ISO 8601) */
+  updatedAt: string;
+  /** Parent work item ID (for sub-tasks) */
+  parent: string | null;
 }
 
 /** Strip HTML tags to plain text */
@@ -534,13 +552,22 @@ export async function fetchWorkItemDetails(workItemId: string): Promise<WorkItem
     if (!issue) return null;
 
     return {
-      id: issue.id,
-      name: issue.name,
-      description: stripHtml(issue.description_html || ""),
-      priority: issue.priority || "none",
-      state: issue.state,
-      sequenceId: issue.sequence_id,
+      id: issue.id as string,
+      name: issue.name as string,
+      description: stripHtml((issue.description_html as string) || ""),
+      priority: (issue.priority as string) || "none",
+      state: issue.state as string,
+      stateGroup: (issue.state_detail as Record<string, string>)?.group ?? null,
+      sequenceId: issue.sequence_id as number,
       projectIdentifier: parsed.projectIdentifier,
+      estimatePoint: issue.estimate_point != null ? Number(issue.estimate_point) : null,
+      assignees: Array.isArray(issue.assignees) ? (issue.assignees as string[]) : [],
+      labels: Array.isArray(issue.labels) ? (issue.labels as string[]) : [],
+      targetDate: (issue.target_date as string) ?? null,
+      startDate: (issue.start_date as string) ?? null,
+      createdAt: issue.created_at as string,
+      updatedAt: issue.updated_at as string,
+      parent: (issue.parent as string) ?? null,
     };
   } catch (error) {
     logger.warn("Failed to fetch work item", { workItemId }, error);

@@ -41,6 +41,7 @@ export type NotificationEvent =
   | "run_failed"
   | "error"
   | "session_checkpoint"
+  | "ask_user"
   | "rollup"
   | "weekly_review";
 
@@ -176,6 +177,14 @@ export const NOTIFICATION_POLICY: Record<NotificationEvent, EventPolicy> = {
   },
   error: {
     priority: "critical",
+    channels: {
+      telegram: { enabled: true, minIntervalSec: 0 },
+      "google-chat": { enabled: true, minIntervalSec: 0 },
+      slack: { enabled: true, minIntervalSec: 0 },
+    },
+  },
+  ask_user: {
+    priority: "high",
     channels: {
       telegram: { enabled: true, minIntervalSec: 0 },
       "google-chat": { enabled: true, minIntervalSec: 0 },

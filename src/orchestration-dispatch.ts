@@ -20,6 +20,7 @@ import { getRiverContextForAgent } from "./context-sources.ts";
 import type { PlaybookContext } from "./playbook.ts";
 import { withRetry, classifyError } from "./dispatch-retry.ts";
 import { getAdviceForDispatch, enrichPromptWithAdvice } from "./dispatch-advice-injector.ts";
+import { checkReadiness, formatReadinessResult } from "./dispatch-readiness.ts";
 import { enqueue, getQueueDepth } from "./dispatch-queue.ts";
 import { withTrace, getTraceId, generateTraceId } from "./trace.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
@@ -62,6 +63,10 @@ export interface TrackedDispatchOpts {
     env?: string[];
     binds?: string[];
   };
+  /** ELLIE-1268: Override readiness check config (e.g. strictMode for overnight). */
+  readinessConfig?: Partial<import("./dispatch-readiness.ts").ReadinessConfig>;
+  /** Internal: tracks how many times this dispatch has been re-queued. */
+  _retryCount?: number;
 }
 
 export interface TrackedDispatchResult {
@@ -88,6 +93,7 @@ export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispat
       gchatSpaceName: opts.playbookCtx.gchatSpaceName,
     };
 
+    const retryCount = opts._retryCount ?? 0;
     const { position } = enqueue({
       id: queueId,
       agentType: opts.agentType,
@@ -95,10 +101,11 @@ export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispat
       channel: opts.channel,
       message: opts.message,
       enqueuedAt: Date.now(),
+      retryCount,
       notifyCtx,
       execute: () => {
-        // Re-dispatch when the current run completes
-        executeTrackedDispatch(opts);
+        // Re-dispatch when the current run completes (increment retry count)
+        executeTrackedDispatch({ ...opts, _retryCount: retryCount + 1 });
       },
     });
 
@@ -107,6 +114,7 @@ export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispat
       existingRunId: existingRun.runId.slice(0, 8),
       requestedAgent: opts.agentType,
       queuePosition: position,
+      retryCount,
     });
 
     notify(notifyCtx, {
@@ -128,6 +136,7 @@ export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispat
       gchatSpaceName: opts.playbookCtx.gchatSpaceName,
     };
 
+    const retryCount2 = opts._retryCount ?? 0;
     const { position } = enqueue({
       id: queueId,
       agentType: opts.agentType,
@@ -135,9 +144,10 @@ export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispat
       channel: opts.channel,
       message: opts.message,
       enqueuedAt: Date.now(),
+      retryCount: retryCount2,
       notifyCtx,
       execute: () => {
-        executeTrackedDispatch(opts);
+        executeTrackedDispatch({ ...opts, _retryCount: retryCount2 + 1 });
       },
     });
 
@@ -146,6 +156,7 @@ export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispat
       activeCount,
       maxConcurrent: MAX_CONCURRENT_DISPATCHES,
       queuePosition: position,
+      retryCount: retryCount2,
     });
 
     notify(notifyCtx, {
@@ -252,6 +263,30 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     }
 
     emitEvent(runId, "progress", agentType, workItemId, { step: "ticket_fetched", ticket_title: details.name });
+
+    // 1b. Pre-dispatch readiness validation (ELLIE-1268)
+    const readiness = checkReadiness(details, opts.readinessConfig);
+    if (readiness.warnings.length > 0) {
+      const summary = formatReadinessResult(readiness, workItemId);
+      logger.warn("Dispatch readiness warnings", { workItemId, warnings: readiness.warnings });
+      emitEvent(runId, "progress", agentType, workItemId, { step: "readiness_warnings", warnings: readiness.warnings });
+    }
+    if (!readiness.ready) {
+      const summary = formatReadinessResult(readiness, workItemId);
+      logger.warn("Dispatch blocked by readiness check", { workItemId, blockers: readiness.blockers });
+      emitEvent(runId, "failed", agentType, workItemId, { error: "Readiness check failed", blockers: readiness.blockers });
+      endRun(runId, "failed");
+      if (jobId) {
+        await updateJob(jobId, { status: "failed", error_count: 1, current_step: null });
+        await appendJobEvent(jobId, "failed", { error: summary });
+      }
+      await notify(notifyCtx, {
+        event: "error",
+        workItemId,
+        telegramMessage: summary,
+      });
+      return;
+    }
 
     // 2. Notify dispatch
     await notify(notifyCtx, {

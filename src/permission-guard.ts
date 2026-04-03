@@ -71,10 +71,12 @@ const AGENT_RESOURCE_MAP: Record<string, { resource: string; action: string }[]>
   research: [
     { resource: "tools", action: "use_web" },
     { resource: "tools", action: "use_mcp" },
+    { resource: "plane", action: "read_issue" },
   ],
   general: [
     { resource: "messages", action: "send" },
     { resource: "memory", action: "read" },
+    { resource: "plane", action: "read_issue" },
   ],
   strategy: [
     { resource: "plane", action: "read_issue" },
@@ -83,6 +85,7 @@ const AGENT_RESOURCE_MAP: Record<string, { resource: string; action: string }[]>
   content: [
     { resource: "messages", action: "send" },
     { resource: "forest", action: "write" },
+    { resource: "plane", action: "read_issue" },
   ],
   finance: [
     { resource: "plane", action: "read_issue" },
