@@ -85,13 +85,25 @@ Message flows through `runCoordinatorLoop()` as today, with one key difference: 
 
 ### Direct Mode
 
-Message bypasses the coordinator loop entirely:
+Message bypasses the coordinator loop entirely and goes through a dedicated prompt assembly path.
 
-- Goes straight to `callSpecialist(thread.direct_agent, message)` with the agent's soul loaded
-- No Max, no routing, no dispatch cards, no coordinator overhead
-- Response comes back from that agent directly
-- Working memory still tracked for the agent in this thread
-- Conversations still managed (idle expiry, summaries, etc.)
+**Prompt assembly for direct mode** (new code path in ellie-chat-handler):
+1. **Soul** — Load from River cache via `getCachedRiverDoc("soul")`, same as coordinator Ellie dispatch
+2. **Working memory** — Read the agent's working memory for this thread (thread-scoped)
+3. **Conversation history** — Last N messages from this thread's conversation (same retrieval as coordinated mode)
+4. **Forest context** — Semantic search results relevant to the message (same as today)
+5. **Agent archetype** — Load from `config/archetypes/{agent}.md` if the agent has one
+6. **NO coordinator framing** — no "You are Max", no dispatch tools, no roster. The agent speaks as itself.
+
+This is similar to how `buildPrompt()` works today for specialist agents, but without the coordinator wrapper. The key difference from `callSpecialist()` (which spawns a CLI process) is that direct mode uses the Messages API directly, maintaining conversation state across turns — it's a persistent chat, not a one-shot dispatch.
+
+**Implementation:** A new `runDirectChat()` function in `ellie-chat-handler.ts` that:
+- Calls the Messages API with the assembled prompt + conversation history
+- Saves the response as a message with thread_id
+- Updates working memory
+- Returns the response to the WebSocket
+
+This is NOT `callSpecialist()` — that's fire-and-forget CLI spawning. Direct mode is conversational, with state.
 
 ### Routing Decision in ellie-chat-handler
 
@@ -206,17 +218,28 @@ Working memory operations include thread_id:
 - `updateWorkingMemory(session_id, agent, sections)` — thread_id is on the existing record
 - `readWorkingMemory(session_id, agent)` — filtered by thread_id when provided
 
-This means James in thread A has completely separate working memory from James in thread B.
+James in thread A has his own working memory separate from James in thread B. However, **cross-thread awareness is injected** to prevent agents contradicting themselves:
+
+- When building a prompt for James in thread A, check if James has active working memory in other threads
+- If so, inject a brief signal: "Note: you are also active in thread 'ELLIE-500 work' — your context_anchors there include: [summary]"
+- This uses the `context_anchors` section from sibling thread working memories (read-only, not the full WM)
+- The agent doesn't get the other thread's full conversation, just awareness that it exists and what it's anchored on
+- This prevents the confusing scenario where James gives contradictory advice across threads about the same ticket
 
 ### Conversations — Thread-Scoped
 
 The existing `get_or_create_conversation()` RPC gets `thread_id` as a parameter. Active conversation lookup filters by thread_id.
 
 Each thread has its own conversation lifecycle:
-- Idle expiry (30 min default)
 - Rolling summaries (every 8 messages)
 - Memory extraction on close
 - River promotion on close
+
+**Idle expiry is paused for non-active threads.** With multiple threads open, aggressive 30-minute idle timers would cause a burst of background conversation closures and summary extractions in threads Dave isn't looking at. Instead:
+- The active thread (the one Dave is currently viewing) uses the normal 30-minute idle timer
+- Non-active threads pause their idle timer — they don't expire while Dave is in another thread
+- When Dave switches to a thread, its idle timer resumes from where it left off
+- This prevents noisy background processing and unnecessary "conversation closed" events in threads that are just waiting for attention
 
 ### Messages — Thread-Tagged
 
@@ -236,29 +259,34 @@ Every message saved includes `thread_id`. Message history retrieval for prompt b
 
 This is too large for a single implementation plan. Recommended phases:
 
-### Phase 1: Data Layer + Routing
+### Phase 1: Data Layer + Routing + Core Isolation
 - Migration: `chat_threads`, `thread_participants`, `thread_read_state` tables
 - Migration: Add `thread_id` to `conversations`, `messages`, `working_memory`
 - Default "General" thread creation
 - Thread CRUD API endpoints
+- Working memory thread scoping (Forest DB column + code changes) — **must ship with routing to prevent context leaks between threads**
+- Cross-thread awareness signal (inject sibling thread context_anchors into prompt)
+- Conversation thread scoping (get_or_create_conversation with thread_id)
+- Message filtering by thread_id in prompt building
 - Ellie-chat-handler: read thread_id from WebSocket, route based on routing_mode
 - Coordinator roster filtering by thread participants
-- Direct mode bypass path
+- Direct mode: new `runDirectChat()` with full prompt assembly (soul + WM + history + Forest + archetype)
+- Thread-aware idle expiry (pause for non-active threads)
 
 ### Phase 2: Frontend
 - Thread dropdown selector component
-- New thread form (name + agent select + routing mode)
-- Thread switching (load history, filter messages)
+- New thread form (name + agent select + routing mode toggle)
+- Thread switching (load history, filter messages by thread_id)
 - Unread tracking + badges
 - WebSocket thread_id on outgoing messages
-- Filter incoming messages by active thread
-
-### Phase 3: Context Isolation
-- Working memory thread scoping (Forest DB migration + code changes)
-- Conversation thread scoping (get_or_create_conversation with thread_id)
-- Message filtering by thread_id in prompt building
+- Filter incoming messages/events by active thread
 - Dispatch side panel thread filtering
-- Active dispatch context filtering by thread
+
+### Phase 3: Polish + Integration
+- Active dispatch context filtering by thread in coordinator prompt
+- Thread-scoped dispatch cards in side panel
+- Thread management WebSocket events (thread_created, thread_updated)
+- Edge case handling: agent added/removed from thread mid-conversation
 
 ---
 
