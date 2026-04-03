@@ -5457,6 +5457,90 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Thread API endpoints (ELLIE-1374)
+  if (url.pathname.startsWith("/api/threads")) {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        let data: Record<string, unknown> = {};
+        if (body) try { data = JSON.parse(body); } catch { /* ignore */ }
+
+        const pathParts = url.pathname.replace("/api/threads", "").split("/").filter(Boolean);
+        const threadId = pathParts[0] || undefined;
+        const subResource = pathParts[1] || undefined;
+        const subId = pathParts[2] || undefined;
+
+        const queryParams: Record<string, string> = {};
+        for (const [k, v] of url.searchParams.entries()) queryParams[k] = v;
+
+        const mockReq: ApiRequest = { body: data, query: queryParams, params: { id: threadId || null, agent: subId || null } };
+        let _statusCode = 200;
+        const mockRes: ApiResponse = {
+          status(code: number) { _statusCode = code; return { json: (d: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); } }; },
+          json(d: unknown) { res.writeHead(_statusCode, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); },
+        };
+
+        const { listThreads, createThread, getThreadWithParticipants, addParticipant, removeParticipant } =
+          await import("./api/threads.ts");
+
+        if (!threadId && req.method === "GET") {
+          const result = await listThreads(supabase);
+          mockRes.json({ success: true, ...result });
+        } else if (!threadId && req.method === "POST") {
+          const { name, channel_id, routing_mode, direct_agent, agents, created_by } = data;
+          if (!name || !channel_id || !routing_mode) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "name, channel_id, and routing_mode are required" }));
+            return;
+          }
+          const result = await createThread(supabase, {
+            name: name as string,
+            channel_id: channel_id as string,
+            routing_mode: routing_mode as string,
+            direct_agent: direct_agent as string | undefined,
+            agents: (agents as string[]) ?? [],
+            created_by: created_by as string | undefined,
+          });
+          mockRes.json({ success: true, ...result });
+        } else if (threadId && subResource === "participants" && req.method === "POST") {
+          const { agent } = data;
+          if (!agent) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "agent is required" }));
+            return;
+          }
+          await addParticipant(supabase, threadId, agent as string);
+          mockRes.json({ success: true });
+        } else if (threadId && subResource === "participants" && req.method === "DELETE") {
+          if (!subId) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "agent param required" }));
+            return;
+          }
+          await removeParticipant(supabase, threadId, subId);
+          mockRes.json({ success: true });
+        } else if (threadId && req.method === "GET") {
+          const result = await getThreadWithParticipants(supabase, threadId);
+          if (!result) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Thread not found" }));
+            return;
+          }
+          mockRes.json({ success: true, ...result });
+        } else {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Unknown threads endpoint" }));
+        }
+      } catch (err) {
+        logger.error("Threads API error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
+    return;
+  }
+
   // Vault credential endpoints (ELLIE-32)
   if (url.pathname.startsWith("/api/vault/")) {
     let body = "";
