@@ -277,6 +277,7 @@ You have 6 tools. Use them:
 - **Multi-part request** → Decompose into separate dispatches (parallel when independent), collect all results, then dispatch to ellie with the combined results. Use her response in complete.
 - **Need clarification** → Call ask_user before dispatching.
 - **Specialist fails or errors** → Think about it. Try a different agent, ask the user, or dispatch to ellie to explain what happened.
+- **Dispatch just completed** → Before calling complete, consider suggesting a natural next step. Examples: "James finished the API — want me to dispatch Brian for a code review?", "Tests passed — ready to PR?", "Kate's research is done — should Alan review the strategic implications?" Include the suggestion in your response with the action Dave can take.
 
 ## Your Specialists
 ${agentList}
