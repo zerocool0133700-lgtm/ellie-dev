@@ -77,6 +77,7 @@ export interface CoordinatorOpts {
   sessionTimeoutMs?: number;
   costCapUsd?: number;
   workItemId?: string;
+  threadId?: string;  // ELLIE-1374: thread context
   rosterFilter?: string[];  // ELLIE-1374: thread participant filter (used in Task 9)
   resumeState?: CoordinatorPausedState;  // ELLIE-1101: resume from ask_user pause
   _testResponses?: Array<{
@@ -169,7 +170,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
   const effectiveCoordinatorAgent = opts.coordinatorAgent
     ?? opts.registry?.getCoordinatorAgent()
     ?? "max";
-  const effectivePrompt = opts.registry ? await opts.registry.getCoordinatorPrompt() : systemPrompt;
+  const effectivePrompt = opts.registry ? await opts.registry.getCoordinatorPrompt(opts.threadId) : systemPrompt;
 
   const startTime = Date.now();
   const isTestMode = !!_testResponses;
@@ -554,6 +555,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
           title: input.task.slice(0, 200),
           work_item_id: workItemId,
           dispatch_type: "single",
+          thread_id: opts.threadId ?? null,
         });
 
         // ELLIE-1325: Check for file conflicts with active dispatches
@@ -661,6 +663,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
             dispatch_type: "single",
             duration_ms: specResult.duration_ms,
             cost_usd: completed.cost_usd,
+            thread_id: opts.threadId ?? null,
           });
 
           // Write dispatch outcome (ELLIE-1309)

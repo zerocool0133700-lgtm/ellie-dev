@@ -1321,6 +1321,7 @@ async function _handleEllieChatMessage(
             rosterFilter: threadAgents || undefined,
             deps: coordinatorDeps,
             workItemId: coordWorkItem,
+            threadId: effectiveThreadId || undefined,
             resumeState: resumeState || undefined,
           });
 
