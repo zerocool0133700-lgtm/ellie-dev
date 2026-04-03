@@ -13,6 +13,7 @@ import { log } from "./logger.ts";
 import type { NotifyContext, NotifyOptions } from "./notification-policy.ts";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { TodoRow } from "./api/gtd-types.ts";
+import { emitDispatchEvent } from "./dispatch-events.ts";
 
 const logger = log.child("orchestration-monitor");
 
@@ -199,6 +200,15 @@ async function escalateTask(task: TodoRow, reason: "unstarted" | "stalled", dura
   } else {
     message = `⚠️ GTD task stalled (no updates ${minutes}min) — assigned to ${agentName}\n"${taskPreview}"`;
   }
+
+  // Emit unified stalled event for dashboard cards (ELLIE-1310)
+  const runId = task.dispatch_envelope_id || task.id;
+  emitDispatchEvent(runId, "stalled", {
+    agent: task.assigned_agent || "unknown",
+    title: (task.content || "Unknown task").slice(0, 200),
+    work_item_id: (task.source_ref as string) || null,
+    dispatch_type: "single",
+  });
 
   await _notifyFn(_notifyCtx, {
     event: "orchestration_stall",
