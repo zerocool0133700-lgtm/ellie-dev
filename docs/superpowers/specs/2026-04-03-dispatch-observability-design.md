@@ -15,6 +15,8 @@
 - Working memory injection to specialists via `buildPrompt()`
 - `GET /api/dispatches/active`, `POST /api/dispatches/cancel`, etc.
 
+**Review feedback incorporated:** Brian (architecture review) and Ellie (operations review) reviewed this spec. Key refinements: structured reporting via working memory (not free-form parsing), crash-resilient context queue via working memory, conflict detection limited to known data, formation parent/child outcomes made explicit, operational guardrails added.
+
 ---
 
 ## Phase 1: Dispatch Event Layer (ELLIE-1308 through 1311)
@@ -60,6 +62,8 @@ The existing schema stays:
 }
 ```
 
+**Dual-write strategy:** Write to DB first, then broadcast to WebSocket. If the WebSocket broadcast fails, the event is still persisted — accept eventual consistency on the UI side since the WebSocket is ephemeral.
+
 **Backward compatibility:** Keep emitting `spawn_status` and `spawn_announcement` alongside `dispatch_event` until the dashboard is fully migrated. Then remove them.
 
 ### 1.2 Dispatch Outcome Storage (ELLIE-1309)
@@ -92,7 +96,15 @@ CREATE INDEX idx_dispatch_outcomes_work_item ON dispatch_outcomes(work_item_id);
 CREATE INDEX idx_dispatch_outcomes_created ON dispatch_outcomes(created_at DESC);
 ```
 
-Populated when a dispatch completes. The coordinator extracts file changes, decisions, and commits from the specialist's output. For formations/round tables, one outcome per agent participant plus one for the overall formation.
+**Outcome extraction via working memory:** Specialists report structured data through their existing working memory sections — `investigation_state` for progress, `decision_log` for decisions, `context_anchors` for file paths and commit SHAs. The coordinator reads these sections after dispatch completes and populates the outcome row. No free-form output parsing — working memory is the structured reporting channel.
+
+For formations/round tables, one outcome per agent participant (with `parent_run_id` linking to the formation) plus one outcome for the overall formation (its `summary` is the synthesis output).
+
+**Operational guardrails:**
+- **Degradation:** If Forest DB is unavailable, outcome writes are queued in memory and retried (same pattern as orchestration-ledger resilient writes). WebSocket events still broadcast without DB persistence.
+- **Retention:** `dispatch_outcomes` rows older than 90 days are eligible for archival. A periodic task sweeps old rows (configurable via `DISPATCH_OUTCOME_RETENTION_DAYS`, default 90).
+- **Auth:** The `GET /api/dispatches/:run_id/outcome` endpoint requires the same bridge key auth used by other relay APIs (`x-bridge-key` header).
+- **Cost values** in `cost_usd` are estimates based on token counts and model pricing, not invoiced amounts.
 
 ### 1.3 Stall Detection Emitter (ELLIE-1310)
 
@@ -105,11 +117,13 @@ When a stall is detected (no progress event for configurable threshold, default 
 
 The stall threshold is configurable per-foundation via `behavior.stall_threshold_ms` (default: 600000 — 10 minutes).
 
+**Formation legs:** The formation orchestrator should set appropriate stall thresholds for child dispatches. Individual formation legs can run 8-9 minutes each — the stall timer should be per-leg, not per-formation. The formation orchestrator passes `stall_threshold_ms` when dispatching children.
+
 ### 1.4 Progress Line Protocol (ELLIE-1311)
 
 A `reportProgress(runId: string, line: string)` helper function that emits a `progress` event to the ledger with the line in the payload's `progress_line` field.
 
-The coordinator calls this on behalf of specialists. When a specialist's streaming output includes recognizable progress markers (file operations, test results, deployment steps), the coordinator extracts a one-liner and calls `reportProgress()`.
+The coordinator calls this on behalf of specialists. Specialists report progress by updating their working memory `investigation_state` section. The coordinator reads this after each specialist interaction and calls `reportProgress()` with a summarized one-liner. This avoids fragile parsing of free-form LLM output — working memory is the structured channel.
 
 Progress lines are short (max 100 chars), human-readable, and present-tense:
 - "Reading schema files..."
@@ -135,6 +149,8 @@ Progress lines are short (max 100 chars), human-readable, and present-tense:
 - Current progress line
 - Timestamp + elapsed time
 - Expand arrow for drill-down (Phase 4)
+
+**Panel focus behavior:** Tapping an inline indicator scrolls the side panel to that card and highlights it briefly. If the panel is already open to a different card's drill-down, the drill-down closes and the panel scrolls to the tapped card. Only specialist dispatches get side panel cards — coordinator-handled messages (Max routing directly to Ellie) do not.
 
 ### 2.2 WebSocket Card Updates (ELLIE-1314)
 
@@ -182,6 +198,8 @@ ellie-home/app/composables/
 
 No new infrastructure — this is a coordinator prompt enhancement.
 
+**Conditional injection:** The active dispatch context is ONLY injected when active dispatches actually exist. When no dispatches are running, the prompt stays clean — no wasted tokens on usually-irrelevant context.
+
 When active dispatches exist, their context is injected into Max's system prompt before each coordinator loop iteration:
 
 ```
@@ -201,15 +219,15 @@ The active dispatch list is built from the orchestration tracker's active runs, 
 
 ### 3.2 Context Injection into Active Dispatch (ELLIE-1317)
 
-**Queue-and-redispatch model.** You cannot push context to a running CLI process. Instead:
+**Working memory queue + auto-redispatch.** You cannot push context to a running CLI process. Instead:
 
-1. Max stores Dave's message in a `dispatch_context_queue` — an in-memory Map keyed by `run_id`, value is an array of `{ message: string, timestamp: number }`
+1. Max writes Dave's message into the agent's working memory `context_anchors` section, appending to any existing content: `[QUEUED from Dave @ HH:MM]: <message>`
 2. Max tells Dave (via Ellie): "James is mid-work — I'll make sure he picks this up as soon as he finishes."
-3. When the dispatch completes, Max checks the queue for that `run_id`
-4. If context is waiting, Max **immediately re-dispatches** the same agent with: the completed results + Dave's queued message(s) as additional context
-5. Queue clears after re-dispatch
+3. When the dispatch completes, Max checks the agent's working memory for queued context markers
+4. If queued context exists, Max **immediately re-dispatches** the same agent with: the completed results + the queued context as additional instructions
+5. Queued markers are cleared from working memory after re-dispatch
 
-The queue lives in coordinator memory (module-level Map). If the relay restarts, the queue is lost — acceptable since active dispatches also restart.
+**Crash resilience:** Working memory is persisted in the Forest DB `working_memory` table. If the relay crashes and restarts, the queued context survives. The next coordinator loop will see the queued markers and act on them.
 
 ### 3.3 Routing Feedback in UI (ELLIE-1318)
 
@@ -322,13 +340,13 @@ When stall detection fires (Phase 1.3), a special attention card renders in chat
 
 ### 5.2 Conflict Detection (ELLIE-1325)
 
-When a new dispatch starts, compare its likely file paths against files being touched by active dispatches:
-- Source: `dispatch_outcomes.files_changed` for historical data on the same work item, plus `progress` events that report file paths from active dispatches
-- Detection: set intersection of file paths between the new dispatch and each active dispatch
+When a new dispatch starts, compare **known** file paths against active dispatches. No predictions — only data we actually have:
+- Source: `dispatch_outcomes.files_changed` from previous completed dispatches on the same work item (historical), plus file paths reported in `progress` events from currently active dispatches (via working memory `context_anchors`)
+- Detection: set intersection of known file paths between the new dispatch's work item history and each active dispatch's reported files
 - If overlap found: warning card in chat — "Kate's research may touch files James is editing (src/api/auth.ts, src/middleware.ts)"
 - Not blocking — informational only. Dave can cancel, reprioritize, or ignore
 
-Detection runs at dispatch start and on each `progress` event that includes file path data.
+Detection runs when a dispatch completes or when a progress event reports file path data. It does NOT try to predict file paths for not-yet-started dispatches.
 
 ### 5.3 Next-Step Suggestions (ELLIE-1326)
 
@@ -369,14 +387,14 @@ The "glance and know" experience — open the page, see the state of the world.
 ## Phase Dependencies
 
 ```
-Phase 1 (data layer) → no dependencies, builds on existing infrastructure
-Phase 2 (UI cards) → depends on Phase 1 (unified events)
-Phase 3 (inquiry routing) → depends on Phase 1 (active dispatch context)
-Phase 4 (drill-down) → depends on Phase 1 (outcome storage) + Phase 2 (card UI)
-Phase 5 (bidirectional) → depends on Phase 1 (stall events) + Phase 2 (card actions) + Phase 3 (proactive surfacing)
+Phase 1 (data layer)      → no dependencies, builds on existing infrastructure
+Phase 2 (UI cards)        → depends on Phase 1 (unified events, outcome table)
+Phase 3 (inquiry routing) → depends on Phase 1 (active dispatch context from ledger)
+Phase 4 (drill-down)      → depends on Phase 1 (outcome storage) + Phase 2 (card UI with expand)
+Phase 5 (bidirectional)   → depends on Phase 1 (stall events) + Phase 2 (card actions) + Phase 3 (proactive surfacing)
 ```
 
-Phases 2 and 3 can be built in parallel after Phase 1 completes. Phase 4 and 5 require both 2 and 3.
+**Parallelism:** Phases 2 and 3 can be built in parallel after Phase 1 completes. Phase 4 requires Phase 1 + 2. Phase 5 requires Phase 1 + 2 + 3. No phase can start before Phase 1 is done.
 
 ---
 
