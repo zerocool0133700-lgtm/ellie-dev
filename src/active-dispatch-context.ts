@@ -15,8 +15,13 @@ const logger = log.child("active-dispatch-context");
  * Build a markdown summary of active dispatches for the coordinator prompt.
  * Returns null if no dispatches are running (caller should skip injection).
  */
-export async function buildActiveDispatchContext(): Promise<string | null> {
-  const runs = getActiveRunStates().filter(r => r.status === "running");
+export async function buildActiveDispatchContext(threadId?: string): Promise<string | null> {
+  let runs = getActiveRunStates().filter(r => r.status === "running");
+
+  // ELLIE-1374 Phase 3: Filter by thread if provided
+  if (threadId) {
+    runs = runs.filter(r => (r as any).thread_id === threadId);
+  }
   if (runs.length === 0) return null;
 
   // Get recent events to enrich with progress lines and titles

@@ -192,7 +192,7 @@ export class FoundationRegistry {
    * - Behavior rules (tone, proactivity, escalation)
    * - Core dispatch instruction
    */
-  async getCoordinatorPrompt(): Promise<string> {
+  async getCoordinatorPrompt(threadId?: string): Promise<string> {
     const foundation = this.getActive();
     const behavior = this.getBehavior();
     const recipes = this.getRecipes();
@@ -231,7 +231,7 @@ export class FoundationRegistry {
     let activeDispatchSection = "";
     try {
       const { buildActiveDispatchContext } = await import("./active-dispatch-context.ts");
-      const dispatchCtx = await buildActiveDispatchContext();
+      const dispatchCtx = await buildActiveDispatchContext(threadId);
       if (dispatchCtx) {
         activeDispatchSection = `\n\n${dispatchCtx}`;
       }
