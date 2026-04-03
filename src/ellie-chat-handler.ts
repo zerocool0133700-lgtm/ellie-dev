@@ -1184,6 +1184,7 @@ async function _handleEllieChatMessage(
           const coordinatorDeps = buildCoordinatorDeps({
             sessionId: coordSessionId,
             channel: "ellie-chat",
+            coordinatorAgent: foundationRegistry?.getCoordinatorAgent() || "max",
             sendFn: async (_ch: string, msg: string) => {
               try {
                 if (ws.readyState === WebSocket.OPEN) {
@@ -1232,7 +1233,8 @@ async function _handleEllieChatMessage(
             userId: "dashboard",
             registry: foundationRegistry || undefined,
             foundation: foundationRegistry?.getActive()?.name || "software-dev",
-            systemPrompt: (foundationRegistry ? await foundationRegistry.getCoordinatorPrompt() : null) || "You are Ellie, a coordinator for Dave. Dispatch specialists for capabilities you don't have.",
+            coordinatorAgent: foundationRegistry?.getCoordinatorAgent() || "max",
+            systemPrompt: (foundationRegistry ? await foundationRegistry.getCoordinatorPrompt() : null) || "You are Max, Dave's behind-the-scenes coordinator. Dave talks to Ellie — not you. Route efficiently, dispatch specialists, synthesize results in Ellie's voice.",
             model: foundationRegistry?.getBehavior()?.coordinator_model || coordAgentModel || "claude-sonnet-4-6",
             agentRoster: foundationRegistry?.getAgentRoster() || ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
             deps: coordinatorDeps,
