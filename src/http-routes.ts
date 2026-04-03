@@ -7162,6 +7162,34 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // GET /api/dispatches/snapshot — morning dashboard data (ELLIE-1328)
+  if (url.pathname === "/api/dispatches/snapshot" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getRecentOutcomes } = await import("./dispatch-outcomes.ts");
+        const { getActiveRunStates } = await import("./orchestration-tracker.ts");
+
+        const recentOutcomes = await getRecentOutcomes(24, 50);
+        const activeRuns = getActiveRunStates().filter(r => r.status === "running");
+
+        const done = recentOutcomes.filter(o => o.status === "completed");
+        const failed = recentOutcomes.filter(o => o.status === "failed");
+
+        res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin) });
+        res.end(JSON.stringify({
+          done: done.map(o => ({ run_id: o.run_id, agent: o.agent, work_item_id: o.work_item_id, summary: o.summary?.slice(0, 200), created_at: o.created_at })),
+          active: activeRuns.map(r => ({ run_id: r.runId, agent: r.agentType, work_item_id: r.workItemId, started_at: r.startedAt })),
+          failed: failed.map(o => ({ run_id: o.run_id, agent: o.agent, work_item_id: o.work_item_id, summary: o.summary?.slice(0, 200), created_at: o.created_at })),
+          summary: { done: done.length, active: activeRuns.length, failed: failed.length, needs_attention: failed.length },
+        }));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Failed to build snapshot" }));
+      }
+    })();
+    return;
+  }
+
   // ELLIE-1277: Dispatch progress events — query Forest orchestration_events by dispatch_envelope_id
   const eventsMatch = url.pathname.match(/^\/api\/dispatches\/([^/]+)\/events$/);
   if (eventsMatch && req.method === "GET") {
