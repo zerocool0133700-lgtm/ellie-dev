@@ -20,6 +20,7 @@ export interface DispatchEventPayload {
   dispatch_type: "single" | "formation" | "round_table" | "delegation";
   duration_ms?: number;
   cost_usd?: number;
+  thread_id?: string | null;  // ELLIE-1374 Phase 3
 }
 
 export type DispatchStatus =
@@ -56,6 +57,7 @@ export function buildDispatchWebSocketPayload(
     work_item_id: payload.work_item_id ?? null,
     progress_line: payload.progress_line ?? null,
     dispatch_type: payload.dispatch_type,
+    thread_id: payload.thread_id ?? null,
     status: EVENT_TO_STATUS[eventType] ?? "in_progress",
     timestamp: Date.now(),
     ...(payload.duration_ms != null ? { duration_ms: payload.duration_ms } : {}),
@@ -79,6 +81,7 @@ export function emitDispatchEvent(
       work_item_id: payload.work_item_id ?? null,
       progress_line: payload.progress_line ?? null,
       dispatch_type: payload.dispatch_type,
+      thread_id: payload.thread_id ?? null,
       ...(payload.duration_ms != null ? { duration_ms: payload.duration_ms } : {}),
       ...(payload.cost_usd != null ? { cost_usd: payload.cost_usd } : {}),
     },
