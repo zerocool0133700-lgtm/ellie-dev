@@ -177,9 +177,14 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
 
   // System prompt comes from the foundation registry (includes roster, recipes, behavior)
   // Only append roster if using a raw prompt (no registry)
-  const fullSystemPrompt = opts.registry
+  let fullSystemPrompt = opts.registry
     ? effectivePrompt
     : `${effectivePrompt}\n\n## Available Agents\n${effectiveRoster.join(", ")}`;
+
+  // ELLIE-1374: If a thread roster filter was passed, append a roster override to the prompt
+  if (opts.rosterFilter && opts.rosterFilter.length > 0) {
+    fullSystemPrompt += `\n\n## THREAD ROSTER OVERRIDE\nThis conversation is in a thread. You can ONLY dispatch to these agents: ${opts.rosterFilter.join(", ")}. Do not dispatch to any agent not in this list.`;
+  }
 
   // 1. Create coordinator context
   const ctx = new CoordinatorContext({
