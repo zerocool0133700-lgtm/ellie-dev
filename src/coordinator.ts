@@ -31,6 +31,7 @@ import { rebuildDispatchStateFromGTD } from "./gtd-recovery.ts";
 import { formatQuestionMessage } from "./telegram-question-format.ts";
 import { emitDispatchEvent } from "./dispatch-events.ts";
 import { writeOutcome } from "./dispatch-outcomes.ts";
+import { checkQueuedContext, clearQueuedContext } from "./dispatch-context-queue.ts";
 
 const logger = log.child("coordinator");
 
@@ -659,6 +660,22 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
                 error: specResult.error || "Unknown specialist error",
               }),
             };
+          }
+
+          // ELLIE-1317: Check for queued context from Dave — auto-redispatch if present
+          try {
+            const coordSessionId = `coordinator-${Date.now().toString(36)}`;
+            const queuedMessages = await checkQueuedContext(coordSessionId, input.agent);
+            if (queuedMessages.length > 0) {
+              logger.info("Queued context found — auto-redispatching", { agent: input.agent, messageCount: queuedMessages.length });
+              await clearQueuedContext(coordSessionId, input.agent);
+              const redispatchTask = `Continue your previous work. Here are additional instructions from Dave that came in while you were working:\n\n${queuedMessages.map(m => `- ${m}`).join("\n")}\n\nYour previous result:\n${specResult.output?.slice(0, 2000) || "No output"}`;
+              const redispatchResult = await deps.callSpecialist(input.agent, redispatchTask, input.context, input.timeout_ms);
+              // Use the redispatch output instead
+              return { toolId, result: redispatchResult.output || specResult.output };
+            }
+          } catch (err) {
+            logger.warn("Queued context check failed — using original result", { agent: input.agent, error: err instanceof Error ? err.message : String(err) });
           }
 
           return {
