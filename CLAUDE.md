@@ -1,297 +1,45 @@
-# Claude Telegram Relay — Setup Guide
+# Ellie Chat Relay — Operations Guide
 
-> Claude Code reads this file automatically. Walk the user through setup one phase at a time.
-> Ask for what you need, configure everything yourself, and confirm each step works before moving on.
+> Claude Code reads this file automatically. It defines how agents work with this codebase.
 
-## How This Works
+## What This Is
 
-This project turns Telegram into a personal AI assistant powered by Claude.
+The Ellie Chat Relay is Ellie's brain — an HTTP/WebSocket server that powers Ellie Chat and adapts to messaging channels (Telegram, Google Chat, Discord, Slack). The HTTP/WebSocket side is primary. The bot integrations are adapters.
 
-The user cloned this repo (or gave you the link). Your job: guide them through setup conversationally. Ask questions, save their answers to `.env`, test each step, move on.
+## Channel Priority
 
-Do not dump all phases at once. Start with Phase 1. When it works, move to Phase 2. Let the user control the pace.
+Ellie Chat is the primary experience. Every feature, every agent interaction, every tool — available in Ellie Chat without restriction. This is where the full rich experience lives: dispatch container cards, the inquiry mechanism, real-time agent activity.
 
-If this is a fresh clone, run `bun run setup` first to install dependencies and create `.env`.
+**When building something new:**
+1. Design for Ellie Chat first
+2. Ask: "What's the Telegram-appropriate version?" second
+3. Adapter channels (Google Chat, Discord, Slack) get what makes sense for their medium
 
----
-
-## Phase 1: Telegram Bot (~3 min)
-
-**You need from the user:**
-- A Telegram bot token from @BotFather
-- Their personal Telegram user ID
-
-**What to tell them:**
-1. Open Telegram, search for @BotFather, send `/newbot`
-2. Pick a display name and a username ending in "bot"
-3. Copy the token BotFather gives them
-4. Get their user ID by messaging @userinfobot on Telegram
-
-**What you do:**
-1. Run `bun run setup` if `.env` does not exist yet
-2. Save `TELEGRAM_BOT_TOKEN` and `TELEGRAM_USER_ID` in `.env`
-3. Run `bun run test:telegram` to verify — it sends a test message to the user
-
-**Done when:** Test message arrives on Telegram.
+**No feature should be Telegram-only.** If it exists in Telegram, it exists in Ellie Chat. Telegram gets text summaries and inline buttons. Ellie Chat gets the full UI.
 
 ---
 
-## Phase 2: Database & Memory — Supabase (~12 min)
+## First-Time Setup
 
-Your bot's memory lives in Supabase: conversation history, facts, goals, and semantic search.
+For setting up a new relay instance from scratch, see [docs/setup-guide.md](docs/setup-guide.md).
 
-### Step 1: Create Supabase Project
+## Channel Adapters
 
-**You need from the user:**
-- Supabase Project URL
-- Supabase anon public key
+The relay connects to multiple messaging channels. Each is optional and configured via environment variables.
 
-**What to tell them:**
-1. Go to supabase.com, create a free account
-2. Create a new project (any name, any region close to them)
-3. Wait ~2 minutes for it to provision
-4. Go to Project Settings > API
-5. Copy: Project URL and anon public key
+| Channel | Type | Config Required | Handler |
+|---------|------|----------------|---------|
+| **Ellie Chat** | WebSocket (primary) | Always on | `src/ellie-chat-handler.ts` |
+| **Telegram** | Long-polling adapter | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_USER_ID` | `src/telegram-handlers.ts` |
+| **Google Chat** | Webhook adapter | `GOOGLE_CHAT_SERVICE_ACCOUNT_KEY_PATH` | `src/google-chat.ts` |
+| **Discord** | Bot adapter | `DISCORD_BOT_TOKEN` | `src/channels/discord/` |
+| **Slack** | Bot adapter | `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET` | `src/channels/slack/` |
 
-**What you do:**
-1. Save `SUPABASE_URL` and `SUPABASE_ANON_KEY` to `.env`
-
-### Step 2: Connect Supabase MCP
-
-This lets Claude Code manage the database directly — run queries, deploy functions, apply migrations.
-
-**What to tell them:**
-1. Go to supabase.com/dashboard/account/tokens
-2. Create an access token, copy it
-
-**What you do:**
-```
-claude mcp add supabase -- npx -y @supabase/mcp-server-supabase@latest --access-token ACCESS_TOKEN
-```
-
-### Step 3: Create Tables
-
-Use the Supabase MCP to run the schema:
-1. Read `db/schema.sql`
-2. Execute it via `execute_sql` (or tell the user to paste it in the SQL Editor)
-3. Run `bun run test:supabase` to verify tables exist
-
-### Step 4: Set Up Semantic Search
-
-This gives your bot real memory — it finds relevant past conversations automatically.
-
-**You need from the user:**
-- An OpenAI API key (for generating text embeddings)
-
-**What to tell them:**
-1. Go to platform.openai.com, create an account
-2. Go to API keys, create a new key, copy it
-3. The key will be stored in Supabase, not on your computer. It stays with your database.
-
-**What you do:**
-1. Deploy the embed Edge Function via Supabase MCP (`deploy_edge_function` with `supabase/functions/embed/index.ts`)
-2. Deploy the search Edge Function (`supabase/functions/search/index.ts`)
-3. Tell the user to store their OpenAI key in Supabase:
-   - Go to Supabase dashboard > Project Settings > Edge Functions
-   - Under Secrets, add: `OPENAI_API_KEY` = their key
-4. Set up database webhooks so embeddings are generated automatically:
-   - Go to Supabase dashboard > Database > Webhooks > Create webhook
-   - Name: `embed_messages`, Table: `messages`, Events: INSERT
-   - Type: Supabase Edge Function, Function: `embed`
-   - Create a second webhook: `embed_memory`, Table: `memory`, Events: INSERT
-   - Same Edge Function: `embed`
-
-### Step 5: Verify
-
-Run `bun run test:supabase` to confirm:
-- Tables exist (messages, memory, logs)
-- Edge Functions respond
-- Embedding generation works
-
-**Done when:** `bun run test:supabase` passes and a test insert into `messages` gets an embedding.
+For detailed channel setup instructions, see [docs/setup-guide.md](docs/setup-guide.md).
 
 ---
 
-## Phase 3: Personalize (~3 min)
-
-**Ask the user:**
-- Their first name
-- Their timezone (e.g., America/New_York, Europe/Berlin)
-- What they do for work (one sentence)
-- Any time constraints (e.g., "I pick up my kid at 3pm on weekdays")
-- How they like to be communicated with (brief/detailed, casual/formal)
-
-**What you do:**
-1. Save `USER_NAME` and `USER_TIMEZONE` to `.env`
-2. Copy `config/profile.example.md` to `config/profile.md`
-3. Fill in `config/profile.md` with their answers — the bot loads this on every message
-
-**Done when:** `config/profile.md` exists with their details.
-
----
-
-## Phase 4: Test (~2 min)
-
-**What you do:**
-1. Run `bun run start`
-2. Tell the user to open Telegram and send a test message to their bot
-3. Wait for confirmation it responded
-4. Press Ctrl+C to stop
-
-**Troubleshooting if it fails:**
-- Wrong bot token → re-check with BotFather
-- Wrong user ID → re-check with @userinfobot
-- Claude CLI not found → `npm install -g @anthropic-ai/claude-code`
-- Bun not installed → `curl -fsSL https://bun.sh/install | bash`
-
-**Done when:** User confirms their bot responded on Telegram.
-
----
-
-## Phase 5: Always On (~5 min)
-
-Make the bot run in the background, start on boot, restart on crash.
-
-**macOS:**
-```
-bun run setup:launchd -- --service relay
-```
-This auto-generates a plist with correct paths and loads it into launchd.
-
-**Linux/Windows:**
-```
-bun run setup:services -- --service relay
-```
-Uses PM2 for process management.
-
-**Verify:** `launchctl list | grep com.claude` (macOS) or `npx pm2 status` (Linux/Windows)
-
-**Done when:** Bot runs in the background and survives a terminal close.
-
----
-
-## Phase 6: Proactive AI (Optional, ~5 min)
-
-Two features that turn a chatbot into an assistant.
-
-### Smart Check-ins
-`examples/smart-checkin.ts` — runs on a schedule, gathers context, asks Claude if it should reach out. If yes, sends a brief message. If no, stays silent.
-
-### Morning Briefing
-`examples/morning-briefing.ts` — sends a daily summary. Pattern file with placeholder data fetchers.
-
-**macOS — schedule both:**
-```
-bun run setup:launchd -- --service all
-```
-
-**Linux/Windows — schedule both:**
-```
-bun run setup:services -- --service all
-```
-
-**Done when:** User has scheduled services running, or explicitly skips this phase.
-
----
-
-## Phase 7: Voice Transcription (Optional, ~5 min)
-
-Lets the bot understand voice messages sent on Telegram.
-
-**Ask the user which option they prefer:**
-
-### Option A: Groq (Recommended — free cloud API)
-- State-of-the-art Whisper model, sub-second speed
-- Free: 2,000 transcriptions per day, no credit card
-- Requires internet connection
-
-**What to tell them:**
-1. Go to console.groq.com and create a free account
-2. Go to API Keys, create a new key, copy it
-
-**What you do:**
-1. Save `VOICE_PROVIDER=groq` and `GROQ_API_KEY` to `.env`
-2. Run `bun run test:voice` to verify
-
-### Option B: Local Whisper (offline, private)
-- Runs entirely on their computer, no account needed
-- Requires ffmpeg and whisper-cpp installed
-- First run downloads a 142MB model file
-
-**What you do:**
-1. Check ffmpeg: `ffmpeg -version` (install: `brew install ffmpeg` or `apt install ffmpeg`)
-2. Check whisper-cpp: `whisper-cpp --help` (install: `brew install whisper-cpp` or build from source)
-3. Download model: `curl -L -o ~/whisper-models/ggml-base.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin`
-4. Save `VOICE_PROVIDER=local`, `WHISPER_BINARY`, `WHISPER_MODEL_PATH` to `.env`
-5. Run `bun run test:voice` to verify
-
-**Done when:** `bun run test:voice` passes.
-
----
-
-## Phase 8: Google Chat (Optional, ~10 min)
-
-Adds Google Chat as a second messaging channel alongside Telegram. The bot receives messages via webhook and responds in the same space/thread.
-
-### Step 1: Create a Google Chat App
-
-**What to tell the user:**
-1. Go to [Google Cloud Console](https://console.cloud.google.com)
-2. Create a project (or select an existing one)
-3. Enable the **Google Chat API** (APIs & Services > Library > search "Google Chat API")
-4. Go to **Google Chat API > Configuration**:
-   - App name: "Ellie" (or whatever they want)
-   - Avatar URL: optional
-   - Description: "Personal AI assistant"
-   - Functionality: check "Receive 1:1 messages"
-   - Connection settings: select **App URL**, set to `{PUBLIC_URL}/google-chat` (e.g., `https://ellie.ellie-labs.dev/google-chat`)
-   - Visibility: "Specific people and groups" — add themselves
-5. Save the configuration
-
-### Step 2: Create a Service Account
-
-**What to tell the user:**
-1. In Google Cloud Console, go to **IAM & Admin > Service Accounts**
-2. Click **Create Service Account**
-   - Name: "ellie-chat-bot" (or any name)
-   - Skip optional permissions
-3. Click the new service account, go to **Keys** tab
-4. Add Key > Create new key > JSON
-5. Save the JSON file somewhere safe (e.g., `~/ellie-gchat-sa.json`)
-
-**What you do:**
-1. Save `GOOGLE_CHAT_SERVICE_ACCOUNT_KEY_PATH=/path/to/sa-key.json` to `.env`
-2. Save `GOOGLE_CHAT_ALLOWED_EMAIL=user@gmail.com` to `.env`
-3. Optionally set `GOOGLE_CHAT_SPACE_NAME=spaces/XXXXXXXXX` for work session notifications
-   - The space name can be found after messaging the bot — check relay logs for `[gchat]` entries
-
-### Step 3: Verify
-
-1. Restart the relay: `systemctl --user restart claude-telegram-relay`
-2. Check logs: `journalctl --user -u claude-telegram-relay -f`
-3. Look for: `[gchat] Service account loaded: ...`
-4. Open Google Chat, find the bot, send a test message
-5. Confirm the bot responds
-
-**Done when:** Google Chat messages get responses and relay logs show `[gchat]` activity.
-
----
-
-## After Setup
-
-Run the full health check:
-```
-bun run setup:verify
-```
-
-Summarize what was set up and what is running. Remind the user:
-- Test by sending a message on Telegram
-- Their bot runs in the background (if Phase 5 was done)
-- Come back to this project folder and type `claude` anytime to make changes
-
----
-
-# Work Session Dispatch Protocol
+## Work Session Dispatch Protocol
 
 > **For the project owner (Dave).** If `.env` has `PLANE_API_KEY` set and Plane MCP is available, this protocol is active. Otherwise, skip this section — it does not apply to first-time setup users.
 
@@ -907,7 +655,7 @@ Every agent dispatch is tracked through:
 - **Plane:** `src/plane.ts` — work item state sync
 - **Voice:** Local Whisper transcription + ElevenLabs TTS streaming
 - **Database:** Supabase (cloud) + Forest/Postgres (local). Migrations in `migrations/{supabase,forest}/`, seeds in `seeds/{supabase,forest}/`
-- **Service:** systemd user service `claude-telegram-relay`
+- **Service:** systemd user service `ellie-chat-relay`
 
 ### Testing
 
@@ -966,8 +714,8 @@ with SHA-256 checksums. Modified files (checksum mismatch) are flagged but not r
 
 ### Key Commands
 ```bash
-systemctl --user restart claude-telegram-relay   # Restart relay
-journalctl --user -u claude-telegram-relay       # View logs
+systemctl --user restart ellie-chat-relay        # Restart relay
+journalctl --user -u ellie-chat-relay            # View logs
 bun run start                                     # Run manually
 bun run test:telegram                             # Test Telegram
 bun run test:supabase                             # Test database
@@ -975,28 +723,3 @@ bun run migrate                                   # Apply pending SQL migrations
 bun run migrate:status                            # Check migration status
 bun run migrate:validate                          # Validate seeds + detect drift
 ```
-
----
-
-## What Comes Next — The Full Version
-
-This free relay covers the essentials. The full version unlocks:
-
-- **6 Specialized AI Agents** — Research, Content, Finance, Strategy, Critic + General orchestrator. Route messages through Telegram forum topics. Run board meetings where all six weigh in.
-- **VPS Deployment** — Your bot on a cloud server that never sleeps. Hybrid mode: free local processing when awake, paid API only when sleeping. $2-5/month.
-- **Real Integrations** — Gmail, Google Calendar, Notion tasks connected via MCP. Smart check-ins pull real data, not patterns.
-- **Human-in-the-Loop** — Claude takes actions (send email, update calendar) but asks first via inline Telegram buttons.
-- **Voice & Phone Calls** — Bot speaks back via ElevenLabs. Calls you when something is urgent.
-- **Fallback AI Models** — Auto-switch to OpenRouter or Ollama when Claude is down. Three layers of intelligence.
-- **Production Infrastructure** — Auto-deploy from GitHub, watchdog monitoring, uninstall scripts, full health checks.
-
-**Get the full course with video walkthroughs:**
-- YouTube: youtube.com/@GodaGo (subscribe for tutorials)
-- Community: skool.com/autonomee (full course, direct support, help personalizing for your business)
-
-We also help you personalize the full version for your specific business and workflow. Or package it as a product you sell to your own clients.
-
-The free version gives you a real, working AI assistant.
-The full version gives you a personal AI infrastructure.
-
-Build yours at the AI Productivity Hub.
