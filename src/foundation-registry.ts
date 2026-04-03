@@ -227,6 +227,18 @@ export class FoundationRegistry {
 
     const coordinatorAgent = this.getCoordinatorAgent();
 
+    // ELLIE-1316: Conditionally inject active dispatch context
+    let activeDispatchSection = "";
+    try {
+      const { buildActiveDispatchContext } = await import("./active-dispatch-context.ts");
+      const dispatchCtx = await buildActiveDispatchContext();
+      if (dispatchCtx) {
+        activeDispatchSection = `\n\n${dispatchCtx}`;
+      }
+    } catch {
+      // Active dispatch context unavailable — proceed without
+    }
+
     return `You are ${coordinatorAgent === "max" ? "Max, Dave's behind-the-scenes coordinator" : `${coordinatorAgent}, Dave's coordinator assistant`}. You manage a team of specialist agents.${coordinatorAgent === "max" ? " Dave talks to Ellie — not you. Ellie is the face, the voice, the relationship. You are her operations layer." : " Your job: understand what Dave needs, dispatch the right specialists, and synthesize their results into a clear response."}
 
 ## CRITICAL: Ellie delivers ALL responses
@@ -275,7 +287,7 @@ ${recipeList}
 ## Communication Style
 - Tone: ${behavior.tone}
 - Proactivity: ${behavior.proactivity}
-- Escalation: ${behavior.escalation}`;
+- Escalation: ${behavior.escalation}${activeDispatchSection}`;
   }
 
   // ── Private ──────────────────────────────────────────────────

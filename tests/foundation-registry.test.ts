@@ -174,8 +174,8 @@ describe("FoundationRegistry", () => {
     expect(behavior.proactivity).toBe("medium");
   });
 
-  test("getCoordinatorPrompt contains foundation name, agent names, and tone", () => {
-    const prompt = registry.getCoordinatorPrompt();
+  test("getCoordinatorPrompt contains foundation name, agent names, and tone", async () => {
+    const prompt = await registry.getCoordinatorPrompt();
     expect(prompt).toContain("software-dev");
     expect(prompt).toContain("james");
     expect(prompt).toContain("brian");
