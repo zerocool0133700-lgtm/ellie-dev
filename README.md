@@ -1,173 +1,49 @@
-# Claude Telegram Relay
+# Ellie Chat Relay
 
-A personal AI assistant on Telegram powered by Claude Code.
-
-You message it. Claude responds. Text, photos, documents, voice. It remembers across sessions, checks in proactively, and runs in the background.
-
-**Created by [Goda Go](https://youtube.com/@GodaGo)** | [AI Productivity Hub Community](https://skool.com/autonomee)
+Ellie's brain — an HTTP/WebSocket server that powers Ellie Chat and adapts to messaging channels.
 
 ```
-You ──▶ Telegram ──▶ Relay ──▶ Claude Code CLI ──▶ Response
-                                    │
-                              Supabase (memory)
+Ellie Chat (WebSocket) ──▶ Ellie Chat Relay ──▶ Agents ──▶ Response
+                                  │
+                           ┌──────┼──────┐
+                           ▼      ▼      ▼
+                       Telegram  GChat  Discord
+                       (adapter) (adapter) (adapter)
 ```
 
-## What You Get
+## What This Is
 
-- **Relay**: Send messages on Telegram, get Claude responses back
-- **Memory**: Semantic search over conversation history, persistent facts and goals via Supabase
-- **Proactive**: Smart check-ins that know when to reach out (and when not to)
-- **Briefings**: Daily morning summary with goals and schedule
-- **Voice**: Transcribe voice messages (Groq cloud or local Whisper — your choice)
-- **Always On**: Runs in the background, starts on boot, restarts on crash
-- **Guided Setup**: Claude Code reads CLAUDE.md and walks you through everything
+The Ellie Chat Relay is the core server for Ellie OS. It:
 
-## Quick Start
+- **Runs the coordinator loop** — Max routes, Ellie delivers, specialists do the work
+- **Manages 8 agents** — James (dev), Kate (research), Alan (strategy), Brian (critic), Jason (ops), Amy (content), Marcus (finance), Ellie (partner)
+- **Connects to channels** — Ellie Chat (primary, WebSocket), Telegram, Google Chat, Discord, Slack
+- **Persists knowledge** — Forest (local Postgres), Supabase (cloud), Elasticsearch (search), River (Obsidian vault)
+- **Handles voice** — Groq Whisper transcription, ElevenLabs TTS
+- **Runs skills** — 47 skill modules loaded from `skills/*/SKILL.md`
 
-### Prerequisites
-
-- **[Bun](https://bun.sh)** runtime (`curl -fsSL https://bun.sh/install | bash`)
-- **[Claude Code](https://claude.ai/claude-code)** CLI installed and authenticated
-- A **Telegram** account
-
-### Option A: Guided Setup (Recommended)
+## Running
 
 ```bash
-git clone https://github.com/godagoo/claude-telegram-relay.git
-cd claude-telegram-relay
-claude
+bun run start                    # Start the relay
+bun run dev                      # Start with auto-reload
+bun test                         # Run all tests
+systemctl --user restart ellie-chat-relay   # Restart the service
+journalctl --user -u ellie-chat-relay       # View logs
 ```
 
-Claude Code reads `CLAUDE.md` and walks you through setup conversationally:
+## Channel Priority
 
-1. Create a Telegram bot via BotFather
-2. Set up Supabase for persistent memory
-3. Personalize your profile
-4. Test the bot
-5. Configure always-on services
-6. Set up proactive check-ins and briefings
-7. Add voice transcription (optional)
+Ellie Chat is the primary experience. Every feature, every agent interaction, every tool — available in Ellie Chat without restriction.
 
-### Option B: Manual Setup
+New features target Ellie Chat first. Telegram gets a simplified version appropriate for the medium. Adapter channels get what makes sense for their medium.
 
-```bash
-git clone https://github.com/godagoo/claude-telegram-relay.git
-cd claude-telegram-relay
-bun run setup          # Install deps, create .env
-# Edit .env with your API keys
-bun run test:telegram  # Verify bot token
-bun run test:supabase  # Verify database
-bun run start          # Start the bot
-```
+## Documentation
 
-## Commands
-
-```bash
-# Run
-bun run start              # Start the bot
-bun run dev                # Start with auto-reload
-
-# Setup & Testing
-bun run setup              # Install dependencies, create .env
-bun run test:telegram      # Test Telegram connection
-bun run test:supabase      # Test Supabase connection
-bun run setup:verify       # Full health check
-
-# Always-On Services
-bun run setup:launchd      # Configure launchd (macOS)
-bun run setup:services     # Configure PM2 (Windows/Linux)
-
-# Use --service flag for specific services:
-# bun run setup:launchd -- --service relay
-# bun run setup:launchd -- --service all    (relay + checkin + briefing)
-```
-
-## Project Structure
-
-```
-CLAUDE.md                    # Guided setup (Claude Code reads this)
-src/
-  relay.ts                   # Core relay daemon
-  transcribe.ts              # Voice transcription (Groq / whisper.cpp)
-  memory.ts                  # Persistent memory (facts, goals, semantic search)
-examples/
-  smart-checkin.ts           # Proactive check-ins
-  morning-briefing.ts        # Daily briefing
-  memory.ts                  # Memory persistence patterns
-config/
-  profile.example.md         # Personalization template
-db/
-  schema.sql                 # Supabase database schema
-supabase/
-  functions/
-    embed/index.ts           # Auto-embedding Edge Function
-    search/index.ts          # Semantic search Edge Function
-setup/
-  install.ts                 # Prerequisites checker
-  test-telegram.ts           # Telegram connectivity test
-  test-supabase.ts           # Supabase connectivity test
-  test-voice.ts              # Voice transcription test
-  configure-launchd.ts       # macOS service setup
-  configure-services.ts      # Windows/Linux service setup
-  verify.ts                  # Full health check
-daemon/
-  launchagent.plist          # macOS daemon template
-  claude-relay.service       # Linux systemd template
-  README-WINDOWS.md          # Windows options
-```
-
-## How It Works
-
-The relay does three things:
-1. **Listen** for Telegram messages (via grammY)
-2. **Spawn** Claude Code CLI with context (your profile, memory, time)
-3. **Send** the response back on Telegram
-
-Claude Code gives you full power: tools, MCP servers, web search, file access. Not just a model — an AI with hands.
-
-Your bot remembers between sessions via Supabase. Every message gets an embedding (via OpenAI, stored in Supabase) so the bot can semantically search past conversations for relevant context. It also tracks facts and goals — Claude detects when you mention something worth remembering and stores it automatically.
-
-## Environment Variables
-
-See `.env.example` for all options. The essentials:
-
-```bash
-# Required
-TELEGRAM_BOT_TOKEN=     # From @BotFather
-TELEGRAM_USER_ID=       # From @userinfobot
-SUPABASE_URL=           # From Supabase dashboard
-SUPABASE_ANON_KEY=      # From Supabase dashboard
-
-# Recommended
-USER_NAME=              # Your first name
-USER_TIMEZONE=          # e.g., America/New_York
-
-# Optional — Voice
-VOICE_PROVIDER=         # "groq" or "local"
-GROQ_API_KEY=           # For Groq (free at console.groq.com)
-
-# Note: OpenAI key for embeddings is stored in Supabase
-# (Edge Function secrets), not in this .env file.
-```
-
-## What's Next
-
-This relay is step one. It works standalone, forever. But it's also the foundation for something much bigger.
-
-200+ builders are running the full version right now — their AI calls them when something is urgent, runs board meetings with six specialized agents, sends emails with approval buttons, and never goes offline.
-
-The key: it's not just about features. It's about **mastering Claude Code** — CLAUDE.md files, MCP servers, hooks, skills. That's what turns a chatbot into real AI infrastructure. The community and course teach you that.
-
-**[Read the full story → WHATS-NEXT.md](WHATS-NEXT.md)**
-
-**Free course (6 lessons):** [autonomee.ai/telegram-bot-course](https://autonomee.ai/telegram-bot-course)
-**Subscribe on YouTube:** [youtube.com/@GodaGo](https://youtube.com/@GodaGo)
-**Join the community:** [skool.com/autonomee](https://skool.com/autonomee)
+- `CLAUDE.md` — Operations guide (agent instructions, protocols, architecture)
+- `docs/architecture/` — Schema, forest maps, system design
+- `skills/` — Agent skill definitions (`SKILL.md` files)
 
 ## License
 
-MIT — Take it, customize it, make it yours.
-
----
-
-Built by [Goda Go](https://youtube.com/@GodaGo)
+MIT
