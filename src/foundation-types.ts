@@ -77,6 +77,8 @@ export interface BehaviorRules {
   cost_cap_daily: number;
   /** Model used by the coordinator agent. */
   coordinator_model: string;
+  /** Agent name that runs the coordinator loop. Defaults to "ellie" for backward compat. */
+  coordinator_agent?: string;
 }
 
 // ── Foundation ───────────────────────────────────────────────────
