@@ -29,6 +29,8 @@ import {
 } from "./dispatch-envelope.ts";
 import { rebuildDispatchStateFromGTD } from "./gtd-recovery.ts";
 import { formatQuestionMessage } from "./telegram-question-format.ts";
+import { emitDispatchEvent } from "./dispatch-events.ts";
+import { writeOutcome } from "./dispatch-outcomes.ts";
 
 const logger = log.child("coordinator");
 
@@ -537,6 +539,14 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
           });
         } catch { /* best-effort */ }
 
+        // Unified dispatch event (ELLIE-1308)
+        emitDispatchEvent(specEnvelope.id, "dispatched", {
+          agent: input.agent,
+          title: input.task.slice(0, 200),
+          work_item_id: workItemId,
+          dispatch_type: "single",
+        });
+
         // ELLIE-1152: Create GTD child item for dispatch tracking
         let gtdItem: { id: string } | null = null;
         if (gtdModule) {
@@ -613,6 +623,30 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
               ts: Date.now(),
             });
           } catch { /* best-effort */ }
+
+          // Unified dispatch event (ELLIE-1308)
+          emitDispatchEvent(specEnvelope.id, specResult.status === "error" ? "failed" : "completed", {
+            agent: input.agent,
+            title: input.task.slice(0, 200),
+            work_item_id: workItemId,
+            dispatch_type: "single",
+            duration_ms: specResult.duration_ms,
+            cost_usd: completed.cost_usd,
+          });
+
+          // Write dispatch outcome (ELLIE-1309)
+          writeOutcome({
+            run_id: specEnvelope.id,
+            agent: input.agent,
+            work_item_id: workItemId,
+            dispatch_type: "single",
+            status: specResult.status === "error" ? "failed" : "completed",
+            summary: specResult.output?.slice(0, 1000) || null,
+            duration_ms: specResult.duration_ms,
+            tokens_in: specResult.tokens_used,
+            tokens_out: 0,
+            cost_usd: completed.cost_usd,
+          });
 
           if (specResult.status === "error") {
             return {
