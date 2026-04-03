@@ -76,8 +76,9 @@ export async function initWorkingMemory(opts: {
   agent: string;
   sections?: WorkingMemorySections;
   channel?: string;
+  thread_id?: string;  // ELLIE-1374
 }): Promise<WorkingMemoryRecord> {
-  const { session_id, agent, sections = {}, channel = null } = opts;
+  const { session_id, agent, sections = {}, channel = null, thread_id = null } = opts;
 
   // Archive any existing active record for this session+agent
   await sql`
@@ -89,12 +90,13 @@ export async function initWorkingMemory(opts: {
   `;
 
   const [record] = await sql<WorkingMemoryRecord[]>`
-    INSERT INTO working_memory (session_id, agent, sections, channel)
+    INSERT INTO working_memory (session_id, agent, sections, channel, thread_id)
     VALUES (
       ${session_id},
       ${agent},
       ${sql.json(sections)},
-      ${channel}
+      ${channel},
+      ${thread_id}
     )
     RETURNING *
   `;
@@ -166,16 +168,22 @@ export async function updateWorkingMemory(opts: {
  * Returns null when no active record exists.
  */
 export async function readWorkingMemory(opts: {
-  session_id: string;
+  session_id?: string;
   agent: string;
+  thread_id?: string;  // ELLIE-1374
 }): Promise<WorkingMemoryRecord | null> {
   const { session_id, agent } = opts;
+
+  const threadFilter = opts.thread_id
+    ? sql`AND thread_id = ${opts.thread_id}`
+    : sql``;
 
   const [record] = await sql<WorkingMemoryRecord[]>`
     SELECT * FROM working_memory
     WHERE session_id = ${session_id}
       AND agent      = ${agent}
       AND archived_at IS NULL
+      ${threadFilter}
   `;
 
   return record ? normalize(record) : null;
@@ -408,6 +416,25 @@ export async function unlockSafeguard(opts: {
   `;
 
   logger.info("Safeguard unlocked", { session_id, agent });
+}
+
+/**
+ * Get working memory context_anchors from other threads for cross-thread awareness.
+ * ELLIE-1374
+ */
+export async function getSiblingThreadMemories(
+  agent: string,
+  currentThreadId: string,
+): Promise<Array<{ thread_id: string; context_anchors: string | null }>> {
+  const rows = await sql`
+    SELECT thread_id, sections->'context_anchors' as context_anchors
+    FROM working_memory
+    WHERE agent = ${agent}
+      AND thread_id IS NOT NULL
+      AND thread_id != ${currentThreadId}
+      AND archived_at IS NULL
+  `;
+  return rows as unknown as Array<{ thread_id: string; context_anchors: string | null }>;
 }
 
 // ── Relay wiring (ELLIE-541) ─────────────────────────────────────────────────
