@@ -7213,6 +7213,32 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // GET /api/dispatches/:run_id/outcome — ELLIE-1321
+  const outcomeMatch = url.pathname.match(/^\/api\/dispatches\/([^/]+)\/outcome$/);
+  if (outcomeMatch && req.method === "GET") {
+    const runId = outcomeMatch[1];
+    (async () => {
+      try {
+        const { readOutcomeWithParticipants } = await import("./dispatch-outcomes.ts");
+        const result = await readOutcomeWithParticipants(runId);
+        if (!result) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Outcome not found" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
+        res.end(JSON.stringify({
+          ...result.outcome,
+          participants: result.participants.length > 0 ? result.participants : undefined,
+        }));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
+      }
+    })();
+    return;
+  }
+
   // Tool approvals list — for dashboard dispatch panel (ELLIE-1153)
   if (url.pathname === "/api/tool-approvals" && req.method === "GET") {
     (async () => {
