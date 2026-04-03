@@ -51,6 +51,7 @@ export async function getOrCreateConversation(
   channelId?: string,
   userId?: string,
   initiatedBy: "user" | "system" | "agent" = "system",
+  threadId?: string,  // ELLIE-1374
 ): Promise<string | null> {
   try {
     const { data, error } = await supabase.rpc("get_or_create_conversation", {
@@ -68,6 +69,15 @@ export async function getOrCreateConversation(
     }
 
     const conversationId = data as string;
+
+    // ELLIE-1374: Tag conversation with thread_id
+    if (threadId && conversationId) {
+      await supabase
+        .from("conversations")
+        .update({ thread_id: threadId })
+        .eq("id", conversationId)
+        .is("thread_id", null);
+    }
 
     // ELLIE-232: Check for conversations the RPC just expired that need extraction.
     // The RPC sets status='expired' for idle conversations, skipping memory extraction.
