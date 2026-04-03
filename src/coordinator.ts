@@ -32,6 +32,7 @@ import { formatQuestionMessage } from "./telegram-question-format.ts";
 import { emitDispatchEvent } from "./dispatch-events.ts";
 import { writeOutcome } from "./dispatch-outcomes.ts";
 import { checkQueuedContext, clearQueuedContext } from "./dispatch-context-queue.ts";
+import { detectFileConflicts } from "./conflict-detector.ts";
 
 const logger = log.child("coordinator");
 
@@ -548,6 +549,25 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
           work_item_id: workItemId,
           dispatch_type: "single",
         });
+
+        // ELLIE-1325: Check for file conflicts with active dispatches
+        if (workItemId) {
+          try {
+            const conflicts = await detectFileConflicts(workItemId);
+            if (conflicts.length > 0) {
+              for (const conflict of conflicts) {
+                await deps.sendEvent({
+                  type: "conflict_warning",
+                  agent: input.agent,
+                  conflictAgent: conflict.activeAgent,
+                  conflictWorkItem: conflict.activeWorkItem,
+                  overlappingFiles: conflict.overlappingFiles,
+                  ts: Date.now(),
+                });
+              }
+            }
+          } catch { /* best-effort */ }
+        }
 
         // ELLIE-1152: Create GTD child item for dispatch tracking
         let gtdItem: { id: string } | null = null;
