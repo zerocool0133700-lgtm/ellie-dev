@@ -1228,6 +1228,21 @@ async function _handleEllieChatMessage(
                 relationshipCtx = memories.map((m: { content: string; category: string }) => `- [${m.category}] ${m.content}`).join("\n");
               }
             } catch { /* memories unavailable */ }
+
+            // Fetch the most recent conversation summary from the General thread
+            // so Ellie knows what was just being discussed before the thread switch
+            try {
+              const { data: recentConvos } = await supabase
+                .from("conversations")
+                .select("summary")
+                .eq("channel", "ellie-chat")
+                .not("summary", "is", null)
+                .order("last_message_at", { ascending: false })
+                .limit(1);
+              if (recentConvos?.[0]?.summary) {
+                relationshipCtx = (relationshipCtx || "") + `\n\n## Recent Conversation (from General thread)\n${recentConvos[0].summary}`;
+              }
+            } catch { /* summary unavailable */ }
           }
         }
 
