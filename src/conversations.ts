@@ -232,21 +232,31 @@ Instructions:
 
 Return ONLY the summary text, nothing else.`;
 
-  try {
-    const summary = await callClaudeCLI(prompt);
+  // ELLIE-1402: Retry once on transient failure
+  const MAX_ATTEMPTS = 2;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const summary = await callClaudeCLI(prompt);
 
-    if (summary && summary.length > 10) {
-      await supabase
-        .from("conversations")
-        .update({ summary })
-        .eq("id", conversationId);
+      if (summary && summary.length > 10) {
+        await supabase
+          .from("conversations")
+          .update({ summary })
+          .eq("id", conversationId);
 
-      logger.info("Summary updated", { preview: summary.substring(0, 80) });
+        logger.info("Summary updated", { conversationId, attempt, preview: summary.substring(0, 80) });
+        return;
+      }
+      logger.warn("Summary generation returned empty/short result", { conversationId, attempt, length: summary?.length || 0 });
+    } catch (err) {
+      logger.warn("Summary generation failed", { conversationId, attempt, maxAttempts: MAX_ATTEMPTS, error: String(err) });
+      if (attempt < MAX_ATTEMPTS) {
+        // Brief pause before retry
+        await new Promise(r => setTimeout(r, 1000));
+      }
     }
-  } catch (err) {
-    logger.error("summary generation failed", { conversationId }, err);
-    // Non-fatal — conversation tracking continues without summary
   }
+  logger.warn("Summary generation exhausted all retries", { conversationId, attempts: MAX_ATTEMPTS });
 }
 
 /**
@@ -662,11 +672,30 @@ export async function getConversationMessages(
       const tail = messages.slice(-35).map(fmt);
       const dropped = total - 40;
       const hasSummary = !!convo.summary;
-      logger.warn("Conversation truncated (100+ range)", { conversationId, total, dropped, hasSummary, strategy: hasSummary ? "head5+summary+tail35" : "head5+tail35" });
-      const summaryLine = convo.summary
-        ? `\n[CONVERSATION SUMMARY (${dropped} earlier messages): ${convo.summary}]\n`
-        : `\n[... ${dropped} earlier messages omitted ...]\n`;
-      lines = [...head, summaryLine, ...tail];
+
+      if (convo.summary) {
+        logger.warn("Conversation truncated (100+ range)", { conversationId, total, dropped, hasSummary: true, strategy: "head5+summary+tail35" });
+        lines = [...head, `\n[CONVERSATION SUMMARY (${dropped} earlier messages): ${convo.summary}]\n`, ...tail];
+      } else {
+        // ELLIE-1402: Fallback — include a sample of middle messages when no summary exists
+        // Take up to 10 messages from the middle to preserve some context
+        const middleStart = 5;
+        const middleEnd = total - 35;
+        const middleSample = messages.slice(middleStart, Math.min(middleStart + 10, middleEnd)).map(fmt);
+        const remainingDropped = middleEnd - middleStart - middleSample.length;
+        logger.warn("Conversation truncated (100+ range, no summary)", {
+          conversationId, total, dropped, hasSummary: false,
+          strategy: "head5+middle10+tail35",
+          middleSampled: middleSample.length,
+          middleDropped: remainingDropped,
+        });
+        lines = [
+          ...head,
+          ...middleSample,
+          `\n[... ${remainingDropped} additional messages omitted — summary generation failed or pending ...]\n`,
+          ...tail,
+        ];
+      }
     }
 
     const text = "CURRENT CONVERSATION:\n" + lines.join("\n");
