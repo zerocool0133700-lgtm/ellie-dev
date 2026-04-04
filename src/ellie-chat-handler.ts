@@ -1255,7 +1255,7 @@ async function _handleEllieChatMessage(
           relationshipContext: relationshipCtx,
         });
 
-        const result = await runDirectChat(prompt);
+        const result = await runDirectChat(prompt, directAgent);
         const memoryId = await saveMessage("assistant", result.response, {}, "ellie-chat", ecUserId);
         deliverResponse(ws, {
           type: "response",

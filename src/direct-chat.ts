@@ -93,30 +93,35 @@ export interface DirectChatResult {
 }
 
 /**
- * Run a direct chat turn — call the Messages API with the assembled prompt.
+ * Run a direct chat turn using the Claude CLI with full tool access.
+ * This gives the agent access to MCP servers, file tools, web search, etc.
+ * Same execution path as callSpecialist() but with the direct prompt.
  */
 export async function runDirectChat(
   prompt: string,
-  model: string = "claude-sonnet-4-6",
+  agent: string = "ellie",
 ): Promise<DirectChatResult> {
-  const client = new Anthropic();
-  const start = Date.now();
+  const { spawnClaudeStreaming } = await import("./claude-cli.ts");
+  const { getAllowedToolsForCLI } = await import("./tool-access-control.ts");
 
-  const response = await client.messages.create({
-    model,
-    max_tokens: 4096,
-    messages: [{ role: "user", content: prompt }],
+  // Resolve tools for this agent — same lookup as callSpecialist
+  const AGENT_TOOLS: Record<string, string[]> = {
+    ellie: ["forest_bridge_read", "forest_bridge_write", "plane_mcp", "memory_extraction", "qmd_search", "brave_web_search", "google_workspace"],
+    general: ["forest_bridge", "plane_lookup", "google_workspace", "web_search", "memory_extraction", "agent_router"],
+  };
+
+  const toolCategories = AGENT_TOOLS[agent] ?? AGENT_TOOLS["ellie"];
+  const allowedTools = getAllowedToolsForCLI(toolCategories, agent);
+
+  const start = Date.now();
+  const result = await spawnClaudeStreaming(prompt, {
+    allowedTools,
   });
 
-  const text = response.content
-    .filter(b => b.type === "text")
-    .map(b => (b as { type: "text"; text: string }).text)
-    .join("");
-
   return {
-    response: text,
-    tokens_in: response.usage.input_tokens,
-    tokens_out: response.usage.output_tokens,
+    response: result.output || "",
+    tokens_in: 0,  // CLI doesn't report token counts directly
+    tokens_out: 0,
     duration_ms: Date.now() - start,
   };
 }
