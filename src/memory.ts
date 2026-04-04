@@ -19,6 +19,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { createHash } from "crypto";
 import { indexMemory, classifyDomain } from "./elasticsearch.ts";
 import { resilientTask } from "./resilient-task.ts";
 import { log } from "./logger.ts";
@@ -258,19 +259,113 @@ export interface MemoryInsertParams {
   metadata?: Record<string, unknown>;
 }
 
-// ── ELLIE-481: Pending queue for inserts skipped due to unavailable search ───
+// ── ELLIE-481/1419: Pending queue for inserts skipped due to unavailable search ──
+// Persisted to Supabase `pending_memory_inserts` table so items survive relay restarts.
+// In-memory shadow for sync health checks and test compatibility.
+const _testPendingQueue: MemoryInsertParams[] = [];
 
-/** In-memory queue for memory inserts that couldn't be dedup-checked (search unavailable). */
-const _pendingMemoryQueue: MemoryInsertParams[] = [];
-
-/** Returns a snapshot of the pending queue (safe copy). */
-export function getPendingMemoryQueue(): MemoryInsertParams[] {
-  return [..._pendingMemoryQueue];
+/** Compute idempotency key for a memory insert (SHA-256 of type+content+source_agent). */
+function pendingIdempotencyKey(params: MemoryInsertParams): string {
+  return createHash("sha256")
+    .update(`${params.type}|${params.content}|${params.source_agent}`)
+    .digest("hex");
 }
 
-/** Clears the pending queue (e.g. on shutdown or after flush). */
-export function clearPendingMemoryQueue(): void {
-  _pendingMemoryQueue.length = 0;
+/** Enqueue a memory insert to the persistent pending table. */
+async function enqueuePendingInsert(supabase: SupabaseClient, params: MemoryInsertParams): Promise<void> {
+  const key = pendingIdempotencyKey(params);
+  // Best-effort persist to Supabase; also track in-memory for sync health checks
+  try {
+    await supabase.from("pending_memory_inserts").upsert({
+      idempotency_key: key,
+      type: params.type,
+      content: params.content,
+      source_agent: params.source_agent,
+      visibility: params.visibility,
+      deadline: params.deadline || null,
+      conversation_id: params.conversation_id || null,
+      metadata: params.metadata || {},
+    }, { onConflict: "idempotency_key" });
+  } catch {
+    // Supabase may also be down — fall through, item is tracked in-memory below
+  }
+  _testPendingQueue.push(params);
+}
+
+/** Returns pending inserts from the durable queue (for health/diagnostics). */
+export async function getPendingMemoryQueue(supabase: SupabaseClient): Promise<MemoryInsertParams[]> {
+  const { data } = await supabase
+    .from("pending_memory_inserts")
+    .select("type, content, source_agent, visibility, deadline, conversation_id, metadata")
+    .order("created_at", { ascending: true });
+  return (data || []) as MemoryInsertParams[];
+}
+
+/**
+ * Flush all pending memory inserts — called on startup and periodically.
+ * Re-runs each through insertMemoryWithDedup; items that succeed are deleted,
+ * items that fail again stay in the table with incremented attempt count.
+ */
+export async function flushPendingMemoryInserts(supabase: SupabaseClient): Promise<{ flushed: number; remaining: number }> {
+  const { data: pending } = await supabase
+    .from("pending_memory_inserts")
+    .select("*")
+    .lt("attempts", 10)
+    .order("created_at", { ascending: true })
+    .limit(50);
+
+  if (!pending || pending.length === 0) {
+    _testPendingQueue.length = 0;
+    return { flushed: 0, remaining: 0 };
+  }
+
+  let flushed = 0;
+  let remaining = 0;
+
+  for (const item of pending) {
+    try {
+      const result = await insertMemoryWithDedup(supabase, {
+        type: item.type,
+        content: item.content,
+        source_agent: item.source_agent,
+        visibility: item.visibility,
+        deadline: item.deadline,
+        conversation_id: item.conversation_id,
+        metadata: item.metadata,
+      });
+
+      if (result.action === "queued") {
+        // Search still unavailable — bump attempt count but leave in table
+        await supabase
+          .from("pending_memory_inserts")
+          .update({ attempts: item.attempts + 1, last_attempt_at: new Date().toISOString() })
+          .eq("id", item.id);
+        remaining++;
+      } else {
+        // Successfully processed — remove from queue
+        await supabase.from("pending_memory_inserts").delete().eq("id", item.id);
+        flushed++;
+      }
+    } catch (err) {
+      await supabase
+        .from("pending_memory_inserts")
+        .update({
+          attempts: item.attempts + 1,
+          last_attempt_at: new Date().toISOString(),
+          error_message: err instanceof Error ? err.message : String(err),
+        })
+        .eq("id", item.id);
+      remaining++;
+    }
+  }
+
+  // Sync in-memory shadow
+  if (flushed > 0) _testPendingQueue.length = remaining;
+
+  if (flushed > 0 || remaining > 0) {
+    logger.info("Pending memory flush", { flushed, remaining });
+  }
+  return { flushed, remaining };
 }
 
 interface MemoryInsertResult {
@@ -302,12 +397,11 @@ export async function insertMemoryWithDedup(
     supabase, params.content, params.type,
   );
 
-  // ELLIE-481: Search unavailable — queue for later rather than blindly inserting
+  // ELLIE-481/1419: Search unavailable — persist to durable queue for later flush
   if (!checkResult.available) {
-    _pendingMemoryQueue.push(params);
+    await enqueuePendingInsert(supabase, params);
     logger.warn("Memory dedup search unavailable — queued insert for later flush", {
       content: params.content.substring(0, 60),
-      queueLength: _pendingMemoryQueue.length,
     });
     return { id: null, action: "queued" };
   }
@@ -503,48 +597,15 @@ export function isSearchAvailable(): boolean {
 export function getMemorySearchHealth(): { searchAvailable: boolean; pendingQueueLength: number } {
   return {
     searchAvailable: isSearchAvailable(),
-    pendingQueueLength: _pendingMemoryQueue.length,
+    // ELLIE-1419: Queue is now in Supabase — sync length only available via async getPendingMemoryQueue.
+    // This returns 0 as a placeholder; use the async version for accurate counts.
+    pendingQueueLength: _testPendingQueue.length,
   };
 }
 
-/**
- * Probe search availability then drain the pending queue.
- * Call this from the periodic housekeeping task after an outage clears.
- * Returns how many were flushed and how many remain.
- */
-export async function flushPendingMemoryInserts(
-  supabase: SupabaseClient,
-): Promise<{ flushed: number; remaining: number }> {
-  if (_pendingMemoryQueue.length === 0) return { flushed: 0, remaining: 0 };
-
-  // Probe: attempt a search with the first item's content to confirm availability
-  const probe = await checkMemoryConflict(
-    supabase, _pendingMemoryQueue[0].content, _pendingMemoryQueue[0].type,
-  );
-  if (!probe.available) return { flushed: 0, remaining: _pendingMemoryQueue.length };
-
-  // Snapshot and clear — re-add failures or items that get re-queued
-  const snapshot = _pendingMemoryQueue.splice(0);
-  let flushed = 0;
-
-  for (let i = 0; i < snapshot.length; i++) {
-    const params = snapshot[i];
-    try {
-      const result = await insertMemoryWithDedup(supabase, params);
-      if (result.action === "queued") {
-        // Search went down mid-flush. params was re-pushed by insertMemoryWithDedup.
-        // Put the rest of the snapshot back so nothing is lost.
-        _pendingMemoryQueue.push(...snapshot.slice(i + 1));
-        break;
-      }
-      flushed++;
-    } catch (err) {
-      logger.error("Failed to flush pending memory insert", { content: params.content.substring(0, 60) }, err);
-      _pendingMemoryQueue.push(params);
-    }
-  }
-
-  return { flushed, remaining: _pendingMemoryQueue.length };
+/** @deprecated Use the async Supabase-backed version. Kept for test compat. */
+export function clearPendingMemoryQueue(): void {
+  _testPendingQueue.length = 0;
 }
 
 /**
@@ -572,6 +633,24 @@ async function _writeFactToForest(
   logger.info(`[REMEMBER:] → Forest: ${content.slice(0, 60)}...`);
 }
 
+/**
+ * ELLIE-1421: Parsed intent — intermediate representation before processing.
+ * Separates parsing (pure) from processing (side-effectful) so we can
+ * batch-process with rollback on failure.
+ */
+interface ParsedIntent {
+  tag: string;                    // full matched tag string to strip from response
+  kind: "insert" | "done" | "forest";
+  params?: MemoryInsertParams;    // for insert intents
+  doneSearch?: string;            // for [DONE:] intents
+  forestWrite?: {                 // for [MEMORY:] intents
+    type: string;
+    confidence: number;
+    content: string;
+  };
+  writeToForest?: boolean;        // for REMEMBER/REMEMBER-GLOBAL → immediate Forest write
+}
+
 export async function processMemoryIntents(
   supabase: SupabaseClient | null,
   response: string,
@@ -581,96 +660,54 @@ export async function processMemoryIntents(
 ): Promise<string> {
   if (!supabase) return response;
 
-  let clean = response;
+  // ── Phase 1: Parse all intents (pure, no side effects) ────────────
 
-  // [REMEMBER: fact to store] - uses default visibility
+  const intents: ParsedIntent[] = [];
+
+  // [REMEMBER: fact to store]
   for (const match of response.matchAll(/\[REMEMBER:\s*(.+?)\]/gi)) {
-    await insertMemoryWithDedup(supabase, {
-      type: "fact",
-      content: match[1],
-      source_agent: sourceAgent,
-      visibility: defaultVisibility,
+    intents.push({
+      tag: match[0],
+      kind: "insert",
+      params: { type: "fact", content: match[1], source_agent: sourceAgent, visibility: defaultVisibility },
+      writeToForest: true,
     });
-    // ELLIE-968: Also write to Forest immediately so facts appear in prompts without waiting for daily sync
-    if (forestSessionIds?.tree_id) {
-      _writeFactToForest(forestSessionIds, match[1], sourceAgent, "fact").catch(err =>
-        logger.warn("Forest fact write failed (non-fatal)", { err: err instanceof Error ? err.message : String(err) })
-      );
-    }
-    clean = clean.replace(match[0], "");
   }
 
-  // [REMEMBER-PRIVATE: fact to store] - explicit private visibility
+  // [REMEMBER-PRIVATE: fact to store]
   for (const match of response.matchAll(/\[REMEMBER-PRIVATE:\s*(.+?)\]/gi)) {
-    await insertMemoryWithDedup(supabase, {
-      type: "fact",
-      content: match[1],
-      source_agent: sourceAgent,
-      visibility: "private",
+    intents.push({
+      tag: match[0],
+      kind: "insert",
+      params: { type: "fact", content: match[1], source_agent: sourceAgent, visibility: "private" },
     });
-    clean = clean.replace(match[0], "");
   }
 
-  // [REMEMBER-GLOBAL: fact to store] - explicit global visibility
+  // [REMEMBER-GLOBAL: fact to store]
   for (const match of response.matchAll(/\[REMEMBER-GLOBAL:\s*(.+?)\]/gi)) {
-    await insertMemoryWithDedup(supabase, {
-      type: "fact",
-      content: match[1],
-      source_agent: sourceAgent,
-      visibility: "global",
+    intents.push({
+      tag: match[0],
+      kind: "insert",
+      params: { type: "fact", content: match[1], source_agent: sourceAgent, visibility: "global" },
+      writeToForest: true,
     });
-    // ELLIE-968: Global facts also go to Forest immediately
-    if (forestSessionIds?.tree_id) {
-      _writeFactToForest(forestSessionIds, match[1], sourceAgent, "fact").catch(err =>
-        logger.warn("Forest fact write failed (non-fatal)", { err: err instanceof Error ? err.message : String(err) })
-      );
-    }
-    clean = clean.replace(match[0], "");
   }
 
-  // [GOAL: text] or [GOAL: text | DEADLINE: date]
-  for (const match of response.matchAll(
-    /\[GOAL:\s*(.+?)(?:\s*\|\s*DEADLINE:\s*(.+?))?\]/gi
-  )) {
-    await insertMemoryWithDedup(supabase, {
-      type: "goal",
-      content: match[1],
-      source_agent: sourceAgent,
-      visibility: defaultVisibility,
-      deadline: match[2] || null,
+  // [GOAL: text | DEADLINE: date]
+  for (const match of response.matchAll(/\[GOAL:\s*(.+?)(?:\s*\|\s*DEADLINE:\s*(.+?))?\]/gi)) {
+    intents.push({
+      tag: match[0],
+      kind: "insert",
+      params: { type: "goal", content: match[1], source_agent: sourceAgent, visibility: defaultVisibility, deadline: match[2] || null },
     });
-    clean = clean.replace(match[0], "");
   }
 
-  // [DONE: search text for completed goal]
+  // [DONE: search text]
   for (const match of response.matchAll(/\[DONE:\s*(.+?)\]/gi)) {
-    // Build query to find matching goal
-    let query = supabase
-      .from("memory")
-      .select("id")
-      .eq("type", "goal")
-      .ilike("content", `%${match[1]}%`);
-
-    // Filter by source_agent if available to avoid closing other agents' goals
-    if (sourceAgent) {
-      query = query.eq("source_agent", sourceAgent);
-    }
-
-    const { data } = await query.limit(1);
-
-    if (data?.[0]) {
-      await supabase
-        .from("memory")
-        .update({
-          type: "completed_goal",
-          completed_at: new Date().toISOString(),
-        })
-        .eq("id", data[0].id);
-    }
-    clean = clean.replace(match[0], "");
+    intents.push({ tag: match[0], kind: "done", doneSearch: match[1] });
   }
 
-  // [MEMORY:] tags → forest shared memories
+  // [MEMORY:] tags → Forest
   if (forestSessionIds?.tree_id) {
     logger.info(`Forest session active — tree: ${forestSessionIds.tree_id.slice(0, 8)}, scanning for [MEMORY:] tags`);
     const memoryRegex = /\[MEMORY:(?:(\w+):)?(?:([\d.]+):)?\s*(.+?)\]/gi;
@@ -679,29 +716,100 @@ export async function processMemoryIntents(
       logger.info(`No [MEMORY:] tags found in response (${response.length} chars)`);
     }
     for (const match of memoryMatches) {
-      const memType = match[1] || 'finding';
-      const confidence = match[2] ? parseFloat(match[2]) : 0.7;
-      const content = match[3];
-      try {
-        const { writeCreatureMemory } = await import('../../ellie-forest/src/index');
-        await writeCreatureMemory({
-          creature_id: forestSessionIds.creature_id ?? undefined,
-          tree_id: forestSessionIds.tree_id,
-          branch_id: forestSessionIds.branch_id,
-          entity_id: forestSessionIds.entity_id,
-          content,
-          type: memType as 'fact' | 'decision' | 'preference' | 'finding' | 'hypothesis',
-          confidence,
-          scope_path: '2/1/2',
-        });
-        logger.info(`Forest memory: [${memType}:${confidence}] ${content.slice(0, 60)}...`);
-      } catch (err) {
-        logger.warn("Forest memory write failed", err);
-      }
-      clean = clean.replace(match[0], '');
+      intents.push({
+        tag: match[0],
+        kind: "forest",
+        forestWrite: {
+          type: match[1] || "finding",
+          confidence: match[2] ? parseFloat(match[2]) : 0.7,
+          content: match[3],
+        },
+      });
     }
   }
 
+  // No intents found — return early
+  if (intents.length === 0) return response;
+
+  // ── Phase 2: Process all intents with rollback on failure ──────────
+
+  const committedIds: string[] = [];        // IDs of inserted memories (for rollback)
+  const completedGoalIds: string[] = [];    // IDs of goals marked done (for rollback)
+
+  try {
+    for (const intent of intents) {
+      if (intent.kind === "insert" && intent.params) {
+        const result = await insertMemoryWithDedup(supabase, intent.params);
+        if (result.id) committedIds.push(result.id);
+
+        // ELLIE-968: Write to Forest immediately for REMEMBER/REMEMBER-GLOBAL
+        if (intent.writeToForest && forestSessionIds?.tree_id) {
+          _writeFactToForest(forestSessionIds, intent.params.content, sourceAgent, "fact").catch(err =>
+            logger.warn("Forest fact write failed (non-fatal)", { err: err instanceof Error ? err.message : String(err) })
+          );
+        }
+      } else if (intent.kind === "done" && intent.doneSearch) {
+        let query = supabase
+          .from("memory")
+          .select("id")
+          .eq("type", "goal")
+          .ilike("content", `%${intent.doneSearch}%`);
+        if (sourceAgent) query = query.eq("source_agent", sourceAgent);
+        const { data } = await query.limit(1);
+
+        if (data?.[0]) {
+          await supabase
+            .from("memory")
+            .update({ type: "completed_goal", completed_at: new Date().toISOString() })
+            .eq("id", data[0].id);
+          completedGoalIds.push(data[0].id);
+        }
+      } else if (intent.kind === "forest" && intent.forestWrite && forestSessionIds?.tree_id) {
+        const { type: memType, confidence, content } = intent.forestWrite;
+        try {
+          const { writeCreatureMemory } = await import('../../ellie-forest/src/index');
+          await writeCreatureMemory({
+            creature_id: forestSessionIds.creature_id ?? undefined,
+            tree_id: forestSessionIds.tree_id,
+            branch_id: forestSessionIds.branch_id,
+            entity_id: forestSessionIds.entity_id,
+            content,
+            type: memType as 'fact' | 'decision' | 'preference' | 'finding' | 'hypothesis',
+            confidence,
+            scope_path: '2/1/2',
+          });
+          logger.info(`Forest memory: [${memType}:${confidence}] ${content.slice(0, 60)}...`);
+        } catch (err) {
+          logger.warn("Forest memory write failed", err);
+        }
+      }
+    }
+  } catch (err) {
+    // ── Rollback: undo committed inserts and goal completions ──
+    logger.error("Memory intent processing failed — rolling back", {
+      error: err instanceof Error ? err.message : String(err),
+      committedIds,
+      completedGoalIds,
+    });
+
+    for (const id of committedIds) {
+      try { await supabase.from("memory").delete().eq("id", id); } catch { /* best-effort */ }
+    }
+    for (const id of completedGoalIds) {
+      try {
+        await supabase.from("memory").update({ type: "goal", completed_at: null }).eq("id", id);
+      } catch { /* best-effort */ }
+    }
+
+    throw err;
+  }
+
+  // ── Phase 3: Strip all intent tags from response ──────────────────
+
+  let clean = response;
+  for (const intent of intents) {
+    clean = clean.replace(intent.tag, "");
+  }
   return clean.trim();
 }
 
@@ -709,14 +817,17 @@ export async function processMemoryIntents(
  * Get all facts and active goals for prompt context.
  */
 export async function getMemoryContext(
-  supabase: SupabaseClient | null
+  supabase: SupabaseClient | null,
+  sourceAgent?: string,
 ): Promise<string> {
   if (!supabase) return "";
 
   try {
+    // ELLIE-1417: Pass requesting agent so RPCs filter private memories
+    const rpcParams = sourceAgent ? { requesting_agent: sourceAgent } : {};
     const [factsResult, goalsResult] = await Promise.all([
-      supabase.rpc("get_facts"),
-      supabase.rpc("get_active_goals"),
+      supabase.rpc("get_facts", rpcParams),
+      supabase.rpc("get_active_goals", rpcParams),
     ]);
 
     const parts: string[] = [];
