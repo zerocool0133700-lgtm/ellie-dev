@@ -80,7 +80,39 @@ export function buildDirectPrompt(opts: DirectPromptOpts): string {
   // 7. Current message
   sections.push(`\nDave: ${opts.message}`);
 
-  return sections.join("\n\n---\n\n");
+  // ELLIE-1401: Log context build breakdown
+  const allSections = [
+    { label: "soul", present: !!getCachedRiverDoc("soul") },
+    { label: "agent-identity", present: true },
+    { label: "profile", present: !!opts.profileContext },
+    { label: "relationship", present: !!opts.relationshipContext },
+    { label: "working-memory", present: !!opts.workingMemorySummary },
+    { label: "cross-thread", present: !!opts.crossThreadAwareness },
+    { label: "forest-context", present: !!opts.forestContext },
+    { label: "conversation-history", present: !!opts.conversationHistory },
+  ];
+  const included = allSections.filter(s => s.present).map(s => s.label);
+  const skipped = allSections.filter(s => !s.present).map(s => s.label);
+  const prompt = sections.join("\n\n---\n\n");
+  logger.info("Direct prompt context build", {
+    agent: opts.agent,
+    included,
+    skipped,
+    totalChars: prompt.length,
+    estimatedTokens: Math.round(prompt.length / 4),
+    sectionSizes: {
+      soul: getCachedRiverDoc("soul")?.length || 0,
+      profile: opts.profileContext?.length || 0,
+      relationship: opts.relationshipContext?.length || 0,
+      workingMemory: opts.workingMemorySummary?.length || 0,
+      crossThread: opts.crossThreadAwareness?.length || 0,
+      forestContext: opts.forestContext?.length || 0,
+      conversationHistory: opts.conversationHistory?.length || 0,
+      message: opts.message.length,
+    },
+  });
+
+  return prompt;
 }
 
 // ── Direct Chat Execution ──────────────────────────────────

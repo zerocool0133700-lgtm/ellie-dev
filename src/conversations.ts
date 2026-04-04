@@ -653,14 +653,19 @@ export async function getConversationMessages(
       // Medium — first 5 (for context anchoring) + last 35
       const head = messages.slice(0, 5).map(fmt);
       const tail = messages.slice(-35).map(fmt);
-      lines = [...head, `\n[... ${total - 40} earlier messages omitted ...]\n`, ...tail];
+      const dropped = total - 40;
+      logger.warn("Conversation truncated (41-100 range)", { conversationId, total, dropped, strategy: "head5+tail35" });
+      lines = [...head, `\n[... ${dropped} earlier messages omitted ...]\n`, ...tail];
     } else {
       // Long — first 5 + rolling summary (if available) + last 35
       const head = messages.slice(0, 5).map(fmt);
       const tail = messages.slice(-35).map(fmt);
+      const dropped = total - 40;
+      const hasSummary = !!convo.summary;
+      logger.warn("Conversation truncated (100+ range)", { conversationId, total, dropped, hasSummary, strategy: hasSummary ? "head5+summary+tail35" : "head5+tail35" });
       const summaryLine = convo.summary
-        ? `\n[CONVERSATION SUMMARY (${total - 40} earlier messages): ${convo.summary}]\n`
-        : `\n[... ${total - 40} earlier messages omitted ...]\n`;
+        ? `\n[CONVERSATION SUMMARY (${dropped} earlier messages): ${convo.summary}]\n`
+        : `\n[... ${dropped} earlier messages omitted ...]\n`;
       lines = [...head, summaryLine, ...tail];
     }
 

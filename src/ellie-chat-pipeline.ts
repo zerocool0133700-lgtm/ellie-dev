@@ -94,5 +94,30 @@ export async function _gatherContextSources(
   ]);
   // ELLIE-967: Merge Tier 2 conversation facts into structured context
   const structuredContext = factsContext ? [_structuredBase, factsContext].filter(Boolean).join("\n\n") : _structuredBase;
+
+  // ELLIE-1401: Log context build breakdown for coordinator path
+  const contextSections = [
+    { label: "conversation-history", present: !!convoContext.text, chars: convoContext.text?.length || 0 },
+    { label: "context-docket", present: !!contextDocket, chars: (contextDocket as string)?.length || 0 },
+    { label: "relevant-context", present: !!relevantContext, chars: (relevantContext as string)?.length || 0 },
+    { label: "elastic-context", present: !!elasticContext, chars: (elasticContext as string)?.length || 0 },
+    { label: "structured-context", present: !!structuredContext, chars: (structuredContext as string)?.length || 0 },
+    { label: "forest-context", present: !!forestContext, chars: (forestContext as string)?.length || 0 },
+    { label: "agent-memory", present: !!agentMemory?.memoryContext, chars: agentMemory?.memoryContext?.length || 0 },
+    { label: "queue-context", present: !!queueContext, chars: (queueContext as string)?.length || 0 },
+    { label: "live-forest", present: !!liveForest?.awareness, chars: liveForest?.awareness?.length || 0 },
+  ];
+  const { log } = await import("./logger.ts");
+  const pipelineLogger = log.child("context-build");
+  pipelineLogger.info("Coordinator context build", {
+    conversationId: convoId,
+    agent: activeAgent,
+    messageCount: convoContext.messageCount,
+    included: contextSections.filter(s => s.present).map(s => s.label),
+    skipped: contextSections.filter(s => !s.present).map(s => s.label),
+    sectionSizes: Object.fromEntries(contextSections.map(s => [s.label, s.chars])),
+    totalContextChars: contextSections.reduce((sum, s) => sum + s.chars, 0),
+  });
+
   return { convoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext, liveForest };
 }
