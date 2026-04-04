@@ -1204,6 +1204,19 @@ async function _handleEllieChatMessage(
           }
         }
 
+        // ELLIE-1400: Load conversation history for the direct thread
+        let conversationHistory: string | undefined;
+        if (supabase && effectiveThreadId) {
+          const directConvoId = await getOrCreateConversation(supabase, "ellie-chat", directAgent, channelId, undefined, undefined, effectiveThreadId);
+          if (directConvoId) {
+            const convoResult = await getConversationMessages(supabase, directConvoId);
+            if (convoResult.text) {
+              conversationHistory = convoResult.text;
+              log.info("[direct-chat] Loaded conversation history", { threadId: effectiveThreadId, messageCount: convoResult.messageCount });
+            }
+          }
+        }
+
         // ELLIE-1374: Load profile + relationship context for Ellie
         // Ellie isn't just any agent — she carries the relationship into every thread
         let profileCtx: string | undefined;
@@ -1249,6 +1262,7 @@ async function _handleEllieChatMessage(
         const prompt = buildDirectPrompt({
           agent: directAgent,
           message: text,
+          conversationHistory,
           workingMemorySummary: wmSummary,
           crossThreadAwareness: crossThreadCtx,
           profileContext: profileCtx,
