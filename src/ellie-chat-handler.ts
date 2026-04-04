@@ -1204,11 +1204,40 @@ async function _handleEllieChatMessage(
           }
         }
 
+        // ELLIE-1374: Load profile + relationship context for Ellie
+        // Ellie isn't just any agent — she carries the relationship into every thread
+        let profileCtx: string | undefined;
+        let relationshipCtx: string | undefined;
+        if (directAgent === "ellie" || directAgent === "general") {
+          try {
+            const { readFile } = await import("fs/promises");
+            const { join } = await import("path");
+            profileCtx = await readFile(join(process.cwd(), "config", "profile.md"), "utf-8");
+          } catch { /* profile unavailable */ }
+
+          // Fetch recent memories about Dave from Supabase
+          if (supabase) {
+            try {
+              const { data: memories } = await supabase
+                .from("memory")
+                .select("content, category")
+                .in("category", ["fact", "goal", "preference"])
+                .order("created_at", { ascending: false })
+                .limit(20);
+              if (memories && memories.length > 0) {
+                relationshipCtx = memories.map((m: { content: string; category: string }) => `- [${m.category}] ${m.content}`).join("\n");
+              }
+            } catch { /* memories unavailable */ }
+          }
+        }
+
         const prompt = buildDirectPrompt({
           agent: directAgent,
           message: text,
           workingMemorySummary: wmSummary,
           crossThreadAwareness: crossThreadCtx,
+          profileContext: profileCtx,
+          relationshipContext: relationshipCtx,
         });
 
         const result = await runDirectChat(prompt);

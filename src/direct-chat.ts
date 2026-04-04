@@ -23,6 +23,8 @@ export interface DirectPromptOpts {
   workingMemorySummary?: string;
   forestContext?: string;
   crossThreadAwareness?: string;
+  profileContext?: string;        // Dave's profile (config/profile.md)
+  relationshipContext?: string;   // Memory/facts about the relationship
 }
 
 /**
@@ -38,7 +40,22 @@ export function buildDirectPrompt(opts: DirectPromptOpts): string {
   }
 
   // 2. Agent identity
-  sections.push(`You are ${opts.agent}. You are in a direct conversation with Dave — no coordinator, no dispatch. Just you and Dave talking.`);
+  const isEllie = opts.agent === "ellie" || opts.agent === "general";
+  if (isEllie) {
+    sections.push(`You are Ellie, Dave's friend and partner. This is a private thread — just you and Dave, no coordinator, no other agents. You carry your full relationship here. Speak as yourself.`);
+  } else {
+    sections.push(`You are ${opts.agent}. You are in a direct conversation with Dave — no coordinator, no dispatch. Just you and Dave talking.`);
+  }
+
+  // 2b. Dave's profile (who he is, what matters to him)
+  if (opts.profileContext) {
+    sections.push(`## About Dave\n${opts.profileContext}`);
+  }
+
+  // 2c. Relationship context (memories, facts, shared history)
+  if (opts.relationshipContext) {
+    sections.push(`## Relationship Context\n${opts.relationshipContext}`);
+  }
 
   // 3. Working memory
   if (opts.workingMemorySummary) {
