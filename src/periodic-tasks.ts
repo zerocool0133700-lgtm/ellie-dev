@@ -293,8 +293,11 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
   }, 24 * 60 * 60_000, "memory-graduation");
 
   // ELLIE-934: Memory arc auto-detection — chains + clusters (every 12 hours)
+  // ELLIE-1429: Also clean up expired arcs
   periodicTask(async () => {
-    const { detectArcsFromChains, detectArcsFromClusters } = await import("../../ellie-forest/src/arcs.ts");
+    const { detectArcsFromChains, detectArcsFromClusters, archiveExpiredArcs } = await import("../../ellie-forest/src/arcs.ts");
+    const expired = await archiveExpiredArcs();
+    if (expired > 0) logger.info(`Archived ${expired} expired arcs`);
     const chains = await detectArcsFromChains();
     const clusters = await detectArcsFromClusters();
     if (chains > 0 || clusters > 0) {

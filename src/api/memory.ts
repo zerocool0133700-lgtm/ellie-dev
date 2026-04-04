@@ -359,6 +359,19 @@ export async function askCriticEndpoint(req: ApiRequest, res: ApiResponse, _bot:
       },
     });
 
+    // ELLIE-1428: Link creature dispatch to the contradiction record for audit trail
+    try {
+      await sql`
+        UPDATE shared_memories
+        SET metadata = COALESCE(metadata, '{}'::jsonb) || ${sql.json({ creature_dispatch_id: creature.id })}
+        WHERE id = ${memory_id}
+      `;
+    } catch (err) {
+      logger.warn("Failed to link creature dispatch to memory (non-fatal)", { memory_id, creature_id: creature.id });
+    }
+
+    logger.info("Critic creature dispatched for contradiction", { memory_id, creature_id: creature.id, tree_id });
+
     return res.json({ success: true, creature_id: creature.id, status: 'dispatched' });
 
   } catch (error) {

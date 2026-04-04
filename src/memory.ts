@@ -49,6 +49,37 @@ export function _resetSearchOutageMetricsForTesting(): void {
 }
 
 // ────────────────────────────────────────────────────────────────
+// ELLIE-1428: Dedup effectiveness metrics
+// ────────────────────────────────────────────────────────────────
+
+const _dedupMetrics = {
+  insertCount: 0,
+  mergeCount: 0,
+  flagCount: 0,
+  queueCount: 0,
+};
+
+export function recordDedupOutcome(action: "inserted" | "merged" | "flagged" | "queued"): void {
+  switch (action) {
+    case "inserted": _dedupMetrics.insertCount++; break;
+    case "merged":   _dedupMetrics.mergeCount++; break;
+    case "flagged":  _dedupMetrics.flagCount++; break;
+    case "queued":   _dedupMetrics.queueCount++; break;
+  }
+}
+
+export function getDedupMetrics(): typeof _dedupMetrics {
+  return { ..._dedupMetrics };
+}
+
+export function _resetDedupMetricsForTesting(): void {
+  _dedupMetrics.insertCount = 0;
+  _dedupMetrics.mergeCount = 0;
+  _dedupMetrics.flagCount = 0;
+  _dedupMetrics.queueCount = 0;
+}
+
+// ────────────────────────────────────────────────────────────────
 // Conflict Resolution Types & Constants
 // ────────────────────────────────────────────────────────────────
 
@@ -422,6 +453,7 @@ export async function insertMemoryWithDedup(
   // ELLIE-481/1419: Search unavailable — persist to durable queue for later flush
   if (!checkResult.available) {
     await enqueuePendingInsert(supabase, params);
+    recordDedupOutcome("queued");
     logger.warn("Memory dedup search unavailable — queued insert for later flush", {
       content: params.content.substring(0, 60),
     });
@@ -432,7 +464,9 @@ export async function insertMemoryWithDedup(
 
   // No conflict — standard insert
   if (!existing) {
-    return await doInsert(supabase, params);
+    const result = await doInsert(supabase, params);
+    recordDedupOutcome("inserted");
+    return result;
   }
 
   // 2. Resolve conflict
@@ -442,17 +476,24 @@ export async function insertMemoryWithDedup(
 
   logger.info(`Dedup: ${resolution.resolution} for "${params.content.substring(0, 60)}..." — ${resolution.reason}`);
 
-  // 3. Execute resolution
+  // 3. Execute resolution — ELLIE-1428: record outcome metrics
   switch (resolution.resolution) {
-    case "merge":
-      return await doMerge(supabase, existing, params, resolution);
-
-    case "flag_for_user":
-      return await doFlag(supabase, existing, params, resolution);
-
+    case "merge": {
+      const result = await doMerge(supabase, existing, params, resolution);
+      recordDedupOutcome("merged");
+      return result;
+    }
+    case "flag_for_user": {
+      const result = await doFlag(supabase, existing, params, resolution);
+      recordDedupOutcome("flagged");
+      return result;
+    }
     case "keep_both":
-    default:
-      return await doInsert(supabase, params, resolution);
+    default: {
+      const result = await doInsert(supabase, params, resolution);
+      recordDedupOutcome("inserted");
+      return result;
+    }
   }
 }
 
@@ -616,7 +657,13 @@ export function isSearchAvailable(): boolean {
  * Returns current search availability and the number of pending inserts
  * waiting for search to come back.
  */
-export function getMemorySearchHealth(): { searchAvailable: boolean; pendingQueueLength: number; outageCount: number; lastOutageAt: Date | null } {
+export function getMemorySearchHealth(): {
+  searchAvailable: boolean;
+  pendingQueueLength: number;
+  outageCount: number;
+  lastOutageAt: Date | null;
+  dedup: ReturnType<typeof getDedupMetrics>;
+} {
   const outageMetrics = getSearchOutageMetrics();
   return {
     searchAvailable: isSearchAvailable(),
@@ -624,6 +671,7 @@ export function getMemorySearchHealth(): { searchAvailable: boolean; pendingQueu
     // This returns 0 as a placeholder; use the async version for accurate counts.
     pendingQueueLength: _testPendingQueue.length,
     ...outageMetrics,
+    dedup: getDedupMetrics(),
   };
 }
 
