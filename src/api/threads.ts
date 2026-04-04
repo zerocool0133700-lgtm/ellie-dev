@@ -39,7 +39,7 @@ export async function listThreads(supabase: SupabaseClient): Promise<{ threads: 
   const { data: threads, error } = await supabase
     .from("chat_threads")
     .select("*")
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: true });
 
   if (error) throw error;
 
