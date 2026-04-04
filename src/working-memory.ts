@@ -174,16 +174,22 @@ export async function readWorkingMemory(opts: {
 }): Promise<WorkingMemoryRecord | null> {
   const { session_id, agent } = opts;
 
+  const sessionFilter = session_id
+    ? sql`AND session_id = ${session_id}`
+    : sql``;
+
   const threadFilter = opts.thread_id
     ? sql`AND thread_id = ${opts.thread_id}`
     : sql``;
 
   const [record] = await sql<WorkingMemoryRecord[]>`
     SELECT * FROM working_memory
-    WHERE session_id = ${session_id}
-      AND agent      = ${agent}
+    WHERE agent = ${agent}
       AND archived_at IS NULL
+      ${sessionFilter}
       ${threadFilter}
+    ORDER BY updated_at DESC
+    LIMIT 1
   `;
 
   return record ? normalize(record) : null;
