@@ -270,6 +270,13 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     if (archived > 0) logger.info(`Archived ${archived} idle session(s)`);
   }, 2 * 60 * 60_000, "working-memory-archive");
 
+  // ELLIE-1420: Auto-unlock stale safeguard locks — prevents permanent session lockout (every hour)
+  periodicTask(async () => {
+    const { autoUnlockStaleSafeguards } = await import("./working-memory.ts");
+    const unlocked = await autoUnlockStaleSafeguards();
+    if (unlocked > 0) logger.warn(`Auto-unlocked ${unlocked} stale safeguard lock(s)`);
+  }, 60 * 60_000, "safeguard-auto-unlock");
+
   // ELLIE-933: Auto-promote qualifying memories to Core tier (every 6 hours)
   periodicTask(async () => {
     const { autoPromoteToCore } = await import("../../ellie-forest/src/shared-memory.ts");
@@ -490,6 +497,13 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     }
   }, 30 * 60_000, "es-reconciliation");
 
+  // ELLIE-1419: Flush pending memory inserts (search was unavailable at queue time) — every 15 minutes
+  periodicTask(async () => {
+    if (!supabase) return;
+    const { flushPendingMemoryInserts } = await import("./memory.ts");
+    await flushPendingMemoryInserts(supabase);
+  }, 15 * 60_000, "pending-memory-flush");
+
   // ELLIE-975: User-configurable scheduled tasks — evaluate cron schedules (every 60 seconds)
   periodicTask(async () => {
     const { schedulerTick, getDefaultExecutors } = await import("./scheduled-tasks.ts");
@@ -550,6 +564,19 @@ export function runStartupTasks(deps: PeriodicTaskDeps): void {
       logger.error("Initial stale expiry error", err);
     }
   }, 10_000);
+
+  // ELLIE-1419: Flush pending memory inserts on startup (15s delay)
+  if (supabase) {
+    setTimeout(async () => {
+      try {
+        const { flushPendingMemoryInserts } = await import("./memory.ts");
+        const result = await flushPendingMemoryInserts(supabase);
+        if (result.flushed > 0) logger.info("Startup pending memory flush", result);
+      } catch (err) {
+        logger.warn("Startup pending memory flush failed (non-fatal)", { error: err instanceof Error ? err.message : String(err) });
+      }
+    }, 15_000);
+  }
 
   // Preload BERT empathy model (15s delay — non-blocking)
   setTimeout(async () => {

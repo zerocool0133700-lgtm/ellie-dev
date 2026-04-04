@@ -61,6 +61,7 @@ export interface WorkingMemoryRecord {
   updated_at: Date;
   archived_at: Date | null;
   safeguard_locked: boolean;
+  safeguard_locked_at: Date | null;
 }
 
 // ── Core operations ──────────────────────────────────────────────────────────
@@ -310,7 +311,8 @@ export async function snapshotWorkingMemoryToForest(opts: {
     // Lock the working memory record
     await txn`
       UPDATE working_memory
-      SET safeguard_locked = TRUE
+      SET safeguard_locked = TRUE,
+          safeguard_locked_at = NOW()
       WHERE session_id = ${session_id}
         AND agent = ${agent}
         AND archived_at IS NULL
@@ -415,13 +417,46 @@ export async function unlockSafeguard(opts: {
 
   await sql`
     UPDATE working_memory
-    SET safeguard_locked = FALSE
+    SET safeguard_locked = FALSE,
+        safeguard_locked_at = NULL
     WHERE session_id = ${session_id}
       AND agent = ${agent}
       AND archived_at IS NULL
   `;
 
   logger.info("Safeguard unlocked", { session_id, agent });
+}
+
+/**
+ * Auto-unlock safeguard locks older than 1 hour (ELLIE-1420).
+ *
+ * If the compaction verification process crashes after setting safeguard_locked,
+ * the session is permanently locked. This function is called hourly to clear
+ * stale locks and restore normal operation.
+ *
+ * Returns the number of sessions unlocked.
+ */
+export async function autoUnlockStaleSafeguards(): Promise<number> {
+  const unlocked = await sql<{ id: string; session_id: string; agent: string }[]>`
+    UPDATE working_memory
+    SET safeguard_locked = FALSE,
+        safeguard_locked_at = NULL
+    WHERE safeguard_locked = TRUE
+      AND archived_at IS NULL
+      AND safeguard_locked_at IS NOT NULL
+      AND safeguard_locked_at < NOW() - INTERVAL '1 hour'
+    RETURNING id, session_id, agent
+  `;
+
+  for (const row of unlocked) {
+    logger.warn("Auto-unlocked stale safeguard", {
+      id: row.id,
+      session_id: row.session_id,
+      agent: row.agent,
+    });
+  }
+
+  return unlocked.length;
 }
 
 /**
@@ -519,7 +554,8 @@ export function _injectWorkingMemoryForTesting(
     created_at: new Date(),
     updated_at: new Date(),
     archived_at: null,
-    safeguard_locked: false, // ELLIE-925: Added missing field
+    safeguard_locked: false,
+    safeguard_locked_at: null,
   };
   _workingMemoryCache.set(agent, record);
 }
