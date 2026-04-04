@@ -117,22 +117,24 @@ export async function browse(req: ApiRequest, res: ApiResponse): Promise<void> {
     };
     const sortCol = validSorts[sort] || "created_at";
 
-    // Count + fetch in parallel
-    const countQuery = sql.unsafe(
-      `SELECT COUNT(*)::int AS total FROM shared_memories ${where}`,
-      params as never[],
-    );
-    const dataQuery = sql.unsafe(
-      `SELECT id, content, type, scope, scope_path, confidence, tags, metadata,
-              cognitive_type, category, weight, access_count, duration, status,
-              source_agent_species, shareable, created_at, updated_at
-       FROM shared_memories ${where}
-       ORDER BY ${sortCol} ${order}, id ${order}
-       LIMIT $${paramIndex++}` + (cursor ? '' : ` OFFSET $${paramIndex++}`),
-      [...params, limit, ...(cursor ? [] : [offset])] as never[],
-    );
-
-    const [countResult, dataResult] = await Promise.all([countQuery, dataQuery]);
+    // ELLIE-1426: Count + fetch in parallel with 30s query timeout
+    const [countResult, dataResult] = await sql.begin(async (txn) => {
+      await txn`SET LOCAL statement_timeout = '30s'`;
+      const countQ = txn.unsafe(
+        `SELECT COUNT(*)::int AS total FROM shared_memories ${where}`,
+        params as never[],
+      );
+      const dataQ = txn.unsafe(
+        `SELECT id, content, type, scope, scope_path, confidence, tags, metadata,
+                cognitive_type, category, weight, access_count, duration, status,
+                source_agent_species, shareable, created_at, updated_at
+         FROM shared_memories ${where}
+         ORDER BY ${sortCol} ${order}, id ${order}
+         LIMIT $${paramIndex++}` + (cursor ? '' : ` OFFSET $${paramIndex++}`),
+        [...params, limit, ...(cursor ? [] : [offset])] as never[],
+      );
+      return Promise.all([countQ, dataQ]);
+    });
     const total = countResult[0]?.total ?? 0;
 
     const hasMore = dataResult.length === limit;

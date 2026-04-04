@@ -186,6 +186,7 @@ import { getCreatureProfile } from "./creature-profile.ts";
 import { withTrace } from "./trace.ts";
 import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost } from "./jobs-ledger.ts";
 import { checkContextPressure, shouldNotify, getCompactionNotice, checkpointSessionToForest } from "./api/session-compaction.ts";
+import { getSearchDegradationWarning } from "./memory.ts";
 import { resilientTask } from "./resilient-task.ts";
 import { primeWorkingMemoryCache, getSiblingThreadMemories, readWorkingMemory } from "./working-memory.ts";
 import { trackDispatchStart, trackDispatchComplete, trackDispatchFailure } from "./dispatch-commitment-tracker.ts";
@@ -1627,6 +1628,10 @@ async function _handleEllieChatMessage(
       }
     }
 
+    // ELLIE-1425: Append search degradation warning if memory dedup is paused
+    const degradationWarning = getSearchDegradationWarning();
+    if (degradationWarning) rawResponse += `\n\n${degradationWarning}`;
+
     const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general", "shared", effectiveSessionIds);
     // ELLIE-649 Tier 2: Process response tags for conversation_facts
     const tier2Response = await import("./response-tag-processor.ts").then(m => m.processResponseTags(supabase, response, "ellie-chat"));
@@ -1983,6 +1988,10 @@ export async function runSpecialistAsync(
         }));
       }
     }
+
+    // ELLIE-1425: Append search degradation warning if memory dedup is paused
+    const specDegradationWarning = getSearchDegradationWarning();
+    if (specDegradationWarning) rawResponse += `\n\n${specDegradationWarning}`;
 
     const response = await processMemoryIntents(supabase, rawResponse, agentName, "shared", agentMemory.sessionIds);
     // ELLIE-649 Tier 2: Process response tags for conversation_facts
