@@ -200,7 +200,7 @@ export async function checkpointSessionToForest(opts: CheckpointOpts): Promise<v
         session_id: conversationId,
         agent: agentName,
         pre_snapshot_memory_id: snapshotMemoryId,
-        require_snapshot: true,
+        require_snapshot: !!snapshotMemoryId,
       });
 
       if (!verification.ok) {

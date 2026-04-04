@@ -4,7 +4,7 @@
  * Verifies that:
  * - checkMemoryConflict returns { available: false } when search errors
  * - insertMemoryWithDedup queues the insert instead of silently skipping dedup
- * - getPendingMemoryQueue / clearPendingMemoryQueue manage the queue
+ * - getTestPendingQueue / clearPendingMemoryQueue manage the in-memory queue shadow
  * - flushPendingMemoryInserts drains the queue when search is back
  * - isSearchAvailable / getMemorySearchHealth reflect circuit breaker + queue state
  */
@@ -13,7 +13,7 @@ import { describe, test, expect, mock, beforeEach, afterAll } from "bun:test";
 import {
   checkMemoryConflict,
   insertMemoryWithDedup,
-  getPendingMemoryQueue,
+  getTestPendingQueue,
   clearPendingMemoryQueue,
   flushPendingMemoryInserts,
   isSearchAvailable,
@@ -41,12 +41,14 @@ function makeSupabase(opts?: {
   searchResults?: any[];
   insertId?: string;
   insertError?: any;
+  pendingRows?: any[];
 }) {
   const {
     searchError = null,
     searchResults = [],
     insertId = "new-id",
     insertError = null,
+    pendingRows = [],
   } = opts ?? {};
 
   function insertChain() {
@@ -65,8 +67,39 @@ function makeSupabase(opts?: {
     return c;
   }
 
+  function upsertChain() {
+    const p = Promise.resolve({ data: null, error: null });
+    return p;
+  }
+
+  function deleteChain() {
+    const p = Promise.resolve({ data: null, error: null });
+    const c: any = { eq: () => c };
+    c.then = (r: Function, rj?: Function) => p.then(r, rj);
+    c.catch = (rj: Function) => p.catch(rj);
+    return c;
+  }
+
+  function selectAllChain(data: any[] = []) {
+    const p = Promise.resolve({ data, error: null });
+    const c: any = { eq: () => c, lt: () => c, order: () => c, limit: () => c };
+    c.then = (r: Function, rj?: Function) => p.then(r, rj);
+    c.catch = (rj: Function) => p.catch(rj);
+    return c;
+  }
+
   return {
-    from: mock(() => ({ insert: insertChain, update: updateChain, select: insertChain })),
+    from: mock((table: string) => {
+      if (table === "pending_memory_inserts") {
+        return {
+          upsert: upsertChain,
+          delete: deleteChain,
+          select: () => selectAllChain(pendingRows),
+          update: updateChain,
+        };
+      }
+      return { insert: insertChain, update: updateChain, select: insertChain };
+    }),
     functions: {
       invoke: mock(() =>
         Promise.resolve({
@@ -145,7 +178,7 @@ describe("insertMemoryWithDedup — pending queue", () => {
 
     expect(result.action).toBe("queued");
     expect(result.id).toBeNull();
-    expect(getPendingMemoryQueue()).toHaveLength(1);
+    expect(getTestPendingQueue()).toHaveLength(1);
   });
 
   test("queued insert preserves all params", async () => {
@@ -161,7 +194,7 @@ describe("insertMemoryWithDedup — pending queue", () => {
 
     await insertMemoryWithDedup(supabase, params);
 
-    const queue = getPendingMemoryQueue();
+    const queue = getTestPendingQueue();
     expect(queue[0]).toMatchObject(params);
   });
 
@@ -169,7 +202,7 @@ describe("insertMemoryWithDedup — pending queue", () => {
     const supabase = makeSupabase({ searchError: "down" });
     await insertMemoryWithDedup(supabase, { type: "fact", content: "fact 1", source_agent: "g", visibility: "shared" });
     await insertMemoryWithDedup(supabase, { type: "fact", content: "fact 2", source_agent: "g", visibility: "shared" });
-    expect(getPendingMemoryQueue()).toHaveLength(2);
+    expect(getTestPendingQueue()).toHaveLength(2);
   });
 
   test("inserts normally (not queued) when search is available", async () => {
@@ -179,35 +212,35 @@ describe("insertMemoryWithDedup — pending queue", () => {
     });
     expect(result.action).toBe("inserted");
     expect(result.id).toBe("ok-id");
-    expect(getPendingMemoryQueue()).toHaveLength(0);
+    expect(getTestPendingQueue()).toHaveLength(0);
   });
 });
 
 // ── getPendingMemoryQueue / clearPendingMemoryQueue ───────────────
 
-describe("getPendingMemoryQueue / clearPendingMemoryQueue", () => {
-  test("getPendingMemoryQueue returns empty array initially", () => {
-    expect(getPendingMemoryQueue()).toHaveLength(0);
+describe("getTestPendingQueue / clearPendingMemoryQueue", () => {
+  test("getTestPendingQueue returns empty array initially", () => {
+    expect(getTestPendingQueue()).toHaveLength(0);
   });
 
-  test("getPendingMemoryQueue returns a copy (not the internal array)", async () => {
+  test("getTestPendingQueue returns a copy (not the internal array)", async () => {
     const supabase = makeSupabase({ searchError: "down" });
     await insertMemoryWithDedup(supabase, { type: "fact", content: "test", source_agent: "g", visibility: "shared" });
 
-    const queue = getPendingMemoryQueue();
+    const queue = getTestPendingQueue();
     queue.push({ type: "fact", content: "injected", source_agent: "hack", visibility: "shared" });
 
     // Internal queue should be unaffected
-    expect(getPendingMemoryQueue()).toHaveLength(1);
+    expect(getTestPendingQueue()).toHaveLength(1);
   });
 
   test("clearPendingMemoryQueue empties the queue", async () => {
     const supabase = makeSupabase({ searchError: "down" });
     await insertMemoryWithDedup(supabase, { type: "fact", content: "test", source_agent: "g", visibility: "shared" });
-    expect(getPendingMemoryQueue()).toHaveLength(1);
+    expect(getTestPendingQueue()).toHaveLength(1);
 
     clearPendingMemoryQueue();
-    expect(getPendingMemoryQueue()).toHaveLength(0);
+    expect(getTestPendingQueue()).toHaveLength(0);
   });
 });
 
@@ -222,33 +255,36 @@ describe("flushPendingMemoryInserts", () => {
   });
 
   test("returns remaining count when search is still unavailable during flush", async () => {
-    const errorSupabase = makeSupabase({ searchError: "still down" });
+    const pendingRow = { id: "p1", type: "fact", content: "stuck item", source_agent: "g", visibility: "shared", attempts: 0 };
+    const errorSupabase = makeSupabase({ searchError: "still down", pendingRows: [pendingRow] });
 
-    // Queue 1 item
+    // Queue 1 item (also populates in-memory shadow)
     await insertMemoryWithDedup(errorSupabase, { type: "fact", content: "stuck item", source_agent: "g", visibility: "shared" });
-    expect(getPendingMemoryQueue()).toHaveLength(1);
+    expect(getTestPendingQueue()).toHaveLength(1);
 
-    // Try to flush while still down
+    // Try to flush while still down — flush reads from Supabase pendingRows
     const result = await flushPendingMemoryInserts(errorSupabase);
     expect(result.flushed).toBe(0);
     expect(result.remaining).toBe(1);
-    expect(getPendingMemoryQueue()).toHaveLength(1);
   });
 
   test("flushes queued items when search is available", async () => {
     const errorSupabase = makeSupabase({ searchError: "was down" });
     await insertMemoryWithDedup(errorSupabase, { type: "fact", content: "queued fact", source_agent: "g", visibility: "shared" });
     await insertMemoryWithDedup(errorSupabase, { type: "fact", content: "another queued fact", source_agent: "g", visibility: "shared" });
-    expect(getPendingMemoryQueue()).toHaveLength(2);
+    expect(getTestPendingQueue()).toHaveLength(2);
 
-    // Reset breaker so the probe succeeds, then flush with working supabase
+    // Reset breaker so the probe succeeds, then flush with working supabase that has pending rows
     breakers.edgeFn.reset();
-    const okSupabase = makeSupabase({ searchResults: [], insertId: "flushed-id" });
+    const pendingRows = [
+      { id: "p1", type: "fact", content: "queued fact", source_agent: "g", visibility: "shared", attempts: 0 },
+      { id: "p2", type: "fact", content: "another queued fact", source_agent: "g", visibility: "shared", attempts: 0 },
+    ];
+    const okSupabase = makeSupabase({ searchResults: [], insertId: "flushed-id", pendingRows });
     const result = await flushPendingMemoryInserts(okSupabase);
 
     expect(result.flushed).toBe(2);
     expect(result.remaining).toBe(0);
-    expect(getPendingMemoryQueue()).toHaveLength(0);
   });
 
   test("queue is empty after successful flush", async () => {
@@ -256,9 +292,12 @@ describe("flushPendingMemoryInserts", () => {
     await insertMemoryWithDedup(errorSupabase, { type: "fact", content: "item", source_agent: "g", visibility: "shared" });
 
     breakers.edgeFn.reset();
-    const okSupabase = makeSupabase({ searchResults: [], insertId: "ok-id" });
+    const pendingRows = [
+      { id: "p1", type: "fact", content: "item", source_agent: "g", visibility: "shared", attempts: 0 },
+    ];
+    const okSupabase = makeSupabase({ searchResults: [], insertId: "ok-id", pendingRows });
     await flushPendingMemoryInserts(okSupabase);
 
-    expect(getPendingMemoryQueue()).toHaveLength(0);
+    expect(getTestPendingQueue()).toHaveLength(0);
   });
 });

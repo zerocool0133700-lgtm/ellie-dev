@@ -34,6 +34,16 @@ mock.module('../../../ellie-forest/src/index', () => ({
   sql: mock(),
 }))
 
+// Bridge auth mock — injected via _setBridgeAuth after import
+const mockAuthenticateBridgeKey = mock(async (_rawKey: string | undefined, _res: any, _perm?: string) => ({
+  id: 'key-1',
+  name: 'test',
+  collaborator: 'test',
+  permissions: ['read', 'write'],
+  allowed_scopes: ['2'],
+  active: true,
+}))
+
 mock.module('../src/logger.ts', () => ({
   log: {
     child: () => ({
@@ -56,7 +66,11 @@ import {
   bridgeRiverWriteEndpoint,
   qmdReindex,
   RIVER_ROOT,
+  _setBridgeAuth,
 } from '../src/api/bridge-river.ts'
+
+// Inject auth mock into the module
+_setBridgeAuth(mockAuthenticateBridgeKey as any)
 
 // ── Helpers ───────────────────────────────────────────────────
 
@@ -310,8 +324,63 @@ describe('applyFrontmatter', () => {
 
 // ── bridgeRiverWriteEndpoint ──────────────────────────────────
 
+// Helper to reset auth mock to default (valid key)
+function resetAuthMock() {
+  mockAuthenticateBridgeKey.mockReset()
+  mockAuthenticateBridgeKey.mockImplementation(async () => ({
+    id: 'key-1', name: 'test', collaborator: 'test',
+    permissions: ['read', 'write'], allowed_scopes: ['2'], active: true,
+  }))
+}
+
+// ── bridgeRiverWriteEndpoint — auth (ELLIE-1418) ────────────
+
+describe('bridgeRiverWriteEndpoint — authentication', () => {
+  beforeEach(() => {
+    resetAuthMock()
+    mockReadFile.mockReset()
+    mockWriteFile.mockReset()
+    mockWriteFile.mockImplementation(() => Promise.resolve())
+    mockMkdir.mockReset()
+    mockMkdir.mockImplementation(() => Promise.resolve())
+  })
+
+  test('calls authenticateBridgeKey with write permission', async () => {
+    mockReadFile.mockImplementation(() => Promise.reject(new Error('ENOENT')))
+    mockWriteFile.mockImplementation(() => Promise.resolve())
+    mockMkdir.mockImplementation(() => Promise.resolve())
+    const res = makeRes()
+    await bridgeRiverWriteEndpoint(makeReq({ path: 'notes/doc.md', content: '# Doc', operation: 'create' }), res)
+    expect(mockAuthenticateBridgeKey).toHaveBeenCalledWith('test-key', expect.anything(), 'write')
+  })
+
+  test('returns early when auth fails (no bridge key)', async () => {
+    // Simulate auth failure — authenticateBridgeKey sends 401 and returns null
+    mockAuthenticateBridgeKey.mockImplementation(async (_key: any, res: any) => {
+      res.status(401).json({ error: 'Missing x-bridge-key header' })
+      return null
+    })
+    const res = makeRes()
+    await bridgeRiverWriteEndpoint({ body: { path: 'notes/doc.md', content: '# X' }, query: {}, bridgeKey: undefined } as any, res)
+    expect(res.getCode()).toBe(401)
+    expect(mockWriteFile).not.toHaveBeenCalled()
+  })
+
+  test('returns early when key lacks write permission', async () => {
+    mockAuthenticateBridgeKey.mockImplementation(async (_key: any, res: any) => {
+      res.status(403).json({ error: "Key does not have 'write' permission" })
+      return null
+    })
+    const res = makeRes()
+    await bridgeRiverWriteEndpoint(makeReq({ path: 'notes/doc.md', content: '# X' }), res)
+    expect(res.getCode()).toBe(403)
+    expect(mockWriteFile).not.toHaveBeenCalled()
+  })
+})
+
 describe('bridgeRiverWriteEndpoint — input validation', () => {
   beforeEach(() => {
+    resetAuthMock()
     mockReadFile.mockReset()
     mockWriteFile.mockReset()
     mockWriteFile.mockImplementation(() => Promise.resolve())
@@ -362,6 +431,7 @@ describe('bridgeRiverWriteEndpoint — input validation', () => {
 
 describe('bridgeRiverWriteEndpoint — create operation', () => {
   beforeEach(() => {
+    resetAuthMock()
     mockReadFile.mockReset()
     mockWriteFile.mockReset()
     mockWriteFile.mockImplementation(() => Promise.resolve())
@@ -425,6 +495,7 @@ describe('bridgeRiverWriteEndpoint — create operation', () => {
 
 describe('bridgeRiverWriteEndpoint — update operation', () => {
   beforeEach(() => {
+    resetAuthMock()
     mockReadFile.mockReset()
     mockWriteFile.mockReset()
     mockWriteFile.mockImplementation(() => Promise.resolve())
@@ -468,6 +539,7 @@ describe('bridgeRiverWriteEndpoint — update operation', () => {
 
 describe('bridgeRiverWriteEndpoint — append operation', () => {
   beforeEach(() => {
+    resetAuthMock()
     mockReadFile.mockReset()
     mockWriteFile.mockReset()
     mockWriteFile.mockImplementation(() => Promise.resolve())
@@ -511,6 +583,7 @@ describe('bridgeRiverWriteEndpoint — append operation', () => {
 
 describe('bridgeRiverWriteEndpoint — response shape', () => {
   beforeEach(() => {
+    resetAuthMock()
     mockReadFile.mockImplementation(() => Promise.reject(new Error('ENOENT')))
     mockWriteFile.mockImplementation(() => Promise.resolve())
     mockMkdir.mockImplementation(() => Promise.resolve())
@@ -529,6 +602,8 @@ describe('bridgeRiverWriteEndpoint — response shape', () => {
 })
 
 describe('bridgeRiverWriteEndpoint — error handling', () => {
+  beforeEach(() => { resetAuthMock() })
+
   test('500 when writeFile throws', async () => {
     mockReadFile.mockImplementation(() => Promise.reject(new Error('ENOENT')))
     mockWriteFile.mockImplementation(() => Promise.reject(new Error('Disk full')))

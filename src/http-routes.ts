@@ -4245,7 +4245,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
 
         switch (endpoint) {
           case "write":
-            await writeMemoryEndpoint(mockReq, mockRes, bot);
+            await writeMemoryEndpoint(mockReq, mockRes, bot, supabase);
             break;
           case "read":
             await readMemoryEndpoint(mockReq, mockRes, bot);

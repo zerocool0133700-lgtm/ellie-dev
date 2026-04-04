@@ -83,6 +83,30 @@ CREATE INDEX IF NOT EXISTS idx_memory_created_at ON memory(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memory_visibility_source_agent ON memory(visibility, source_agent);
 
 -- ============================================================
+-- PENDING MEMORY INSERTS (ELLIE-1419)
+-- Durable queue for memory inserts skipped when search Edge Function is down.
+-- Drained on startup and periodically by flushPendingMemoryInserts().
+-- ============================================================
+CREATE TABLE IF NOT EXISTS pending_memory_inserts (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  idempotency_key TEXT NOT NULL UNIQUE,
+  type TEXT NOT NULL,
+  content TEXT NOT NULL,
+  source_agent TEXT NOT NULL,
+  visibility TEXT NOT NULL CHECK (visibility IN ('private', 'shared', 'global')),
+  deadline TEXT,
+  conversation_id TEXT,
+  metadata JSONB DEFAULT '{}',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at TIMESTAMPTZ,
+  error_message TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_memory_created
+  ON pending_memory_inserts (created_at ASC);
+
+-- ============================================================
 -- LOGS TABLE (Observability - Optional)
 -- ============================================================
 CREATE TABLE IF NOT EXISTS logs (
@@ -110,8 +134,25 @@ ALTER TABLE logs ENABLE ROW LEVEL SECURITY;
 -- Allow all for service role (your bot uses service key)
 CREATE POLICY "Allow all for service role" ON conversations FOR ALL USING (true);
 CREATE POLICY "Allow all for service role" ON messages FOR ALL USING (true);
-CREATE POLICY "Allow all for service role" ON memory FOR ALL USING (true);
 CREATE POLICY "Allow all for service role" ON logs FOR ALL USING (true);
+
+-- ELLIE-1417: Memory visibility enforcement
+CREATE POLICY "service_role_full_access" ON memory FOR ALL TO service_role USING (true) WITH CHECK (true);
+CREATE POLICY "authenticated_visibility_read" ON memory FOR SELECT TO authenticated
+  USING (visibility = 'global' OR visibility = 'shared'
+    OR (visibility = 'private' AND source_agent = coalesce(
+      current_setting('app.current_agent', true),
+      (current_setting('request.jwt.claims', true)::json->>'sub'))));
+CREATE POLICY "authenticated_insert" ON memory FOR INSERT TO authenticated WITH CHECK (true);
+CREATE POLICY "authenticated_modify_own" ON memory FOR UPDATE TO authenticated
+  USING (source_agent = coalesce(current_setting('app.current_agent', true),
+    (current_setting('request.jwt.claims', true)::json->>'sub')))
+  WITH CHECK (source_agent = coalesce(current_setting('app.current_agent', true),
+    (current_setting('request.jwt.claims', true)::json->>'sub')));
+CREATE POLICY "authenticated_delete_own" ON memory FOR DELETE TO authenticated
+  USING (source_agent = coalesce(current_setting('app.current_agent', true),
+    (current_setting('request.jwt.claims', true)::json->>'sub')));
+CREATE POLICY "anon_global_read" ON memory FOR SELECT TO anon USING (visibility = 'global');
 
 -- ============================================================
 -- HELPER FUNCTIONS
@@ -134,8 +175,8 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Get active goals
-CREATE OR REPLACE FUNCTION get_active_goals()
+-- ELLIE-1417: Get active goals (visibility-filtered)
+CREATE OR REPLACE FUNCTION get_active_goals(requesting_agent TEXT DEFAULT NULL)
 RETURNS TABLE (
   id UUID,
   content TEXT,
@@ -148,12 +189,14 @@ BEGIN
   SELECT m.id, m.content, m.deadline, m.priority, m.source_agent
   FROM memory m
   WHERE m.type = 'goal'
+    AND (m.visibility IN ('global', 'shared')
+      OR (m.visibility = 'private' AND requesting_agent IS NOT NULL AND m.source_agent = requesting_agent))
   ORDER BY m.priority DESC, m.created_at DESC;
 END;
 $$ LANGUAGE plpgsql;
 
--- Get all facts
-CREATE OR REPLACE FUNCTION get_facts()
+-- ELLIE-1417: Get all facts (visibility-filtered)
+CREATE OR REPLACE FUNCTION get_facts(requesting_agent TEXT DEFAULT NULL)
 RETURNS TABLE (
   id UUID,
   content TEXT,
@@ -164,6 +207,8 @@ BEGIN
   SELECT m.id, m.content, m.source_agent
   FROM memory m
   WHERE m.type = 'fact'
+    AND (m.visibility IN ('global', 'shared')
+      OR (m.visibility = 'private' AND requesting_agent IS NOT NULL AND m.source_agent = requesting_agent))
   ORDER BY m.created_at DESC;
 END;
 $$ LANGUAGE plpgsql;

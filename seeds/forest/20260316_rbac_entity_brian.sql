@@ -7,9 +7,13 @@ VALUES (
   'e0000000-0000-0000-0000-000000000004',
   'agent',
   'Brian',
-  'critic',
+  'brian',
   '{"capabilities": ["review", "feedback", "quality_checks", "code_review", "ui_review"], "domains": ["ellie-dev", "ellie-home"], "domain_note": "critic scope may be limited to specific projects via permission scoping"}'::jsonb
-) ON CONFLICT (id) DO NOTHING;
+) ON CONFLICT (id) DO UPDATE SET
+  entity_type = EXCLUDED.entity_type,
+  name = EXCLUDED.name,
+  archetype = EXCLUDED.archetype,
+  metadata = EXCLUDED.metadata;
 
 -- Brian → critic_agent role (granted by Ellie)
 INSERT INTO rbac_entity_roles (entity_id, role_id, granted_by)

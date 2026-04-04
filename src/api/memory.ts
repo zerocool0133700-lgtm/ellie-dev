@@ -29,9 +29,11 @@ import {
   createArc, getArc, updateArc, addMemoryToArc, listArcs, getArcsForMemory,
   sql,
 } from '../../../ellie-forest/src/index';
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { classifyEntailment } from "../entailment-classifier.ts";
 import { notify, type NotifyContext } from "../notification-policy.ts";
 import { log } from "../logger.ts";
+import { breakers } from "../resilience.ts";
 
 const logger = log.child("memory-api");
 
@@ -60,7 +62,7 @@ const escapeMarkdown = (text: string) => text.replace(/[_*[\]()~`>#+=|{}.!-]/g, 
  *   "check_contradictions": true  // optional: run entailment-verified contradiction check
  * }
  */
-export async function writeMemoryEndpoint(req: ApiRequest, res: ApiResponse, bot: Bot) {
+export async function writeMemoryEndpoint(req: ApiRequest, res: ApiResponse, bot: Bot, supabase?: SupabaseClient | null) {
   try {
     const { content, check_contradictions, contradiction_threshold, ...opts } = req.body;
 
@@ -77,11 +79,52 @@ export async function writeMemoryEndpoint(req: ApiRequest, res: ApiResponse, bot
       opts.expires_at = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
     }
 
+    // ELLIE-1424: Cross-tier dedup — check Supabase memory (Tier 2) before Forest write
+    let crossTierMatch: { id: string; content: string; similarity: number } | null = null;
+    if (supabase && check_contradictions) {
+      try {
+        const invoked = await breakers.edgeFn.call(
+          async () => {
+            const r = await supabase.functions.invoke("search", {
+              body: { query: content, table: "memory", match_count: 3, match_threshold: contradiction_threshold ?? 0.85 },
+            });
+            if (r.error) throw r.error;
+            return r;
+          },
+          null,
+        );
+        if (invoked?.data?.length) {
+          const best = invoked.data[0];
+          if (best.similarity >= (contradiction_threshold ?? 0.85)) {
+            crossTierMatch = { id: best.id, content: best.content, similarity: best.similarity };
+          }
+        }
+      } catch (err) {
+        logger.warn("Cross-tier dedup check failed (non-fatal)", { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+
+    // If cross-tier match found, link it in metadata rather than duplicating
+    if (crossTierMatch) {
+      opts.metadata = {
+        ...(opts.metadata || {}),
+        cross_tier_link: {
+          supabase_memory_id: crossTierMatch.id,
+          similarity: crossTierMatch.similarity,
+          tier: 2,
+        },
+      };
+    }
+
     // Always write the memory first
     const memory = await writeMemory({ content, ...opts });
 
     if (!check_contradictions) {
-      return res.json({ success: true, memory_id: memory.id });
+      return res.json({
+        success: true,
+        memory_id: memory.id,
+        ...(crossTierMatch ? { cross_tier_duplicate: crossTierMatch } : {}),
+      });
     }
 
     // Step 1: Find cosine-similar candidates in the same scope

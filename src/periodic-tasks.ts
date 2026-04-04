@@ -504,6 +504,16 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     await flushPendingMemoryInserts(supabase);
   }, 15 * 60_000, "pending-memory-flush");
 
+  // ELLIE-1422: Sync conversation_facts → Forest (every 6 hours)
+  periodicTask(async () => {
+    if (!supabase) return;
+    const { syncConversationFactsToForest } = await import("./sync-conversation-facts.ts");
+    const result = await syncConversationFactsToForest(supabase);
+    if (result.synced > 0 || result.failed > 0) {
+      logger.info("Conversation facts → Forest sync", result);
+    }
+  }, 6 * 60 * 60_000, "conversation-facts-forest-sync");
+
   // ELLIE-975: User-configurable scheduled tasks — evaluate cron schedules (every 60 seconds)
   periodicTask(async () => {
     const { schedulerTick, getDefaultExecutors } = await import("./scheduled-tasks.ts");

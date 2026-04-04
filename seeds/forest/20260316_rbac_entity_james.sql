@@ -7,9 +7,13 @@ VALUES (
   'e0000000-0000-0000-0000-000000000003',
   'agent',
   'James',
-  'dev',
-  '{"capabilities": ["code", "git", "plane", "forest", "config", "service_management"], "bridge_key": "bk_04fc33cf9a62aae63e0e07f4c5b5be9a6e6375bb60499b6af16b6c5dc5441948", "archetype_note": "dev is identity not capability limit"}'::jsonb
-) ON CONFLICT (id) DO NOTHING;
+  'james',
+  '{"capabilities": ["code", "git", "plane", "forest", "config", "service_management"], "bridge_key": "bk_04fc33cf9a62aae63e0e07f4c5b5be9a6e6375bb60499b6af16b6c5dc5441948"}'::jsonb
+) ON CONFLICT (id) DO UPDATE SET
+  entity_type = EXCLUDED.entity_type,
+  name = EXCLUDED.name,
+  archetype = EXCLUDED.archetype,
+  metadata = EXCLUDED.metadata;
 
 -- James → dev_agent role (granted by Ellie)
 INSERT INTO rbac_entity_roles (entity_id, role_id, granted_by)

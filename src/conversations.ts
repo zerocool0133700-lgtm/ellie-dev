@@ -312,7 +312,7 @@ export async function promoteToRiver(
 
     const resp = await fetch("http://localhost:3001/api/bridge/river/write", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-bridge-key": process.env.BRIDGE_KEY || "" },
       body: JSON.stringify({
         path: doc.path,
         content: doc.content,

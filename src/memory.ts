@@ -28,6 +28,27 @@ import { breakers } from "./resilience.ts";
 const logger = log.child("memory");
 
 // ────────────────────────────────────────────────────────────────
+// ELLIE-1425: Health metrics for search outage monitoring
+// ────────────────────────────────────────────────────────────────
+
+let _searchOutageCount = 0;
+let _lastSearchOutageAt: Date | null = null;
+
+export function recordSearchOutage(): void {
+  _searchOutageCount++;
+  _lastSearchOutageAt = new Date();
+}
+
+export function getSearchOutageMetrics(): { outageCount: number; lastOutageAt: Date | null } {
+  return { outageCount: _searchOutageCount, lastOutageAt: _lastSearchOutageAt };
+}
+
+export function _resetSearchOutageMetricsForTesting(): void {
+  _searchOutageCount = 0;
+  _lastSearchOutageAt = null;
+}
+
+// ────────────────────────────────────────────────────────────────
 // Conflict Resolution Types & Constants
 // ────────────────────────────────────────────────────────────────
 
@@ -139,6 +160,7 @@ export async function checkMemoryConflict(
 
   if (!invoked) {
     logger.warn("Memory dedup search unavailable — circuit breaker blocked or Edge Function errored");
+    recordSearchOutage();
     return { available: false };
   }
 
@@ -594,18 +616,36 @@ export function isSearchAvailable(): boolean {
  * Returns current search availability and the number of pending inserts
  * waiting for search to come back.
  */
-export function getMemorySearchHealth(): { searchAvailable: boolean; pendingQueueLength: number } {
+export function getMemorySearchHealth(): { searchAvailable: boolean; pendingQueueLength: number; outageCount: number; lastOutageAt: Date | null } {
+  const outageMetrics = getSearchOutageMetrics();
   return {
     searchAvailable: isSearchAvailable(),
     // ELLIE-1419: Queue is now in Supabase — sync length only available via async getPendingMemoryQueue.
     // This returns 0 as a placeholder; use the async version for accurate counts.
     pendingQueueLength: _testPendingQueue.length,
+    ...outageMetrics,
   };
+}
+
+/**
+ * Returns a user-facing warning when memory search is degraded.
+ * Returns null when search is operating normally.
+ * ELLIE-1425: Surface search outage to user so they know dedup is paused.
+ */
+export function getSearchDegradationWarning(): string | null {
+  if (isSearchAvailable()) return null;
+  const { outageCount } = getSearchOutageMetrics();
+  return `⚠️ Memory search is temporarily unavailable (${outageCount} outage${outageCount !== 1 ? 's' : ''} detected). Memory dedup is paused — new memories will be queued and processed when search recovers.`;
 }
 
 /** @deprecated Use the async Supabase-backed version. Kept for test compat. */
 export function clearPendingMemoryQueue(): void {
   _testPendingQueue.length = 0;
+}
+
+/** Sync getter for the in-memory pending queue shadow. Test use only. */
+export function getTestPendingQueue(): MemoryInsertParams[] {
+  return [..._testPendingQueue];
 }
 
 /**

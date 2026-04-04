@@ -19,6 +19,7 @@
  *   and enables recovery if context compression loses critical information.
  */
 
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { sql } from "../../ellie-forest/src/index.ts";
 import { log } from "./logger.ts";
 import { hashToInt64 } from "./advisory-lock-hash.ts";
@@ -81,13 +82,18 @@ export async function initWorkingMemory(opts: {
 }): Promise<WorkingMemoryRecord> {
   const { session_id, agent, sections = {}, channel = null, thread_id = null } = opts;
 
-  // Archive any existing active record for this session+agent
+  // ELLIE-1427: Include thread_id in archive to avoid archiving other threads' records
+  const archiveThreadFilter = thread_id
+    ? sql`AND thread_id = ${thread_id}`
+    : sql`AND thread_id IS NULL`;
+
   await sql`
     UPDATE working_memory
     SET archived_at = NOW()
     WHERE session_id = ${session_id}
       AND agent      = ${agent}
       AND archived_at IS NULL
+      ${archiveThreadFilter}
   `;
 
   const [record] = await sql<WorkingMemoryRecord[]>`
@@ -179,9 +185,12 @@ export async function readWorkingMemory(opts: {
     ? sql`AND session_id = ${session_id}`
     : sql``;
 
+  // ELLIE-1427: Always filter by thread_id for proper isolation.
+  // When thread_id is provided, match it exactly.
+  // When not provided, only return non-threaded records (thread_id IS NULL).
   const threadFilter = opts.thread_id
     ? sql`AND thread_id = ${opts.thread_id}`
-    : sql``;
+    : sql`AND thread_id IS NULL`;
 
   const [record] = await sql<WorkingMemoryRecord[]>`
     SELECT * FROM working_memory
@@ -476,6 +485,82 @@ export async function getSiblingThreadMemories(
       AND archived_at IS NULL
   `;
   return rows as unknown as Array<{ thread_id: string; context_anchors: string | null }>;
+}
+
+// ── ELLIE-1423: Backfill from conversation_facts on session init ─────────────
+
+interface ConversationFactRow {
+  id: string;
+  content: string;
+  type: string;
+  category: string | null;
+  confidence: number;
+}
+
+/**
+ * Load active conversation_facts from Supabase (Tier 2) and merge them into
+ * working memory context_anchors for the given session.
+ *
+ * Call after initWorkingMemory() to backfill Tier 2 knowledge that would
+ * otherwise be missing from a fresh working memory record.
+ *
+ * Non-fatal — returns silently on error so session init is never blocked.
+ */
+export async function loadSessionContextFromConversationFacts(opts: {
+  supabase: SupabaseClient;
+  session_id: string;
+  agent: string;
+  limit?: number;
+}): Promise<void> {
+  const { supabase, session_id, agent, limit = 20 } = opts;
+
+  try {
+    const { data: facts, error } = await supabase
+      .from("conversation_facts")
+      .select("id, content, type, category, confidence")
+      .eq("status", "active")
+      .order("confidence", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (error || !facts || facts.length === 0) return;
+
+    const typed = facts as ConversationFactRow[];
+    const lines = typed.map(
+      (f) => `- [${f.type}${f.category ? `/${f.category}` : ""}] ${f.content}`,
+    );
+
+    const factsBlock =
+      `[Conversation facts backfilled from Tier 2 at session init]\n` +
+      lines.join("\n");
+
+    // Merge into context_anchors (preserving any existing content)
+    const current = await readWorkingMemory({ session_id, agent });
+    if (!current) return;
+
+    const existing = current.sections.context_anchors || "";
+    const merged = existing
+      ? `${existing}\n\n${factsBlock}`
+      : factsBlock;
+
+    await updateWorkingMemory({
+      session_id,
+      agent,
+      sections: { context_anchors: merged },
+    });
+
+    logger.info("Backfilled conversation_facts into working memory", {
+      session_id,
+      agent,
+      facts_count: typed.length,
+    });
+  } catch (err) {
+    logger.warn("Failed to backfill conversation_facts (non-fatal)", {
+      session_id,
+      agent,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 // ── Relay wiring (ELLIE-541) ─────────────────────────────────────────────────

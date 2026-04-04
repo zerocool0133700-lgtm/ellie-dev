@@ -15,6 +15,7 @@ import {
   readWorkingMemory,
   checkpointWorkingMemory,
   archiveWorkingMemory,
+  loadSessionContextFromConversationFacts,
   type WorkingMemorySections,
 } from "../working-memory.ts";
 import { writeMemory } from "../../../ellie-forest/src/index.ts";
@@ -29,10 +30,14 @@ const logger = log.child("working-memory-api");
  * Create or reinitialize working memory for a session+agent pair.
  *
  * Body: { session_id, agent, sections?, channel? }
+ *
+ * ELLIE-1423: After init, backfills context_anchors from conversation_facts
+ * (Tier 2) so agents resume with recently extracted knowledge.
  */
 export async function workingMemoryInitEndpoint(
   req: ApiRequest,
   res: ApiResponse,
+  supabase?: import("@supabase/supabase-js").SupabaseClient | null,
 ): Promise<void> {
   const { session_id, agent, sections, channel } = req.body ?? {};
 
@@ -52,6 +57,17 @@ export async function workingMemoryInitEndpoint(
       sections: sections as WorkingMemorySections | undefined,
       channel: channel as string | undefined,
     });
+
+    // ELLIE-1423: Backfill Tier 2 conversation_facts into working memory
+    if (supabase) {
+      loadSessionContextFromConversationFacts({
+        supabase,
+        session_id,
+        agent,
+      }).catch((err) => {
+        logger.warn("conversation_facts backfill failed (non-fatal)", { session_id, agent, error: String(err) });
+      });
+    }
 
     res.json({
       success: true,

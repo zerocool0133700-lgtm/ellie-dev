@@ -16,10 +16,15 @@ import { spawn } from 'bun'
 import { readFile, writeFile as writeFileFn, mkdir } from 'fs/promises'
 import { join } from 'path'
 import { writeMemory, sql } from '../../../ellie-forest/src/index'
+import { authenticateBridgeKey as _authenticateBridgeKey } from './bridge.ts'
 import type { ApiRequest, ApiResponse } from './types.ts'
 import { log } from '../logger.ts'
 
 const logger = log.child('bridge-river')
+
+/** Auth function — exported for test injection via `_setBridgeAuth()`. */
+let bridgeAuth = _authenticateBridgeKey
+export function _setBridgeAuth(fn: typeof _authenticateBridgeKey) { bridgeAuth = fn }
 
 const QMD_BIN = '/home/ellie/.bun/bin/qmd'
 const RIVER_COLLECTION = 'ellie-river'
@@ -455,6 +460,10 @@ export async function qmdReindex(): Promise<boolean> {
  * After writing, triggers `qmd update` to reindex the collection.
  */
 export async function bridgeRiverWriteEndpoint(req: ApiRequest, res: ApiResponse) {
+  // ── Auth (ELLIE-1418) ──────────────────────────────────────
+  const key = await bridgeAuth(req.bridgeKey, res, 'write')
+  if (!key) return
+
   const { path, content, operation = 'create', frontmatter: incomingFm = {} } = req.body
 
   // ── Input validation ────────────────────────────────────────
