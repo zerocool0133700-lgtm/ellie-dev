@@ -22,6 +22,7 @@ export interface DeepClassificationResult {
   tier: DeepTier;
   confidence: number;
   emotional_intensity: number;
+  category: string | null;
   reasoning: string;
 }
 
@@ -31,8 +32,15 @@ const DEFAULT_RESULT: DeepClassificationResult = {
   tier: "operational",
   confidence: 0.65,
   emotional_intensity: 0,
+  category: null,
   reasoning: "Classification unavailable — defaulting to operational",
 };
+
+const VALID_CATEGORIES = [
+  "health", "fitness", "relationships", "identity", "financial",
+  "learning", "mental_health", "work", "hobbies", "family",
+  "spirituality", "general",
+];
 
 let _anthropic: Anthropic | null = null;
 
@@ -53,7 +61,10 @@ Which tier best describes this memory?
 - operational: Technical facts, system behavior, configs, how things work
 - ephemeral: Bug details, errors, one-time incidents, transient state
 
-Return JSON only: {"tier": "foundational|strategic|operational|ephemeral", "confidence": 0.0-1.0, "emotional_intensity": 0.0-1.0, "reasoning": "one sentence"}`;
+Also classify the category:
+- health, fitness, relationships, identity, financial, learning, mental_health, work, hobbies, family, spirituality, general
+
+Return JSON only: {"tier": "foundational|strategic|operational|ephemeral", "confidence": 0.0-1.0, "emotional_intensity": 0.0-1.0, "category": "one of the above", "reasoning": "one sentence"}`;
 }
 
 export function parseDeepClassification(text: string): DeepClassificationResult {
@@ -66,14 +77,17 @@ export function parseDeepClassification(text: string): DeepClassificationResult 
     const parsed = JSON.parse(cleaned);
     const tier: DeepTier = VALID_TIERS.includes(parsed.tier) ? parsed.tier : "operational";
 
+    const category = VALID_CATEGORIES.includes(parsed.category) ? parsed.category : null;
+
     return {
       tier,
       confidence: typeof parsed.confidence === "number" ? parsed.confidence : DEFAULT_RESULT.confidence,
       emotional_intensity: typeof parsed.emotional_intensity === "number" ? parsed.emotional_intensity : 0,
+      category,
       reasoning: parsed.reasoning || "",
     };
   } catch {
-    return { ...DEFAULT_RESULT, reasoning: "Parse error — defaulting to operational" };
+    return { ...DEFAULT_RESULT, category: null, reasoning: "Parse error — defaulting to operational" };
   }
 }
 
@@ -137,6 +151,7 @@ export async function processDeepClassificationBatch(opts?: {
         confidence                 = ${finalConfidence},
         emotional_intensity        = ${result.emotional_intensity},
         needs_deep_classification  = false
+        ${result.category ? db`, category = ${result.category}` : db``}
       WHERE id = ${mem.id}
     `;
 
