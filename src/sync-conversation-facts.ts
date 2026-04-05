@@ -92,7 +92,7 @@ export async function syncConversationFactsToForest(
       const memory = await writeMemory({
         content: fact.content,
         type: mapFactType(fact.type) as "fact" | "preference" | "decision" | "finding",
-        scope_path: mapCategoryToScope(fact.category),
+        category: fact.category || undefined,
         confidence: fact.confidence,
         tags: [
           "conversation_fact",

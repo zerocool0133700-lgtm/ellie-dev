@@ -168,7 +168,6 @@ export async function checkpointSessionToForest(opts: CheckpointOpts): Promise<v
   await writeMemory({
     content: lines.join("\n"),
     type: "finding",
-    scope_path: "2/1",
     confidence: 0.7,
     tags: ["session-checkpoint", "compaction"],
     metadata: {

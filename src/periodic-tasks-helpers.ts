@@ -76,12 +76,11 @@ export async function graduateMemories(sb: SupabaseClient): Promise<number> {
       const graduatingMeta = { ...(fact.metadata ?? {}), graduating: true };
       await sb.from("memory").update({ metadata: graduatingMeta }).eq("id", fact.id);
 
-      // Write to Forest — scope_path "2" = Projects root so it appears in the knowledge tree
+      // Write to Forest — router auto-classifies scope from content
       // Preserve original created_at so timeline is accurate
       const forestMemory = await writeMemory({
         content: fact.content,
         type: 'fact',
-        scope_path: '2',
         confidence: 0.7,
         source_agent_species: fact.source_agent ?? undefined,
         created_at: fact.created_at,

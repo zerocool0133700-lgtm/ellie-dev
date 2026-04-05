@@ -382,11 +382,10 @@ export async function snapshotWorkingMemoryToForest(opts: {
     ...sectionLines,
   ].join("\n");
 
-  // Write to Forest with working_memory_snapshot tag
+  // Write to Forest with working_memory_snapshot tag — router auto-classifies scope
   const memory = await writeMemory({
     content,
     type: "finding",
-    scope_path,
     confidence: 0.9,
     tags: ["working_memory_snapshot", `agent:${agent}`],
     metadata: {
