@@ -37,11 +37,14 @@ export async function expireStaleAgentSessions(sb: SupabaseClient): Promise<void
 export async function graduateMemories(sb: SupabaseClient): Promise<number> {
   // Fix #4: Fetch facts that haven't been graduated yet
   // Two queries: corroborated facts + high-confidence non-graduated facts
+  // ELLIE-1428: Fix PostgREST filter — .not("metadata->>graduated", "eq", "true") returns 0 rows
+  // because NULL != 'true' evaluates to NULL (not TRUE) in SQL, so NOT(NULL) = NULL = excluded.
+  // Use .or() to correctly match rows where graduated is either null or not 'true'.
   const { data: candidates, error } = await sb
     .from("memory")
     .select("id, content, type, source_agent, visibility, metadata, created_at")
     .eq("type", "fact")
-    .not("metadata->>graduated", "eq", "true")
+    .or("metadata->>graduated.is.null,metadata->>graduated.neq.true")
     .order("created_at", { ascending: false })
     .limit(50);
 
