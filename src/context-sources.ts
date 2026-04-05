@@ -1641,3 +1641,46 @@ export async function getScopedForestContext(
     return "";
   }
 }
+
+/**
+ * ELLIE-1428 Phase 3: Fetch knowledge shared through groves.
+ * Resolves agent → entity → person → groves → shared tree memories.
+ */
+export async function getGroveKnowledgeContext(
+  query: string,
+  agent: string,
+  opts?: { limit?: number }
+): Promise<string> {
+  if (!query || query.length < 10) return "";
+
+  try {
+    const forestSql = (await import("../../ellie-forest/src/db.ts")).default;
+    const { getGroveSharedKnowledge } = await import("../../ellie-forest/src/index.ts");
+
+    // Resolve agent name → entity ID
+    const [entity] = await forestSql`
+      SELECT id FROM entities WHERE name = ${agent} AND type = 'agent' LIMIT 1
+    `;
+    if (!entity) return "";
+
+    const results = await getGroveSharedKnowledge({
+      entityId: entity.id,
+      query,
+      limit: opts?.limit ?? 5,
+    });
+
+    if (!results || results.length === 0) return "";
+
+    const lines = results.map((r: any) =>
+      `- [${r.type}, shared] ${r.content.slice(0, 200)}`
+    );
+
+    return `GROVE SHARED KNOWLEDGE:\n${lines.join("\n")}`;
+  } catch (err) {
+    const { log } = await import("./logger.ts");
+    log.child("context-sources").warn("getGroveKnowledgeContext failed (non-fatal)", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return "";
+  }
+}
