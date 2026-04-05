@@ -1374,7 +1374,7 @@ async function _handleEllieChatMessage(
                     "Content-Type": "application/json",
                     "x-bridge-key": process.env.BRIDGE_KEY || "",
                   },
-                  body: JSON.stringify({ query, scope_path: "2" }),
+                  body: JSON.stringify({ query, scope_path: resolveAgentScope(ecRouteAgent) }),
                 });
                 const data = await resp.json() as { memories?: Array<{ content: string }> };
                 return data.memories?.map(m => m.content).join("\n") || "No results.";
