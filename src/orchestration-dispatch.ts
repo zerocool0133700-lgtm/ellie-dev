@@ -542,6 +542,37 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       }).catch(err =>
         logger.warn("persistCreatureFindings failed (non-fatal)", { err: err instanceof Error ? err.message : String(err) })
       );
+      // ELLIE-1428 Phase 2: Auto-link trees via vines when dispatching
+      if (sessionIds.tree_id && workItemId) {
+        try {
+          const { createLink } = await import("../../ellie-forest/src/vines.ts");
+          const { default: forestSql } = await import("../../ellie-forest/src/db.ts");
+          const siblings = await forestSql<{ id: string }[]>`
+            SELECT id FROM trees
+            WHERE work_item_id = ${workItemId}
+              AND id != ${sessionIds.tree_id}
+              AND state NOT IN ('archived', 'composted')
+            LIMIT 3
+          `;
+          for (const sibling of siblings) {
+            await createLink({
+              source_tree_id: sessionIds.tree_id,
+              target_tree_id: sibling.id,
+              link_type: 'related',
+              confidence: 0.8,
+              note: `Sibling dispatches for ${workItemId}`,
+              metadata: { auto_linked: true, work_item_id: workItemId },
+            }).catch(() => {});
+          }
+          if (siblings.length > 0) {
+            logger.info("Auto-linked trees via vines", {
+              tree_id: sessionIds.tree_id,
+              siblings: siblings.length,
+              work_item_id: workItemId,
+            });
+          }
+        } catch { /* vine linking is non-fatal */ }
+      }
       // ELLIE-442: Post completed event to #creature-log
       postCreatureEvent("completed", { agentType, workItemId, durationMs, responsePreview });
     }
