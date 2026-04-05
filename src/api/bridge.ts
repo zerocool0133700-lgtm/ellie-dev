@@ -152,7 +152,7 @@ export async function bridgeReadEndpoint(req: ApiRequest, res: ApiResponse) {
       scope_path: effectiveScopePath,
       tree_id,
       match_count: match_count ?? 10,
-      match_threshold: match_threshold ?? 0.7,
+      match_threshold: match_threshold ?? (scope_path ? 0.4 : 0.7),  // Lower threshold for scoped searches — scope itself is the filter
       category,
       cognitive_type,
       include_global: false,
