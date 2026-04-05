@@ -1577,3 +1577,67 @@ export async function getRelatedKnowledge(
     return "";
   }
 }
+
+/**
+ * Resolve an agent's primary search scope.
+ * Uses the same mapping as ellie-forest/src/scoped-search.ts AGENT_SCOPE_MAP.
+ * Kept here to avoid circular import from the pipeline.
+ */
+const AGENT_PRIMARY_SCOPE: Record<string, string> = {
+  dev:      "2/1",
+  research: "2",
+  content:  "2",
+  critic:   "2/1",
+  strategy: "2",
+  ops:      "2/1",
+  finance:  "2",
+  general:  "2",
+  ellie:    "2",
+};
+
+export function resolveAgentScope(agent: string): string {
+  return AGENT_PRIMARY_SCOPE[agent.toLowerCase()] || "2";
+}
+
+/**
+ * ELLIE-1428 Phase 3: Scope-aware Forest context retrieval.
+ * Resolves agent → scope, then queries Forest readMemoriesByPath()
+ * for knowledge within that subtree. Returns formatted context block.
+ */
+export async function getScopedForestContext(
+  query: string,
+  agent: string,
+  opts?: { limit?: number; workItemId?: string }
+): Promise<string> {
+  if (!query || query.length < 10) return "";
+
+  try {
+    const { readMemoriesForAgent } = await import("../../ellie-forest/src/index.ts");
+    const scope = resolveAgentScope(agent);
+
+    const results = await readMemoriesForAgent({
+      query,
+      agent,
+      scope_path: scope,
+      match_count: opts?.limit ?? 8,
+      match_threshold: 0.5,
+    });
+
+    if (!results || results.length === 0) return "";
+
+    const lines = results.map((r: any) => {
+      const scopeTag = r.scope_path || "?";
+      const typeTag = r.type || "memory";
+      const confidence = r.confidence ? ` (${Math.round(r.confidence * 100)}%)` : "";
+      return `- [${typeTag}, ${scopeTag}${confidence}] ${r.content.slice(0, 250)}`;
+    });
+
+    return `SCOPED FOREST KNOWLEDGE (${scope}):\n${lines.join("\n")}`;
+  } catch (err) {
+    const { log } = await import("./logger.ts");
+    log.child("context-sources").warn("getScopedForestContext failed (non-fatal)", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return "";
+  }
+}
