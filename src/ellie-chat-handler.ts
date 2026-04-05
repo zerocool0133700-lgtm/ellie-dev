@@ -291,7 +291,7 @@ async function _handleEllieChatMessage(
   const ecUser = wsAppUserMap.get(ws);
   const ecUserId = ecUser?.id || ecUser?.anonymous_id || undefined;
 
-  await saveMessage("user", text, image ? { image_name: image.name, image_mime: image.mime_type } : {}, "ellie-chat", ecUserId, clientId, "user");
+  await saveMessage("user", text, { ...(image ? { image_name: image.name, image_mime: image.mime_type } : {}), ...(effectiveThreadId ? { thread_id: effectiveThreadId } : {}) }, "ellie-chat", ecUserId, clientId, "user");
   broadcastExtension({ type: "message_in", channel: "ellie-chat", preview: text.substring(0, 200) });
 
   // ELLIE-1276: Check if any dispatched agents are waiting for user answers (with disambiguation)
@@ -1220,11 +1220,11 @@ async function _handleEllieChatMessage(
           }
         }
 
-        // ELLIE-1374: Load profile + relationship context for Ellie
-        // Ellie isn't just any agent — she carries the relationship into every thread
+        // ELLIE-1374: Load profile + relationship context
+        // Ellie gets full profile + relationship; other agents get a lighter version
         let profileCtx: string | undefined;
         let relationshipCtx: string | undefined;
-        if (directAgent === "ellie" || directAgent === "general") {
+        {  // All agents get Dave's profile so they know who they're talking to
           try {
             const { readFile } = await import("fs/promises");
             const { join } = await import("path");
@@ -1297,10 +1297,23 @@ async function _handleEllieChatMessage(
         });
 
         const result = await runDirectChat(prompt, directAgent);
-        const memoryId = await saveMessage("assistant", result.response, {}, "ellie-chat", ecUserId);
+
+        // ELLIE-1428: Run memory pipeline on direct chat responses (same as coordinator path)
+        // This ensures [REMEMBER:] tags, [GOAL:] tags, and conversation facts are captured
+        let processedResponse = result.response;
+        try {
+          const { processMemoryIntents } = await import("./memory.ts");
+          processedResponse = await processMemoryIntents(supabase, result.response, directAgent, "shared", []);
+        } catch { /* memory pipeline non-fatal */ }
+        try {
+          const { processResponseTags } = await import("./response-tag-processor.ts");
+          processedResponse = await processResponseTags(supabase, processedResponse, "ellie-chat");
+        } catch { /* tag processing non-fatal */ }
+
+        const memoryId = await saveMessage("assistant", processedResponse, { agent: directAgent, thread_id: effectiveThreadId }, "ellie-chat", ecUserId);
         deliverResponse(ws, {
           type: "response",
-          text: result.response,
+          text: processedResponse,
           agent: directAgent,
           thread_id: effectiveThreadId,
           memoryId: memoryId || undefined,
