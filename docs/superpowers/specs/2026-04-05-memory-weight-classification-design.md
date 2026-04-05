@@ -119,7 +119,7 @@ writeMemory(opts) →
 
 **New DB columns on `shared_memories`:**
 - `needs_deep_classification BOOLEAN DEFAULT false` — flag for async LLM pass
-- `memory_tier TEXT` — the assigned tier (foundational/strategic/operational/ephemeral). Stored for querying and the stale sweep. Set by the classifier alongside confidence/emotional_intensity.
+- `content_tier TEXT` — the assigned tier (foundational/strategic/operational/ephemeral). Named `content_tier` because `memory_tier` already exists with a different meaning (core/extended/goals). Stored for querying and the stale sweep. Set by the classifier alongside confidence/emotional_intensity.
 
 ---
 
