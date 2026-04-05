@@ -204,14 +204,18 @@ async function phase5(): Promise<void> {
     return
   }
 
+  // Count active memories first to cap the loop
+  // (refreshWeights sets updated_at = NOW() which cycles records endlessly)
+  const [{ count }] = await forestSql<{ count: number }[]>`
+    SELECT count(*)::int AS count FROM shared_memories WHERE status = 'active'
+  `
+  const maxBatches = Math.ceil(count / 500) + 1
   let totalRefreshed = 0
-  let batchNum = 0
 
-  while (true) {
-    batchNum++
+  for (let batch = 1; batch <= maxBatches; batch++) {
     const refreshed = await refreshWeights({ limit: 500 })
     totalRefreshed += refreshed
-    log(`  Batch ${batchNum}: refreshed ${refreshed} weights (total: ${totalRefreshed})`)
+    log(`  Batch ${batch}/${maxBatches}: refreshed ${refreshed} weights (total: ${totalRefreshed})`)
     if (refreshed < 500) break
   }
 
