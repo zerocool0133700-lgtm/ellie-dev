@@ -1517,3 +1517,63 @@ export async function getRiverContextForAgent(
     return '';
   }
 }
+
+// ── ELLIE-1428 Phase 2: Semantic Edge Context ─────────────────
+
+/**
+ * Query semantic edges to find knowledge connected to the most relevant
+ * memories for the current message. Two-hop: first find relevant memories
+ * via Forest search, then find their semantic neighbors via edges.
+ */
+export async function getRelatedKnowledge(
+  query: string,
+  opts?: { limit?: number }
+): Promise<string> {
+  if (!query || query.length < 15) return "";
+
+  try {
+    const { default: forestSql } = await import("../../ellie-forest/src/db.ts");
+    const { readMemories, getRelatedMemories } = await import("../../ellie-forest/src/index.ts");
+
+    // Step 1: Find the top 3 relevant memories via Forest semantic search
+    const seeds = await readMemories({
+      query,
+      match_count: 3,
+      match_threshold: 0.6,
+    });
+
+    if (seeds.length === 0) return "";
+
+    // Step 2: For each seed, get its semantic neighbors
+    const limit = opts?.limit ?? 5;
+    const seen = new Set(seeds.map((s: any) => s.id));
+    const related: Array<{ content: string; type: string; similarity: number; scope_path: string }> = [];
+
+    for (const seed of seeds) {
+      const neighbors = await getRelatedMemories(forestSql, (seed as any).id, {
+        limit: 3,
+        minSimilarity: 0.7,
+      });
+      for (const n of neighbors) {
+        if (!seen.has(n.id) && related.length < limit) {
+          seen.add(n.id);
+          related.push(n);
+        }
+      }
+    }
+
+    if (related.length === 0) return "";
+
+    const lines = related.map(r =>
+      `- [${r.type}, ${r.scope_path || "?"}] ${r.content.slice(0, 200)}`
+    );
+
+    return `CONNECTED KNOWLEDGE (via semantic edges):\n${lines.join("\n")}`;
+  } catch (err) {
+    const { log } = await import("./logger.ts");
+    log.child("context-sources").warn("getRelatedKnowledge failed (non-fatal)", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return "";
+  }
+}

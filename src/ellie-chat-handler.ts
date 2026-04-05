@@ -1268,12 +1268,20 @@ async function _handleEllieChatMessage(
           if (ctx) directForestCtx = ctx;
         } catch { /* ES context is non-fatal */ }
 
+        // ELLIE-1428 Phase 2: Semantic edge context for direct chat
+        let directRelatedCtx: string | undefined;
+        try {
+          const { getRelatedKnowledge } = await import("./context-sources.ts");
+          const related = await getRelatedKnowledge(text, { limit: 3 });
+          if (related) directRelatedCtx = related;
+        } catch { /* non-fatal */ }
+
         const prompt = buildDirectPrompt({
           agent: directAgent,
           message: text,
           conversationHistory,
           workingMemorySummary: wmSummary,
-          forestContext: directForestCtx,
+          forestContext: [directForestCtx, directRelatedCtx].filter(Boolean).join("\n\n") || undefined,
           crossThreadAwareness: crossThreadCtx,
           profileContext: profileCtx,
           relationshipContext: relationshipCtx,

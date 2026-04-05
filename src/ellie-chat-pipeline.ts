@@ -20,6 +20,7 @@ import {
   getAgentMemoryContext,
   getMaxMemoriesForModel,
   getLiveForestContext,
+  getRelatedKnowledge,
 } from "./context-sources.ts";
 import { getForestContext } from "./elasticsearch/context.ts";
 import { getQueueContext } from "./api/agent-queue.ts";
@@ -80,7 +81,7 @@ export async function _gatherContextSources(
   workItemId: string | undefined,
   shouldFetch: (label: string) => boolean,
 ) {
-  const [convoContext, contextDocket, relevantContext, elasticContext, _structuredBase, forestContext, agentMemory, queueContext, liveForest, factsContext] = await Promise.all([
+  const [convoContext, contextDocket, relevantContext, elasticContext, _structuredBase, forestContext, agentMemory, queueContext, liveForest, factsContext, relatedKnowledge] = await Promise.all([
     convoId && supabase ? getConversationMessages(supabase, convoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
     shouldFetch("context-docket") ? getContextDocket() : Promise.resolve(""),
     getRelevantContext(supabase, effectiveText, "ellie-chat", activeAgent, convoId),
@@ -91,9 +92,15 @@ export async function _gatherContextSources(
     shouldFetch("queue") && agentDispatch?.is_new ? getQueueContext(activeAgent) : Promise.resolve(""),
     getLiveForestContext(effectiveText),
     getRelevantFacts(supabase, effectiveText),  // ELLIE-967: Tier 2 fact retrieval
+    getRelatedKnowledge(effectiveText, { limit: 5 }),  // ELLIE-1428 Phase 2: semantic edge context
   ]);
   // ELLIE-967: Merge Tier 2 conversation facts into structured context
   const structuredContext = factsContext ? [_structuredBase, factsContext].filter(Boolean).join("\n\n") : _structuredBase;
+
+  // ELLIE-1428 Phase 2: Merge semantic edge context
+  const finalStructuredContext = relatedKnowledge
+    ? [structuredContext, relatedKnowledge].filter(Boolean).join("\n\n")
+    : structuredContext;
 
   // ELLIE-1401: Log context build breakdown for coordinator path
   const contextSections = [
@@ -106,6 +113,7 @@ export async function _gatherContextSources(
     { label: "agent-memory", present: !!agentMemory?.memoryContext, chars: agentMemory?.memoryContext?.length || 0 },
     { label: "queue-context", present: !!queueContext, chars: (queueContext as string)?.length || 0 },
     { label: "live-forest", present: !!liveForest?.awareness, chars: liveForest?.awareness?.length || 0 },
+    { label: "related-knowledge", present: !!relatedKnowledge, chars: (relatedKnowledge as string)?.length || 0 },
   ];
   const { log } = await import("./logger.ts");
   const pipelineLogger = log.child("context-build");
@@ -119,5 +127,5 @@ export async function _gatherContextSources(
     totalContextChars: contextSections.reduce((sum, s) => sum + s.chars, 0),
   });
 
-  return { convoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext, liveForest };
+  return { convoContext, contextDocket, relevantContext, elasticContext, structuredContext: finalStructuredContext, forestContext, agentMemory, queueContext, liveForest };
 }
