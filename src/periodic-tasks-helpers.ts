@@ -100,6 +100,7 @@ export async function graduateMemories(sb: SupabaseClient): Promise<number> {
           type: 'fact',
           domain: classifyDomain(fact.content),
           created_at: fact.created_at,
+          scope_path: forestMemory.scope_path ?? undefined,
           metadata: { source: 'shared_memories', scope_path: '2' },
         });
       } catch { /* ES indexing is non-fatal */ }

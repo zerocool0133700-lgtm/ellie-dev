@@ -73,9 +73,10 @@ export async function persistCreatureFindings(opts: {
     const { writeMemory } = await import("../../ellie-forest/src/index.ts")
 
     let persisted = 0
+    const writtenMemories: Array<{ finding: Finding; scopePath: string | null | undefined }> = []
     for (const finding of findings) {
       try {
-        await writeMemory({
+        const written = await writeMemory({
           content: finding.content,
           type: finding.type,
           confidence: finding.confidence,
@@ -90,6 +91,7 @@ export async function persistCreatureFindings(opts: {
             ...(opts.workItemId ? { work_item_id: opts.workItemId } : {}),
           },
         })
+        writtenMemories.push({ finding, scopePath: written.scope_path })
         persisted++
       } catch (err) {
         logger.warn("Failed to persist individual finding", {
@@ -110,13 +112,14 @@ export async function persistCreatureFindings(opts: {
 
     try {
       const { indexMemory, classifyDomain } = await import("./elasticsearch.ts")
-      for (const finding of findings) {
+      for (const { finding, scopePath } of writtenMemories) {
         await indexMemory({
           id: opts.creatureId + "-" + findings.indexOf(finding),
           content: finding.content,
           type: finding.type,
           domain: classifyDomain(finding.content),
           created_at: new Date().toISOString(),
+          scope_path: scopePath ?? undefined,
           metadata: { source: "creature_finding", creature_id: opts.creatureId },
         })
       }

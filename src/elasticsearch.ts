@@ -146,6 +146,7 @@ export async function indexMemory(doc: {
   domain?: string;
   created_at: string;
   conversation_id?: string;
+  scope_path?: string;
   metadata?: Record<string, unknown>;
 }): Promise<void> {
   if (!(await checkHealth())) return;
@@ -235,6 +236,7 @@ export async function searchElastic(
     excludeConversationId?: string;
     limit?: number;
     recencyBoost?: boolean;
+    scope_path?: string;
   }
 ): Promise<string> {
   if (!(await checkHealth())) return "";
@@ -259,6 +261,9 @@ export async function searchElastic(
     // ELLIE-202: Exclude current conversation from search (it's already loaded in full)
     if (excludeConversationId) {
       filters.push({ bool: { must_not: { term: { conversation_id: excludeConversationId } } } });
+    }
+    if (options?.scope_path) {
+      filters.push({ prefix: { scope_path: options.scope_path } });
     }
 
     let queryBody: Record<string, unknown> = {

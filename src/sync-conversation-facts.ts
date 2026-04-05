@@ -116,6 +116,7 @@ export async function syncConversationFactsToForest(
           type: mapFactType(fact.type),
           domain: classifyDomain(fact.content),
           created_at: fact.created_at || new Date().toISOString(),
+          scope_path: memory.scope_path ?? undefined,
           metadata: { source: 'shared_memories', scope_path: mapCategoryToScope(fact.category) },
         });
       } catch { /* ES indexing is non-fatal */ }
