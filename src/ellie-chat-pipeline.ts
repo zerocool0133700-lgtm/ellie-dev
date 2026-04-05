@@ -21,6 +21,8 @@ import {
   getMaxMemoriesForModel,
   getLiveForestContext,
   getRelatedKnowledge,
+  getScopedForestContext,   // NEW: Phase 3
+  resolveAgentScope,        // NEW: Phase 3
 } from "./context-sources.ts";
 import { getForestContext } from "./elasticsearch/context.ts";
 import { getQueueContext } from "./api/agent-queue.ts";
@@ -81,11 +83,11 @@ export async function _gatherContextSources(
   workItemId: string | undefined,
   shouldFetch: (label: string) => boolean,
 ) {
-  const [convoContext, contextDocket, relevantContext, elasticContext, _structuredBase, forestContext, agentMemory, queueContext, liveForest, factsContext, relatedKnowledge] = await Promise.all([
+  const [convoContext, contextDocket, relevantContext, elasticContext, _structuredBase, forestContext, agentMemory, queueContext, liveForest, factsContext, relatedKnowledge, scopedForest] = await Promise.all([
     convoId && supabase ? getConversationMessages(supabase, convoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
     shouldFetch("context-docket") ? getContextDocket() : Promise.resolve(""),
     getRelevantContext(supabase, effectiveText, "ellie-chat", activeAgent, convoId),
-    searchElastic(effectiveText, { limit: 5, recencyBoost: true, channel: "ellie-chat", sourceAgent: activeAgent, excludeConversationId: convoId }),
+    searchElastic(effectiveText, { limit: 5, recencyBoost: true, channel: "ellie-chat", sourceAgent: activeAgent, excludeConversationId: convoId, scope_path: resolveAgentScope(activeAgent) }),
     shouldFetch("structured-context") ? getAgentStructuredContext(supabase, activeAgent) : Promise.resolve(""),
     getForestContext(effectiveText),
     getAgentMemoryContext(activeAgent, workItemId, getMaxMemoriesForModel(agentDispatch?.agent.model)),
@@ -93,14 +95,20 @@ export async function _gatherContextSources(
     getLiveForestContext(effectiveText),
     getRelevantFacts(supabase, effectiveText),  // ELLIE-967: Tier 2 fact retrieval
     getRelatedKnowledge(effectiveText, { limit: 5 }),  // ELLIE-1428 Phase 2: semantic edge context
+    getScopedForestContext(effectiveText, activeAgent, { limit: 8, workItemId: workItemId }),  // ELLIE-1428 Phase 3: scoped Forest context
   ]);
   // ELLIE-967: Merge Tier 2 conversation facts into structured context
   const structuredContext = factsContext ? [_structuredBase, factsContext].filter(Boolean).join("\n\n") : _structuredBase;
 
   // ELLIE-1428 Phase 2: Merge semantic edge context
-  const finalStructuredContext = relatedKnowledge
+  const mergedStructuredContext = relatedKnowledge
     ? [structuredContext, relatedKnowledge].filter(Boolean).join("\n\n")
     : structuredContext;
+
+  // ELLIE-1428 Phase 3: Merge scoped Forest knowledge
+  const finalStructuredContext = scopedForest
+    ? [mergedStructuredContext, scopedForest].filter(Boolean).join("\n\n")
+    : mergedStructuredContext;
 
   // ELLIE-1401: Log context build breakdown for coordinator path
   const contextSections = [
@@ -114,6 +122,7 @@ export async function _gatherContextSources(
     { label: "queue-context", present: !!queueContext, chars: (queueContext as string)?.length || 0 },
     { label: "live-forest", present: !!liveForest?.awareness, chars: liveForest?.awareness?.length || 0 },
     { label: "related-knowledge", present: !!relatedKnowledge, chars: (relatedKnowledge as string)?.length || 0 },
+    { label: "scoped-forest", present: !!scopedForest, chars: (scopedForest as string)?.length || 0 },
   ];
   const { log } = await import("./logger.ts");
   const pipelineLogger = log.child("context-build");

@@ -153,6 +153,8 @@ import {
 import {
   getAgentStructuredContext, getAgentMemoryContext, getMaxMemoriesForModel,
   getLiveForestContext,
+  getScopedForestContext,   // NEW: Phase 3
+  resolveAgentScope,        // NEW: Phase 3
 } from "./context-sources.ts";
 import { getAgentMemorySummary } from "./agent-memory-store.ts";
 import {
@@ -1264,7 +1266,7 @@ async function _handleEllieChatMessage(
         let directForestCtx: string | undefined;
         try {
           const { searchElastic } = await import("./elasticsearch.ts");
-          const ctx = await searchElastic(text, { limit: 5, recencyBoost: true, channel: "ellie-chat" });
+          const ctx = await searchElastic(text, { limit: 5, recencyBoost: true, channel: "ellie-chat", scope_path: resolveAgentScope(directAgent) });
           if (ctx) directForestCtx = ctx;
         } catch { /* ES context is non-fatal */ }
 
@@ -1276,12 +1278,19 @@ async function _handleEllieChatMessage(
           if (related) directRelatedCtx = related;
         } catch { /* non-fatal */ }
 
+        // ELLIE-1428 Phase 3: Scoped Forest context for direct chat
+        let directScopedForestCtx: string | undefined;
+        try {
+          const scopedCtx = await getScopedForestContext(text, directAgent, { limit: 8 });
+          if (scopedCtx) directScopedForestCtx = scopedCtx;
+        } catch { /* non-fatal */ }
+
         const prompt = buildDirectPrompt({
           agent: directAgent,
           message: text,
           conversationHistory,
           workingMemorySummary: wmSummary,
-          forestContext: [directForestCtx, directRelatedCtx].filter(Boolean).join("\n\n") || undefined,
+          forestContext: [directForestCtx, directRelatedCtx, directScopedForestCtx].filter(Boolean).join("\n\n") || undefined,
           crossThreadAwareness: crossThreadCtx,
           profileContext: profileCtx,
           relationshipContext: relationshipCtx,
