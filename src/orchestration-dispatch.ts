@@ -30,6 +30,7 @@ import { recordUsage, shouldBlock } from "./creature-cost-tracker.ts";
 import { startCreature, failCreature, completeCreature, dispatchPushCreature, writeJobCompletionMetric } from "../../ellie-forest/src/index";
 import { postCreatureEvent, postJobEvent } from "./channels/discord/observation.ts";
 import { RELAY_BASE_URL } from "./relay-config.ts";
+import { persistCreatureFindings } from "./creature-findings.ts";
 import { logToolUsage } from "./tool-usage-audit.ts";
 import {
   spawnSession,
@@ -525,6 +526,21 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
         work_item_id: workItemId,
       }).catch(err =>
         logger.warn("completeCreature failed (non-fatal)", { creature_id: sessionIds.creature_id, err: err.message })
+      );
+      // ELLIE-1428 Phase 2: Auto-persist creature findings to Forest
+      persistCreatureFindings({
+        creatureId: sessionIds.creature_id,
+        treeId: sessionIds.tree_id,
+        entityId: sessionIds.entity_id,
+        result: {
+          response_preview: responsePreview,
+          duration_ms: durationMs,
+          work_item_id: workItemId,
+        },
+        agentName: agentType,
+        workItemId,
+      }).catch(err =>
+        logger.warn("persistCreatureFindings failed (non-fatal)", { err: err instanceof Error ? err.message : String(err) })
       );
       // ELLIE-442: Post completed event to #creature-log
       postCreatureEvent("completed", { agentType, workItemId, durationMs, responsePreview });
