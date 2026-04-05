@@ -77,12 +77,14 @@ export async function graduateMemories(sb: SupabaseClient): Promise<number> {
       await sb.from("memory").update({ metadata: graduatingMeta }).eq("id", fact.id);
 
       // Write to Forest — scope_path "2" = Projects root so it appears in the knowledge tree
+      // Preserve original created_at so timeline is accurate
       await writeMemory({
         content: fact.content,
         type: 'fact',
         scope_path: '2',
         confidence: 0.7,
         source_agent_species: fact.source_agent ?? undefined,
+        created_at: fact.created_at,
         metadata: {
           graduated_from: 'supabase',
           supabase_id: fact.id,
