@@ -1260,11 +1260,20 @@ async function _handleEllieChatMessage(
           }
         }
 
+        // ELLIE-1428: Load Forest + memory context for direct chat (same ES path as coordinated mode)
+        let directForestCtx: string | undefined;
+        try {
+          const { searchElastic } = await import("./elasticsearch.ts");
+          const ctx = await searchElastic(text, { limit: 5, recencyBoost: true, channel: "ellie-chat" });
+          if (ctx) directForestCtx = ctx;
+        } catch { /* ES context is non-fatal */ }
+
         const prompt = buildDirectPrompt({
           agent: directAgent,
           message: text,
           conversationHistory,
           workingMemorySummary: wmSummary,
+          forestContext: directForestCtx,
           crossThreadAwareness: crossThreadCtx,
           profileContext: profileCtx,
           relationshipContext: relationshipCtx,

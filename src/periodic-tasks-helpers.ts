@@ -78,7 +78,7 @@ export async function graduateMemories(sb: SupabaseClient): Promise<number> {
 
       // Write to Forest — scope_path "2" = Projects root so it appears in the knowledge tree
       // Preserve original created_at so timeline is accurate
-      await writeMemory({
+      const forestMemory = await writeMemory({
         content: fact.content,
         type: 'fact',
         scope_path: '2',
@@ -91,6 +91,19 @@ export async function graduateMemories(sb: SupabaseClient): Promise<number> {
           graduated_at: new Date().toISOString(),
         },
       });
+
+      // Index into ES so context builder picks it up immediately
+      try {
+        const { indexMemory, classifyDomain } = await import("./elasticsearch.ts");
+        await indexMemory({
+          id: forestMemory.id,
+          content: fact.content,
+          type: 'fact',
+          domain: classifyDomain(fact.content),
+          created_at: fact.created_at,
+          metadata: { source: 'shared_memories', scope_path: '2' },
+        });
+      } catch { /* ES indexing is non-fatal */ }
 
       // Mark as fully graduated in Supabase
       await sb.from("memory").update({
