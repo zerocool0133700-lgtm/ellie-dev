@@ -263,6 +263,13 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     if (refreshed > 0) logger.info(`Refreshed weights for ${refreshed} memories`);
   }, 60 * 60_000, "weight-refresh");
 
+  // ELLIE-1428: Deep classify ambiguous memories (every 30 minutes)
+  periodicTask(async () => {
+    const { processDeepClassificationBatch } = await import("./deep-classifier.ts");
+    const classified = await processDeepClassificationBatch({ limit: 50 });
+    if (classified > 0) logger.info(`Deep-classified ${classified} memories`);
+  }, 30 * 60_000, "deep-classification");
+
   // Working memory idle archive — archive sessions idle >24h (every 2 hours — ELLIE-540)
   periodicTask(async () => {
     const { archiveIdleWorkingMemory } = await import("./working-memory.ts");
