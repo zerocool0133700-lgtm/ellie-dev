@@ -1471,8 +1471,28 @@ async function _handleEllieChatMessage(
           }
 
           const coordResponse = coordinatorResult.response || "I completed the request but didn't generate a response. Please try again.";
+
+          // ELLIE-1462: Extract contributing agents from coordinator dispatch envelopes
+          const contributors = coordinatorResult.envelopes
+            ? [...new Set(
+                coordinatorResult.envelopes
+                  .filter((e: any) => e.type === "specialist" && e.status === "completed")
+                  .map((e: any) => e.agent as string)
+              )]
+            : [];
+
           // ELLIE-1097: Use deliverResponse instead of raw ws.send — buffers on disconnect
-          const memoryId = await saveMessage("assistant", coordResponse, {}, "ellie-chat", ecUserId, undefined, undefined, effectiveThreadId || undefined);
+          const memoryId = await saveMessage(
+            "assistant", coordResponse,
+            {
+              agent: "ellie",
+              ...(contributors.length > 0 ? { contributors } : {}),
+              ...(effectiveThreadId ? { thread_id: effectiveThreadId } : {}),
+            },
+            "ellie-chat", ecUserId,
+            undefined, "system",
+            effectiveThreadId || undefined,
+          );
           const responsePayload = {
             type: "response",
             text: coordResponse,
