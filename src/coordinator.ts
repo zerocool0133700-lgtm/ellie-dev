@@ -531,6 +531,13 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
         const input = tool.input as unknown as DispatchAgentInput;
         const toolId = tool.id as string;
 
+        // Guard against missing required fields
+        if (!input.task || !input.agent) {
+          const errorMsg = `dispatch_agent requires both "agent" and "task" fields. Got agent="${input.agent}", task="${input.task}"`;
+          logger.warn("Dispatch missing required fields", { agent: input.agent, task: input.task });
+          return { toolId, result: errorMsg };
+        }
+
         // Validate agent is in roster
         if (!effectiveRoster.includes(input.agent)) {
           const errorMsg = `Agent "${input.agent}" is not in the roster. Available: ${effectiveRoster.join(", ")}`;
