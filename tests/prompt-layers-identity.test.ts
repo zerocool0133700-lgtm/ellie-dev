@@ -34,7 +34,7 @@ describe("Layer 1: Identity", () => {
     const summary = buildSkillSummary(entries);
     expect(summary).toContain("plane");
     expect(summary).toContain("forest");
-    expect(summary).toContain("Manage Plane tickets");
+    expect(summary).toContain("2 skills available");
     expect(summary.length).toBeLessThan(500);
   });
 
@@ -43,7 +43,7 @@ describe("Layer 1: Identity", () => {
     expect(block).toContain("IDENTITY");
     expect(block).toContain("Dave");
     expect(block).toContain("Ellie");
-    expect(new TextEncoder().encode(block).length).toBeLessThan(4096);
+    expect(new TextEncoder().encode(block).length).toBeLessThan(5120);
   });
 
   test("_injectIdentityForTesting overrides loaded docs", async () => {

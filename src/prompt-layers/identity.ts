@@ -90,9 +90,9 @@ export async function loadSkillRegistry(): Promise<SkillRegistryEntry[]> {
  * Pure function — no I/O.
  */
 export function buildSkillSummary(entries: SkillRegistryEntry[]): string {
-  return entries
-    .map((e) => `- **${e.name}**: ${e.description}`)
-    .join("\n");
+  if (entries.length === 0) return "No skills loaded.";
+  const names = entries.map(e => e.name).join(", ");
+  return `I have ${entries.length} skills available: ${names}.\nFor details on any skill, I can load the full reference.`;
 }
 
 // ── Identity document loader ───────────────────────────────────────────────────
@@ -135,9 +135,10 @@ function extractSoulDigest(soul: string): string {
   for (const line of lines) {
     if (!started && line.startsWith("## Core Identity")) {
       started = true;
+      continue; // skip the heading itself
     }
     if (started) {
-      if (line.trim() === "---" && result.length > 2) break; // stop at next section divider
+      if (line.startsWith("## ")) break; // stop at next section heading
       result.push(line);
     }
   }
@@ -170,10 +171,10 @@ export async function renderIdentityBlock(): Promise<string> {
     "",
     "### Our Partnership",
     docs.relationship.trim(),
+    "",
+    "### Skills",
+    docs.skillSummary.trim(),
   ];
-
-  // Skills are injected by Layer 3 (Channel A) — not duplicated here
-  // to keep this block compact and under 4KB.
 
   return sections.join("\n");
 }
