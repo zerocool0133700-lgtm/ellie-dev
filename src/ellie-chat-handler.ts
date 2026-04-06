@@ -1231,19 +1231,23 @@ async function _handleEllieChatMessage(
             profileCtx = await readFile(join(process.cwd(), "config", "profile.md"), "utf-8");
           } catch { /* profile unavailable */ }
 
-          // Fetch recent memories about Dave from Supabase
-          if (supabase) {
-            try {
-              const { data: memories } = await supabase
-                .from("memory")
-                .select("content, category")
-                .in("category", ["fact", "goal", "preference"])
-                .order("created_at", { ascending: false })
-                .limit(20);
-              if (memories && memories.length > 0) {
-                relationshipCtx = memories.map((m: { content: string; category: string }) => `- [${m.category}] ${m.content}`).join("\n");
-              }
-            } catch { /* memories unavailable */ }
+          // ELLIE-1428: Fetch relationship context from Forest (scoped, weighted)
+          // Pull from Y/ (Dave's personal tree) and E/4/1 (Ellie's knowledge of Dave)
+          try {
+            const { readMemories: readForestMemories } = await import("../../ellie-forest/src/index.ts");
+            const [daveCtx, ellieKnowsDave] = await Promise.all([
+              readForestMemories({ query: "Dave values family identity how he thinks", scope_path: "Y", match_count: 10, match_threshold: 0.3 }),
+              readForestMemories({ query: "Dave relationship preferences working style", scope_path: "E/4/1", match_count: 5, match_threshold: 0.3 }),
+            ]);
+            const allCtx = [...daveCtx, ...ellieKnowsDave];
+            if (allCtx.length > 0) {
+              relationshipCtx = allCtx
+                .sort((a: any, b: any) => (b.weight || 0) - (a.weight || 0))
+                .slice(0, 15)
+                .map((m: any) => `- [${m.content_tier || m.type}, ${m.scope_path || "?"}] ${m.content.slice(0, 200)}`)
+                .join("\n");
+            }
+          } catch { /* Forest context non-fatal */ }
 
             // Fetch the most recent conversation summary from the General thread
             // so Ellie knows what was just being discussed before the thread switch
