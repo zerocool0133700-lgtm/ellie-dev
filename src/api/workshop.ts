@@ -186,14 +186,95 @@ export async function handleDebrief(
     ts: Date.now(),
   });
 
-  logger.info({ memoryId }, "Workshop debrief posted to Ellie Chat");
+  // Write structured knowledge directly to Forest — no LLM extraction needed
+  const forestWrites = await plantKnowledge(debrief);
+
+  logger.info({ memoryId, forestWrites }, "Workshop debrief posted and planted");
 
   return {
     status: 200,
     body: {
       ok: true,
       memoryId,
-      message: "Debrief posted to Ellie Chat",
+      forestWrites,
+      message: "Debrief posted to Ellie Chat and planted in Forest",
     },
   };
+}
+
+// ── Forest knowledge planting ───────────────────────────────
+
+const BRIDGE_URL = "http://localhost:3001/api/bridge/write";
+
+async function writeToBridge(content: string, type: string, scopePath: string, workItemId?: string): Promise<boolean> {
+  try {
+    const key = process.env.BRIDGE_KEY || "bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e740f6577a";
+    const resp = await fetch(BRIDGE_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-bridge-key": key },
+      body: JSON.stringify({
+        content,
+        type,
+        scope_path: scopePath,
+        confidence: 0.85,
+        metadata: {
+          source: "workshop-debrief",
+          ...(workItemId ? { work_item_id: workItemId } : {}),
+        },
+      }),
+    });
+    return resp.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Plant structured debrief knowledge directly into the Forest.
+ * - Each decision → decision memory at each scope
+ * - Summary → fact memory at primary scope
+ * - Doc references → fact memories at primary scope
+ * Returns the number of successful writes.
+ */
+async function plantKnowledge(debrief: WorkshopDebrief): Promise<number> {
+  const primaryScope = debrief.scopes[0] || "2";
+  let writes = 0;
+
+  // Plant summary as a fact
+  const summaryContent = `[Workshop] ${debrief.session}: ${debrief.summary}`;
+  if (await writeToBridge(summaryContent, "fact", primaryScope, debrief.work_item_id)) {
+    writes++;
+  }
+
+  // Plant each decision
+  for (const decision of debrief.decisions) {
+    const content = `[Workshop] ${debrief.session} — ${decision}`;
+    // Write to each scope the debrief touches
+    for (const scope of debrief.scopes) {
+      if (await writeToBridge(content, "decision", scope, debrief.work_item_id)) {
+        writes++;
+      }
+    }
+  }
+
+  // Plant doc references as facts at primary scope
+  for (const doc of debrief.docs_created) {
+    const content = `[Workshop] New doc: ${doc} (from session: ${debrief.session})`;
+    if (await writeToBridge(content, "fact", primaryScope, debrief.work_item_id)) {
+      writes++;
+    }
+  }
+
+  // Plant open questions as hypotheses
+  if (debrief.open_questions) {
+    for (const q of debrief.open_questions) {
+      const content = `[Workshop] Open question from ${debrief.session}: ${q}`;
+      if (await writeToBridge(content, "hypothesis", primaryScope, debrief.work_item_id)) {
+        writes++;
+      }
+    }
+  }
+
+  logger.info({ writes, decisions: debrief.decisions.length, docs: debrief.docs_created.length }, "Forest knowledge planted");
+  return writes;
 }
