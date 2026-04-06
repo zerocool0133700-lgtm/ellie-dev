@@ -1497,6 +1497,7 @@ async function _handleEllieChatMessage(
             type: "response",
             text: coordResponse,
             agent: "ellie",
+            contributors: contributors.length > 0 ? contributors : undefined, // ELLIE-1466: include contributor list in broadcast
             thread_id: effectiveThreadId,
             memoryId: memoryId || undefined,
             ts: Date.now(),
