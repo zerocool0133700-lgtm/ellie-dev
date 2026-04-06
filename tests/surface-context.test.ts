@@ -25,6 +25,7 @@ describe("SurfaceContext renderer registry", () => {
 
     const rendered = renderSurfaceContext(ctx);
 
+    expect(rendered).toContain("## SURFACE CONTEXT");
     expect(rendered).toContain("/knowledge");
     expect(rendered).toContain("Tree");
     expect(rendered).toContain("memory");
@@ -51,7 +52,7 @@ describe("SurfaceContext renderer registry", () => {
       surface_origin: "panel-test",
     };
     const rendered = renderSurfaceContext(ctx as SurfaceContext);
-    expect(rendered).toBe("CUSTOM: panel-test");
+    expect(rendered).toBe("## SURFACE CONTEXT\nCUSTOM: panel-test");
   });
 
   test("renders knowledge-river context with folder and ingestion in progress", () => {
@@ -77,6 +78,7 @@ describe("SurfaceContext renderer registry", () => {
 
     const rendered = renderSurfaceContext(ctx);
 
+    expect(rendered).toContain("## SURFACE CONTEXT");
     expect(rendered).toContain("River");
     expect(rendered).toContain("research/quantum");
     expect(rendered).toContain("12");
@@ -109,6 +111,7 @@ describe("SurfaceContext renderer registry", () => {
     };
 
     const rendered = renderSurfaceContext(ctx);
+    expect(rendered).toContain("## SURFACE CONTEXT");
     expect(rendered).toContain("No folder selected");
     expect(rendered).not.toContain("files queued");
   });
@@ -138,5 +141,20 @@ describe("Surface context injection in layered prompt", () => {
     expect(result.surfaceContext).toContain("## SURFACE CONTEXT");
     expect(result.surfaceContext).toContain("Tree tab");
     expect(result.surfaceContext).toContain("memory");
+  });
+
+  test("surfaceContext increases totalBytes when present", async () => {
+    const ctx: KnowledgeTreeContext = {
+      surface_id: "knowledge-tree",
+      surface_origin: "panel-test",
+      selection: { scope_path: "2/1/3", scope_name: "memory", memory_count: 432 },
+      forest_summary: { total_scopes: 163, total_memories: 4274 },
+    };
+    const baseline = await buildLayeredContext("hello", "ellie-chat", "ellie", null);
+    const withCtx = await buildLayeredContext("hello", "ellie-chat", "ellie", null, undefined, ctx);
+    expect(withCtx.totalBytes).toBeGreaterThan(baseline.totalBytes);
+    expect(withCtx.totalBytes - baseline.totalBytes).toBe(
+      new TextEncoder().encode(withCtx.surfaceContext).length
+    );
   });
 });

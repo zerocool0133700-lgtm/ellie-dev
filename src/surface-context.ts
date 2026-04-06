@@ -68,7 +68,8 @@ export function registerSurfaceRenderer<T extends SurfaceContext>(
 
 export function renderSurfaceContext(ctx: SurfaceContext): string {
   const renderer = renderers.get(ctx.surface_id);
-  return renderer ? renderer(ctx) : "";
+  if (!renderer) return "";
+  return `## SURFACE CONTEXT\n${renderer(ctx)}`;
 }
 
 // ── Built-in renderers ───────────────────────────────────────

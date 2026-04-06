@@ -911,6 +911,13 @@ export async function buildPrompt(
       content: layeredContext.awareness,
       priority: 2, // essential — current state
     });
+    if (layeredContext.surfaceContext) {
+      sections.push({
+        label: "layered-surface-context",
+        content: layeredContext.surfaceContext,
+        priority: 2, // essential — what the user is currently looking at
+      });
+    }
     if (layeredContext.knowledge) {
       sections.push({
         label: "layered-knowledge",

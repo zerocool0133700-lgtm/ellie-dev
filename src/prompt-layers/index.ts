@@ -56,9 +56,7 @@ export async function buildLayeredContext(
   const knowledge = renderKnowledge(knowledgeResult);
 
   // ELLIE-1455: Render surface context if present
-  const surfaceContextRendered = surfaceContext
-    ? `## SURFACE CONTEXT\n${renderSurfaceContext(surfaceContext)}`
-    : "";
+  const surfaceContextRendered = surfaceContext ? renderSurfaceContext(surfaceContext) : "";
 
   // 3. Check total budget
   const encoder = new TextEncoder();
