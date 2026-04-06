@@ -1249,8 +1249,8 @@ async function _handleEllieChatMessage(
             }
           } catch { /* Forest context non-fatal */ }
 
-            // Fetch the most recent conversation summary from the General thread
-            // so Ellie knows what was just being discussed before the thread switch
+          // Fetch the most recent conversation summary from the General thread
+          if (supabase) {
             try {
               const { data: recentConvos } = await supabase
                 .from("conversations")
