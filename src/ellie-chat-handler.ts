@@ -1328,7 +1328,7 @@ async function _handleEllieChatMessage(
         } catch { /* tag processing non-fatal */ }
 
         const memoryId = await saveMessage("assistant", processedResponse, { agent: directAgent, thread_id: effectiveThreadId }, "ellie-chat", ecUserId);
-        deliverResponse(ws, {
+        const directPayload = {
           type: "response",
           text: processedResponse,
           agent: directAgent,
@@ -1336,7 +1336,10 @@ async function _handleEllieChatMessage(
           memoryId: memoryId || undefined,
           ts: Date.now(),
           duration_ms: result.duration_ms,
-        }, ecUserId);
+        };
+        deliverResponse(ws, directPayload, ecUserId);
+        // ELLIE-1454: Also broadcast to all connected clients
+        broadcastToEllieChatClients(directPayload);
       } catch (err) {
         log.error("[direct-chat] Error", { error: String(err) });
         deliverResponse(ws, {
@@ -1470,7 +1473,7 @@ async function _handleEllieChatMessage(
           const coordResponse = coordinatorResult.response || "I completed the request but didn't generate a response. Please try again.";
           // ELLIE-1097: Use deliverResponse instead of raw ws.send — buffers on disconnect
           const memoryId = await saveMessage("assistant", coordResponse, {}, "ellie-chat", ecUserId);
-          deliverResponse(ws, {
+          const responsePayload = {
             type: "response",
             text: coordResponse,
             agent: "ellie",
@@ -1478,7 +1481,10 @@ async function _handleEllieChatMessage(
             memoryId: memoryId || undefined,
             ts: Date.now(),
             duration_ms: coordinatorResult.durationMs,
-          }, ecUserId);
+          };
+          deliverResponse(ws, responsePayload, ecUserId);
+          // ELLIE-1454: Also broadcast to all connected clients so any open tab gets the response
+          broadcastToEllieChatClients(responsePayload);
           log.info(
             `[coordinator] ellie-chat complete — iterations=${coordinatorResult.loopIterations} ` +
             `tokens_in=${coordinatorResult.totalTokensIn} tokens_out=${coordinatorResult.totalTokensOut} ` +
