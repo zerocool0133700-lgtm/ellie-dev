@@ -3943,6 +3943,28 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Workshop debrief endpoint (ELLIE-1454)
+  if (url.pathname === "/api/workshop/debrief" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body);
+        const headers: Record<string, string | undefined> = {
+          "x-bridge-key": req.headers["x-bridge-key"] as string | undefined,
+        };
+        const { handleDebrief } = await import("./api/workshop.ts");
+        const result = await handleDebrief(data, headers);
+        res.writeHead(result.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result.body));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
+    return;
+  }
+
   // Work session endpoints
   if (url.pathname.startsWith("/api/work-session/") && req.method === "POST") {
     let body = "";
