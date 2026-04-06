@@ -65,6 +65,7 @@ import { capturePrompt } from "./api/agent-prompts.ts";
 import type { FoundationRegistry } from "./foundation-registry.ts";
 import { parseFoundationCommand, executeFoundationCommand } from "./foundation-commands.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
+import type { SurfaceContext } from "./surface-context.ts";
 
 const logger = log.child("ellie-chat");
 
@@ -227,10 +228,11 @@ export async function handleEllieChatMessage(
   abortSignal?: AbortSignal,
   replyTo?: { id: string; text: string; role: string; agent?: string }, // ELLIE-1090
   threadId?: string, // ELLIE-1374
+  surfaceContext?: SurfaceContext, // ELLIE-1455
 ): Promise<void> {
   // ELLIE-461: Top-level error boundary — any uncaught error gets a user-facing message
   try {
-    return await withTrace(async () => _handleEllieChatMessage(ws, text, phoneMode, image, channelId, clientId, mode, abortSignal, replyTo, threadId));
+    return await withTrace(async () => _handleEllieChatMessage(ws, text, phoneMode, image, channelId, clientId, mode, abortSignal, replyTo, threadId, surfaceContext));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Don't send error to user for aborted dispatches — they closed the connection
@@ -258,6 +260,7 @@ async function _handleEllieChatMessage(
   abortSignal?: AbortSignal,
   replyTo?: { id: string; text: string; role: string; agent?: string }, // ELLIE-1090
   threadId?: string, // ELLIE-1374
+  surfaceContext?: SurfaceContext, // ELLIE-1455
 ): Promise<void> {
   const { bot, anthropic, supabase } = getRelayDeps();
 
@@ -961,7 +964,7 @@ async function _handleEllieChatMessage(
     if (useLayeredPrompt) {
       try {
         const { gatherLayeredContext } = await import("./ellie-chat-pipeline");
-        layeredContext = await gatherLayeredContext(text, channelId || "ellie-chat", ecRouteAgent || "ellie", supabase);
+        layeredContext = await gatherLayeredContext(text, channelId || "ellie-chat", ecRouteAgent || "ellie", supabase, surfaceContext);
       } catch (err) {
         const { log } = await import("./logger.ts");
         log.child("layered-prompt").warn({ err }, "Layered prompt failed, falling back to standard pipeline");
