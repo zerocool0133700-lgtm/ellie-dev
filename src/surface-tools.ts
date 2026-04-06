@@ -10,6 +10,8 @@
  * See: docs/superpowers/specs/2026-04-06-knowledge-surface-and-ingestion-design.md
  */
 
+import type Anthropic from "@anthropic-ai/sdk";
+
 export type SurfaceToolName =
   | "propose_create_folder"
   | "propose_move_folder"
@@ -23,14 +25,28 @@ export interface SurfaceAction {
   proposal_id: string;
 }
 
-const AUTO_APPLY_TOOLS: ReadonlySet<SurfaceToolName> = new Set([
-  "propose_select_folder",
-  "propose_switch_tab",
-  "highlight_drop_zone",
-]);
+/**
+ * Tab identifiers used by the /knowledge page.
+ *
+ * Note these are intentionally shorter than SurfaceId ("tree" vs "knowledge-tree").
+ * SurfaceId is the globally-qualified context identifier; KnowledgeTab is the
+ * local UI tab name. Curation is a tab that does not yet have a surface context
+ * renderer — switching to it is allowed, but Ellie will see an empty context on
+ * the next turn (safe degradation).
+ */
+export const KNOWLEDGE_TABS = ["tree", "river", "graph", "canvas", "curation"] as const;
+export type KnowledgeTab = typeof KNOWLEDGE_TABS[number];
+
+const TOOL_CLASSIFICATION: Record<SurfaceToolName, "auto" | "mutating"> = {
+  propose_create_folder: "mutating",
+  propose_move_folder: "mutating",
+  propose_select_folder: "auto",
+  propose_switch_tab: "auto",
+  highlight_drop_zone: "auto",
+};
 
 export function isAutoApply(tool: SurfaceToolName): boolean {
-  return AUTO_APPLY_TOOLS.has(tool);
+  return TOOL_CLASSIFICATION[tool] === "auto";
 }
 
 export function buildSurfaceAction(
@@ -40,17 +56,21 @@ export function buildSurfaceAction(
   return {
     tool,
     args,
-    proposal_id: `prop_${crypto.randomUUID().slice(0, 8)}`,
+    proposal_id: `prop_${crypto.randomUUID()}`,
   };
 }
 
-// Tool definitions in the format expected by the coordinator/tool registry.
-// Each tool's "execute" function returns a SurfaceAction (no side effects).
-export const SURFACE_TOOL_DEFINITIONS = [
+/**
+ * Tool definitions in the format expected by the Anthropic SDK and the coordinator registry.
+ *
+ * Each tool is an Anthropic.Tool with no execute closure. Task 6 will dispatch via a
+ * switch on tool name. buildSurfaceAction and isAutoApply are the dispatch helpers.
+ */
+export const SURFACE_TOOL_DEFINITIONS: Anthropic.Tool[] = [
   {
     name: "propose_create_folder",
     description: "Propose creating one or more new folders in the user's River vault. Use when the user describes content they want to organize. The user must accept the proposal before any folders are actually created.",
-    inputSchema: {
+    input_schema: {
       type: "object",
       properties: {
         paths: {
@@ -65,13 +85,11 @@ export const SURFACE_TOOL_DEFINITIONS = [
       },
       required: ["paths", "reason"],
     },
-    execute: (args: Record<string, unknown>): SurfaceAction =>
-      buildSurfaceAction("propose_create_folder", args),
   },
   {
     name: "propose_move_folder",
     description: "Propose moving a folder to a new location in the River vault. The user must accept before the move happens.",
-    inputSchema: {
+    input_schema: {
       type: "object",
       properties: {
         from: { type: "string", description: "Current folder path" },
@@ -80,49 +98,41 @@ export const SURFACE_TOOL_DEFINITIONS = [
       },
       required: ["from", "to", "reason"],
     },
-    execute: (args: Record<string, unknown>): SurfaceAction =>
-      buildSurfaceAction("propose_move_folder", args),
   },
   {
     name: "propose_select_folder",
     description: "Switch the user's selected folder in the panel. Auto-applied (no accept needed). Use to navigate the user to a folder that's relevant to the conversation.",
-    inputSchema: {
+    input_schema: {
       type: "object",
       properties: {
         path: { type: "string", description: "Folder path to select" },
       },
       required: ["path"],
     },
-    execute: (args: Record<string, unknown>): SurfaceAction =>
-      buildSurfaceAction("propose_select_folder", args),
   },
   {
     name: "propose_switch_tab",
     description: "Switch the active tab on /knowledge. Auto-applied.",
-    inputSchema: {
+    input_schema: {
       type: "object",
       properties: {
         tab: {
           type: "string",
-          enum: ["tree", "river", "graph", "canvas", "curation"],
+          enum: [...KNOWLEDGE_TABS],
         },
       },
       required: ["tab"],
     },
-    execute: (args: Record<string, unknown>): SurfaceAction =>
-      buildSurfaceAction("propose_switch_tab", args),
   },
   {
     name: "highlight_drop_zone",
     description: "Auto-expand the ingestion drop zone in the River tab and lock the target folder. Use after the user accepts a folder structure proposal, when you're ready for them to drop files. Auto-applied.",
-    inputSchema: {
+    input_schema: {
       type: "object",
       properties: {
         target_folder: { type: "string" },
       },
       required: ["target_folder"],
     },
-    execute: (args: Record<string, unknown>): SurfaceAction =>
-      buildSurfaceAction("highlight_drop_zone", args),
   },
 ];

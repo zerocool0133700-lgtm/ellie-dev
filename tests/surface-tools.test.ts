@@ -34,4 +34,16 @@ describe("Surface tools", () => {
     const b = buildSurfaceAction("propose_create_folder", { paths: ["b/"], reason: "" });
     expect(a.proposal_id).not.toBe(b.proposal_id);
   });
+
+  test("SURFACE_TOOL_DEFINITIONS uses Anthropic SDK shape", async () => {
+    const { SURFACE_TOOL_DEFINITIONS } = await import("../src/surface-tools");
+    expect(SURFACE_TOOL_DEFINITIONS).toHaveLength(5);
+    for (const tool of SURFACE_TOOL_DEFINITIONS) {
+      expect(tool).toHaveProperty("name");
+      expect(tool).toHaveProperty("description");
+      expect(tool).toHaveProperty("input_schema");
+      expect(tool).not.toHaveProperty("inputSchema");
+      expect(tool).not.toHaveProperty("execute");
+    }
+  });
 });
