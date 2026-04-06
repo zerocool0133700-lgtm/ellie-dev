@@ -577,3 +577,127 @@ export function processMessageMode(
 
   return { mode: previousMode, changed: false, detection };
 }
+
+// ── Layered Mode Detection (LAYERED-PROMPT) ─────────────────
+// Maps the existing ContextMode system to the layered prompt's mode set.
+// Adds channel-awareness and personal/heartbeat modes.
+
+import type { LayeredMode, ModeAwarenessFilter } from "./prompt-layers/types";
+
+const PERSONAL_SIGNALS = [
+  /\b(?:georgia|wincy|phineas|family|daughter|wife|dog|school|brunch|weekend|vacation)\b/i,
+  /\b(?:how was your|how's the|how are the kids)\b/i,
+];
+
+const PLANNING_SIGNALS_LAYERED = [
+  /\b(?:roadmap|next steps|priorities|what should we|plan for|sprint)\b/i,
+  /\b(?:let'?s plan|prioritize|backlog|what'?s next)\b/i,
+];
+
+const CASUAL_SIGNALS = [
+  /^(?:hey|hi|hello|what'?s up|how'?s it going|good (?:morning|evening|afternoon))/i,
+  /^(?:yo|sup|howdy)/i,
+];
+
+const DEV_SIGNALS_LAYERED = [
+  /ELLIE-\d+/i,
+  /\b(?:bug|fix|deploy|merge|commit|branch|migration|schema|endpoint|API)\b/i,
+  /\b(?:relay|forest|dashboard|handler|pipeline|typescript|function|file)\b/i,
+];
+
+/**
+ * Detect the layered prompt mode from message + channel.
+ * Returns one of: voice-casual, dev-session, planning, personal, heartbeat
+ */
+export function detectLayeredMode(
+  message: string | null,
+  channel: string | null,
+): { mode: LayeredMode; signal: string } {
+  // No message = heartbeat tick
+  if (!message) {
+    return { mode: "heartbeat", signal: "no_message" };
+  }
+
+  const isVoiceChannel = channel === "voice" || channel === "phone";
+  const isCodeChannel = channel === "vscode" || channel === "claude-code";
+
+  // Code editor channels are always dev-session
+  if (isCodeChannel) {
+    return { mode: "dev-session", signal: `channel:${channel}` };
+  }
+
+  // Check for dev signals first (they override channel-based casual)
+  for (const pattern of DEV_SIGNALS_LAYERED) {
+    if (pattern.test(message)) {
+      return { mode: "dev-session", signal: pattern.source };
+    }
+  }
+
+  // Planning signals
+  for (const pattern of PLANNING_SIGNALS_LAYERED) {
+    if (pattern.test(message)) {
+      return { mode: "planning", signal: pattern.source };
+    }
+  }
+
+  // Personal signals
+  for (const pattern of PERSONAL_SIGNALS) {
+    if (pattern.test(message)) {
+      return { mode: "personal", signal: pattern.source };
+    }
+  }
+
+  // Voice channel without dev/planning signals = casual
+  if (isVoiceChannel) {
+    return { mode: "voice-casual", signal: "channel:voice" };
+  }
+
+  // Casual greetings
+  for (const pattern of CASUAL_SIGNALS) {
+    if (pattern.test(message)) {
+      return { mode: "voice-casual", signal: pattern.source };
+    }
+  }
+
+  // Default: dev-session (most conversations are dev work)
+  return { mode: "dev-session", signal: "default" };
+}
+
+/** Mode → awareness section filter mapping */
+export const MODE_AWARENESS_FILTERS: Record<LayeredMode, ModeAwarenessFilter> = {
+  "voice-casual": {
+    work: "none",
+    conversations: "last_only",
+    system: "incidents_only",
+    calendar: "next_only",
+    heartbeat: "none",
+  },
+  "dev-session": {
+    work: "full",
+    conversations: "open_threads",
+    system: "full",
+    calendar: "none",
+    heartbeat: "none",
+  },
+  "planning": {
+    work: "full",
+    conversations: "last_only",
+    system: "agent_status",
+    calendar: "count_only",
+    heartbeat: "overdue",
+  },
+  "personal": {
+    work: "none",
+    conversations: "last_only",
+    system: "none",
+    calendar: "next_only",
+    heartbeat: "none",
+  },
+  "heartbeat": {
+    work: "overdue_blocked",
+    conversations: "stale_threads",
+    system: "incidents_only",
+    calendar: "next_only",
+    heartbeat: "full",
+  },
+};
