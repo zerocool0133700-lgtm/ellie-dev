@@ -1,8 +1,10 @@
 # Knowledge Surface & Data Ingestion — Design Spec
 
 > **Date:** 2026-04-06
-> **Status:** Brainstormed
+> **Status:** Reviewed (Rev 2 — incorporates feedback from Ellie, Alan, Brian)
 > **Context:** Today, getting knowledge into Ellie's system means manually editing Obsidian files or writing Forest memories via the bridge API. There is no in-app way to upload a PDF, drop a Word doc, or have Ellie help organize where things go. This spec establishes both (1) a reusable pattern for embedding Ellie on any UI surface and (2) the first application of that pattern: a data ingestion control surface on `/knowledge` that converts uploaded files into River markdown and Forest semantic chunks.
+>
+> **The Two-Coin Vision:** The product must be excellent AND Ellie must be excellent. `/knowledge` is the embodiment of this — the surface is fully manual and beautifully usable on its own (coin one: product excellent), and Ellie is present as a contextually-aware, helpful layer on top (coin two: Ellie excellent). Both halves are first-class. The spec is structured so both halves can ship and be evaluated independently — but the design lives at the intersection.
 
 ## Problem
 
@@ -93,8 +95,12 @@ defineProps<{
 **Connection model:**
 - Uses the same WebSocket as `/ellie-chat` (`/ws/ellie-chat`) — single shared connection
 - Sends `surface_context` field on every outgoing message
-- Shares the same active thread by default (so a conversation on `/ellie-chat` continues on `/knowledge`)
-- Thread selector available in the panel header (small dropdown) for users who want a separate conversation
+- **Default to a surface-scoped thread, NOT the main chat thread.** Each surface gets its own auto-created thread on first use, named after the surface (e.g., `knowledge-river`, `knowledge-tree`). This means surface actions and proposals never bleed into `/ellie-chat`.
+- Thread selector available in the panel header for users who want to switch threads (e.g., share a conversation across surfaces deliberately).
+- The `surface_origin` field is included on every outgoing message as a redundant safeguard: `{ surface_id, surface_origin: 'knowledge-river-panel' }`. The relay tags response messages with the same field, and clients filter by it. So even if a user moves the panel's thread to the main chat thread, surface action cards only render in panels that match the origin.
+
+**Why surface-scoped threads:**
+The shared-thread model creates a subtle bug: a surface action sent on the main chat thread arrives at `/ellie-chat` with no action handlers, leaving an orphaned proposal. Surface-scoped threads eliminate the bug entirely. Users who *want* a cross-surface conversation can manually select the same thread in both places — the system supports it, just doesn't default to it.
 
 **Composes existing infrastructure:**
 - `useEllieChat()` for messages, send, thread state, WebSocket
@@ -152,9 +158,11 @@ A new tool group registered for Ellie when the active message has `surface_conte
 |---|---|---|
 | `propose_create_folder` | Suggest one or more new folders in River. | `paths: string[]`, `reason: string` |
 | `propose_move_folder` | Suggest moving a folder. | `from: string`, `to: string`, `reason: string` |
-| `propose_select_folder` | Switch the user's selected folder. | `path: string` |
-| `propose_switch_tab` | Switch tabs within `/knowledge`. | `tab: "tree" \| "river" \| "graph" \| "canvas" \| "curation"` |
-| `propose_ingest_files` | Prime the user that the drop zone is ready (no upload, just guidance). | `target_folder: string`, `expected_count?: number` |
+| `propose_select_folder` | Switch the user's selected folder. Auto-applied (read-only navigation). | `path: string` |
+| `propose_switch_tab` | Switch tabs within `/knowledge`. Auto-applied. | `tab: "tree" \| "river" \| "graph" \| "canvas" \| "curation"` |
+| `highlight_drop_zone` | Auto-expand Zone B and select the target folder, signaling "I'm ready for your files." Used when Ellie has just proposed structure that the user accepted, and now wants to invite the upload. Auto-applied (no accept needed). | `target_folder: string` |
+
+(Earlier draft had a `propose_ingest_files` tool — Brian's review correctly noted it was a no-op masquerading as an action. It's been replaced by `highlight_drop_zone`, which has real behavior: it auto-expands Zone B and locks the selected folder, so the user lands on a primed surface ready to receive files.)
 
 These are **proposal tools**, not action tools. They emit a `surface_action` payload attached to the response message metadata — they do NOT mutate state on the relay or in any database.
 
@@ -198,7 +206,50 @@ Ellie sees this ack on her next turn so she can acknowledge what landed and not 
 
 **Read-only operations don't need proposals:**
 
-If Ellie just wants to *show* something to the user (e.g., "let's open `research/`"), she calls `propose_select_folder` which the panel can apply *immediately* without an Accept button — because nothing is being mutated, only navigation. The `propose_*` naming is preserved for consistency, but the panel's action handler decides per-tool whether to require explicit acceptance. Mutating tools (`create_folder`, `move_folder`, `ingest_files`) always require explicit acceptance. Navigation tools (`select_folder`, `switch_tab`) apply immediately.
+If Ellie just wants to *show* something to the user (e.g., "let's open `research/`"), she calls `propose_select_folder` which the panel can apply *immediately* without an Accept button — because nothing is being mutated, only navigation. The `propose_*` naming is preserved for consistency, but the panel's action handler decides per-tool whether to require explicit acceptance. Mutating tools (`create_folder`, `move_folder`) always require explicit acceptance. Navigation tools (`select_folder`, `switch_tab`, `highlight_drop_zone`) apply immediately.
+
+### Proposal Preview Card — visual specification
+
+The card is the most important visual element in the conversational flow. It is a child component of `EllieSurfacePanel.vue` rendered inline with chat messages — directly below the message that contains the `surface_action`. Component name: `ProposalPreviewCard.vue`.
+
+**Structure:**
+
+```
+┌─────────────────────────────────────────────┐
+│ ┃ PROPOSAL — preview in River               │ ← header bar (cyan, 28px tall)
+│ ┃ Create folders                            │ ← short summary of action type
+├─────────────────────────────────────────────┤
+│ ☑ + research/quantum-computing/             │ ← per-item rows with checkboxes
+│ ☑ + research/quantum-computing/papers/      │   (default checked, click to toggle)
+│ ☑ + research/quantum-computing/notes/       │
+├─────────────────────────────────────────────┤
+│ Reason: Group quantum papers with separate  │ ← Ellie's reason (collapsible if long)
+│   spaces for source PDFs and notes.         │
+├─────────────────────────────────────────────┤
+│  [✓ Accept selected]   [✗ Reject all]       │ ← action buttons (cyan/gray)
+└─────────────────────────────────────────────┘
+```
+
+**Visual rules:**
+- 1px cyan dashed border around the entire card (matches Zone B drop zone styling for visual coherence)
+- Background: `bg-gray-900/40` (slightly darker than the chat bubble)
+- Width: matches chat message width, max 400px
+- Diff lines: `+` rows in green (`text-emerald-400`), `-` rows in red (`text-red-400`), `→` rows in cyan (move/rename)
+- Each row has a small icon prefix: 📁 for folder, 📄 for file, ⬆ for upload
+- Checkboxes on the left of each row for granular accept (default checked)
+- Footer buttons: cyan filled "Accept selected" (default action, primary), gray outline "Reject all" (secondary)
+- Disabled state during apply: button text becomes "Applying..." with a small spinner
+
+**Behavior:**
+- Card appears as soon as the message arrives, with all items checked
+- User can uncheck individual items
+- "Accept selected" is enabled when at least one item is checked
+- "Reject all" sends a `proposal_response` with `applied: false` and disables the card (greys out, replaces buttons with "Rejected" label)
+- "Accept selected" sends `proposal_response` with `applied: true` and `applied_subset` (the checked items). On success, the card becomes a "Done" state with a green check and the timestamp. On failure, the card shows an error and keeps the buttons enabled for retry.
+- Once a card is in Done or Rejected state, it stays in the chat scroll as a permanent record (just like a Workshop card) — scrolling back shows the historical decision.
+
+**Reusability:**
+The card is generic across surfaces. It takes a `surface_action` prop, infers the visual representation from the tool name (`propose_create_folder` → "Create folders" + folder icons; `propose_move_folder` → "Move folder" + before/after diff). New tools register a small renderer descriptor when they're added, so the card knows how to display them.
 
 ---
 
@@ -220,7 +271,7 @@ The River tab on `/knowledge` is restructured into two vertically-stacked zones.
 - Clicking a subfolder navigates into it
 - Newly-ingested files appear with a "NEW" badge for ~30 seconds after the `ingest_complete` event
 
-### Zone B — Ingest Drop Zone (bottom, ~40% of vertical space)
+### Zone B — Ingest Drop Zone (bottom, collapsible)
 
 **Contents:**
 - **Drop target** — full-width dashed cyan border, large enough to be an obvious drop target
@@ -235,6 +286,16 @@ The River tab on `/knowledge` is restructured into two vertically-stacked zones.
 - Multi-file: drop or pick up to 50 files at once (parallel processing, max 3 concurrent)
 - During upload, the zone transforms into a progress display (one row per file with status)
 - On completion, new files appear in Zone A with NEW badges + a Workshop card appears in the Ellie panel
+
+**Collapsible by default:**
+Most of the time the user is browsing River, not ingesting. Zone B starts as a thin 40px bar at the bottom that says `⬆ Ingest into {selected folder}` — the bar is the trigger surface. Three ways to expand:
+1. **Click the bar** → expands to ~40% of vertical space
+2. **Drag a file from anywhere over the page** → auto-expands as soon as the drag enters the window
+3. **Hover the bar for >300ms** → expands (forgiving for users who want to peek without clicking)
+
+When expanded, an arrow toggle in the bar collapses it back. Expanded state persists per-session in `sessionStorage` so a workflow that involves multiple uploads doesn't keep collapsing.
+
+When ingestion is in progress, the zone stays expanded until the last file completes, then collapses on a 5-second delay (giving the user time to read the result).
 
 **Selected folder relationship:**
 - Zone A's selected folder IS Zone B's upload target
@@ -279,22 +340,59 @@ ingestion_id: ing_abc123
 ---
 ```
 
+### Pipeline host
+
+**The pipeline runs on the relay (`ellie-dev`, port 3001), NOT in `ellie-home`.** The relay already owns the bridge API, the Forest write paths, the WebSocket protocol, and `document-ingestion.ts`. Putting `/api/knowledge/ingest` in `ellie-home` would mean either duplicating those capabilities or proxying back to the relay for every step. The clean split:
+- **`ellie-home`** (the dashboard): uploads files, renders progress, displays results. No pipeline logic.
+- **`ellie-dev`** (the relay): owns the entire ingestion pipeline. Receives multipart upload, runs the stages, emits WebSocket events.
+
+The `ellie-home` Nuxt server route (if any) is a thin pass-through that forwards multipart form data to the relay endpoint with the bridge key for authentication.
+
 ### Pipeline stages (per file)
 
-1. **Upload** — `POST /api/knowledge/ingest` (new endpoint in `ellie-home/server/api/knowledge/`)
+1. **Upload** — `POST http://localhost:3001/api/knowledge/ingest` (new endpoint on the **relay**, in `ellie-dev/src/api/knowledge.ts`)
    - Multipart form: `file`, `target_folder`, `proposal_id?` (optional, links to Ellie's proposal)
+   - Authenticated via `x-bridge-key` header
 2. **Validate** — check size (max 50 MB), check `canIngest(filename)` from `document-ingestion.ts`. Reject early with a clear error.
-3. **Archive raw** — write the original buffer to `uploads-archive/{target_folder}/{filename}`. Create the directory tree if needed.
-4. **Convert to MD** — call `ingestDocument(buffer, filename)` from `document-ingestion.ts` → returns `{ markdown, title, format, ... }`. For images, pass a `describeFn` that calls a vision model for caption.
-5. **Build frontmatter** — assemble the YAML with source link, ingested_at, ingestion_id.
-6. **Write to River** — `POST /api/bridge/river/write` with `operation: "create"`, `path: "{target_folder}/{slug}.md"`, content. The QMD reindex fires automatically as a side effect (BM25 index updated).
-7. **Plant Forest summary chunks** — call new helper `planIngestionSummary(markdown, title, target_folder)`:
-   - Splits markdown into ~500-token semantic chunks (paragraph-aware split)
-   - For long docs (>3 chunks), generates a top-level summary as one extra chunk via LLM call
-   - Each chunk is written to Forest via `bridgeWrite` with `type: "fact"`, metadata `{ river_doc_path, chunk_index, ingestion_id, target_folder }`
-   - **Scope assignment** — a helper `riverFolderToScope(target_folder)` returns the Forest scope path. v1 default: a single dedicated scope `2/river-ingest` (created at first ingestion) with all chunks tagged by `target_folder` for filtering. Future: per-folder sub-scopes (`2/river-ingest/research`, etc.) once the dedicated branch is established.
-8. **Update frontmatter** — write `forest_chunks: N` back into the MD (so the doc knows how many embeddings exist)
-9. **Notify** — emit WebSocket event `{ type: "ingest_complete", ingestion_id, river_path, forest_chunk_count, target_folder, file_name }`
+3. **Deduplication check** — compute `SHA-256` hash of the raw buffer. Check `uploads-archive/{target_folder}/.hashes.jsonl` (an append-only log) for an existing entry with the same hash AND same target folder. If duplicate, return early with `{ status: "duplicate", existing_path, existing_md_path }` and emit a chat message: "This file is already ingested at `{existing_md_path}`." Do NOT proceed with the rest of the pipeline. (Hash check is per-folder to allow the same file to live in multiple knowledge contexts intentionally.)
+4. **Archive raw** — write the original buffer to `uploads-archive/{target_folder}/{filename}`. If a file with the same name already exists (different hash), append a numeric suffix (`{filename}-2.pdf`). Append the hash + filename + ingested_at to `.hashes.jsonl` in the same directory.
+5. **Convert to MD** — call `ingestDocument(buffer, filename)` from `document-ingestion.ts` → returns `{ markdown, title, format, ... }`. For images, pass a `describeFn` that calls a vision model for caption.
+6. **Build frontmatter** — assemble the YAML with source link, ingested_at, ingestion_id, source_hash.
+7. **Write to River** — `POST /api/bridge/river/write` with `operation: "create"`, `path: "{target_folder}/{slug}.md"`, content. The QMD reindex fires asynchronously as a side effect.
+8. **Plant Forest summary chunks** — call new helper `planIngestionSummary(markdown, title, target_folder)`:
+   - **Scope resolution** — `riverFolderToScope(target_folder)` returns a per-folder Forest scope path: `2/river-ingest/{slug(target_folder)}`. The slug strips path separators (`research/quantum-computing` → `research-quantum-computing`). The scope is auto-created on first use via the bridge API. **This is critical** — Forest semantic search runs across a scope, so each top-level River folder gets its own scope to keep retrieval coherent.
+   - **Chunking algorithm** (pseudocode):
+     ```
+     function chunkMarkdown(md: string, targetTokens = 500): string[]:
+       paragraphs = split(md, /\n\n+/)
+       chunks = []
+       buffer = ""
+       for p in paragraphs:
+         if estimateTokens(buffer + p) > targetTokens AND buffer != "":
+           chunks.push(buffer.trim())
+           buffer = p
+         else:
+           buffer = buffer ? buffer + "\n\n" + p : p
+         # If a single paragraph exceeds targetTokens, hard-split on sentences
+         if estimateTokens(buffer) > targetTokens * 1.5:
+           sentences = splitSentences(buffer)
+           for s in sentences:
+             if estimateTokens(currentSentenceChunk + s) > targetTokens:
+               chunks.push(currentSentenceChunk.trim())
+               currentSentenceChunk = s
+             else:
+               currentSentenceChunk += " " + s
+           buffer = currentSentenceChunk
+       if buffer.trim():
+         chunks.push(buffer.trim())
+       return chunks
+     # estimateTokens(s) ≈ s.length / 4 (rough heuristic, no tokenizer dependency)
+     ```
+   - For long docs (>3 chunks), generate a top-level summary as an additional chunk via LLM call (Ellie or a small model). The summary chunk is written first (chunk_index 0) so it surfaces in semantic search.
+   - Each chunk is written to Forest via `bridgeWrite` with `type: "fact"`, metadata `{ river_doc_path, chunk_index, ingestion_id, target_folder, source_hash }`
+9. **Wait for QMD reindex ack** — before stage 10, wait for the QMD reindex to settle. The river bridge `write` endpoint already returns a `reindexed: true` flag. Hold for that signal (or a 2-second timeout) before stage 10 to avoid the race where the frontmatter update triggers a second reindex of stale content.
+10. **Update frontmatter** — write `forest_chunks: N` back into the MD via `POST /api/bridge/river/write` with `operation: "update"` and a frontmatter-only patch. This triggers a second reindex, but the content is now stable.
+11. **Notify** — emit WebSocket event `{ type: "ingest_complete", ingestion_id, river_path, forest_chunk_count, target_folder, file_name, source_hash }`
    - UI Zone A marks the file with NEW badge
    - Ellie panel renders a Workshop-style card with a permanent record
 
@@ -315,7 +413,8 @@ ingestion_id: ing_abc123
 - **Sidecar in a parallel tree** keeps River clean (only MD lives there, Obsidian and QMD don't get confused by binary files)
 - **Forest summary chunks** make the content semantically searchable through Ellie's normal Layer 3 retrieval
 - **Automatic, not manual** — every ingested file gets summarized for free
-- **Scope assignment for v1** — all chunks land in a dedicated `2/river-ingest` Forest scope, tagged with `target_folder` metadata for filtering. Future: per-folder sub-scopes and smart content-based scope detection.
+- **Per-folder Forest scopes** — each top-level River folder maps to its own Forest scope (`2/river-ingest/{folder_slug}`). This is necessary because Forest semantic search runs *across a scope*, so a flat dump would degrade retrieval coherence at volume. Per-folder scopes keep semantic neighborhoods clean. (Earlier draft used a flat scope with metadata tagging — Brian's review caught that this is incompatible with Forest's vector search model.)
+- **Deduplication via SHA-256** — same file dropped twice is detected and skipped, with a clear chat message pointing to the existing version.
 
 ---
 
@@ -383,9 +482,9 @@ ingestion_id: ing_abc123
 **Ellie's next turn:**
 > Done. The folders are ready. Drag your PDFs into the drop zone below — they'll go into `research/quantum-computing/papers/`. I'll convert them to markdown and make them searchable.
 
-→ Response includes `surface_action.tool: "propose_select_folder"` with `path: "research/quantum-computing/papers/"` (auto-applied since it's navigation, not mutation).
+→ Response includes two surface actions: `propose_select_folder` with `path: "research/quantum-computing/papers/"` (auto-applied since it's navigation), then `highlight_drop_zone` with the same target (auto-applied — Zone B expands to its full size, primed and ready).
 
-→ Zone B's headline updates to `⬆ INGEST INTO research/quantum-computing/papers/`
+→ Zone B's headline updates to `⬆ INGEST INTO research/quantum-computing/papers/` and the zone is expanded.
 
 **User drops 3 PDFs.**
 
@@ -406,9 +505,9 @@ ingestion_id: ing_abc123
 
 ## Phasing
 
-### Phase 1A: Ellie Surface Panel (reusable component)
+### Phase 1A: Ellie Surface Panel + first mount on /knowledge (Tree tab awareness)
 
-The foundation. Build the embedded chat panel as a reusable Vue component.
+The foundation, built and validated together. Per Alan's review: separating "build the panel" from "mount it somewhere" creates a validation gap — you can't tell if the panel works in isolation. Build it AND wire it onto Tree tab in one phase.
 
 - New component `app/components/ellie/EllieSurfacePanel.vue`
 - Composes existing `useEllieChat()` (no new WebSocket)
@@ -419,102 +518,116 @@ The foundation. Build the embedded chat panel as a reusable Vue component.
 - Input row with mic + send
 - Props: `surfaceId`, `surfaceContext`, `onAction`
 - Persists collapsed/position state per `surfaceId`
+- **Surface-scoped thread auto-creation** — first mount on a surface auto-creates and selects a thread named `{surface_id}-{tab_or_default}` (e.g., `knowledge-tree`)
+- Mount on `app/pages/knowledge.vue` as right sidebar
+- Provide `surfaceContext` for Tree tab (current scope, scope tree summary, memory counts)
+- Surface awareness banner updates as the user clicks around the Tree tab
+- **No actions yet** — Ellie can answer questions about the visible state but has no surface tools wired up. This phase validates the panel + context wiring end to end.
 
-**Acceptance:** Drop the component on any page, it works as a thin chat panel. No surface-specific behavior yet.
+**Acceptance:** Open `/knowledge`, see Ellie panel on the right, switch to Tree tab, click a scope, watch the surface awareness banner update. Ask Ellie "what's in this scope?" — she answers using the context (without yet being able to manipulate anything).
 
 ### Phase 1B: Surface context wiring (relay-side)
 
-Teach the relay how to receive and use `surface_context`.
+Teach the relay how to receive and use `surface_context`. (Phases 1A and 1B are tightly coupled — 1A's banner is meaningless without 1B's prompt injection. Build 1B in parallel with 1A; they ship together.)
 
 - Extend the WebSocket message schema to accept `surface_context` field
-- New "Surface Context" section in `prompt-builder.ts` (or layered prompt builder), priority 4
-- Per-surface renderer registry (v1: only `knowledge` renderer)
+- New "Surface Context" section in `prompt-builder.ts` (or layered prompt builder if `LAYERED_PROMPT=true`), priority 4
+- Per-surface renderer registry (v1: only `knowledge-tree` renderer)
 - Test: send a message with surface_context, verify Ellie's prompt includes it
 
-**Acceptance:** Ellie can be told "you're on /knowledge → River → research/" and her replies reflect that awareness.
+**Acceptance:** Ellie can be told "you're on /knowledge → Tree → scope X" and her replies reflect that awareness.
 
-### Phase 1C: Surface action tools (proposal pattern)
+### Phase 1C: Surface action tools + Proposal Preview Card (proposal pattern)
 
-Add the proposal-style tools and the wire format for actions.
+Add the proposal-style tools, the wire format, and the visual preview component.
 
 - New tool group `surface_tools` registered when `surface_id === "knowledge"`
-- Tools: `propose_create_folder`, `propose_move_folder`, `propose_select_folder`, `propose_switch_tab`, `propose_ingest_files`
-- Each tool emits `surface_action` payload attached to response message metadata
+- Tools: `propose_create_folder`, `propose_move_folder`, `propose_select_folder`, `propose_switch_tab`, `highlight_drop_zone`
+- Each mutating tool emits `surface_action` payload attached to response message metadata
 - Wire into the `complete` flow so metadata travels with the message
-- Panel receives the action, renders preview card with Accept/Reject (mutating tools) or auto-applies (navigation tools)
+- New component `ProposalPreviewCard.vue` per the visual spec above
+- Card renders inline with chat messages when `surface_action` is present on a mutating tool
+- Auto-applies for navigation tools (`propose_select_folder`, `propose_switch_tab`, `highlight_drop_zone`)
 - Acceptance ack flows back to relay as `proposal_response` message
+- Surface-scoped thread filtering ensures cards only render in the panel that originated the message
 
-**Acceptance:** Ellie can say "I propose creating folder X" and the panel renders a clickable preview card.
+**Acceptance:** Ellie can say "I propose creating folder X" and the panel renders a clickable preview card. Accepting the card sends an ack back. Ellie can also auto-navigate (`propose_select_folder`) without an Accept button.
 
-### Phase 2A: Mount panel on /knowledge + Tree tab awareness
+### Phase 2A: River tab — Two zones layout (manual)
 
-First real surface integration.
+Restructure the existing River tab into the two-zone layout with full manual workflows.
 
-- Add `<EllieSurfacePanel>` to `app/pages/knowledge.vue`
-- Right sidebar by default, collapsible
-- Provide `surface_context` for Tree tab (current scope, scope tree summary, memory counts)
-- Implement minimal action handlers: `propose_select_folder` (scope selection) is enough for Tree
-- Ellie can answer "what's in scope X?" with full awareness
-- No mutations on Tree tab (read-only awareness)
-
-**Acceptance:** Open `/knowledge`, see Ellie panel, switch to Tree tab, click a scope, watch the surface awareness banner update.
-
-### Phase 2B: River tab — Two zones layout
-
-Restructure the existing River tab.
-
-- Refactor to Zone A (top, ~60%) + Zone B (bottom, ~40%)
+- Refactor to Zone A (top, ~60%) + Zone B (bottom, collapsible thin bar)
 - Zone A: search box, selected folder header, folder contents grid, breadcrumb
 - Search-as-command-bar logic (find / create / move from one input)
 - Selected folder is shared state for the tab
 - Manual folder navigation works (no Ellie involvement yet)
-- Zone B: drop zone shell + Choose Files button + path summary line (drop zone is inert in this phase)
-- Surface context for River tab
+- Zone B: collapsible bar that expands on click/hover/file-drag, with drop zone + Choose Files button + path summary line (drop zone is inert in this phase)
+- Surface context for River tab (folder, file_count, etc.)
+- The River-tab variant of the surface-scoped thread (`knowledge-river`) is auto-created on first visit
 
-**Acceptance:** River tab has the new two-zone layout, manual folder navigation works, search/create/move work, drop zone is visible but inert.
+**Acceptance:** River tab has the new two-zone layout, manual folder navigation works (including search-as-command-bar), Zone B expand/collapse works, surface context updates as the user clicks around. Drop zone is visible but inert.
 
-### Phase 2C: Ingestion pipeline
+### Phase 2B: Ingestion pipeline (the meat)
 
-Wire up the actual conversion pipeline.
+Wire up the actual conversion pipeline. Lives on the **relay**, not in `ellie-home`.
 
-- New endpoint `POST /api/knowledge/ingest` in `ellie-home/server/api/knowledge/`
+- New endpoint `POST http://localhost:3001/api/knowledge/ingest` in `ellie-dev/src/api/knowledge.ts`
+- Authenticated via `x-bridge-key`
 - Validates file (size, `canIngest()`)
-- Archives raw to `uploads-archive/{folder}/{filename}` (configurable root via env var)
-- Calls `ingestDocument()` from `ellie-dev` (expose via internal API or shared module)
-- Builds frontmatter, writes MD via `POST /api/bridge/river/write`
-- Splits MD into chunks, plants each in Forest via bridge write
-- Updates frontmatter with `forest_chunks` count
-- Emits `ingest_complete` WebSocket event
-- Drop zone in Zone B becomes live
+- **SHA-256 deduplication check** against `uploads-archive/{folder}/.hashes.jsonl` — early-exits with a duplicate response if matched
+- Archives raw to `uploads-archive/{folder}/{filename}` (configurable root via env var, defaults to `/home/ellie/uploads-archive`)
+- Calls `ingestDocument()` directly (already in `ellie-dev`)
+- Builds frontmatter (title, source, source_path, ingested_at, source_hash, ingestion_id)
+- Writes MD via the existing `bridgeRiverWrite` helper (in-process, not HTTP)
+- Splits MD into chunks via the chunking pseudocode in the pipeline section
+- Resolves Forest scope via `riverFolderToScope(target_folder)` → `2/river-ingest/{folder_slug}`
+- Plants each chunk in Forest via the in-process `bridgeWrite` helper
+- For long docs (>3 chunks), generates an LLM summary chunk first
+- Waits for QMD reindex ack (or 2-second timeout) before frontmatter update
+- Updates MD frontmatter with `forest_chunks` count
+- Emits WebSocket event `ingest_complete` to subscribed clients
 - Multi-file with parallel processing (max 3 concurrent)
-- Progress display in Zone B during upload
+- Drop zone in Zone B becomes live (drag/drop and click-to-pick both work)
+- Progress display in Zone B during upload (one row per file with status: queued/uploading/converting/planting/done/failed)
 - New files appear in Zone A with NEW badge
-- Workshop card in Ellie panel showing the ingestion record
+- Workshop card in Ellie panel showing the ingestion record (durable history)
 
-**Acceptance:** Drop a PDF into Zone B, watch it convert, see the MD appear in Zone A, search River and find it, ask Ellie about its content and she finds the Forest chunk.
+**Acceptance:** Drop a PDF into Zone B → archive raw → MD appears in River → Forest chunks in `2/river-ingest/{folder_slug}` → ask Ellie about its content via normal chat, she finds the chunk via Layer 3 retrieval. Drop the same PDF again → deduplication catches it, no duplicate work.
 
-### Phase 2D: Ellie's River agency
+### Phase 2C: Ellie's River agency (proposals on River tab)
 
-Make Ellie active on the River tab with proposals/previews/accept.
+Make Ellie active on the River tab — she can propose structure changes, the panel previews them, the user accepts.
 
-- Action handlers for River tab: `propose_create_folder`, `propose_move_folder`, `propose_select_folder`, `propose_ingest_files`
-- Proposal preview card component (cyan dashed border, granular ✓/✗ per item)
-- Accept all / Reject buttons
-- Acceptance ack flows back to relay
-- Ellie's prompt includes surface tools when `surface_id === "knowledge"`
-- Test conversational flows end-to-end
+- Action handlers for River tab: `propose_create_folder`, `propose_move_folder`, `propose_select_folder`, `highlight_drop_zone`
+- `ProposalPreviewCard.vue` from Phase 1C is now wired into the River-tab flow
+- Ellie's prompt includes the surface tools when `surface_id === "knowledge"` and `tab === "river"`
+- Surface-context renderer for River tab includes folder selection, file list, file counts, and recent ingestion state
+- Test conversational flows end-to-end:
+  - "I want to load research papers about quantum" → Ellie proposes folders → user accepts → `highlight_drop_zone` auto-fires → user drops PDFs → conversion happens → Ellie acknowledges in chat with content awareness
 
-**Acceptance:** Full conversational ingestion flow works — describe to Ellie, she proposes structure, you accept, you drop files, everything lands in the right place.
+**Acceptance:** Full conversational ingestion flow works — describe to Ellie, she proposes structure, you accept, you drop files, everything lands in the right place, and Ellie can answer questions about what she just helped you load.
 
 ### Phase 3 (future, separate specs)
 
+- **Cleanup/reconcile job** for orphaned Forest chunks (see "Cleanup & Delete" section above) — needs Plane ticket created NOW
 - Ellie panel on more surfaces — Tree mutations, Graph, Canvas
 - **Big Rock 2** — Supabase message → Forest categorization with learned rules (off-cycle background work + morning review surface for unknowns)
 - Ingestion of URLs (paste a URL, scrape and convert)
-- Smart Forest scope detection at ingestion time
+- Content-based Forest scope refinement at ingestion time (smarter than per-folder)
 - Cross-thread context sharing on the panel
 
 ---
+
+## Cleanup & Delete (deferred, ticket required)
+
+A user who deletes a River MD file (via Obsidian, file manager, or a future delete UI) will leave orphaned Forest chunks pointing to a no-longer-existing path. This is a known gap and **not in scope for v1**, but it must be tracked:
+
+- **The orphan problem:** Forest chunks have `metadata.river_doc_path`. If the doc disappears, the chunks still surface in Ellie's semantic search and reference a dead path.
+- **The raw archive problem:** The PDF in `uploads-archive/` is preserved by design (you might want it back), but if the MD is gone, the archive entry is orphaned too.
+- **v1 acceptance:** users are expected NOT to delete ingested files manually. If they do, retrieval may surface stale results until manual cleanup.
+- **v2 plan:** a daily reconciliation job (`reconcile-river-ingest`) walks the Forest `2/river-ingest/*` scopes, checks each chunk's `river_doc_path` for existence, and either marks chunks as orphaned (excluded from retrieval) or deletes them. The same job sweeps `uploads-archive/.hashes.jsonl` for archive entries with no surviving MD.
+- **Action:** create Plane ticket for v2 reconciliation work before this spec ships. Tagged for the next sprint after v1 stabilizes.
 
 ## What Doesn't Change
 
