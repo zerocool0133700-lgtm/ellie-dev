@@ -20,6 +20,18 @@ const BASE_DIR = join(import.meta.dir, "../..");
 const BRIDGE_KEY = "bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e740f6577a";
 const KNOWLEDGE_BUDGET_BYTES = 4096;
 
+// ── On-demand reference documents ───────────────────────────────────────────
+// These load when the conversation topic matches, giving Ellie product knowledge.
+
+const REFERENCE_DOCS: SkillRegistryEntry[] = [
+  {
+    name: "ecosystem",
+    triggers: ["ellie life", "ellie learn", "ellie work", "leos", "ecosystem", "three products", "all three", "life learn work"],
+    file: "config/identity/ecosystem.md",
+    description: "LEOS ecosystem overview — Life, Learn, Work products",
+  },
+];
+
 // ── Channel A: Skill trigger matching ─────────────────────────────────────────
 
 /**
@@ -91,6 +103,16 @@ export function buildScopeFromMode(mode: LayeredMode, message: string): string {
     }
 
     case "dev-session": {
+      // Multi-product queries should search at project root, not drill into one scope
+      const productMentions = [
+        /ellie.?life|life module/i,
+        /ellie.?learn|learn module/i,
+        /ellie.?work|work module/i,
+      ].filter(p => p.test(message)).length;
+      if (productMentions >= 2 || /\bleos\b|ecosystem|all three/i.test(lower)) {
+        return "2";
+      }
+
       if (lower.includes("forest") || lower.includes("tree") || lower.includes("branch")) {
         return "2/2";
       }
@@ -100,13 +122,13 @@ export function buildScopeFromMode(mode: LayeredMode, message: string): string {
       if (lower.includes("dashboard") || lower.includes("ellie-home") || lower.includes("nuxt")) {
         return "2/3";
       }
-      if (lower.includes("ellie-life")) {
+      if (/ellie.?life|life module/i.test(message)) {
         return "2/5";
       }
-      if (lower.includes("ellie-learn") || lower.includes("learn")) {
+      if (/ellie.?learn|learn module/i.test(message)) {
         return "2/6";
       }
-      if (lower.includes("ellie-work") || lower.includes("work module")) {
+      if (/ellie.?work|work module/i.test(message)) {
         return "2/7";
       }
       return "2/1";
@@ -226,9 +248,11 @@ export async function retrieveKnowledge(
     fetchContextualExpansion(message, agent),
   ]);
 
-  // Channel A: match triggers and load docs
-  const matches = matchSkillTriggers(message, registry);
-  const skillDocs = await loadSkillDocs(matches);
+  // Channel A: match triggers and load docs (skills + reference docs)
+  const skillMatches = matchSkillTriggers(message, registry);
+  const refMatches = matchSkillTriggers(message, REFERENCE_DOCS);
+  const allMatches = [...skillMatches, ...refMatches];
+  const skillDocs = await loadSkillDocs(allMatches);
 
   return { skillDocs, forestKnowledge, expansion };
 }

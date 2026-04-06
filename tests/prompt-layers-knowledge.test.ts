@@ -60,6 +60,17 @@ describe("Layer 3: Knowledge", () => {
     test("heartbeat → 2", () => {
       expect(buildScopeFromMode("heartbeat", "")).toBe("2");
     });
+
+    test("multi-product query → 2 (project root)", () => {
+      expect(buildScopeFromMode("dev-session", "tell me about ellie life and ellie learn")).toBe("2");
+      expect(buildScopeFromMode("dev-session", "where are we on all three products")).toBe("2");
+      expect(buildScopeFromMode("dev-session", "the LEOS ecosystem")).toBe("2");
+    });
+
+    test("single product → specific scope", () => {
+      expect(buildScopeFromMode("dev-session", "how is ellie life coming along")).toBe("2/5");
+      expect(buildScopeFromMode("dev-session", "the ellie learn module")).toBe("2/6");
+    });
   });
 
   describe("Voice summary filter", () => {
