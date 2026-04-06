@@ -705,7 +705,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
             thread_id: opts.threadId ?? null,
           });
 
-          // Write dispatch outcome (ELLIE-1309)
+          // Write dispatch outcome (ELLIE-1309, ELLIE-1459: include source_thread_id)
           writeOutcome({
             run_id: specEnvelope.id,
             agent: input.agent,
@@ -717,6 +717,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
             tokens_in: specResult.tokens_used,
             tokens_out: 0,
             cost_usd: completed.cost_usd,
+            source_thread_id: opts.threadId ?? null,
           });
 
           if (specResult.status === "error") {

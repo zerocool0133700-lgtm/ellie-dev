@@ -35,6 +35,8 @@ export interface DispatchOutcome {
   tokens_in?: number | null;
   tokens_out?: number | null;
   cost_usd?: number | null;
+  /** ELLIE-1459: Thread that originated this dispatch — for routing responses back. */
+  source_thread_id?: string | null;
 }
 
 export interface DispatchOutcomeRow extends DispatchOutcome {
@@ -49,7 +51,8 @@ export async function writeOutcome(outcome: DispatchOutcome): Promise<void> {
       INSERT INTO dispatch_outcomes (
         run_id, parent_run_id, agent, work_item_id, dispatch_type,
         status, summary, files_changed, decisions, commits,
-        forest_writes, duration_ms, tokens_in, tokens_out, cost_usd
+        forest_writes, duration_ms, tokens_in, tokens_out, cost_usd,
+        source_thread_id
       ) VALUES (
         ${outcome.run_id},
         ${outcome.parent_run_id ?? null},
@@ -65,7 +68,8 @@ export async function writeOutcome(outcome: DispatchOutcome): Promise<void> {
         ${outcome.duration_ms ?? null},
         ${outcome.tokens_in ?? null},
         ${outcome.tokens_out ?? null},
-        ${outcome.cost_usd ?? null}
+        ${outcome.cost_usd ?? null},
+        ${outcome.source_thread_id ?? null}
       )
       ON CONFLICT (run_id) DO UPDATE SET
         status = EXCLUDED.status,
@@ -77,7 +81,8 @@ export async function writeOutcome(outcome: DispatchOutcome): Promise<void> {
         duration_ms = EXCLUDED.duration_ms,
         tokens_in = EXCLUDED.tokens_in,
         tokens_out = EXCLUDED.tokens_out,
-        cost_usd = EXCLUDED.cost_usd
+        cost_usd = EXCLUDED.cost_usd,
+        source_thread_id = COALESCE(EXCLUDED.source_thread_id, dispatch_outcomes.source_thread_id)
     `;
     logger.info("Outcome written", { run_id: outcome.run_id, agent: outcome.agent, status: outcome.status });
   } catch (err) {
