@@ -13,6 +13,8 @@ import { renderIdentityBlock } from "./identity";
 import { buildAwareness, filterAwarenessByMode } from "./awareness";
 import { retrieveKnowledge, renderKnowledge } from "./knowledge";
 import type { LayeredMode, LayeredPromptResult } from "./types";
+import { renderSurfaceContext } from "../surface-context";
+import type { SurfaceContext } from "../surface-context";
 
 const logger = log.child("prompt:layers");
 
@@ -33,6 +35,7 @@ export async function buildLayeredContext(
   agent: string = "ellie",
   supabase: any = null,
   modeOverride?: LayeredMode,
+  surfaceContext?: SurfaceContext | null,
 ): Promise<LayeredPromptResult> {
   const start = Date.now();
 
@@ -52,10 +55,16 @@ export async function buildLayeredContext(
 
   const knowledge = renderKnowledge(knowledgeResult);
 
+  // ELLIE-1455: Render surface context if present
+  const surfaceContextRendered = surfaceContext
+    ? `## SURFACE CONTEXT\n${renderSurfaceContext(surfaceContext)}`
+    : "";
+
   // 3. Check total budget
   const encoder = new TextEncoder();
   const totalBytes = encoder.encode(identity).length +
     encoder.encode(awareness).length +
+    encoder.encode(surfaceContextRendered).length +
     encoder.encode(knowledge).length;
 
   if (totalBytes > TOTAL_BUDGET_BYTES) {
@@ -64,11 +73,12 @@ export async function buildLayeredContext(
   }
 
   const elapsed = Date.now() - start;
-  logger.info({ mode, totalBytes, elapsed }, "Layered prompt built");
+  logger.info({ mode, totalBytes, elapsed, hasSurfaceContext: !!surfaceContext }, "Layered prompt built");
 
   return {
     identity,
     awareness,
+    surfaceContext: surfaceContextRendered,
     knowledge,
     mode,
     totalBytes,

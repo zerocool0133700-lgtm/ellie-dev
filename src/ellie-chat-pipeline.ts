@@ -156,6 +156,7 @@ export async function _gatherContextSources(
 
 import { buildLayeredContext } from "./prompt-layers/index";
 import type { LayeredPromptResult } from "./prompt-layers/types";
+import type { SurfaceContext } from "./surface-context";
 
 /**
  * Layered alternative to _gatherContextSources().
@@ -166,6 +167,7 @@ export async function gatherLayeredContext(
   channel: string | null,
   agent: string,
   supabase: any,
+  surfaceContext?: SurfaceContext | null,
 ): Promise<LayeredPromptResult> {
-  return buildLayeredContext(message, channel, agent, supabase);
+  return buildLayeredContext(message, channel, agent, supabase, undefined, surfaceContext);
 }

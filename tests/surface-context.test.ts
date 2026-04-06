@@ -1,4 +1,5 @@
 import { describe, test, expect } from "bun:test";
+import { buildLayeredContext } from "../src/prompt-layers/index";
 import {
   renderSurfaceContext,
   registerSurfaceRenderer,
@@ -110,5 +111,32 @@ describe("SurfaceContext renderer registry", () => {
     const rendered = renderSurfaceContext(ctx);
     expect(rendered).toContain("No folder selected");
     expect(rendered).not.toContain("files queued");
+  });
+});
+
+describe("Surface context injection in layered prompt", () => {
+  test("surfaceContext field is empty string when no context provided", async () => {
+    const result = await buildLayeredContext("hello", "ellie-chat", "ellie", null);
+    expect(result.surfaceContext).toBe("");
+  });
+
+  test("surfaceContext field contains rendered section when context provided", async () => {
+    const ctx: KnowledgeTreeContext = {
+      surface_id: "knowledge-tree",
+      surface_origin: "panel-test",
+      selection: {
+        scope_path: "2/1/3",
+        scope_name: "memory",
+        memory_count: 432,
+      },
+      forest_summary: {
+        total_scopes: 163,
+        total_memories: 4274,
+      },
+    };
+    const result = await buildLayeredContext("hello", "ellie-chat", "ellie", null, undefined, ctx);
+    expect(result.surfaceContext).toContain("## SURFACE CONTEXT");
+    expect(result.surfaceContext).toContain("Tree tab");
+    expect(result.surfaceContext).toContain("memory");
   });
 });

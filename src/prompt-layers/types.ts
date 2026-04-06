@@ -136,6 +136,7 @@ export interface KnowledgeResult {
 export interface LayeredPromptResult {
   identity: string;        // rendered Layer 1
   awareness: string;       // rendered Layer 2
+  surfaceContext: string;  // ELLIE-1455: rendered surface context ("" when no surface attached)
   knowledge: string;       // rendered Layer 3
   mode: LayeredMode;
   totalBytes: number;
