@@ -1782,6 +1782,52 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
     return;
   }
 
+  // ── Routing Observability — ELLIE-1452 ──
+
+  if (url.pathname === "/api/routing/decisions" && req.method === "GET") {
+    try {
+      const { handleGetRoutingDecisions } = await import("./routing-observability.ts");
+      const result = handleGetRoutingDecisions();
+      res.writeHead(result.status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result.body));
+    } catch (err: any) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: err?.message || "Failed to get routing decisions" }));
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/routing/feedback" && req.method === "POST") {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => { chunks.push(chunk); });
+    req.on("end", async () => {
+      try {
+        const parsed = JSON.parse(Buffer.concat(chunks).toString());
+        const { handleRoutingFeedback } = await import("./routing-observability.ts");
+        const result = await handleRoutingFeedback({ json: () => Promise.resolve(parsed) });
+        res.writeHead(result.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result.body));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Failed to process routing feedback" }));
+      }
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/routing/feedback" && req.method === "GET") {
+    try {
+      const { handleGetRoutingFeedback } = await import("./routing-observability.ts");
+      const result = handleGetRoutingFeedback();
+      res.writeHead(result.status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result.body));
+    } catch (err: any) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: err?.message || "Failed to get routing feedback" }));
+    }
+    return;
+  }
+
   // ── Empathy Model Management — ELLIE-990 ──
 
   if (url.pathname === "/api/empathy/reload" && req.method === "POST") {

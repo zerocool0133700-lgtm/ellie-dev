@@ -408,6 +408,26 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
         return;
       }
 
+      // ELLIE-1452: Routing feedback — Dave flags a wrong agent choice
+      if (msg.type === "routing_feedback" && msg.envelope_id) {
+        (async () => {
+          try {
+            const { recordRoutingFeedback } = await import("./routing-observability.ts");
+            recordRoutingFeedback({
+              envelopeId: msg.envelope_id,
+              originalAgent: msg.original_agent || "unknown",
+              suggestedAgent: msg.suggested_agent || undefined,
+              comment: msg.comment || undefined,
+              timestamp: Date.now(),
+            });
+            ws.send(JSON.stringify({ type: "routing_feedback_ack", envelope_id: msg.envelope_id, ts: Date.now() }));
+          } catch (err) {
+            logger.error("Routing feedback error", err);
+          }
+        })();
+        return;
+      }
+
       // Session upgrade: anonymous → authenticated (ELLIE-176)
       if (msg.type === "session_upgrade" && msg.token) {
         (async () => {

@@ -33,6 +33,7 @@ import { emitDispatchEvent } from "./dispatch-events.ts";
 import { writeOutcome } from "./dispatch-outcomes.ts";
 import { checkQueuedContext, clearQueuedContext } from "./dispatch-context-queue.ts";
 import { detectFileConflicts } from "./conflict-detector.ts";
+import { emitRoutingDecision, extractRoutingReasoning, journalRoutingDecision } from "./routing-observability.ts";
 
 const logger = log.child("coordinator");
 
@@ -170,7 +171,18 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
   const effectiveCoordinatorAgent = opts.coordinatorAgent
     ?? opts.registry?.getCoordinatorAgent()
     ?? "max";
-  const effectivePrompt = opts.registry ? await opts.registry.getCoordinatorPrompt(opts.threadId) : systemPrompt;
+
+  // ELLIE-1452: Use layered prompt pipeline when flag is set
+  const useLayeredCoordinator = process.env.LAYERED_PROMPT === "true" && opts.registry;
+  let effectivePrompt: string;
+  if (useLayeredCoordinator) {
+    const { buildCoordinatorLayeredContext } = await import("./prompt-layers/coordinator.ts");
+    const layers = await buildCoordinatorLayeredContext(opts.registry!, opts.threadId);
+    effectivePrompt = [layers.identity, layers.awareness, layers.knowledge].join("\n\n");
+    logger.info({ totalBytes: layers.totalBytes }, "Coordinator using layered prompt pipeline");
+  } else {
+    effectivePrompt = opts.registry ? await opts.registry.getCoordinatorPrompt(opts.threadId) : systemPrompt;
+  }
 
   const startTime = Date.now();
   const isTestMode = !!_testResponses;
@@ -557,6 +569,26 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
           dispatch_type: "single",
           thread_id: opts.threadId ?? null,
         });
+
+        // ELLIE-1452: Emit routing decision with reasoning for observability
+        try {
+          const reasoning = extractRoutingReasoning(
+            apiResponse.content,
+            toolId,
+          );
+          const routingDecision = {
+            envelopeId: specEnvelope.id,
+            agentChosen: input.agent,
+            task: input.task,
+            reasoning,
+            agentsAvailable: effectiveRoster,
+            workItemId: workItemId ?? null,
+            threadId: opts.threadId ?? null,
+            timestamp: Date.now(),
+          };
+          emitRoutingDecision(routingDecision);
+          journalRoutingDecision(routingDecision);
+        } catch { /* best-effort observability */ }
 
         // ELLIE-1325: Check for file conflicts with active dispatches
         if (workItemId) {
