@@ -474,13 +474,33 @@ export async function reconcilePlaneState(): Promise<{ pending: number; orphaned
       }
 
       if (hasFailed) {
-        // Reset failed items to pending so the queue worker retries them
-        await sql`
+        // Only reset failed items that haven't exceeded max_attempts.
+        // Items past max_attempts are permanently dead-lettered — resetting
+        // them causes infinite retry loops (see TEST-QUEUE-6 incident).
+        const resetResult = await sql`
           UPDATE plane_sync_queue
           SET status = 'pending', next_retry_at = NOW()
           WHERE work_item_id = ${workItemId} AND status = 'failed'
+            AND attempts < max_attempts
         `;
-        logger.info("Reset failed queue items for retry", { workItemId });
+        if (resetResult.count > 0) {
+          logger.info("Reset failed queue items for retry", { workItemId, count: resetResult.count });
+        }
+
+        // Log permanently failed items for visibility
+        const deadLettered = await sql`
+          SELECT id, action, attempts, max_attempts, last_error
+          FROM plane_sync_queue
+          WHERE work_item_id = ${workItemId} AND status = 'failed'
+            AND attempts >= max_attempts
+        `;
+        if (deadLettered.length > 0) {
+          logger.warn("Dead-lettered queue items skipped during reconciliation", {
+            workItemId,
+            count: deadLettered.length,
+            items: deadLettered.map(d => ({ id: d.id.slice(0, 8), action: d.action, attempts: d.attempts })),
+          });
+        }
       }
     }
 

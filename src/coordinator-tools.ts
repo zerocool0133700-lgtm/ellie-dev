@@ -118,7 +118,7 @@ export const COORDINATOR_TOOL_DEFINITIONS: Anthropic.Tool[] = [
         },
         timeout_ms: {
           type: "number",
-          description: "Maximum milliseconds to wait for the agent to respond. Default: 120000.",
+          description: "Maximum milliseconds to wait for the agent to respond. Default: 600000 (10 min).",
         },
         priority: {
           type: "string",

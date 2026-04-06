@@ -97,13 +97,13 @@ export interface ConvergeDeps {
 export interface ConvergeConfig {
   /** Agent used for synthesis. Default: "strategy". */
   synthesisAgent: string;
-  /** Timeout for the synthesis call in ms. Default: 120000. */
+  /** Timeout for the synthesis call in ms. Default: 600000 (10 min). */
   synthesisTimeoutMs: number;
 }
 
 const DEFAULT_CONFIG: ConvergeConfig = {
   synthesisAgent: "strategy",
-  synthesisTimeoutMs: 120_000,
+  synthesisTimeoutMs: 600_000,
 };
 
 // ── Prompt Building ─────────────────────────────────────────────
