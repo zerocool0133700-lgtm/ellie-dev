@@ -722,6 +722,38 @@ async function _writeFactToForest(
 }
 
 /**
+ * Write a memory to a contributor's agent scope in the Forest.
+ * ELLIE-1463: contributors get knowledge in their own tree (3/{agent}).
+ * Uses the bridge API since contributors may not have active Forest sessions.
+ */
+async function _writeToContributorScope(
+  content: string,
+  contributorAgent: string,
+  sourceAgent: string,
+  type: string = "fact",
+): Promise<void> {
+  try {
+    const key = process.env.BRIDGE_KEY || "bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e740f6577a";
+    await fetch("http://localhost:3001/api/bridge/write", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-bridge-key": key },
+      body: JSON.stringify({
+        content: `[contributed via ${sourceAgent}] ${content}`,
+        type,
+        scope_path: `3/${contributorAgent}`,
+        confidence: 0.75,
+        metadata: {
+          contributed_via: sourceAgent,
+          source: "contributor-attribution",
+        },
+      }),
+    });
+  } catch {
+    // Fire-and-forget — don't break the pipeline
+  }
+}
+
+/**
  * ELLIE-1421: Parsed intent — intermediate representation before processing.
  * Separates parsing (pure) from processing (side-effectful) so we can
  * batch-process with rollback on failure.
@@ -745,6 +777,7 @@ export async function processMemoryIntents(
   sourceAgent: string = "general",
   defaultVisibility: "private" | "shared" | "global" = "shared",
   forestSessionIds?: { tree_id: string; branch_id?: string; creature_id?: string; entity_id?: string },
+  contributors?: string[],
 ): Promise<string> {
   if (!supabase) return response;
 
@@ -835,6 +868,12 @@ export async function processMemoryIntents(
           _writeFactToForest(forestSessionIds, intent.params.content, sourceAgent, "fact").catch(err =>
             logger.warn("Forest fact write failed (non-fatal)", { err: err instanceof Error ? err.message : String(err) })
           );
+          // ELLIE-1463: Write to contributor scopes
+          if (contributors && contributors.length > 0) {
+            for (const c of contributors) {
+              _writeToContributorScope(intent.params.content, c, sourceAgent).catch(() => {});
+            }
+          }
         }
       } else if (intent.kind === "done" && intent.doneSearch) {
         let query = supabase
@@ -867,6 +906,12 @@ export async function processMemoryIntents(
             scope_path: '2/1/2',
           });
           logger.info(`Forest memory: [${memType}:${confidence}] ${content.slice(0, 60)}...`);
+          // ELLIE-1463: Write to contributor scopes
+          if (contributors && contributors.length > 0) {
+            for (const c of contributors) {
+              _writeToContributorScope(content, c, sourceAgent, memType).catch(() => {});
+            }
+          }
         } catch (err) {
           logger.warn("Forest memory write failed", err);
         }
