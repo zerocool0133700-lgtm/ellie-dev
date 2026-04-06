@@ -194,10 +194,12 @@ async function updateDeliveryStatus(messageId: string, status: "sent" | "failed"
 /**
  * Fetch undelivered ellie-chat messages for a user since a given timestamp.
  * Returns messages that were saved but never successfully delivered via WS.
+ * ELLIE-1460: If thread_id is provided, only returns messages from that thread.
  */
 export async function getUndeliveredMessages(
   userId: string,
   sinceTs?: number,
+  threadId?: string,
 ): Promise<Array<{ id: string; content: string; role: string; created_at: string; metadata: Record<string, unknown> }>> {
   if (!_supabase) return [];
   try {
@@ -213,6 +215,11 @@ export async function getUndeliveredMessages(
     // If user has a real ID, filter by it; otherwise get all ellie-chat undelivered
     if (userId && userId !== "system-dashboard") {
       query = query.eq("user_id", userId);
+    }
+
+    // ELLIE-1460: Filter to active thread if provided
+    if (threadId) {
+      query = query.eq("thread_id", threadId);
     }
 
     // Time filter — only get messages from the last hour to avoid ancient undelivered messages
@@ -237,11 +244,13 @@ export async function getUndeliveredMessages(
  * Fetch recent conversation history for session restoration.
  * Returns both user and assistant messages regardless of delivery_status.
  * Used when a client reconnects and sessionStorage may be lost (mobile, new tab).
+ * ELLIE-1460: If thread_id is provided, only returns messages from that thread.
  */
 export async function getRecentHistory(
   channel: string,
   userId?: string,
   limit: number = 50,
+  threadId?: string,
 ): Promise<Array<{ id: string; content: string; role: string; created_at: string; metadata: Record<string, unknown> }>> {
   if (!_supabase) return [];
   try {
@@ -258,6 +267,11 @@ export async function getRecentHistory(
     // Filter to this user's messages (same guard as getUndeliveredMessages)
     if (userId && userId !== "system-dashboard") {
       query = query.eq("user_id", userId);
+    }
+
+    // ELLIE-1460: Filter to active thread if provided
+    if (threadId) {
+      query = query.eq("thread_id", threadId);
     }
 
     const { data, error } = await query;
