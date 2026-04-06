@@ -13,6 +13,8 @@ import { log } from "../logger.ts";
 import { getActiveRunStates } from "../orchestration-tracker.ts";
 import { getRecentEvents } from "../orchestration-ledger.ts";
 import type { FoundationRegistry } from "../foundation-registry.ts";
+import { renderSurfaceContext } from "../surface-context.ts";
+import type { SurfaceContext } from "../surface-context.ts";
 
 const logger = log.child("coordinator-layers");
 
@@ -21,6 +23,7 @@ const logger = log.child("coordinator-layers");
 export interface CoordinatorLayeredContext {
   identity: string;
   awareness: string;
+  surfaceContext: string;   // ELLIE-1455: rendered surface context block ("" when none)
   knowledge: string;
   totalBytes: number;
 }
@@ -215,6 +218,7 @@ export async function buildCoordinatorKnowledge(
 export async function buildCoordinatorLayeredContext(
   registry: FoundationRegistry,
   threadId?: string,
+  surfaceContext?: SurfaceContext | null,  // ELLIE-1455
 ): Promise<CoordinatorLayeredContext> {
   const start = Date.now();
   const foundation = registry.getActive();
@@ -233,13 +237,17 @@ export async function buildCoordinatorLayeredContext(
     buildCoordinatorKnowledge(registry),
   ]);
 
+  // ELLIE-1455: Render surface context block (empty string if none)
+  const surfaceContextRendered = surfaceContext ? renderSurfaceContext(surfaceContext) : "";
+
   const encoder = new TextEncoder();
   const totalBytes = encoder.encode(identity).length +
     encoder.encode(awareness).length +
+    encoder.encode(surfaceContextRendered).length +
     encoder.encode(knowledge).length;
 
   const elapsed = Date.now() - start;
   logger.info({ totalBytes, elapsed, coordinatorAgent }, "Coordinator layered context built");
 
-  return { identity, awareness, knowledge, totalBytes };
+  return { identity, awareness, surfaceContext: surfaceContextRendered, knowledge, totalBytes };
 }

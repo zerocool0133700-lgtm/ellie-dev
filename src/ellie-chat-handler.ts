@@ -1443,6 +1443,7 @@ async function _handleEllieChatMessage(
             deps: coordinatorDeps,
             workItemId: coordWorkItem,
             threadId: effectiveThreadId || undefined,
+            surfaceContext: surfaceContext ?? undefined,  // ELLIE-1455 — from Task 4 plumbing
             resumeState: resumeState || undefined,
           });
 

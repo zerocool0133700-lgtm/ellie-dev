@@ -20,6 +20,9 @@ import {
   type CompleteInput,
   type InvokeRecipeInput,
 } from "./coordinator-tools.ts";
+import type { SurfaceContext } from "./surface-context.ts";
+import { SURFACE_TOOL_DEFINITIONS } from "./surface-tools.ts";
+import { renderSurfaceContext } from "./surface-context.ts";
 import {
   createEnvelope,
   completeEnvelope,
@@ -80,6 +83,7 @@ export interface CoordinatorOpts {
   workItemId?: string;
   threadId?: string;  // ELLIE-1374: thread context
   rosterFilter?: string[];  // ELLIE-1374: thread participant filter (used in Task 9)
+  surfaceContext?: SurfaceContext | null;  // ELLIE-1455
   resumeState?: CoordinatorPausedState;  // ELLIE-1101: resume from ask_user pause
   _testResponses?: Array<{
     stop_reason: string;
@@ -172,16 +176,29 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
     ?? opts.registry?.getCoordinatorAgent()
     ?? "max";
 
+  // ELLIE-1455: Add surface action tools when a surface is attached
+  const effectiveTools = opts.surfaceContext
+    ? [...COORDINATOR_TOOL_DEFINITIONS, ...SURFACE_TOOL_DEFINITIONS]
+    : COORDINATOR_TOOL_DEFINITIONS;
+
   // ELLIE-1452: Use layered prompt pipeline when flag is set
   const useLayeredCoordinator = process.env.LAYERED_PROMPT === "true" && opts.registry;
   let effectivePrompt: string;
   if (useLayeredCoordinator) {
     const { buildCoordinatorLayeredContext } = await import("./prompt-layers/coordinator.ts");
-    const layers = await buildCoordinatorLayeredContext(opts.registry!, opts.threadId);
-    effectivePrompt = [layers.identity, layers.awareness, layers.knowledge].join("\n\n");
-    logger.info({ totalBytes: layers.totalBytes }, "Coordinator using layered prompt pipeline");
+    const layers = await buildCoordinatorLayeredContext(opts.registry!, opts.threadId, opts.surfaceContext);
+    // ELLIE-1455: surfaceContext (already includes its own "## SURFACE CONTEXT" heading) is injected
+    // between awareness and knowledge — same priority slot as ellie's prompt-builder.
+    const sections = [layers.identity, layers.awareness, layers.surfaceContext, layers.knowledge].filter(s => s);
+    effectivePrompt = sections.join("\n\n");
+    logger.info({ totalBytes: layers.totalBytes, hasSurfaceContext: !!opts.surfaceContext }, "Coordinator using layered prompt pipeline");
   } else {
     effectivePrompt = opts.registry ? await opts.registry.getCoordinatorPrompt(opts.threadId) : systemPrompt;
+    // ELLIE-1455: even on the non-layered fallback, prepend surface context if present
+    if (opts.surfaceContext) {
+      const surfaceBlock = renderSurfaceContext(opts.surfaceContext);
+      effectivePrompt = `${effectivePrompt}\n\n${surfaceBlock}`;
+    }
   }
 
   const startTime = Date.now();
@@ -318,6 +335,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
             model: effectiveModel,
             systemPrompt: ctx.getSystemPrompt(),
             messages: ctx.getMessages(),
+            tools: effectiveTools,  // ELLIE-1455
           });
           apiResponse = {
             stop_reason: anthropicResponse.stop_reason ?? "end_turn",
@@ -939,6 +957,7 @@ async function callMessagesAPI(
     model: string;
     systemPrompt: string;
     messages: Anthropic.MessageParam[];
+    tools: Anthropic.Tool[];  // ELLIE-1455
   },
 ): Promise<Anthropic.Message> {
   return client.messages.create({
@@ -946,7 +965,7 @@ async function callMessagesAPI(
     max_tokens: 4096,
     system: opts.systemPrompt,
     messages: opts.messages,
-    tools: COORDINATOR_TOOL_DEFINITIONS,
+    tools: opts.tools,
   });
 }
 
