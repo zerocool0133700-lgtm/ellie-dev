@@ -55,12 +55,15 @@ export type SurfaceContext = KnowledgeTreeContext | KnowledgeRiverContext;
 
 // ── Renderer Registry ────────────────────────────────────────
 
-type SurfaceRenderer = (ctx: SurfaceContext) => string;
+type SurfaceRenderer<T extends SurfaceContext = SurfaceContext> = (ctx: T) => string;
 
 const renderers = new Map<SurfaceId, SurfaceRenderer>();
 
-export function registerSurfaceRenderer(id: SurfaceId, renderer: SurfaceRenderer): void {
-  renderers.set(id, renderer);
+export function registerSurfaceRenderer<T extends SurfaceContext>(
+  id: T["surface_id"],
+  renderer: SurfaceRenderer<T>,
+): void {
+  renderers.set(id, renderer as SurfaceRenderer);
 }
 
 export function renderSurfaceContext(ctx: SurfaceContext): string {
@@ -70,36 +73,34 @@ export function renderSurfaceContext(ctx: SurfaceContext): string {
 
 // ── Built-in renderers ───────────────────────────────────────
 
-registerSurfaceRenderer("knowledge-tree", (ctx) => {
-  const c = ctx as KnowledgeTreeContext;
+registerSurfaceRenderer("knowledge-tree", (ctx: KnowledgeTreeContext) => {
   const lines: string[] = [];
   lines.push("The user is on /knowledge → Tree tab.");
-  if (c.selection.scope_path) {
-    lines.push(`- Selected scope: ${c.selection.scope_name} (${c.selection.scope_path}) — ${c.selection.memory_count} memories`);
+  if (ctx.selection.scope_path) {
+    lines.push(`- Selected scope: ${ctx.selection.scope_name} (${ctx.selection.scope_path}) — ${ctx.selection.memory_count} memories`);
   } else {
     lines.push("- No scope selected.");
   }
-  lines.push(`- Forest has ${c.forest_summary.total_scopes} scopes and ${c.forest_summary.total_memories} total memories.`);
+  lines.push(`- Forest has ${ctx.forest_summary.total_scopes} scopes and ${ctx.forest_summary.total_memories} total memories.`);
   lines.push("");
   lines.push("You can propose actions that affect this surface — they will be added to the surface_actions array on your response.");
   return lines.join("\n");
 });
 
-registerSurfaceRenderer("knowledge-river", (ctx) => {
-  const c = ctx as KnowledgeRiverContext;
+registerSurfaceRenderer("knowledge-river", (ctx: KnowledgeRiverContext) => {
   const lines: string[] = [];
   lines.push("The user is on /knowledge → River tab.");
-  if (c.selection.folder) {
-    lines.push(`- Selected folder: ${c.selection.folder} (${c.selection.folder_file_count} files, ${c.selection.folder_subfolder_count} subfolders)`);
-    if (c.selection.last_files.length > 0) {
-      lines.push(`- Recent files: ${c.selection.last_files.join(", ")}`);
+  if (ctx.selection.folder) {
+    lines.push(`- Selected folder: ${ctx.selection.folder} (${ctx.selection.folder_file_count} files, ${ctx.selection.folder_subfolder_count} subfolders)`);
+    if (ctx.selection.last_files.length > 0) {
+      lines.push(`- Recent files: ${ctx.selection.last_files.join(", ")}`);
     }
   } else {
     lines.push("- No folder selected.");
   }
-  lines.push(`- River has ${c.river_summary.total_docs} indexed docs across ${c.river_summary.total_folders} folders.`);
-  if (c.ingestion_state.in_progress) {
-    lines.push(`- Ingestion in progress: ${c.ingestion_state.queued} files queued.`);
+  lines.push(`- River has ${ctx.river_summary.total_docs} indexed docs across ${ctx.river_summary.total_folders} folders.`);
+  if (ctx.ingestion_state.in_progress) {
+    lines.push(`- Ingestion in progress: ${ctx.ingestion_state.queued} files queued.`);
   }
   lines.push("");
   lines.push("You can propose actions that affect this surface — they will be added to the surface_actions array on your response.");

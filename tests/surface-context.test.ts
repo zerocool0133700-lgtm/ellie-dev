@@ -31,6 +31,7 @@ describe("SurfaceContext renderer registry", () => {
     expect(rendered).toContain("432");
     expect(rendered).toContain("163");
     expect(rendered).toContain("4274");
+    expect(rendered).toContain("surface_actions");
   });
 
   test("returns empty string for unregistered surface_id", () => {
@@ -50,5 +51,64 @@ describe("SurfaceContext renderer registry", () => {
     };
     const rendered = renderSurfaceContext(ctx as SurfaceContext);
     expect(rendered).toBe("CUSTOM: panel-test");
+  });
+
+  test("renders knowledge-river context with folder and ingestion in progress", () => {
+    const ctx: import("../src/surface-context").KnowledgeRiverContext = {
+      surface_id: "knowledge-river",
+      surface_origin: "panel-river-1",
+      selection: {
+        folder: "research/quantum",
+        folder_file_count: 12,
+        folder_subfolder_count: 2,
+        last_files: ["paper-a.md", "paper-b.md"],
+      },
+      ingestion_state: {
+        in_progress: true,
+        queued: 3,
+        last_ingested_at: "2026-04-06T12:00:00Z",
+      },
+      river_summary: {
+        total_docs: 38,
+        total_folders: 7,
+      },
+    };
+
+    const rendered = renderSurfaceContext(ctx);
+
+    expect(rendered).toContain("River");
+    expect(rendered).toContain("research/quantum");
+    expect(rendered).toContain("12");
+    expect(rendered).toContain("paper-a.md");
+    expect(rendered).toContain("38");
+    expect(rendered).toContain("7");
+    expect(rendered).toContain("3 files queued");
+    expect(rendered).toContain("surface_actions");
+  });
+
+  test("knowledge-river renderer handles no folder selected", () => {
+    const ctx: import("../src/surface-context").KnowledgeRiverContext = {
+      surface_id: "knowledge-river",
+      surface_origin: "panel-river-2",
+      selection: {
+        folder: null,
+        folder_file_count: 0,
+        folder_subfolder_count: 0,
+        last_files: [],
+      },
+      ingestion_state: {
+        in_progress: false,
+        queued: 0,
+        last_ingested_at: null,
+      },
+      river_summary: {
+        total_docs: 38,
+        total_folders: 7,
+      },
+    };
+
+    const rendered = renderSurfaceContext(ctx);
+    expect(rendered).toContain("No folder selected");
+    expect(rendered).not.toContain("files queued");
   });
 });
