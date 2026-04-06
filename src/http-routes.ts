@@ -200,6 +200,7 @@ import { handleCommsRoute } from "./api/routes/comms.ts";
 import { handleCalendarIntelRoute } from "./api/routes/calendar-intel.ts";
 import { handleRelationshipsRoute } from "./api/routes/relationships.ts";
 import { handleBriefingRoute } from "./api/routes/briefing.ts";
+import { handlePunchListRoute } from "./api/routes/punch-list.ts";
 import { handleAlertsRoute } from "./api/routes/alerts.ts";
 import { handleReactionsRoute } from "./api/routes/reactions.ts";
 import { handleEmojiPrefsRoute } from "./api/routes/emoji-prefs.ts";
@@ -5968,6 +5969,9 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
 
   // Briefing endpoints (ELLIE-316) — extracted to api/routes/briefing.ts
   if (await handleBriefingRoute(req, res, url, supabase, bot)) return;
+
+  // Punch List — collaborative daily working document
+  if (await handlePunchListRoute(req, res, url)) return;
 
   // Work Item Gardener endpoints (ELLIE-407)
   if (url.pathname === "/api/work-item-gardener/run" && req.method === "POST") {

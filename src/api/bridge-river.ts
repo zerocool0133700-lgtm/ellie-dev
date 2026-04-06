@@ -327,15 +327,15 @@ export async function syncOakCatalog(): Promise<void> {
   // Step 2: Scope convergence — top memories per active scope
   const scopeStats = await forestSql`
     SELECT
-      ks.scope_path,
+      ks.path AS scope_path,
       ks.name,
       COUNT(sm.id)::int as memory_count
     FROM knowledge_scopes ks
     LEFT JOIN shared_memories sm
-      ON sm.scope_path = ks.scope_path
+      ON sm.scope_path = ks.path
       AND sm.status = 'active'
-    WHERE ks.scope_path NOT LIKE '3/%'
-    GROUP BY ks.scope_path, ks.name
+    WHERE ks.path NOT LIKE '3/%'
+    GROUP BY ks.path, ks.name
     HAVING COUNT(sm.id) > 0
     ORDER BY COUNT(sm.id) DESC
     LIMIT 30

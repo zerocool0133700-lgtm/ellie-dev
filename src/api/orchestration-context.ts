@@ -40,8 +40,10 @@ export async function getOrchestrationContext(): Promise<string> {
         const { formatTime24 } = await import("../timezone.ts");
         const time = formatTime24(evt.created_at);
         const workItem = evt.work_item_id ? ` (${evt.work_item_id})` : "";
-        const duration = evt.payload?.duration_ms
-          ? ` in ${formatElapsed(evt.payload.duration_ms as number)}`
+        const rawPayload = evt.payload;
+        const parsedPayload = (typeof rawPayload === "string" ? JSON.parse(rawPayload) : rawPayload) as Record<string, unknown> | undefined;
+        const duration = parsedPayload?.duration_ms
+          ? ` in ${formatElapsed(parsedPayload.duration_ms as number)}`
           : "";
         sections.push(`- ${evt.agent_type || "agent"} ${evt.event_type}${workItem}${duration} at ${time}`);
       }

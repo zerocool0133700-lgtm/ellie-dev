@@ -83,12 +83,16 @@ async function main() {
     }
   } else { s.push("*Empty*"); }
 
-  // 4. "Who is Dave" query
+  // 4. "Who is Dave" query — scoped to Y/ (Dave's personal tree) and E/4/1 (Ellie knows Dave)
   s.push('\n## 4. "Who is Dave?" (what surfaces about the user)');
-  const daveResults = await readMemories({ query: "who is Dave, his values, family, how he thinks, what matters", match_count: 10, match_threshold: 0.3 });
+  const [davePersonal, daveRelationship] = await Promise.all([
+    bridgeRead("Dave identity values family how he thinks personality", "Y", 10),
+    bridgeRead("Dave relationship preferences working style", "E/4/1", 10),
+  ]);
+  const daveResults = [...davePersonal, ...daveRelationship];
   if (daveResults.length) {
     for (const m of daveResults) {
-      s.push(`- [${(m as any).content_tier || "?"}, ${(m as any).scope_path || "?"}] ${m.content.slice(0, 150)}`);
+      s.push(`- [${m.type}, ${m.scope_path || "?"}] ${m.content?.slice(0, 150)}`);
     }
   } else { s.push("*Empty*"); }
 

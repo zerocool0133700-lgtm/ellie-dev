@@ -106,7 +106,8 @@ export async function buildCoordinatorAwareness(
       sections.push("");
       sections.push("### Recent Completions");
       for (const event of completedRecent.slice(0, 5)) {
-        const payload = event.payload as Record<string, unknown>;
+        const raw = event.payload;
+        const payload = (typeof raw === "string" ? JSON.parse(raw) : raw) as Record<string, unknown>;
         const agent = (payload.agent as string) || event.agent_type || "unknown";
         const title = (payload.title as string) || "";
         const ago = Math.round((Date.now() - new Date(event.created_at).getTime()) / 60000);
