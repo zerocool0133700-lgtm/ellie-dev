@@ -291,7 +291,7 @@ async function _handleEllieChatMessage(
   const ecUser = wsAppUserMap.get(ws);
   const ecUserId = ecUser?.id || ecUser?.anonymous_id || undefined;
 
-  await saveMessage("user", text, { ...(image ? { image_name: image.name, image_mime: image.mime_type } : {}), ...(effectiveThreadId ? { thread_id: effectiveThreadId } : {}) }, "ellie-chat", ecUserId, clientId, "user");
+  await saveMessage("user", text, { ...(image ? { image_name: image.name, image_mime: image.mime_type } : {}), ...(effectiveThreadId ? { thread_id: effectiveThreadId } : {}) }, "ellie-chat", ecUserId, clientId, "user", effectiveThreadId || undefined);
   broadcastExtension({ type: "message_in", channel: "ellie-chat", preview: text.substring(0, 200) });
 
   // ELLIE-1276: Check if any dispatched agents are waiting for user answers (with disambiguation)
@@ -779,7 +779,7 @@ async function _handleEllieChatMessage(
       // Post-message psy assessment (ELLIE-330)
       runPostMessageAssessment(text, cleanedText, anthropic).catch(err => logger.error("Post-message assessment failed", err));
 
-      const phoneMemoryId = await saveMessage("assistant", cleanedText, {}, "ellie-chat", ecUserId);
+      const phoneMemoryId = await saveMessage("assistant", cleanedText, {}, "ellie-chat", ecUserId, undefined, undefined, effectiveThreadId || undefined);
       broadcastExtension({
         type: "message_out", channel: "ellie-chat",
         agent: "general",
@@ -923,7 +923,7 @@ async function _handleEllieChatMessage(
 
     if (isSpecialist && !isMultiStep && agentResult && process.env.COORDINATOR_MODE !== "true") {
       const ack = getSpecialistAck(ecRouteAgent);
-      const ackMemoryId = await saveMessage("assistant", ack, { agent: "general" }, "ellie-chat", ecUserId);
+      const ackMemoryId = await saveMessage("assistant", ack, { agent: "general" }, "ellie-chat", ecUserId, undefined, undefined, effectiveThreadId || undefined);
       deliverResponse(ws, { type: "response", text: ack, agent: "general", memoryId: ackMemoryId, ts: Date.now() });
       broadcastExtension({ type: "message_out", channel: "ellie-chat", agent: "general", preview: ack });
 
@@ -1097,7 +1097,7 @@ async function _handleEllieChatMessage(
         const { cleanedText: ellieChatOrcPlaybookClean, commands: ellieChatOrcPlaybookCmds } = extractPlaybookCommands(tier2Pipeline);
         // ELLIE-389: Save first to get memoryId, then send with it
         const { cleanedText: orcPreClean } = extractApprovalTags(ellieChatOrcPlaybookClean);
-        const orcMemoryId = await saveMessage("assistant", orcPreClean, { agent: orcAgent }, "ellie-chat", ecUserId);
+        const orcMemoryId = await saveMessage("assistant", orcPreClean, { agent: orcAgent }, "ellie-chat", ecUserId, undefined, undefined, effectiveThreadId || undefined);
         const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, ellieChatOrcPlaybookClean, session.sessionId, orcAgent, orcMemoryId);
 
         broadcastExtension({
@@ -1327,7 +1327,7 @@ async function _handleEllieChatMessage(
           processedResponse = await processResponseTags(supabase, processedResponse, "ellie-chat");
         } catch { /* tag processing non-fatal */ }
 
-        const memoryId = await saveMessage("assistant", processedResponse, { agent: directAgent, thread_id: effectiveThreadId }, "ellie-chat", ecUserId);
+        const memoryId = await saveMessage("assistant", processedResponse, { agent: directAgent, thread_id: effectiveThreadId }, "ellie-chat", ecUserId, undefined, undefined, effectiveThreadId || undefined);
         const directPayload = {
           type: "response",
           text: processedResponse,
@@ -1460,7 +1460,7 @@ async function _handleEllieChatMessage(
                   choices: paused.questionMetadata.choices,
                 })
               : coordinatorResult.response;
-            await saveMessage("assistant", formattedForSave, {}, "ellie-chat", ecUserId);
+            await saveMessage("assistant", formattedForSave, {}, "ellie-chat", ecUserId, undefined, undefined, effectiveThreadId || undefined);
             return;
           }
 
@@ -1472,7 +1472,7 @@ async function _handleEllieChatMessage(
 
           const coordResponse = coordinatorResult.response || "I completed the request but didn't generate a response. Please try again.";
           // ELLIE-1097: Use deliverResponse instead of raw ws.send — buffers on disconnect
-          const memoryId = await saveMessage("assistant", coordResponse, {}, "ellie-chat", ecUserId);
+          const memoryId = await saveMessage("assistant", coordResponse, {}, "ellie-chat", ecUserId, undefined, undefined, effectiveThreadId || undefined);
           const responsePayload = {
             type: "response",
             text: coordResponse,
@@ -1704,7 +1704,7 @@ async function _handleEllieChatMessage(
     const ecAgent = agentResult?.dispatch.agent.name || "general";
     // ELLIE-389: Save first to get memoryId, then send with it
     const { cleanedText: ecPreClean } = extractApprovalTags(ecPlaybookClean);
-    const ecMemoryId = await saveMessage("assistant", ecPreClean, { agent: ecAgent }, "ellie-chat", ecUserId);
+    const ecMemoryId = await saveMessage("assistant", ecPreClean, { agent: ecAgent }, "ellie-chat", ecUserId, undefined, undefined, effectiveThreadId || undefined);
     const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, ecPlaybookClean, session.sessionId, ecAgent, ecMemoryId);
 
     broadcastExtension({
@@ -2064,7 +2064,7 @@ export async function runSpecialistAsync(
     const { cleanedText: playClean, commands: playCmds } = extractPlaybookCommands(tier2Spec);
     // ELLIE-389: Save first to get memoryId, then send with it
     const { cleanedText: specPreClean } = extractApprovalTags(playClean);
-    const specMemoryId = await saveMessage("assistant", specPreClean, { agent: agentName }, "ellie-chat", ecUserId);
+    const specMemoryId = await saveMessage("assistant", specPreClean, { agent: agentName }, "ellie-chat", ecUserId, undefined, undefined, threadId || undefined);
     const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, playClean, session.sessionId, agentName, specMemoryId);
 
     broadcastExtension({
@@ -2127,7 +2127,7 @@ export async function runSpecialistAsync(
       appendJobEvent(jobId, "failed", { error: err instanceof Error ? err.message.slice(0, 500) : String(err) });
     }
     const errorMsg = `Sorry, the ${agentName} specialist ran into an issue. You can try again or rephrase.`;
-    const errMemoryId = await saveMessage("assistant", errorMsg, {}, "ellie-chat", ecUserId).catch(() => null);
+    const errMemoryId = await saveMessage("assistant", errorMsg, {}, "ellie-chat", ecUserId, undefined, undefined, threadId || undefined).catch(() => null);
     deliverResponse(ws, { type: "response", text: errorMsg, agent: agentName, memoryId: errMemoryId, ts: Date.now(), channelId });
     clearProcessing(ecUserId || "anonymous");
     exitDispatchMode();
