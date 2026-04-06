@@ -29,6 +29,7 @@ import type { ContextMode } from "./context-mode.ts";
 import { getModeSectionPriorities, getModeTokenBudget } from "./context-mode.ts";
 import { freshnessTracker, buildStalenessWarning } from "./context-freshness.ts";
 import type { ChannelContextProfile } from "./api/mode-profile.ts";
+import type { LayeredPromptResult } from "./prompt-layers/types";
 import { sanitizeUserMessage } from "./sanitize.ts";
 import { buildSourceHierarchyInstruction } from "./source-hierarchy.ts";
 import { getActiveRunStates } from "./orchestration-tracker.ts";
@@ -884,6 +885,7 @@ export async function buildPrompt(
   fullWorkingMemory?: boolean,
   empathyGuidance?: string,
   agentLocalMemory?: string,
+  layeredContext?: LayeredPromptResult,
 ): Promise<string> {
   const channelLabel = channel === "google-chat" ? "Google Chat" : channel === "ellie-chat" ? "Ellie Chat (dashboard)" : channel === "email" ? "Email (via AgentMail — replies are sent back as email to the sender)" : "Telegram";
 
@@ -894,6 +896,29 @@ export async function buildPrompt(
   // ── Assemble prompt as prioritized sections (ELLIE-185) ──
   // Priority: 1 = never trim, 2 = essential, 3 = important, 4-6 = context, 7-9 = trim first
   const sections: PromptSection[] = [];
+
+  // ── LAYERED PROMPT: inject identity/awareness/knowledge as high-priority sections ──
+  // When LAYERED_PROMPT=true, these sections provide the core context.
+  // They coexist with (and take priority over) the existing sections during rollout.
+  if (layeredContext) {
+    sections.push({
+      label: "layered-identity",
+      content: layeredContext.identity,
+      priority: 1, // never trimmed — who Ellie is
+    });
+    sections.push({
+      label: "layered-awareness",
+      content: layeredContext.awareness,
+      priority: 2, // essential — current state
+    });
+    if (layeredContext.knowledge) {
+      sections.push({
+        label: "layered-knowledge",
+        content: layeredContext.knowledge,
+        priority: 3, // important — retrieved knowledge
+      });
+    }
+  }
 
   // ELLIE-525: Only primary Ellie (general agent) loads soul.md.
   // Downstream agents (dev, critic, research, finance, strategy, ops) are tools,

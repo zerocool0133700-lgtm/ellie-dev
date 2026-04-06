@@ -146,3 +146,23 @@ export async function _gatherContextSources(
 
   return { convoContext, contextDocket, relevantContext, elasticContext, structuredContext: finalStructuredContext, forestContext, agentMemory, queueContext, liveForest };
 }
+
+// ── Layered Prompt Pipeline (feature-flagged) ───────────────
+// Replaces _gatherContextSources when LAYERED_PROMPT=true
+// See: docs/superpowers/specs/2026-04-06-layered-prompt-architecture-design.md
+
+import { buildLayeredContext } from "./prompt-layers/index";
+import type { LayeredPromptResult } from "./prompt-layers/types";
+
+/**
+ * Layered alternative to _gatherContextSources().
+ * Returns structured layers instead of a flat context bag.
+ */
+export async function gatherLayeredContext(
+  message: string | null,
+  channel: string | null,
+  agent: string,
+  supabase: any,
+): Promise<LayeredPromptResult> {
+  return buildLayeredContext(message, channel, agent, supabase);
+}

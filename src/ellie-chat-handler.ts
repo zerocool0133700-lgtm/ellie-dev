@@ -955,6 +955,19 @@ async function _handleEllieChatMessage(
     const shouldFetch = buildShouldFetch(contextMode, ellieChatActiveAgent);
     const ecCreatureProfile = getCreatureProfile(ellieChatActiveAgent); // needed for skill snapshot
 
+    // ── Layered Prompt (ELLIE-1442) ──
+    const useLayeredPrompt = process.env.LAYERED_PROMPT === "true";
+    let layeredContext: import("./prompt-layers/types").LayeredPromptResult | undefined;
+    if (useLayeredPrompt) {
+      try {
+        const { gatherLayeredContext } = await import("./ellie-chat-pipeline");
+        layeredContext = await gatherLayeredContext(text, channelId || "ellie-chat", ecRouteAgent || "ellie", supabase);
+      } catch (err) {
+        const { log } = await import("./logger.ts");
+        log.child("layered-prompt").warn({ err }, "Layered prompt failed, falling back to standard pipeline");
+      }
+    }
+
     const { convoContext: ecConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext: ecQueueContext, liveForest } = await gatherContextSources(
       supabase, ecConvoId, effectiveText, ellieChatActiveAgent, agentResult?.dispatch ?? null, ellieChatWorkItem, shouldFetch,
     );
@@ -1526,6 +1539,7 @@ async function _handleEllieChatMessage(
       undefined, // fullWorkingMemory
       empathyGuidance || undefined,
       ecAgentLocalMemory || undefined,
+      layeredContext,
     );
 
     capturePrompt({
