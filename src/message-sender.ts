@@ -51,6 +51,7 @@ export async function saveMessage(
   userId?: string,
   clientId?: string,
   initiatedBy: "user" | "system" | "agent" = "system",
+  threadId?: string,
 ): Promise<string | null> {
   if (!_supabase) return null;
   try {
@@ -67,6 +68,7 @@ export async function saveMessage(
     };
     if (userId) row.user_id = userId;
     if (clientId) row.id = clientId;
+    if (threadId) row.thread_id = threadId;
 
     const { data } = await _supabase.from("messages").insert(row).select("id").single();
 
