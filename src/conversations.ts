@@ -707,6 +707,37 @@ export async function getConversationMessages(
 }
 
 /**
+ * Load messages for a specific thread — true thread isolation (ELLIE-1458).
+ * Returns messages in the same format as getConversationMessages.
+ */
+export async function getThreadMessages(
+  supabase: SupabaseClient,
+  threadId: string,
+  limit: number = 50,
+): Promise<{ text: string; messageCount: number; conversationId: string }> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id, role, content, metadata, created_at")
+    .eq("thread_id", threadId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error || !data || data.length === 0) {
+    return { text: "", messageCount: 0, conversationId: "" };
+  }
+
+  // Reverse to chronological order
+  const messages = (data as any[]).reverse();
+  const formatted = messages.map((m: any) => {
+    const role = m.role === "user" ? "Dave" : (m.metadata?.agent || "Ellie");
+    return `${role}: ${m.content}`;
+  }).join("\n\n");
+
+  const text = "CURRENT CONVERSATION:\n" + formatted;
+  return { text, messageCount: messages.length, conversationId: "" };
+}
+
+/**
  * Retrieve a conversation by ID with paginated messages — ELLIE-405.
  * Returns structured data suitable for API responses.
  */

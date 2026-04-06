@@ -969,7 +969,7 @@ async function _handleEllieChatMessage(
     }
 
     const { convoContext: ecConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext: ecQueueContext, liveForest } = await gatherContextSources(
-      supabase, ecConvoId, effectiveText, ellieChatActiveAgent, agentResult?.dispatch ?? null, ellieChatWorkItem, shouldFetch,
+      supabase, ecConvoId, effectiveText, ellieChatActiveAgent, agentResult?.dispatch ?? null, ellieChatWorkItem, shouldFetch, effectiveThreadId || undefined,
     );
     const recentMessages = ecConvoContext.text;
     if (agentResult?.dispatch.is_new && ecQueueContext) {
@@ -1846,7 +1846,7 @@ export async function runSpecialistAsync(
     const specCreatureProfile = getCreatureProfile(ellieChatActiveAgent); // needed for skill snapshot
 
     const { convoContext: specConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext: specQueueContext, liveForest } = await gatherContextSources(
-      supabase, specConvoId, effectiveText, ellieChatActiveAgent, agentResult.dispatch, workItemId, shouldFetch,
+      supabase, specConvoId, effectiveText, ellieChatActiveAgent, agentResult.dispatch, workItemId, shouldFetch, threadId,
     );
     const recentMessages = specConvoContext.text;
     if (agentResult.dispatch.is_new && specQueueContext) {

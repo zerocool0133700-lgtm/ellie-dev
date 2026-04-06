@@ -11,7 +11,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { processMessageMode, getModeSectionPriorities } from "./context-mode.ts";
 import { getCreatureProfile } from "./creature-profile.ts";
-import { getConversationMessages } from "./conversations.ts";
+import { getConversationMessages, getThreadMessages } from "./conversations.ts";
 import { getContextDocket } from "./relay-config.ts";
 import { getRelevantContext, getRelevantFacts } from "./memory.ts";
 import { searchElastic } from "./elasticsearch.ts";
@@ -83,9 +83,12 @@ export async function _gatherContextSources(
   agentDispatch: { is_new: boolean; agent: { model?: string | null } } | null,
   workItemId: string | undefined,
   shouldFetch: (label: string) => boolean,
+  threadId?: string, // ELLIE-1458: prefer thread-based loading when active
 ) {
   const [convoContext, contextDocket, relevantContext, elasticContext, _structuredBase, forestContext, agentMemory, queueContext, liveForest, factsContext, relatedKnowledge, scopedForest, groveKnowledge] = await Promise.all([
-    convoId && supabase ? getConversationMessages(supabase, convoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" }),
+    threadId && supabase
+      ? getThreadMessages(supabase, threadId)
+      : (convoId && supabase ? getConversationMessages(supabase, convoId) : Promise.resolve({ text: "", messageCount: 0, conversationId: "" })),
     shouldFetch("context-docket") ? getContextDocket() : Promise.resolve(""),
     getRelevantContext(supabase, effectiveText, "ellie-chat", activeAgent, convoId),
     searchElastic(effectiveText, { limit: 5, recencyBoost: true, channel: "ellie-chat", sourceAgent: activeAgent, excludeConversationId: convoId, scope_path: resolveAgentScope(activeAgent) }),
