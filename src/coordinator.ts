@@ -21,7 +21,7 @@ import {
   type InvokeRecipeInput,
 } from "./coordinator-tools.ts";
 import type { SurfaceContext } from "./surface-context.ts";
-import { SURFACE_TOOL_DEFINITIONS } from "./surface-tools.ts";
+import { SURFACE_TOOL_DEFINITIONS, buildSurfaceAction, type SurfaceAction, type SurfaceToolName } from "./surface-tools.ts";
 import { renderSurfaceContext } from "./surface-context.ts";
 import {
   createEnvelope,
@@ -131,7 +131,10 @@ export interface CoordinatorResult {
   hitSafetyRail: boolean;
   durationMs: number;
   paused?: CoordinatorPausedState;  // ELLIE-1101: set when ask_user pauses the loop
+  surfaceActions?: SurfaceAction[];  // ELLIE-1455
 }
+
+const SURFACE_TOOL_NAMES: ReadonlySet<string> = new Set(SURFACE_TOOL_DEFINITIONS.map(d => d.name));
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -232,6 +235,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
   });
 
   const envelopes: DispatchEnvelope[] = [coordEnvelope];
+  const surfaceActions: SurfaceAction[] = [];  // ELLIE-1455
 
   // Tracking
   let totalTokensIn = 0;
@@ -396,6 +400,21 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
     const otherCalls: Array<Record<string, unknown>> = [];
 
     for (const tool of toolUses) {
+      // ELLIE-1455: Surface tools — synthesize action, ack to LLM, accumulate for response
+      if (SURFACE_TOOL_NAMES.has(tool.name as string)) {
+        const action = buildSurfaceAction(
+          tool.name as SurfaceToolName,
+          tool.input as Record<string, unknown>,
+        );
+        surfaceActions.push(action);
+        ctx.addToolResult(
+          tool.id as string,
+          JSON.stringify({ status: "queued", proposal_id: action.proposal_id }),
+        );
+        logger.info("[surface] action queued", { tool: tool.name, proposal_id: action.proposal_id });
+        continue;
+      }
+
       if (tool.name === "complete") {
         // Handle complete tool — extract response, optionally promote
         const input = tool.input as unknown as CompleteInput;
@@ -512,6 +531,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
           hitSafetyRail: false,
           durationMs,
           paused: pausedState,
+          surfaceActions,  // ELLIE-1455
         };
       } else if (tool.name === "dispatch_agent") {
         dispatchCalls.push(tool);
@@ -857,6 +877,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
     totalCostUsd,
     hitSafetyRail,
     durationMs,
+    surfaceActions,  // ELLIE-1455
   };
 }
 

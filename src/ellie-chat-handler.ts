@@ -1497,7 +1497,7 @@ async function _handleEllieChatMessage(
             undefined, "system",
             effectiveThreadId || undefined,
           );
-          const responsePayload = {
+          const responsePayload: Record<string, unknown> = {
             type: "response",
             text: coordResponse,
             agent: "ellie",
@@ -1507,6 +1507,12 @@ async function _handleEllieChatMessage(
             ts: Date.now(),
             duration_ms: coordinatorResult.durationMs,
           };
+
+          // ELLIE-1455: Include surface_actions if Ellie called any surface tools
+          if (coordinatorResult.surfaceActions && coordinatorResult.surfaceActions.length > 0) {
+            responsePayload.surface_actions = coordinatorResult.surfaceActions;
+          }
+
           deliverResponse(ws, responsePayload, ecUserId);
           // ELLIE-1454: Also broadcast to all connected clients so any open tab gets the response
           broadcastToEllieChatClients(responsePayload);
