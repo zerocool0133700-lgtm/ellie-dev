@@ -348,6 +348,11 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 
 **Context:** This module orchestrates the full pipeline: validate → dedup check → archive raw → convert → chunk → frontmatter → River write → Forest plant → notify. It does NOT expose an HTTP endpoint (Task 4 does that). It's a pure module that takes a buffer and metadata, returns a result, and emits events via callback.
 
+**Audit corrections (2026-04-06):**
+- The pipeline result type is named `IngestionPipelineResult` to avoid collision with the existing `IngestionResult` exported from `src/document-ingestion.ts`.
+- `bridgeWrite` is **not** an exported function in `src/api/bridge.ts` — only `bridgeWriteEndpoint(req, res)` exists. The plant step calls `/api/bridge/write` via `fetch("http://localhost:3001/api/bridge/write", …)` using the bridge key from the env, mirroring how `prompt-layers/knowledge.ts` calls `/api/bridge/read`.
+- `ensureScopeExists` is removed — `/api/bridge/write` auto-creates the scope on first write, so no separate call is needed.
+
 - [ ] **Step 1: Write the failing test (focused on dedup check + scope resolution)**
 
 Create `/home/ellie/ellie-dev/tests/ingestion-pipeline.test.ts`:
@@ -514,7 +519,9 @@ export async function recordHash(folderArchivePath: string, record: HashRecord):
 
 export type IngestionStatus = "queued" | "uploading" | "converting" | "planting" | "done" | "duplicate" | "failed";
 
-export interface IngestionResult {
+// NOTE: Renamed from IngestionResult to avoid collision with the existing
+// IngestionResult exported from src/document-ingestion.ts.
+export interface IngestionPipelineResult {
   ingestion_id: string;
   status: IngestionStatus;
   river_path?: string;
@@ -549,7 +556,7 @@ export interface IngestOptions {
 
 // ── Main orchestrator ────────────────────────────────────────
 
-export async function runIngestion(opts: IngestOptions): Promise<IngestionResult> {
+export async function runIngestion(opts: IngestOptions): Promise<IngestionPipelineResult> {
   const ingestion_id = `ing_${crypto.randomUUID().slice(0, 8)}`;
   const { filename, target_folder, buffer, onEvent } = opts;
 
@@ -639,9 +646,8 @@ export async function runIngestion(opts: IngestOptions): Promise<IngestionResult
       ingested_at,
     });
 
-    // Stage 8: Plant Forest chunks
+    // Stage 8: Plant Forest chunks (scope is auto-created on first /api/bridge/write)
     const scope = riverFolderToScope(target_folder);
-    await ensureScopeExists(scope);
     for (let i = 0; i < chunks.length; i++) {
       await plantChunk({
         content: chunks[i],
@@ -731,12 +737,6 @@ async function writeRiverDoc(relPath: string, content: string): Promise<void> {
   // We do NOT wait for this — eventually consistent.
 }
 
-async function ensureScopeExists(scope_path: string): Promise<void> {
-  // Use the existing bridge write helper to create the scope if it doesn't exist.
-  // The bridge write API auto-creates scopes on first write, so this is a no-op
-  // — included as a placeholder if explicit scope creation becomes necessary.
-}
-
 interface PlantChunkOpts {
   content: string;
   scope_path: string;
@@ -747,23 +747,37 @@ interface PlantChunkOpts {
   source_hash: string;
 }
 
+const BRIDGE_KEY = process.env.BRIDGE_KEY_ELLIE
+  || process.env.BRIDGE_KEY
+  || "bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e740f6577a";
+
 async function plantChunk(opts: PlantChunkOpts): Promise<void> {
-  // Use the existing in-process bridge write helper.
-  // Implementation depends on what the relay exposes — see Task 4 for the
-  // glue that wires this to the existing src/api/bridge.ts helpers.
-  const { bridgeWrite } = await import("./api/bridge");
-  await bridgeWrite({
-    content: opts.content,
-    scope_path: opts.scope_path,
-    type: "fact",
-    metadata: {
-      river_doc_path: opts.river_doc_path,
-      chunk_index: opts.chunk_index,
-      ingestion_id: opts.ingestion_id,
-      target_folder: opts.target_folder,
-      source_hash: opts.source_hash,
+  // bridgeWriteEndpoint is the only export — call it via self-fetch to keep
+  // this module pure (no req/res mocking). Mirrors prompt-layers/knowledge.ts
+  // calling /api/bridge/read.
+  const res = await fetch("http://localhost:3001/api/bridge/write", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-bridge-key": BRIDGE_KEY,
     },
-  } as any);
+    body: JSON.stringify({
+      content: opts.content,
+      scope_path: opts.scope_path,
+      type: "fact",
+      metadata: {
+        river_doc_path: opts.river_doc_path,
+        chunk_index: opts.chunk_index,
+        ingestion_id: opts.ingestion_id,
+        target_folder: opts.target_folder,
+        source_hash: opts.source_hash,
+      },
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`bridge write failed (${res.status}): ${text}`);
+  }
 }
 
 async function generateAndPlantSummary(opts: {
@@ -805,7 +819,14 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 - Create: `/home/ellie/ellie-dev/src/api/knowledge.ts`
 - Modify: `/home/ellie/ellie-dev/src/http-routes.ts`
 
-**Context:** Wire the pipeline to HTTP. `POST /api/knowledge/ingest` accepts multipart form data, calls `runIngestion`, broadcasts `ingest_complete` events to all connected ellie-chat WebSocket clients. `DELETE /api/knowledge/purge` removes a previously-ingested file.
+**Context:** Wire the pipeline to HTTP. `POST /api/knowledge/ingest` accepts a JSON body with the file as base64 (matching the existing `/api/ingest/file` convention from ELLIE-1087), calls `runIngestion`, broadcasts `ingest_*` events to all connected ellie-chat WebSocket clients. `DELETE /api/knowledge/purge` removes a previously-ingested file.
+
+**Audit corrections (2026-04-06):**
+- The relay uses raw Node `http` (`req.on("data") / req.on("end")`, `res.writeHead` / `res.end`) — **not** the Fetch API. The handlers must take `(req: IncomingMessage, res: ServerResponse)`, not `(req: Request) => Promise<Response>`. Mirror the existing `/api/ingest/file` block in `http-routes.ts:6942`.
+- `broadcastToEllieChatClients` is exported from `src/relay-state.ts` (not a non-existent `ws-delivery`). Verified at `relay-state.ts:129`.
+- Auth uses the shared `authenticateBridgeKey(...)` helper from `src/api/bridge.ts:52`, not a local `process.env.BRIDGE_KEY` check. Mirror the wrap-with-mockRes pattern in `http-routes.ts` around line 6997.
+- Multipart upload is done as **base64-in-JSON** to match `/api/ingest/file` (no new package, no FormData parser): the body is `{ filename, content, target_folder, proposal_id? }` where `content` is base64.
+- `bridgeDeleteByMetadata` does not exist. The purge step deletes the River MD file only and logs a TODO for Forest chunk cleanup — that follow-up is tracked separately.
 
 - [ ] **Step 1: Read the existing http-routes structure**
 
@@ -821,69 +842,105 @@ Create `/home/ellie/ellie-dev/src/api/knowledge.ts`:
 /**
  * Knowledge API — ingest and purge endpoints.
  *
- * POST /api/knowledge/ingest    — multipart upload, runs the pipeline
+ * POST   /api/knowledge/ingest  — base64-in-JSON upload, runs the pipeline
  * DELETE /api/knowledge/purge   — remove a previously-ingested file
+ *
+ * Style note: Node http (IncomingMessage / ServerResponse), NOT Fetch API.
+ * Mirrors the existing /api/ingest/file block at http-routes.ts:6942.
  *
  * See: docs/superpowers/specs/2026-04-06-knowledge-surface-and-ingestion-design.md
  */
 
-import { log } from "../logger.ts";
-import { runIngestion, type IngestionEvent } from "../ingestion-pipeline";
-import { broadcastToEllieChatClients } from "../ws-delivery";
+import type { IncomingMessage, ServerResponse } from "http";
 import { promises as fs } from "fs";
 import * as path from "path";
+import { log } from "../logger.ts";
+import { runIngestion, type IngestionEvent } from "../ingestion-pipeline";
+import { broadcastToEllieChatClients } from "../relay-state.ts";
+import { authenticateBridgeKey } from "./bridge.ts";
 
 const logger = log.child("api:knowledge");
 
-const UPLOADS_ARCHIVE_ROOT = process.env.UPLOADS_ARCHIVE_ROOT || "/home/ellie/uploads-archive";
 const RIVER_VAULT_ROOT = process.env.RIVER_ROOT || "/home/ellie/obsidian-vault/ellie-river";
-
-const BRIDGE_KEY = process.env.BRIDGE_KEY || "";
-
-function checkBridgeAuth(req: Request): boolean {
-  const key = req.headers.get("x-bridge-key");
-  return !!key && key === BRIDGE_KEY;
-}
 
 // Server-side enforcement: max 50 in-flight ingestions per process
 const MAX_IN_FLIGHT = 50;
 let inFlight = 0;
 
-export async function handleIngest(req: Request): Promise<Response> {
-  if (!checkBridgeAuth(req)) {
-    return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
-  }
+/**
+ * Build a tiny mock ApiResponse so we can reuse authenticateBridgeKey
+ * (which expects an Express-ish res object) on top of raw Node res.
+ * Same pattern used in http-routes.ts around line 6999.
+ */
+function mockApiResFor(res: ServerResponse) {
+  return {
+    status: (code: number) => ({
+      json: (data: unknown) => {
+        res.writeHead(code, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(data));
+      },
+    }),
+    json: (data: unknown) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(data));
+    },
+  };
+}
+
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  return await new Promise((resolve, reject) => {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", () => {
+      try { resolve(body ? JSON.parse(body) : {}); }
+      catch (err) { reject(err); }
+    });
+    req.on("error", reject);
+  });
+}
+
+export async function handleIngest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  // Auth (shared bridge-key middleware)
+  const authRes = mockApiResFor(res);
+  const bridgeKey = await authenticateBridgeKey(
+    req.headers["x-bridge-key"] as string | undefined,
+    authRes as any,
+    "write",
+  );
+  if (!bridgeKey) return; // 401/403 already sent
 
   if (inFlight >= MAX_IN_FLIGHT) {
-    return new Response(JSON.stringify({ error: "too many in-flight ingestions" }), { status: 429 });
+    res.writeHead(429, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "too many in-flight ingestions" }));
+    return;
   }
 
-  let formData: FormData;
+  let body: { filename?: string; content?: string; target_folder?: string; proposal_id?: string };
   try {
-    formData = await req.formData();
+    body = (await readJsonBody(req)) as any;
   } catch {
-    return new Response(JSON.stringify({ error: "invalid multipart body" }), { status: 400 });
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "invalid JSON body" }));
+    return;
   }
 
-  const file = formData.get("file") as File | null;
-  const target_folder = formData.get("target_folder") as string | null;
-  const proposal_id = (formData.get("proposal_id") as string | null) || undefined;
-
-  if (!file || !target_folder) {
-    return new Response(JSON.stringify({ error: "file and target_folder are required" }), { status: 400 });
+  const { filename, content, target_folder, proposal_id } = body;
+  if (!filename || !content || !target_folder) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "filename, content (base64), and target_folder are required" }));
+    return;
   }
 
-  const buffer = Buffer.from(await file.arrayBuffer());
+  const buffer = Buffer.from(content, "base64");
 
   inFlight++;
   try {
     const result = await runIngestion({
-      filename: file.name,
+      filename,
       target_folder,
       buffer,
       proposal_id,
       onEvent: (event: IngestionEvent) => {
-        // Broadcast each pipeline-stage event to all ellie-chat clients
         broadcastToEllieChatClients({
           type: "ingest_event",
           ...event,
@@ -892,7 +949,7 @@ export async function handleIngest(req: Request): Promise<Response> {
       },
     });
 
-    // Final ingest_complete event
+    // Final ingest_complete event (only on success)
     if (result.status === "done") {
       broadcastToEllieChatClients({
         type: "ingest_complete",
@@ -900,40 +957,45 @@ export async function handleIngest(req: Request): Promise<Response> {
         river_path: result.river_path,
         forest_chunk_count: result.forest_chunk_count,
         target_folder,
-        file_name: file.name,
+        file_name: filename,
         source_hash: result.source_hash,
         ts: Date.now(),
       });
     }
 
-    return new Response(JSON.stringify(result), {
-      status: result.status === "failed" ? 500 : 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    res.writeHead(result.status === "failed" ? 500 : 200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(result));
   } finally {
     inFlight--;
   }
 }
 
-export async function handlePurge(req: Request): Promise<Response> {
-  if (!checkBridgeAuth(req)) {
-    return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
-  }
+export async function handlePurge(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const authRes = mockApiResFor(res);
+  const bridgeKey = await authenticateBridgeKey(
+    req.headers["x-bridge-key"] as string | undefined,
+    authRes as any,
+    "write",
+  );
+  if (!bridgeKey) return;
 
   let body: { river_path?: string; ingestion_id?: string; target_folder?: string };
   try {
-    body = (await req.json()) as any;
+    body = (await readJsonBody(req)) as any;
   } catch {
-    return new Response(JSON.stringify({ error: "invalid JSON body" }), { status: 400 });
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "invalid JSON body" }));
+    return;
   }
 
   if (!body.river_path && !body.ingestion_id && !body.target_folder) {
-    return new Response(JSON.stringify({ error: "must provide river_path, ingestion_id, or target_folder" }), { status: 400 });
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "must provide river_path, ingestion_id, or target_folder" }));
+    return;
   }
 
   const removed = { river_md: 0, raw_files: 0, forest_chunks: 0 };
 
-  // Phase 1 of purge: by river_path only — full implementation in a follow-up
   if (body.river_path) {
     const fullPath = path.join(RIVER_VAULT_ROOT, body.river_path);
     try {
@@ -941,42 +1003,46 @@ export async function handlePurge(req: Request): Promise<Response> {
       removed.river_md++;
     } catch (err: any) {
       if (err.code !== "ENOENT") {
-        return new Response(JSON.stringify({ error: String(err) }), { status: 500 });
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(err) }));
+        return;
       }
     }
-    // Forest chunk cleanup by river_doc_path metadata
-    try {
-      const { bridgeDeleteByMetadata } = await import("./bridge");
-      const deleted = await (bridgeDeleteByMetadata as any)?.({ river_doc_path: body.river_path });
-      removed.forest_chunks = deleted?.count || 0;
-    } catch (err) {
-      logger.warn({ err: String(err) }, "forest chunk cleanup not available");
-    }
+    // TODO: Forest chunk cleanup by river_doc_path metadata.
+    // No bridge helper exists yet for "delete memories where metadata.river_doc_path = X".
+    // Tracked as a follow-up — purge is a developer tool until the UI catches up.
+    logger.info({ river_path: body.river_path }, "purged river MD; forest chunks left in place (TODO)");
   }
 
-  return new Response(JSON.stringify({ success: true, removed }), {
-    headers: { "Content-Type": "application/json" },
-  });
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ success: true, removed }));
 }
 ```
 
 - [ ] **Step 3: Register the routes in http-routes.ts**
 
-Find the route registration in `src/http-routes.ts` (the pattern will be specific to the relay). Add:
+Open `src/http-routes.ts` and add the import at the top of the file (alongside the other `./api/...` imports), then add the two route blocks immediately after the existing `/api/ingest/url` block (~line 6992):
 
 ```typescript
-import { handleIngest, handlePurge } from "./api/knowledge";
+// At the top of http-routes.ts, near other api imports:
+import { handleIngest as handleKnowledgeIngest, handlePurge as handleKnowledgePurge } from "./api/knowledge.ts";
+```
 
-// In the route handler / switch:
+```typescript
+// After the existing /api/ingest/url block (around line 6992):
+
+// ── ELLIE-1455: Knowledge ingestion pipeline ──
 if (url.pathname === "/api/knowledge/ingest" && req.method === "POST") {
-  return handleIngest(req);
+  (async () => { await handleKnowledgeIngest(req, res); })();
+  return;
 }
 if (url.pathname === "/api/knowledge/purge" && req.method === "DELETE") {
-  return handlePurge(req);
+  (async () => { await handleKnowledgePurge(req, res); })();
+  return;
 }
 ```
 
-If `bridgeDeleteByMetadata` doesn't exist in `src/api/bridge.ts`, the purge call will silently log a warning (the import wraps it in try/catch). That's acceptable for v1 — purge is a developer tool until the UI catches up.
+The wrapping IIFE matches the pattern used by other async route handlers in `http-routes.ts` (search for `(async () => { ... })();`).
 
 - [ ] **Step 4: Restart the relay and smoke-test the ingest endpoint**
 
@@ -984,14 +1050,15 @@ If `bridgeDeleteByMetadata` doesn't exist in `src/api/bridge.ts`, the purge call
 systemctl --user restart ellie-chat-relay
 ```
 
-In another terminal, post a small test markdown file:
+In another terminal, post a small test markdown file (base64-in-JSON, matching `/api/ingest/file`):
 
 ```bash
 echo -e "# Test Doc\n\nThis is a test paragraph.\n\nAnother paragraph here." > /tmp/test-ingest.md
+B64=$(base64 -w0 /tmp/test-ingest.md)
 curl -s -X POST http://localhost:3001/api/knowledge/ingest \
   -H "x-bridge-key: bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e740f6577a" \
-  -F "file=@/tmp/test-ingest.md" \
-  -F "target_folder=test-ingest/" | jq .
+  -H "Content-Type: application/json" \
+  -d "{\"filename\":\"test-ingest.md\",\"content\":\"$B64\",\"target_folder\":\"test-ingest/\"}" | jq .
 ```
 
 Expected: `{ "ingestion_id": "ing_...", "status": "done", "river_path": "test-ingest/test-ingest.md", "forest_chunk_count": 1, ... }`
@@ -1008,8 +1075,8 @@ Both should contain entries for the test file. Drop the same file again to verif
 ```bash
 curl -s -X POST http://localhost:3001/api/knowledge/ingest \
   -H "x-bridge-key: bk_d81869ef1556947b38376429ab2d9752ec0ed2799dc85d968532a6e740f6577a" \
-  -F "file=@/tmp/test-ingest.md" \
-  -F "target_folder=test-ingest/" | jq .
+  -H "Content-Type: application/json" \
+  -d "{\"filename\":\"test-ingest.md\",\"content\":\"$B64\",\"target_folder\":\"test-ingest/\"}" | jq .
 ```
 
 Expected: `{ "status": "duplicate", "duplicate_of": { ... } }`
@@ -1033,72 +1100,96 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 
 **Context:** When Ellie is on `/ellie-chat`, Telegram, or any non-knowledge surface, her Layer 3 retrieval doesn't know to look in `2/river-ingest/*` for ingested content. Without this fix, ingested PDFs are unfindable from anywhere except the surface they were uploaded on.
 
-- [ ] **Step 1: Read the current knowledge layer**
+**Audit corrections (2026-04-06):**
+- `fetchForestKnowledge(message, scopePath)` is **module-private** in `knowledge.ts:165` and returns a **rendered string** (`## KNOWLEDGE\n- [type, scope] content\n…`), not arrays of memory objects. There is no score-based merging to do — we fan out to multiple scopes, get back rendered strings, and concatenate.
+- `listScopes` does **not** exist in `src/api/bridge.ts` (only `bridgeScopesEndpoint(req, res)` does). The cross-scope walk uses `fetch("http://localhost:3001/api/bridge/scopes")` to list scopes — same self-fetch pattern as the existing `fetchForestKnowledge`.
+- The strategy is: keep the existing single-scope fetch path untouched, and for non-surface modes ALSO call a new `fetchRiverIngestKnowledge` that enumerates `2/river-ingest/*` scopes and unions their rendered results into `forestKnowledge`.
 
-Run: `cd /home/ellie/ellie-dev && wc -l src/prompt-layers/knowledge.ts && grep -n "scope_path\|bridgeRead\|retrieveKnowledge" src/prompt-layers/knowledge.ts | head -20`
+- [ ] **Step 1: Inspect the current knowledge layer**
 
-Identify the function that performs the Forest semantic search.
+Run: `grep -n "fetchForestKnowledge\|retrieveKnowledge\|BRIDGE_KEY\|/api/bridge/read" /home/ellie/ellie-dev/src/prompt-layers/knowledge.ts`
 
-- [ ] **Step 2: Add scope enumeration helper**
+Confirm:
+- `fetchForestKnowledge(message, scopePath)` is private and returns `Promise<string>`.
+- `retrieveKnowledge(message, mode, agent)` returns `KnowledgeResult` with `forestKnowledge: string`.
+- A `BRIDGE_KEY` constant is already defined and used in `fetchForestKnowledge`.
 
-In `/home/ellie/ellie-dev/src/prompt-layers/knowledge.ts`, add a helper to enumerate `2/river-ingest/*` sub-scopes:
+- [ ] **Step 2: Add a multi-scope fetch + scope enumerator**
+
+Add these two functions to `src/prompt-layers/knowledge.ts`, just below the existing `fetchForestKnowledge`:
 
 ```typescript
-import { RIVER_INGEST_SCOPE_ROOT } from "../river-folder-scope";
-
 /**
- * Enumerate all child scopes under 2/river-ingest/ for cross-scope retrieval.
- * Returns scope paths like ["2/river-ingest/research", "2/river-ingest/architecture", ...]
+ * Enumerate child scopes under 2/river-ingest/ via /api/bridge/scopes.
+ * Returns scope paths like ["2/river-ingest/research", "2/river-ingest/architecture"].
  */
 async function enumerateRiverIngestScopes(): Promise<string[]> {
   try {
-    // Use the bridge scopes endpoint to list child scopes
-    const { listScopes } = await import("../api/bridge");
-    const allScopes = await (listScopes as any)?.();
-    if (!Array.isArray(allScopes)) return [];
-    return allScopes
-      .map((s: any) => s.scope_path || s.path || "")
-      .filter((p: string) => p.startsWith(`${RIVER_INGEST_SCOPE_ROOT}/`));
-  } catch {
+    const res = await fetch("http://localhost:3001/api/bridge/scopes", {
+      headers: { "x-bridge-key": BRIDGE_KEY },
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { scopes?: Array<{ scope_path?: string; path?: string }> };
+    const list = data.scopes ?? [];
+    return list
+      .map((s) => s.scope_path || s.path || "")
+      .filter((p): p is string => typeof p === "string" && p.startsWith("2/river-ingest/"));
+  } catch (err) {
+    logger.warn("river-ingest scope enumeration failed", { err });
     return [];
   }
 }
-```
 
-If `listScopes` doesn't exist in the bridge, fall back to using the `/api/bridge/scopes` HTTP endpoint via fetch — but ideally this is in-process. If neither is feasible, the simplest v1 fallback is a directory walk on the Forest schema or returning an empty array (Layer 3 behaves as before, just without river-ingest enumeration).
-
-- [ ] **Step 3: Call enumeration in the retrieval function for non-surface queries**
-
-Find the function that runs the Forest semantic search (likely `retrieveKnowledge` or similar). Modify it to:
-
-```typescript
-export async function retrieveKnowledge(message: string | null, mode: any, agent: string): Promise<KnowledgeResult> {
-  // ... existing scope-targeted search ...
-  const baseResults = await /* existing query */;
-
-  // ELLIE-1455: For non-surface contexts, also enumerate river-ingest scopes
-  // (Surface contexts already query the right scope directly via surface_context.)
-  let riverIngestResults: any[] = [];
-  try {
-    const riverScopes = await enumerateRiverIngestScopes();
-    for (const scope of riverScopes) {
-      const r = await /* same query function, but with this scope */;
-      if (Array.isArray(r)) riverIngestResults.push(...r);
-    }
-  } catch (err) {
-    // log and continue without river-ingest results
-  }
-
-  // Merge, re-rank by score, trim to limit
-  const merged = [...baseResults, ...riverIngestResults]
-    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
-    .slice(0, /* existing limit */);
-
-  return /* result object containing merged */;
+/**
+ * Fan out fetchForestKnowledge across all 2/river-ingest/* scopes and
+ * concatenate the rendered results. Each call already returns a "## KNOWLEDGE\n…"
+ * block; we strip duplicate headers and merge under a single header.
+ */
+async function fetchRiverIngestKnowledge(message: string): Promise<string> {
+  const scopes = await enumerateRiverIngestScopes();
+  if (scopes.length === 0) return "";
+  const results = await Promise.all(scopes.map((s) => fetchForestKnowledge(message, s)));
+  const lines = results
+    .filter((r) => r && r.trim().length > 0)
+    .map((r) => r.replace(/^##\s+KNOWLEDGE\n?/i, "").trim())
+    .filter((r) => r.length > 0);
+  if (lines.length === 0) return "";
+  return `## KNOWLEDGE (river-ingest)\n${lines.join("\n")}`;
 }
 ```
 
-The exact integration depends on the existing function shape. The principle: existing scope-targeted query continues; we additionally walk `2/river-ingest/*` scopes and union the results.
+- [ ] **Step 3: Call the new helper from `retrieveKnowledge` for non-surface modes**
+
+Edit the existing `retrieveKnowledge` function. Replace the `Promise.all` block with:
+
+```typescript
+  const [registry, forestKnowledge, expansion, riverIngestKnowledge] = await Promise.all([
+    loadSkillRegistry(),
+    fetchForestKnowledge(message, scopePath),
+    fetchContextualExpansion(message, agent),
+    // Surface-mode requests already target the right scope; for the rest,
+    // walk 2/river-ingest/* and union the results.
+    mode === "surface" ? Promise.resolve("") : fetchRiverIngestKnowledge(message),
+  ]);
+```
+
+Then merge the two forest strings before returning:
+
+```typescript
+  const mergedForest = [forestKnowledge, riverIngestKnowledge]
+    .filter((s) => s && s.trim().length > 0)
+    .join("\n\n");
+
+  return { skillDocs, forestKnowledge: mergedForest, expansion };
+```
+
+If the project's `LayeredMode` type does not have a `"surface"` literal, gate on `mode !== "heartbeat"` instead — the goal is "skip when we already targeted the right scope, do it everywhere else."
+
+- [ ] **Step 3a: Confirm `LayeredMode` literals**
+
+Run: `grep -n "type LayeredMode\|LayeredMode =" /home/ellie/ellie-dev/src/prompt-layers/types.ts`
+
+Use whichever literal denotes a surface-scoped request. If unsure, fall back to the heartbeat-only gate.
 
 - [ ] **Step 4: Restart relay and verify ingested content is findable from /ellie-chat**
 
@@ -1120,82 +1211,17 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 6: Surface-scoped thread auto-creation for River panel
+### Task 6: Surface-scoped thread auto-creation for River panel — **DEFERRED**
 
-**Files:**
-- Modify: `/home/ellie/ellie-home/app/composables/useThreads.ts`
-- Modify: `/home/ellie/ellie-home/app/components/ellie/EllieSurfacePanel.vue`
+**Status:** ⛔ DEFERRED out of Phase 2 during pre-execution audit (2026-04-06).
 
-**Context:** Per the spec, the River panel should default to a surface-scoped thread (`knowledge-river`) instead of sharing the main chat thread. Phase 1 deferred this; Phase 2 implements it.
+**Why:** `useEllieChat` is currently a module-level singleton with shared `messages` ref and `currentChannelId`. Switching channels from inside `EllieSurfacePanel.vue` on mount would mutate the shared state and pollute every other page using the composable (top bar, sidebar, conversation pages). Shipping surface-scoped threads requires redesigning `useEllieChat` for non-singleton usage (factory pattern or scoped instances) — out of scope for Phase 2.
 
-- [ ] **Step 1: Add ensureThreadByName helper to useThreads**
+**Forest record:** memory `dd8ac554-a01c-4dcc-bb18-8e94cb2a95b5` (scope `2/1`).
 
-In `/home/ellie/ellie-home/app/composables/useThreads.ts`, add a function that finds a thread by name or creates it if missing:
+**Follow-up ticket:** TODO — file as separate Plane issue ("Surface-scoped chat threads — useEllieChat redesign").
 
-```typescript
-async function ensureThreadByName(name: string, opts?: { routing_mode?: 'coordinated' | 'direct'; agents?: string[] }): Promise<Thread | null> {
-  // First, fetch latest threads to make sure we're not racing
-  await fetchThreads()
-  let existing = threads.value.find(t => t.name === name)
-  if (existing) return existing
-
-  // Create it
-  const created = await createThread({
-    name,
-    routing_mode: opts?.routing_mode || 'coordinated',
-    agents: opts?.agents || ['ellie'],
-  })
-  return created
-}
-```
-
-Add `ensureThreadByName` to the exported object at the bottom.
-
-- [ ] **Step 2: Use it from the panel on mount**
-
-In `/home/ellie/ellie-home/app/components/ellie/EllieSurfacePanel.vue`, add a prop for the desired thread name and call `ensureThreadByName` on mount:
-
-```typescript
-const props = defineProps<{
-  surfaceId: SurfaceId
-  surfaceContext: SurfaceContext
-  onAction?: (action: SurfaceAction) => Promise<void> | void
-  readModeAvailable?: boolean
-  readMode?: boolean
-  threadName?: string  // ELLIE-1455: surface-scoped thread name (e.g. 'knowledge-river')
-}>()
-
-// Inside onMounted, after the localStorage restore:
-onMounted(async () => {
-  // ... existing localStorage restore ...
-
-  if (props.threadName) {
-    const { ensureThreadByName, switchThread } = useThreads()
-    const thread = await ensureThreadByName(props.threadName)
-    if (thread) {
-      switchThread(thread.id)
-      // Also tell useEllieChat to switch to this thread's storage key
-      const { switchChannel } = useEllieChat()
-      await switchChannel(thread.id)
-    }
-  }
-})
-```
-
-- [ ] **Step 3: Verify build**
-
-Run: `cd /home/ellie/ellie-home && bun run build 2>&1 | tail -5`
-Expected: Clean build
-
-- [ ] **Step 4: Commit**
-
-```bash
-cd /home/ellie/ellie-home
-git add app/composables/useThreads.ts app/components/ellie/EllieSurfacePanel.vue
-git commit -m "[ELLIE-1455] surface-scoped thread auto-creation for embedded panels
-
-Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
-```
+**Phase 2 behavior without this task:** River panel uses the same default thread as the rest of the dashboard. Surface context still flows through the layered prompt + tool layer (Tasks 1–5), so Ellie still knows the user is in `knowledge-river`. Only thread isolation is missing.
 
 ---
 
@@ -1546,11 +1572,30 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 
 **Context:** Replace the existing River tab content with the two-zone layout: Zone A on top (RiverNavigationZone), Zone B on bottom (IngestDropZone). Wire the selected folder, file uploads, and surface context.
 
-- [ ] **Step 1: Find the existing River tab block**
+**Audit corrections (2026-04-06):**
 
-Run: `cd /home/ellie/ellie-home && grep -n "river\|River" app/pages/knowledge.vue | head -20`
+1. **Existing River block to delete (verified against current file):**
+   - Template: `app/pages/knowledge.vue` **lines 39–90** — the entire `<!-- River View (ELLIE-150) -->` div (search box + results list + doc viewer).
+   - Script setup: **lines 498–547** — `RiverDoc` interface, `riverQuery`, `riverResults`, `riverLoading`, `riverDocContent`, `riverDocId` refs, `searchRiver()` and `viewRiverDoc()` functions. Delete all of them; the new layout uses different state and never calls `/api/knowledge/river` or `/api/knowledge/river-doc` (these Nuxt server routes can stay — other places may use them).
+   - Line numbers will shift as edits are made; re-grep before each delete.
 
-Identify the conditional block that renders the River tab (likely a `v-if="activeTab === 'river'"` or similar).
+2. **`/api/bridge/river/list` does NOT exist on the relay.** The plan called a fictional endpoint. Folder navigation must be derived client-side from `/api/bridge/river/catalog`, which returns a flat `{ docs: [{ docid, path, size, updated_at }] }`. From that response we can:
+   - Derive `riverAllFolders` by extracting unique directory prefixes from each `path`.
+   - Derive `riverContents` for the currently-selected folder by filtering `docs` whose path starts with `${selectedFolder}` and grouping into "files in this folder" vs "subfolders".
+
+3. **Use direct fetch to `http://localhost:3001/api/bridge/...`, not `$fetch('/api/bridge/...')`.** No Nuxt proxy exists for `/api/bridge/*`; `$fetch('/api/bridge/...')` would hit the Nuxt server and 404. The bridge key comes from `useRuntimeConfig().public.bridgeKey`.
+
+4. **`/api/knowledge/ingest` body is base64-in-JSON, not FormData.** Match the new Task 4 contract — read each file with `await file.arrayBuffer()`, base64 it, and POST `{ filename, content, target_folder }` as JSON. (`FormData` would fail because the relay endpoint reads the body with `req.on("data")` and `JSON.parse`.)
+
+5. **Layout interaction with Phase 1 wrapper.** The Phase 1 patch added a `<div class="flex-1 overflow-y-auto">` wrapper around the tab content area. The new River two-zone layout uses `flex flex-col h-full`, which only fills the parent if the parent has a fixed height. Either remove the `overflow-y-auto` wrapper for the river tab specifically, or change the river root to `min-h-[600px]` so it has explicit height. The audit-then-execute step for Task 9 must verify this is correct in the current file before committing.
+
+**Replace Steps 1–5 of the original task with this corrected sequence:**
+
+- [ ] **Step 1: Verify what to delete**
+
+Run: `grep -n "River View (ELLIE-150)\|riverQuery\|riverResults\|searchRiver\|viewRiverDoc\|RiverDoc" /home/ellie/ellie-home/app/pages/knowledge.vue`
+
+Confirm the line ranges still match this audit note (template ~39–90, script ~498–547). If they have shifted, use the new line ranges.
 
 - [ ] **Step 2: Replace the River block with the two-zone layout**
 
@@ -1583,72 +1628,118 @@ In `app/pages/knowledge.vue`, replace the existing River tab content with:
 
 - [ ] **Step 3: Add the River state and handlers in <script setup>**
 
+Direct-fetch to `http://localhost:3001/api/bridge/...` (no Nuxt proxy). `loadRiverState` and `onRiverSelectFolder` both derive from a single catalog response.
+
 ```typescript
 import RiverNavigationZone from '~/components/knowledge/RiverNavigationZone.vue'
 import IngestDropZone from '~/components/knowledge/IngestDropZone.vue'
 import type { KnowledgeRiverContext } from '~/types/surface-context'
 
+interface RiverCatalogEntry { docid: string; path: string; size: string; updated_at: string }
+
+const RELAY_BASE = 'http://localhost:3001'
+const bridgeKey = (useRuntimeConfig().public as any).bridgeKey as string
+
 const riverSelectedFolder = ref('')
+const riverCatalog = ref<RiverCatalogEntry[]>([])
 const riverContents = ref<{ path: string; name: string; is_folder: boolean; is_new?: boolean }[]>([])
 const riverAllFolders = ref<string[]>([])
 const riverState = ref({ total_docs: 0, total_folders: 0 })
 const ingestionRows = ref<{ id: string; filename: string; status: any; error?: string }[]>([])
 
+function deriveAllFolders(docs: RiverCatalogEntry[]): string[] {
+  const set = new Set<string>()
+  for (const d of docs) {
+    const parts = d.path.split('/').slice(0, -1)
+    for (let i = 1; i <= parts.length; i++) {
+      set.add(parts.slice(0, i).join('/') + '/')
+    }
+  }
+  return Array.from(set).sort()
+}
+
+function deriveFolderContents(docs: RiverCatalogEntry[], folder: string) {
+  const prefix = folder.replace(/\/+$/, '')
+  const items: { path: string; name: string; is_folder: boolean }[] = []
+  const subfolderSet = new Set<string>()
+  for (const d of docs) {
+    if (prefix && !d.path.startsWith(prefix + '/')) continue
+    const rel = prefix ? d.path.slice(prefix.length + 1) : d.path
+    const slash = rel.indexOf('/')
+    if (slash === -1) {
+      items.push({ path: d.path, name: rel, is_folder: false })
+    } else {
+      const sub = rel.slice(0, slash)
+      if (!subfolderSet.has(sub)) {
+        subfolderSet.add(sub)
+        const subPath = (prefix ? prefix + '/' : '') + sub + '/'
+        items.push({ path: subPath, name: sub, is_folder: true })
+      }
+    }
+  }
+  return items.sort((a, b) => Number(b.is_folder) - Number(a.is_folder) || a.name.localeCompare(b.name))
+}
+
 async function loadRiverState() {
   try {
-    // Use the existing river bridge catalog endpoint
-    const data = await $fetch<{ docs: any[]; folders: string[] }>('/api/bridge/river/catalog')
-    if (data) {
-      riverState.value = {
-        total_docs: data.docs?.length || 0,
-        total_folders: data.folders?.length || 0,
-      }
-      riverAllFolders.value = data.folders || []
+    const res = await fetch(`${RELAY_BASE}/api/bridge/river/catalog`, {
+      headers: { 'x-bridge-key': bridgeKey },
+    })
+    if (!res.ok) throw new Error(`catalog ${res.status}`)
+    const data = await res.json() as { docs: RiverCatalogEntry[] }
+    riverCatalog.value = data.docs || []
+    riverAllFolders.value = deriveAllFolders(riverCatalog.value)
+    riverState.value = {
+      total_docs: riverCatalog.value.length,
+      total_folders: riverAllFolders.value.length,
+    }
+    if (riverSelectedFolder.value) {
+      riverContents.value = deriveFolderContents(riverCatalog.value, riverSelectedFolder.value)
     }
   } catch (err) {
     console.warn('[knowledge] failed to load river state', err)
   }
 }
 
-async function loadFolderContents(folder: string) {
-  try {
-    const data = await $fetch<{ items: any[] }>(`/api/bridge/river/list?folder=${encodeURIComponent(folder)}`)
-    riverContents.value = data?.items || []
-  } catch {
-    riverContents.value = []
-  }
-}
-
 async function onRiverSelectFolder(path: string) {
   riverSelectedFolder.value = path
-  await loadFolderContents(path)
+  riverContents.value = deriveFolderContents(riverCatalog.value, path)
 }
 
 async function onRiverCreateFolder(path: string) {
-  // For now, create the folder by writing a placeholder .gitkeep file via the river bridge.
-  // The river bridge write endpoint accepts folder creation via a stub doc.
+  // Create the folder by writing a placeholder .gitkeep marker via /api/bridge/river/write.
   try {
-    await $fetch('/api/bridge/river/write', {
+    const cleanPath = path.replace(/\/$/, '')
+    const res = await fetch(`${RELAY_BASE}/api/bridge/river/write`, {
       method: 'POST',
-      headers: { 'x-bridge-key': useRuntimeConfig().public.bridgeKey as string },
-      body: {
-        path: `${path.replace(/\/$/, '')}/.gitkeep.md`,
+      headers: { 'Content-Type': 'application/json', 'x-bridge-key': bridgeKey },
+      body: JSON.stringify({
+        path: `${cleanPath}/.gitkeep.md`,
         content: '<!-- folder marker -->\n',
         operation: 'create',
-      },
+      }),
     })
+    if (!res.ok) throw new Error(`write ${res.status}`)
     await loadRiverState()
-    await onRiverSelectFolder(path)
+    await onRiverSelectFolder(cleanPath + '/')
   } catch (err) {
     console.warn('[knowledge] create folder failed', err)
   }
 }
 
 function onRiverNavigateUp() {
-  const parts = riverSelectedFolder.value.replace(/\/$/, '').split('/')
+  const parts = riverSelectedFolder.value.replace(/\/$/, '').split('/').filter(Boolean)
   parts.pop()
-  riverSelectedFolder.value = parts.length > 0 ? parts.join('/') + '/' : ''
-  loadFolderContents(riverSelectedFolder.value)
+  const next = parts.length > 0 ? parts.join('/') + '/' : ''
+  riverSelectedFolder.value = next
+  riverContents.value = deriveFolderContents(riverCatalog.value, next)
+}
+
+function bufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf)
+  let binary = ''
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i])
+  return btoa(binary)
 }
 
 async function onFilesSelected(files: File[]) {
@@ -1656,13 +1747,16 @@ async function onFilesSelected(files: File[]) {
     const id = `local-${crypto.randomUUID().slice(0, 8)}`
     ingestionRows.value.push({ id, filename: file.name, status: 'queued' })
     try {
-      const formData = new FormData()
-      formData.append('file', file)
-      formData.append('target_folder', riverSelectedFolder.value)
-      const res = await fetch('http://localhost:3001/api/knowledge/ingest', {
+      const buf = await file.arrayBuffer()
+      const content = bufferToBase64(buf)
+      const res = await fetch(`${RELAY_BASE}/api/knowledge/ingest`, {
         method: 'POST',
-        headers: { 'x-bridge-key': useRuntimeConfig().public.bridgeKey as string },
-        body: formData,
+        headers: { 'Content-Type': 'application/json', 'x-bridge-key': bridgeKey },
+        body: JSON.stringify({
+          filename: file.name,
+          content,
+          target_folder: riverSelectedFolder.value,
+        }),
       })
       const result = await res.json()
       const rowIdx = ingestionRows.value.findIndex(r => r.id === id)
@@ -1678,8 +1772,8 @@ async function onFilesSelected(files: File[]) {
       }
     }
   }
-  // Refresh contents after batch
-  await onRiverSelectFolder(riverSelectedFolder.value)
+  // Refresh catalog (and current folder contents) after batch
+  await loadRiverState()
 }
 
 // Surface context for River tab (used by EllieSurfacePanel)
@@ -1700,26 +1794,30 @@ const riverSurfaceContext = computed<KnowledgeRiverContext>(() => ({
   river_summary: riverState.value,
 }))
 
-// Update the surfaceContext computed (added in Phase 1) to switch on activeTab
-// Replace the existing surfaceContext computed with this:
-const surfaceContext = computed(() => {
-  if (activeTab.value === 'tree') {
-    // ... existing tree context ...
-    return /* tree context */ null  // keep existing logic
-  }
-  if (activeTab.value === 'river') {
-    return riverSurfaceContext.value
-  }
-  return null
-})
+// Update the surfaceContext computed (added in Phase 1) to switch on activeTab.
+// **DO NOT replace the entire computed** — the existing one already returns a
+// KnowledgeTreeContext for the tree tab. Instead, find the early-return for the
+// `tree` branch and add a `river` branch alongside it. Sketch:
+//
+//   const surfaceContext = computed(() => {
+//     if (activeTab.value === 'tree') {
+//       // ...existing tree context, already in file...
+//       return treeContext
+//     }
+//     if (activeTab.value === 'river') {
+//       return riverSurfaceContext.value
+//     }
+//     return null
+//   })
 
-// Load river state when tab becomes active
-watch(activeTab, (tab) => {
-  if (tab === 'river') {
-    loadRiverState()
-    if (riverSelectedFolder.value) loadFolderContents(riverSelectedFolder.value)
-  }
-})
+// Load river state when tab becomes active. The Phase 1 file already has a
+// `watch(activeTab, ...)` block (~line 901). Extend it instead of adding a
+// duplicate watcher:
+//
+//   watch(activeTab, (tab) => {
+//     // ...existing logic...
+//     if (tab === 'river') loadRiverState()
+//   })
 ```
 
 - [ ] **Step 4: Add Phase 2 action handler in handleSurfaceAction**
