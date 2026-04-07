@@ -55,3 +55,10 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Claude Code local settings (may contain secrets)
+.claude/settings.local.json
+
+# Runtime state files
+.google-contacts-sync-state.json
+.checkpoints/
