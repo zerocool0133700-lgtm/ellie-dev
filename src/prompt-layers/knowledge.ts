@@ -204,41 +204,20 @@ async function fetchForestKnowledge(
 }
 
 /**
- * Enumerate child scopes under 2/river-ingest/ via /api/bridge/scopes.
- * Returns scope paths like ["2/river-ingest/research", "2/river-ingest/architecture"].
- */
-async function enumerateRiverIngestScopes(): Promise<string[]> {
-  try {
-    const res = await fetch("http://localhost:3001/api/bridge/scopes", {
-      headers: { "x-bridge-key": BRIDGE_KEY },
-    });
-    if (!res.ok) return [];
-    const data = (await res.json()) as { scopes?: Array<{ scope_path?: string; path?: string }> };
-    const list = data.scopes ?? [];
-    return list
-      .map((s) => s.scope_path || s.path || "")
-      .filter((p): p is string => typeof p === "string" && p.startsWith("2/river-ingest/"));
-  } catch (err) {
-    logger.warn("river-ingest scope enumeration failed", { err });
-    return [];
-  }
-}
-
-/**
- * Fan out fetchForestKnowledge across all 2/river-ingest/* scopes and
- * concatenate the rendered results. Each call already returns a "## KNOWLEDGE\n…"
- * block; we strip duplicate headers and merge under a single header.
+ * Cross-scope river-ingest retrieval.
+ *
+ * `/api/bridge/read` already does descendant-scope matching when given an
+ * ancestor `scope_path`, so a single read against `2/river-ingest` returns
+ * memories from every `2/river-ingest/{folder}` sub-scope. We don't need to
+ * enumerate child scopes — the parent query handles it.
+ *
+ * The header is rewritten to "## KNOWLEDGE (river-ingest)" so the merge
+ * downstream can distinguish it from the scope-targeted forest result.
  */
 async function fetchRiverIngestKnowledge(message: string): Promise<string> {
-  const scopes = await enumerateRiverIngestScopes();
-  if (scopes.length === 0) return "";
-  const results = await Promise.all(scopes.map((s) => fetchForestKnowledge(message, s)));
-  const lines = results
-    .filter((r) => r && r.trim().length > 0)
-    .map((r) => r.replace(/^##\s+KNOWLEDGE\n?/i, "").trim())
-    .filter((r) => r.length > 0);
-  if (lines.length === 0) return "";
-  return `## KNOWLEDGE (river-ingest)\n${lines.join("\n")}`;
+  const result = await fetchForestKnowledge(message, "2/river-ingest");
+  if (!result || result.trim().length === 0) return "";
+  return result.replace(/^##\s+KNOWLEDGE\b/i, "## KNOWLEDGE (river-ingest)");
 }
 
 // ── Channel C: Contextual expansion (stub) ────────────────────────────────────
