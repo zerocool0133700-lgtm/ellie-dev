@@ -205,6 +205,7 @@ import { handleAlertsRoute } from "./api/routes/alerts.ts";
 import { handleReactionsRoute } from "./api/routes/reactions.ts";
 import { handleEmojiPrefsRoute } from "./api/routes/emoji-prefs.ts";
 import { handleAgentMemoryRoute } from "./api/routes/agent-memory.ts";
+import { handleIngest as handleKnowledgeIngest, handlePurge as handleKnowledgePurge } from "./api/knowledge.ts";
 import { handleOsAuthRoute, parseOsAuthRoute } from "./os-auth/index.ts";
 import { getRedisClient } from "./os-auth/redis.ts";
 import { handleAvatarRoutes } from "./avatar-routes.ts";
@@ -6987,6 +6988,16 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         res.end(JSON.stringify({ error: err?.message || "Invalid request body" }));
       }
     });
+    return;
+  }
+
+  // ── ELLIE-1471: Knowledge ingestion pipeline ──
+  if (url.pathname === "/api/knowledge/ingest" && req.method === "POST") {
+    (async () => { await handleKnowledgeIngest(req, res); })();
+    return;
+  }
+  if (url.pathname === "/api/knowledge/purge" && req.method === "DELETE") {
+    (async () => { await handleKnowledgePurge(req, res); })();
     return;
   }
 
