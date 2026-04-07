@@ -1513,6 +1513,11 @@ async function _handleEllieChatMessage(
             responsePayload.surface_actions = coordinatorResult.surfaceActions;
           }
 
+          // ELLIE-1455: Echo surface_origin so the originating panel can filter
+          if (surfaceContext?.surface_origin) {
+            responsePayload.surface_origin = surfaceContext.surface_origin;
+          }
+
           deliverResponse(ws, responsePayload, ecUserId);
           // ELLIE-1454: Also broadcast to all connected clients so any open tab gets the response
           broadcastToEllieChatClients(responsePayload);
