@@ -203,6 +203,44 @@ async function fetchForestKnowledge(
   }
 }
 
+/**
+ * Enumerate child scopes under 2/river-ingest/ via /api/bridge/scopes.
+ * Returns scope paths like ["2/river-ingest/research", "2/river-ingest/architecture"].
+ */
+async function enumerateRiverIngestScopes(): Promise<string[]> {
+  try {
+    const res = await fetch("http://localhost:3001/api/bridge/scopes", {
+      headers: { "x-bridge-key": BRIDGE_KEY },
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { scopes?: Array<{ scope_path?: string; path?: string }> };
+    const list = data.scopes ?? [];
+    return list
+      .map((s) => s.scope_path || s.path || "")
+      .filter((p): p is string => typeof p === "string" && p.startsWith("2/river-ingest/"));
+  } catch (err) {
+    logger.warn("river-ingest scope enumeration failed", { err });
+    return [];
+  }
+}
+
+/**
+ * Fan out fetchForestKnowledge across all 2/river-ingest/* scopes and
+ * concatenate the rendered results. Each call already returns a "## KNOWLEDGE\n…"
+ * block; we strip duplicate headers and merge under a single header.
+ */
+async function fetchRiverIngestKnowledge(message: string): Promise<string> {
+  const scopes = await enumerateRiverIngestScopes();
+  if (scopes.length === 0) return "";
+  const results = await Promise.all(scopes.map((s) => fetchForestKnowledge(message, s)));
+  const lines = results
+    .filter((r) => r && r.trim().length > 0)
+    .map((r) => r.replace(/^##\s+KNOWLEDGE\n?/i, "").trim())
+    .filter((r) => r.length > 0);
+  if (lines.length === 0) return "";
+  return `## KNOWLEDGE (river-ingest)\n${lines.join("\n")}`;
+}
+
 // ── Channel C: Contextual expansion (stub) ────────────────────────────────────
 
 /**
@@ -242,10 +280,14 @@ export async function retrieveKnowledge(
   // Load skill registry lazily to avoid circular imports
   const { loadSkillRegistry } = await import("./identity.ts");
 
-  const [registry, forestKnowledge, expansion] = await Promise.all([
+  const [registry, forestKnowledge, expansion, riverIngestKnowledge] = await Promise.all([
     loadSkillRegistry(),
     fetchForestKnowledge(message, scopePath),
     fetchContextualExpansion(message, agent),
+    // After the heartbeat early-return, we ALWAYS try the river-ingest fan-out.
+    // (LayeredMode has no "surface" literal in this codebase; heartbeat is the only
+    // special case and is already handled above.)
+    fetchRiverIngestKnowledge(message),
   ]);
 
   // Channel A: match triggers and load docs (skills + reference docs)
@@ -254,7 +296,12 @@ export async function retrieveKnowledge(
   const allMatches = [...skillMatches, ...refMatches];
   const skillDocs = await loadSkillDocs(allMatches);
 
-  return { skillDocs, forestKnowledge, expansion };
+  // Merge the two forest knowledge strings (scope-targeted + cross-scope river-ingest)
+  const mergedForest = [forestKnowledge, riverIngestKnowledge]
+    .filter((s) => s && s.trim().length > 0)
+    .join("\n\n");
+
+  return { skillDocs, forestKnowledge: mergedForest, expansion };
 }
 
 // ── Renderer ──────────────────────────────────────────────────────────────────
