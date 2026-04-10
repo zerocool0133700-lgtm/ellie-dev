@@ -4348,6 +4348,113 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Data Contracts API — contract builder endpoints (ELLIE-1532)
+  if (url.pathname.startsWith("/api/contracts/") && (req.method === "POST" || req.method === "GET")) {
+    const isPost = req.method === "POST";
+
+    const handleContractRequest = async (body?: string) => {
+      try {
+        let data: Record<string, unknown> = {};
+        if (isPost && body) {
+          try { data = JSON.parse(body); } catch {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Invalid JSON body" }));
+            return;
+          }
+        }
+
+        const endpoint = url.pathname.replace("/api/contracts/", "");
+
+        const {
+          contractCreateEndpoint, contractGetEndpoint, contractListEndpoint,
+          contractReviseEndpoint, contractHistoryEndpoint,
+          documentCreateEndpoint, documentGetEndpoint, documentListEndpoint,
+          documentReviseEndpoint, documentHistoryEndpoint,
+          contractRefAddEndpoint, contractRefListEndpoint,
+          documentRefAddEndpoint, documentRefListEndpoint,
+        } = await import("./api/data-contracts.ts");
+
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v: string, k: string) => { queryParams[k] = v; });
+
+        const mockReq: ApiRequest = { body: data, query: queryParams };
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({
+            json: (resData: unknown) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(resData));
+            },
+          }),
+          json: (resData: unknown) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(resData));
+          },
+        };
+
+        switch (endpoint) {
+          case "create":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await contractCreateEndpoint(mockReq, mockRes); break;
+          case "get":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await contractGetEndpoint(mockReq, mockRes); break;
+          case "list":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await contractListEndpoint(mockReq, mockRes); break;
+          case "revise":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await contractReviseEndpoint(mockReq, mockRes); break;
+          case "history":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await contractHistoryEndpoint(mockReq, mockRes); break;
+          case "documents/create":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await documentCreateEndpoint(mockReq, mockRes); break;
+          case "documents/get":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await documentGetEndpoint(mockReq, mockRes); break;
+          case "documents/list":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await documentListEndpoint(mockReq, mockRes); break;
+          case "documents/revise":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await documentReviseEndpoint(mockReq, mockRes); break;
+          case "documents/history":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await documentHistoryEndpoint(mockReq, mockRes); break;
+          case "refs/add":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await contractRefAddEndpoint(mockReq, mockRes); break;
+          case "refs/list":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await contractRefListEndpoint(mockReq, mockRes); break;
+          case "documents/refs/add":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await documentRefAddEndpoint(mockReq, mockRes); break;
+          case "documents/refs/list":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await documentRefListEndpoint(mockReq, mockRes); break;
+          default:
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Unknown contracts endpoint" }));
+        }
+      } catch (err) {
+        logger.error("Contracts API error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    };
+
+    if (isPost) {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+      req.on("end", () => handleContractRequest(body));
+    } else {
+      handleContractRequest();
+    }
+    return;
+  }
+
   // Forest Bridge API — external collaborator endpoints (ELLIE-177)
   if (url.pathname.startsWith("/api/bridge/") && (req.method === "POST" || req.method === "GET")) {
     const isPost = req.method === "POST";
@@ -5555,10 +5662,11 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           await import("./api/threads.ts");
 
         if (!threadId && req.method === "GET") {
-          const result = await listThreads(supabase);
+          const domainId = url.searchParams.get("domain_id") || undefined;
+          const result = await listThreads(supabase, { domain_id: domainId });
           mockRes.json({ success: true, ...result });
         } else if (!threadId && req.method === "POST") {
-          const { name, channel_id, routing_mode, direct_agent, agents, created_by } = data;
+          const { name, channel_id, domain_id, surface_id, routing_mode, direct_agent, agents, created_by } = data;
           if (!name || !channel_id || !routing_mode) {
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "name, channel_id, and routing_mode are required" }));
@@ -5567,6 +5675,8 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
           const result = await createThread(supabase, {
             name: name as string,
             channel_id: channel_id as string,
+            domain_id: domain_id as string | undefined,
+            surface_id: surface_id as string | undefined,
             routing_mode: routing_mode as string,
             direct_agent: direct_agent as string | undefined,
             agents: (agents as string[]) ?? [],
