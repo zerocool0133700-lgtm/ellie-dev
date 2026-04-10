@@ -252,8 +252,9 @@ export async function createFormationGrove(
     let parentId: string | null = null
     if (!parentScope) {
       const [newParent] = await sql`
-        INSERT INTO knowledge_scopes (path, name, level, parent_id, description)
-        VALUES (${formationParent}, 'Formations', 'topic',
+        INSERT INTO knowledge_scopes (path, name, scope_type_id, parent_id, description)
+        VALUES (${formationParent}, 'Formations',
+          (SELECT id FROM scope_types WHERE name = 'topic' LIMIT 1),
           (SELECT id FROM knowledge_scopes WHERE path = '2'),
           'Formation-specific knowledge scopes')
         ON CONFLICT (path) DO NOTHING
@@ -270,9 +271,11 @@ export async function createFormationGrove(
 
     // Create the formation-specific scope
     await sql`
-      INSERT INTO knowledge_scopes (path, name, level, parent_id, group_id, description)
+      INSERT INTO knowledge_scopes (path, name, scope_type_id, parent_id, group_id, description)
       VALUES (
-        ${scopePath}, ${formationName}, 'grove', ${parentId}, ${group.id},
+        ${scopePath}, ${formationName},
+        (SELECT id FROM scope_types WHERE name = 'grove' LIMIT 1),
+        ${parentId}, ${group.id},
         ${'Knowledge scope for formation ' + formationName + ' session ' + sessionId.slice(0, 8)}
       )
       ON CONFLICT (path) DO NOTHING
