@@ -1,0 +1,2364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ellie Life — Desktop Mockups</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --warm-bg: #FFF8F0;
+    --card-bg: #FFFFFF;
+    --primary: #E8735A;
+    --primary-light: #FFEEE9;
+    --primary-dark: #C45A44;
+    --text: #2D2926;
+    --text-muted: #8A8380;
+    --text-light: #B5AFAB;
+    --accent-green: #7BC67E;
+    --accent-green-light: #EDF7EE;
+    --accent-blue: #6BA3D6;
+    --accent-blue-light: #EBF3FB;
+    --accent-purple: #9B8FD0;
+    --accent-purple-light: #F0EDF8;
+    --accent-gold: #E8B84D;
+    --accent-gold-light: #FDF5E3;
+    --border: #F0EBE6;
+    --shadow: 0 2px 12px rgba(45,41,38,0.06);
+    --shadow-hover: 0 4px 20px rgba(45,41,38,0.1);
+    --radius: 16px;
+    --radius-sm: 10px;
+    --radius-xs: 6px;
+    --sidebar-w: 240px;
+  }
+
+  body {
+    font-family: -apple-system, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
+    background: #1a1a2e;
+    color: var(--text);
+    line-height: 1.5;
+  }
+
+  /* ── Showcase Navigation ── */
+  .showcase-nav {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 1000;
+    background: rgba(26,26,46,0.95);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    padding: 12px 32px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+  }
+  .showcase-title {
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.3px;
+    white-space: nowrap;
+    margin-right: 16px;
+  }
+  .showcase-tabs {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    flex: 1;
+  }
+  .showcase-tab {
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(255,255,255,0.5);
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+    border: none;
+    background: none;
+  }
+  .showcase-tab:hover { color: rgba(255,255,255,0.8); background: rgba(255,255,255,0.05); }
+  .showcase-tab.active { color: #fff; background: rgba(232,115,90,0.25); }
+  .nav-badge {
+    display: inline-block;
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-left: 6px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .badge-base { background: rgba(232,115,90,0.2); color: var(--primary); }
+  .badge-addon { background: rgba(155,143,208,0.2); color: var(--accent-purple); }
+
+  /* ── Sections ── */
+  .section {
+    display: none;
+    padding: 80px 32px 48px;
+    min-height: 100vh;
+  }
+  .section.active { display: block; }
+  .section-header {
+    max-width: 900px;
+    margin: 0 auto 48px;
+    text-align: center;
+  }
+  .section-header h1 {
+    font-size: 32px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: -0.5px;
+    margin-bottom: 12px;
+  }
+  .section-header p {
+    font-size: 16px;
+    color: rgba(255,255,255,0.5);
+    max-width: 600px;
+    margin: 0 auto;
+  }
+
+  /* ── Desktop Frame ── */
+  .desktop-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 48px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  .desktop-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+  .desktop-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: rgba(255,255,255,0.4);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .desktop-frame {
+    width: 100%;
+    max-width: 1100px;
+    background: var(--warm-bg);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3), inset 0 0 0 1px rgba(0,0,0,0.1);
+    position: relative;
+  }
+  .desktop-titlebar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    background: #f5f0ea;
+    border-bottom: 1px solid var(--border);
+  }
+  .titlebar-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+  }
+  .titlebar-dots {
+    display: flex;
+    gap: 6px;
+    margin-right: 12px;
+  }
+  .titlebar-url {
+    flex: 1;
+    background: #fff;
+    border-radius: 6px;
+    padding: 5px 14px;
+    font-size: 12px;
+    color: var(--text-muted);
+    text-align: center;
+  }
+  .desktop-body {
+    display: flex;
+    min-height: 600px;
+  }
+
+  /* ── App Sidebar ── */
+  .app-sidebar {
+    width: var(--sidebar-w);
+    background: #fff;
+    border-right: 1px solid var(--border);
+    padding: 20px 0;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .sidebar-brand {
+    padding: 0 20px 20px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .sidebar-brand .brand-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    background: var(--primary-light);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+  }
+  .sidebar-brand .brand-name {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: -0.3px;
+  }
+  .sidebar-brand .brand-sub {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .sidebar-nav { flex: 1; }
+  .sidebar-section-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--text-light);
+    padding: 16px 20px 6px;
+  }
+  .sidebar-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 20px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s;
+    border-left: 3px solid transparent;
+  }
+  .sidebar-item:hover { background: var(--primary-light); color: var(--text); }
+  .sidebar-item.active {
+    background: var(--primary-light);
+    color: var(--primary-dark);
+    border-left-color: var(--primary);
+    font-weight: 600;
+  }
+  .sidebar-item .si-icon { font-size: 16px; width: 20px; text-align: center; }
+  .sidebar-item .si-badge {
+    margin-left: auto;
+    background: var(--primary);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 7px;
+    border-radius: 10px;
+  }
+  .sidebar-user {
+    padding: 16px 20px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .sidebar-user-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--primary);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .sidebar-user-name { font-size: 13px; font-weight: 600; }
+  .sidebar-user-status { font-size: 11px; color: var(--text-muted); }
+
+  /* ── Main Content Area ── */
+  .app-main {
+    flex: 1;
+    padding: 28px 32px;
+    overflow-y: auto;
+    max-height: 600px;
+    background: var(--warm-bg);
+  }
+  .main-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 24px;
+  }
+  .main-title { font-size: 26px; font-weight: 700; letter-spacing: -0.5px; }
+  .main-subtitle { font-size: 14px; color: var(--text-muted); margin-top: 2px; }
+
+  /* ── Cards (desktop) ── */
+  .d-card {
+    background: var(--card-bg);
+    border-radius: var(--radius);
+    padding: 20px;
+    box-shadow: var(--shadow);
+    transition: box-shadow 0.2s;
+  }
+  .d-card:hover { box-shadow: var(--shadow-hover); }
+  .d-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 14px;
+  }
+  .d-card-title { font-size: 15px; font-weight: 650; }
+  .d-card-action { font-size: 12px; color: var(--primary); font-weight: 600; cursor: pointer; }
+  .d-card-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 0;
+  }
+  .d-card-row + .d-card-row { border-top: 1px solid var(--border); }
+  .d-card-row .dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  }
+  .d-card-row .label { flex: 1; font-size: 13px; }
+  .d-card-row .meta { font-size: 12px; color: var(--text-muted); }
+  .d-card-row .check {
+    width: 18px; height: 18px; border-radius: 50%;
+    border: 1.5px solid var(--border); flex-shrink: 0;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .d-card-row .check:hover { border-color: var(--primary); }
+  .d-card-row .check.done {
+    background: var(--accent-green);
+    border-color: var(--accent-green);
+    position: relative;
+  }
+  .d-card-row .check.done::after {
+    content: '\2713'; color: #fff; font-size: 11px;
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+  }
+
+  /* ── Grid Layouts ── */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  .grid-2-1 { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+  .grid-1-2 { display: grid; grid-template-columns: 1fr 2fr; gap: 16px; }
+  .grid-sidebar-main { display: grid; grid-template-columns: 340px 1fr; gap: 20px; }
+  .mb-16 { margin-bottom: 16px; }
+  .mb-20 { margin-bottom: 20px; }
+  .mb-24 { margin-bottom: 24px; }
+
+  /* ── Chat (desktop) ── */
+  .chat-panel {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+  }
+  .chat-messages-d {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px 0;
+    overflow-y: auto;
+  }
+  .chat-bubble-d {
+    max-width: 65%;
+    padding: 12px 16px;
+    border-radius: 18px;
+    font-size: 13.5px;
+    line-height: 1.5;
+  }
+  .chat-bubble-d.ellie {
+    background: var(--card-bg);
+    box-shadow: var(--shadow);
+    align-self: flex-start;
+    border-bottom-left-radius: 6px;
+  }
+  .chat-bubble-d.user {
+    background: var(--primary);
+    color: #fff;
+    align-self: flex-end;
+    border-bottom-right-radius: 6px;
+  }
+  .chat-input-d {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 0 4px;
+    border-top: 1px solid var(--border);
+  }
+  .chat-input-d input {
+    flex: 1;
+    padding: 12px 18px;
+    border-radius: 24px;
+    border: 1.5px solid var(--border);
+    font-size: 14px;
+    background: var(--card-bg);
+    color: var(--text);
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .chat-input-d input:focus { border-color: var(--primary); }
+  .chat-input-d input::placeholder { color: var(--text-light); }
+  .chat-send-d {
+    width: 40px; height: 40px; border-radius: 50%;
+    background: var(--primary); border: none; color: #fff;
+    font-size: 18px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s;
+  }
+  .chat-send-d:hover { background: var(--primary-dark); }
+  .chat-context-panel {
+    width: 260px;
+    border-left: 1px solid var(--border);
+    padding: 20px;
+    background: #fff;
+    flex-shrink: 0;
+    overflow-y: auto;
+  }
+  .context-section-title {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--text-light);
+    margin-bottom: 10px;
+    margin-top: 16px;
+  }
+  .context-section-title:first-child { margin-top: 0; }
+
+  /* ── Mood prompt desktop ── */
+  .mood-prompt-d {
+    background: var(--primary-light);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .mood-prompt-d .icon { font-size: 28px; }
+  .mood-prompt-d .text { font-size: 13px; color: var(--primary-dark); font-weight: 500; }
+  .mood-options-d { display: flex; gap: 8px; margin-top: 8px; }
+  .mood-btn-d {
+    padding: 6px 16px;
+    border-radius: 20px;
+    font-size: 12px;
+    border: 1.5px solid var(--primary);
+    color: var(--primary-dark);
+    background: transparent;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .mood-btn-d:hover { background: rgba(232,115,90,0.1); }
+  .mood-btn-d.selected { background: var(--primary); color: #fff; }
+
+  /* ── Nudge cards ── */
+  .nudge-card {
+    border-radius: var(--radius);
+    padding: 18px 20px;
+  }
+  .nudge-title {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+  .nudge-text {
+    font-size: 13.5px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+  .nudge-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .nudge-btn {
+    padding: 7px 16px;
+    border-radius: 20px;
+    font-size: 12px;
+    border: 1.5px solid var(--primary);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .nudge-btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+  .nudge-btn.secondary { background: transparent; color: var(--primary-dark); }
+
+  /* ── Memory cards ── */
+  .memory-card-d {
+    border-radius: var(--radius);
+    padding: 16px 18px;
+  }
+  .mem-label-d {
+    font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.8px;
+    margin-bottom: 6px;
+  }
+  .mem-text-d { font-size: 13px; color: var(--text); line-height: 1.45; }
+  .mem-date-d { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+
+  /* ── Health ring ── */
+  .health-ring-d {
+    width: 160px; height: 160px; position: relative;
+    margin: 0 auto;
+  }
+  .health-ring-d svg { transform: rotate(-90deg); }
+  .health-ring-center-d {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%); text-align: center;
+  }
+  .health-ring-center-d .num { font-size: 30px; font-weight: 700; color: var(--accent-green); }
+  .health-ring-center-d .unit { font-size: 12px; color: var(--text-muted); }
+
+  .health-stat-d {
+    background: var(--card-bg);
+    border-radius: var(--radius-sm);
+    padding: 16px;
+    text-align: center;
+    box-shadow: var(--shadow);
+  }
+  .health-stat-d .hs-val { font-size: 22px; font-weight: 700; }
+  .health-stat-d .hs-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+
+  .habit-row-d {
+    display: flex; align-items: center; gap: 12px; padding: 10px 0;
+  }
+  .habit-row-d + .habit-row-d { border-top: 1px solid var(--border); }
+  .habit-icon-d { font-size: 20px; }
+  .habit-name-d { flex: 1; font-size: 13px; font-weight: 500; }
+  .habit-streak-d {
+    font-size: 11px; color: var(--accent-gold); font-weight: 600;
+    background: var(--accent-gold-light); padding: 3px 10px; border-radius: 10px;
+  }
+  .habit-dots-d { display: flex; gap: 4px; }
+  .habit-dots-d span {
+    width: 16px; height: 16px; border-radius: 3px;
+  }
+
+  /* ── Inbox ── */
+  .inbox-item-d {
+    display: flex; align-items: flex-start; gap: 14px; padding: 14px 0;
+  }
+  .inbox-item-d + .inbox-item-d { border-top: 1px solid var(--border); }
+  .inbox-avatar-d {
+    width: 38px; height: 38px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700; color: #fff; flex-shrink: 0;
+  }
+  .inbox-content-d { flex: 1; }
+  .inbox-from-d { font-size: 13px; font-weight: 600; }
+  .inbox-preview-d { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .inbox-summary-d {
+    font-size: 12px; color: var(--primary-dark);
+    background: var(--primary-light);
+    border-radius: var(--radius-xs);
+    padding: 8px 12px; margin-top: 8px;
+  }
+  .inbox-meta-d { font-size: 11px; color: var(--text-light); white-space: nowrap; flex-shrink: 0; }
+
+  /* ── Money ── */
+  .money-total-d { text-align: center; margin: 16px 0; }
+  .money-total-d .amount { font-size: 36px; font-weight: 700; letter-spacing: -1px; }
+  .money-total-d .sublabel { font-size: 13px; color: var(--text-muted); }
+  .money-bar-d {
+    height: 10px; background: var(--border); border-radius: 5px;
+    margin: 12px 0; overflow: hidden;
+  }
+  .money-bar-fill-d { height: 100%; border-radius: 5px; }
+  .money-category-d {
+    display: flex; align-items: center; gap: 10px; padding: 9px 0;
+  }
+  .money-category-d + .money-category-d { border-top: 1px solid var(--border); }
+  .money-cat-dot-d { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+  .money-cat-name-d { flex: 1; font-size: 13px; }
+  .money-cat-amt-d { font-size: 13px; font-weight: 600; }
+  .money-cat-pct-d { font-size: 11px; color: var(--text-muted); margin-left: 4px; width: 30px; }
+  .money-cat-bar {
+    width: 80px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden;
+  }
+  .money-cat-bar-fill { height: 100%; border-radius: 3px; }
+
+  /* ── Insight cards ── */
+  .insight-card-d {
+    border-radius: var(--radius-sm);
+    padding: 14px 16px;
+  }
+  .insight-card-d .insight-icon { font-size: 16px; margin-bottom: 4px; }
+  .insight-card-d .insight-text { font-size: 12px; color: var(--text); line-height: 1.5; }
+
+  /* ── Family ── */
+  .family-member-d {
+    display: flex; align-items: center; gap: 14px; padding: 12px 0;
+  }
+  .family-member-d + .family-member-d { border-top: 1px solid var(--border); }
+  .family-avatar-d {
+    width: 42px; height: 42px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px; font-weight: 700; color: #fff;
+  }
+  .family-info-d { flex: 1; }
+  .family-name-d { font-size: 14px; font-weight: 600; }
+  .family-status-d { font-size: 12px; color: var(--text-muted); }
+  .family-action-d {
+    font-size: 12px; padding: 5px 14px; border-radius: 6px;
+    border: 1.5px solid var(--border); color: var(--text-muted);
+    background: transparent; cursor: pointer; transition: all 0.15s;
+  }
+  .family-action-d:hover { border-color: var(--primary); color: var(--primary); }
+
+  .meal-card-d {
+    border-radius: var(--radius-sm);
+    padding: 14px 16px;
+  }
+  .meal-time-d { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+  .meal-name-d { font-size: 14px; font-weight: 600; margin-top: 4px; }
+  .meal-detail-d { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+  /* ── Onboarding Desktop ── */
+  .onboard-desktop-frame {
+    width: 100%;
+    max-width: 700px;
+    margin: 0 auto;
+    background: var(--warm-bg);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+  }
+  .onboard-desktop-body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 64px;
+    text-align: center;
+    min-height: 480px;
+  }
+  .onboard-illustration-d {
+    width: 120px; height: 120px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 48px; margin-bottom: 28px;
+  }
+  .onboard-desktop-body h2 {
+    font-size: 26px; font-weight: 700; margin-bottom: 10px; letter-spacing: -0.3px;
+  }
+  .onboard-desktop-body p {
+    font-size: 15px; color: var(--text-muted); margin-bottom: 28px;
+    max-width: 440px; line-height: 1.6;
+  }
+  .onboard-btn-d {
+    padding: 14px 40px; border-radius: 14px; border: none;
+    font-size: 15px; font-weight: 650; cursor: pointer; margin-bottom: 10px;
+    transition: all 0.15s;
+  }
+  .onboard-btn-d.primary { background: var(--primary); color: #fff; }
+  .onboard-btn-d.primary:hover { background: var(--primary-dark); }
+  .onboard-btn-d.secondary { background: var(--primary-light); color: var(--primary-dark); }
+  .onboard-progress-d {
+    display: flex; gap: 6px; margin-top: 20px;
+  }
+  .onboard-progress-d span {
+    width: 32px; height: 4px; border-radius: 2px; background: var(--border);
+  }
+  .onboard-progress-d span.active { background: var(--primary); }
+
+  /* ── Onboard Chat (desktop two-col) ── */
+  .onboard-chat-layout {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    min-height: 480px;
+  }
+  .onboard-chat-side {
+    padding: 40px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  .onboard-chat-messages {
+    background: #fff;
+    border-left: 1px solid var(--border);
+    padding: 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    justify-content: center;
+  }
+
+  /* ── Annotations ── */
+  .annotation {
+    background: rgba(232,184,77,0.1);
+    border-left: 3px solid var(--accent-gold);
+    border-radius: 0 8px 8px 0;
+    padding: 12px 16px;
+    margin: 24px auto;
+    max-width: 700px;
+  }
+  .annotation .ann-label {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.8px; color: var(--accent-gold); margin-bottom: 4px;
+  }
+  .annotation .ann-text {
+    font-size: 13px; color: rgba(255,255,255,0.7); line-height: 1.5;
+  }
+
+  /* ── Architecture (reuse from mobile) ── */
+  .diagram-section { max-width: 900px; margin: 0 auto; padding: 0 20px; }
+  .arch-box {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 16px; padding: 28px; margin-bottom: 20px;
+  }
+  .arch-box h3 { color: #fff; font-size: 16px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+  .arch-row { display: flex; flex-wrap: wrap; gap: 12px; }
+  .arch-chip { padding: 8px 16px; border-radius: 10px; font-size: 13px; font-weight: 500; }
+  .chip-core { background: rgba(232,115,90,0.15); color: var(--primary); border: 1px solid rgba(232,115,90,0.25); }
+  .chip-health { background: rgba(123,198,126,0.15); color: var(--accent-green); border: 1px solid rgba(123,198,126,0.25); }
+  .chip-family { background: rgba(107,163,214,0.15); color: var(--accent-blue); border: 1px solid rgba(107,163,214,0.25); }
+  .chip-money { background: rgba(232,184,77,0.15); color: var(--accent-gold); border: 1px solid rgba(232,184,77,0.25); }
+  .chip-infra { background: rgba(155,143,208,0.15); color: var(--accent-purple); border: 1px solid rgba(155,143,208,0.25); }
+  .arch-connector { display: flex; align-items: center; justify-content: center; padding: 8px 0; color: rgba(255,255,255,0.2); font-size: 20px; }
+  .flow-step { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 20px; }
+  .flow-num { width: 32px; height: 32px; border-radius: 50%; background: var(--primary); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; flex-shrink: 0; }
+  .flow-content h4 { color: #fff; font-size: 14px; margin-bottom: 4px; }
+  .flow-content p { color: rgba(255,255,255,0.5); font-size: 13px; }
+
+  /* ── Pricing ── */
+  .pricing-grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 20px; max-width: 900px; margin: 0 auto; }
+  .pricing-card {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 20px; padding: 28px 24px;
+    width: 200px; text-align: center;
+  }
+  .pricing-card.featured { border-color: var(--primary); background: rgba(232,115,90,0.06); }
+  .pricing-card .pc-icon { font-size: 32px; margin-bottom: 12px; }
+  .pricing-card h3 { color: #fff; font-size: 16px; margin-bottom: 4px; }
+  .pricing-card .pc-desc { color: rgba(255,255,255,0.4); font-size: 12px; margin-bottom: 16px; }
+  .pricing-card .pc-price { color: #fff; font-size: 28px; font-weight: 700; }
+  .pricing-card .pc-period { color: rgba(255,255,255,0.4); font-size: 12px; }
+  .pricing-card .pc-feat { text-align: left; margin-top: 16px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,0.08); }
+  .pricing-card .pc-feat li { color: rgba(255,255,255,0.6); font-size: 12px; padding: 4px 0; list-style: none; display: flex; align-items: center; gap: 6px; }
+  .pricing-card .pc-feat li::before { content: '\2713'; color: var(--accent-green); font-weight: 700; font-size: 11px; }
+
+  /* ── Quick action bar (desktop) ── */
+  .quick-bar {
+    display: flex;
+    gap: 8px;
+    padding: 12px 0;
+  }
+  .quick-bar-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    border-radius: 10px;
+    background: var(--card-bg);
+    box-shadow: var(--shadow);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    cursor: pointer;
+    transition: all 0.15s;
+    border: none;
+  }
+  .quick-bar-btn:hover { box-shadow: var(--shadow-hover); }
+  .quick-bar-btn .qb-icon {
+    width: 28px; height: 28px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px;
+  }
+
+  /* ── Filter pills ── */
+  .filter-pills { display: flex; gap: 8px; margin-bottom: 16px; }
+  .filter-pill {
+    padding: 6px 16px; border-radius: 20px; font-size: 12px;
+    font-weight: 600; cursor: pointer; border: none; transition: all 0.15s;
+  }
+  .filter-pill.active { background: var(--primary); color: #fff; }
+  .filter-pill:not(.active) { background: var(--card-bg); color: var(--text-muted); box-shadow: var(--shadow); }
+  .filter-pill:not(.active):hover { color: var(--text); }
+
+  /* ── Permissions row ── */
+  .perm-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 0; border-bottom: 1px solid var(--border);
+  }
+  .perm-row:last-child { border-bottom: none; }
+  .perm-label { font-size: 14px; font-weight: 600; }
+  .perm-sub { font-size: 12px; color: var(--text-muted); }
+  .toggle {
+    width: 44px; height: 24px; border-radius: 12px; position: relative;
+    cursor: pointer;
+  }
+  .toggle .knob {
+    width: 20px; height: 20px; background: #fff; border-radius: 50%;
+    position: absolute; top: 2px; transition: left 0.2s;
+  }
+  .toggle.on { background: var(--accent-green); }
+  .toggle.on .knob { left: 22px; }
+  .toggle.off { background: var(--border); }
+  .toggle.off .knob { left: 2px; }
+
+  /* ── Calendar week strip ── */
+  .cal-week {
+    display: flex; gap: 4px;
+  }
+  .cal-day {
+    flex: 1; text-align: center; padding: 8px 4px;
+    border-radius: 10px; cursor: pointer; transition: all 0.15s;
+  }
+  .cal-day:hover { background: var(--primary-light); }
+  .cal-day.today { background: var(--primary); color: #fff; border-radius: 10px; }
+  .cal-day .cd-name { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+  .cal-day .cd-num { font-size: 16px; font-weight: 700; margin-top: 2px; }
+  .cal-day:not(.today) .cd-name { color: var(--text-muted); }
+  .cal-day:not(.today) .cd-num { color: var(--text); }
+  .cal-day.today .cd-name { color: rgba(255,255,255,0.8); }
+  .cal-day.today .cd-num { color: #fff; }
+  .cal-day .cd-dot {
+    width: 5px; height: 5px; border-radius: 50%; margin: 4px auto 0;
+  }
+</style>
+</head>
+<body>
+
+<!-- Showcase Navigation -->
+<nav class="showcase-nav">
+  <div class="showcase-title">Ellie Life — Desktop</div>
+  <div class="showcase-tabs">
+    <button class="showcase-tab active" onclick="showSection('home')">Home <span class="nav-badge badge-base">Base</span></button>
+    <button class="showcase-tab" onclick="showSection('chat')">Chat <span class="nav-badge badge-base">Base</span></button>
+    <button class="showcase-tab" onclick="showSection('organize')">Organize <span class="nav-badge badge-base">Base</span></button>
+    <button class="showcase-tab" onclick="showSection('comms')">Comms Filter <span class="nav-badge badge-base">Base</span></button>
+    <button class="showcase-tab" onclick="showSection('memory')">Memory <span class="nav-badge badge-base">Base</span></button>
+    <button class="showcase-tab" onclick="showSection('health')">Health <span class="nav-badge badge-addon">Add-on</span></button>
+    <button class="showcase-tab" onclick="showSection('family')">Family <span class="nav-badge badge-addon">Add-on</span></button>
+    <button class="showcase-tab" onclick="showSection('money')">Money <span class="nav-badge badge-addon">Add-on</span></button>
+    <button class="showcase-tab" onclick="showSection('onboarding')">Onboarding</button>
+    <button class="showcase-tab" onclick="showSection('integration')">Architecture</button>
+    <button class="showcase-tab" onclick="showSection('pricing')">Pricing</button>
+  </div>
+</nav>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION: Home Dashboard                     -->
+<!-- ═══════════════════════════════════════════ -->
+<div id="home" class="section active">
+  <div class="section-header">
+    <h1>Home Dashboard — Desktop</h1>
+    <p>Your day at a glance with room to breathe. Ellie surfaces what matters across a spacious layout.</p>
+  </div>
+  <div class="desktop-grid">
+
+    <div class="desktop-container">
+      <div class="desktop-label">Morning View</div>
+      <div class="desktop-frame">
+        <div class="desktop-titlebar">
+          <div class="titlebar-dots">
+            <div class="titlebar-dot" style="background: #FF5F57;"></div>
+            <div class="titlebar-dot" style="background: #FFBD2E;"></div>
+            <div class="titlebar-dot" style="background: #28C840;"></div>
+          </div>
+          <div class="titlebar-url">app.ellielife.com</div>
+        </div>
+        <div class="desktop-body">
+          <!-- Sidebar -->
+          <div class="app-sidebar">
+            <div class="sidebar-brand">
+              <div class="brand-icon">🌸</div>
+              <div>
+                <div class="brand-name">Ellie</div>
+                <div class="brand-sub">Your AI companion</div>
+              </div>
+            </div>
+            <div class="sidebar-nav">
+              <div class="sidebar-item active"><div class="si-icon">🏠</div>Home</div>
+              <div class="sidebar-item"><div class="si-icon">💬</div>Chat with Ellie</div>
+              <div class="sidebar-item"><div class="si-icon">📋</div>Tasks & Lists<div class="si-badge">3</div></div>
+              <div class="sidebar-item"><div class="si-icon">📬</div>Inbox<div class="si-badge">3</div></div>
+              <div class="sidebar-item"><div class="si-icon">🧠</div>Memory</div>
+              <div class="sidebar-section-label">Add-ons</div>
+              <div class="sidebar-item"><div class="si-icon">💚</div>Wellness</div>
+              <div class="sidebar-item"><div class="si-icon">👨‍👩‍👧‍👦</div>Family</div>
+              <div class="sidebar-item"><div class="si-icon">💰</div>Money</div>
+            </div>
+            <div class="sidebar-user">
+              <div class="sidebar-user-avatar">S</div>
+              <div>
+                <div class="sidebar-user-name">Sarah</div>
+                <div class="sidebar-user-status">Feeling okay today</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Main Content -->
+          <div class="app-main">
+            <div class="main-header">
+              <div>
+                <div class="main-title">Good morning, Sarah</div>
+                <div class="main-subtitle">Monday, March 30 — You have a calm morning ahead</div>
+              </div>
+              <div class="quick-bar">
+                <button class="quick-bar-btn"><div class="qb-icon" style="background: var(--primary-light);">💬</div>Chat</button>
+                <button class="quick-bar-btn"><div class="qb-icon" style="background: var(--accent-green-light);">📝</div>Quick Note</button>
+                <button class="quick-bar-btn"><div class="qb-icon" style="background: var(--accent-purple-light);">🎤</div>Voice</button>
+              </div>
+            </div>
+
+            <!-- Mood + Calendar Row -->
+            <div class="grid-2 mb-20">
+              <div class="mood-prompt-d">
+                <div class="icon">🌤️</div>
+                <div>
+                  <div class="text">How are you feeling this morning?</div>
+                  <div class="mood-options-d">
+                    <button class="mood-btn-d">Great</button>
+                    <button class="mood-btn-d selected">Okay</button>
+                    <button class="mood-btn-d">Meh</button>
+                    <button class="mood-btn-d">Rough</button>
+                  </div>
+                </div>
+              </div>
+              <div class="d-card" style="padding: 16px 20px;">
+                <div class="cal-week">
+                  <div class="cal-day today">
+                    <div class="cd-name">Mon</div>
+                    <div class="cd-num">30</div>
+                    <div class="cd-dot" style="background: rgba(255,255,255,0.5);"></div>
+                  </div>
+                  <div class="cal-day">
+                    <div class="cd-name">Tue</div>
+                    <div class="cd-num">31</div>
+                  </div>
+                  <div class="cal-day">
+                    <div class="cd-name">Wed</div>
+                    <div class="cd-num">1</div>
+                    <div class="cd-dot" style="background: var(--accent-blue);"></div>
+                  </div>
+                  <div class="cal-day">
+                    <div class="cd-name">Thu</div>
+                    <div class="cd-num">2</div>
+                    <div class="cd-dot" style="background: var(--accent-green);"></div>
+                  </div>
+                  <div class="cal-day">
+                    <div class="cd-name">Fri</div>
+                    <div class="cd-num">3</div>
+                  </div>
+                  <div class="cal-day">
+                    <div class="cd-name">Sat</div>
+                    <div class="cd-num">4</div>
+                  </div>
+                  <div class="cal-day">
+                    <div class="cd-name">Sun</div>
+                    <div class="cd-num">5</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Focus + Schedule + Nudges -->
+            <div class="grid-3 mb-20">
+              <div class="d-card">
+                <div class="d-card-header">
+                  <div class="d-card-title">Today's Focus</div>
+                  <div class="d-card-action">See all</div>
+                </div>
+                <div class="d-card-row"><div class="check"></div><div class="label">Call dentist to reschedule</div><div class="meta">AM</div></div>
+                <div class="d-card-row"><div class="check done"></div><div class="label">Submit expense report</div><div class="meta">Done</div></div>
+                <div class="d-card-row"><div class="check"></div><div class="label">Pick up kids — early release</div><div class="meta">2:30</div></div>
+              </div>
+
+              <div class="d-card">
+                <div class="d-card-header">
+                  <div class="d-card-title">Coming Up</div>
+                </div>
+                <div class="d-card-row"><div class="dot" style="background: var(--accent-blue);"></div><div class="label">Team standup</div><div class="meta">10:00</div></div>
+                <div class="d-card-row"><div class="dot" style="background: var(--accent-green);"></div><div class="label">Lunch with Mom</div><div class="meta">12:30</div></div>
+                <div class="d-card-row"><div class="dot" style="background: var(--primary);"></div><div class="label">Early release pickup</div><div class="meta">2:30</div></div>
+              </div>
+
+              <div style="display: flex; flex-direction: column; gap: 12px;">
+                <div class="nudge-card" style="background: var(--primary-light); flex: 1;">
+                  <div class="nudge-title" style="color: var(--primary-dark);">💡 Ellie noticed</div>
+                  <div class="nudge-text" style="font-size: 12px;">You mentioned the dentist 3 times this week. Want a 9 AM reminder?</div>
+                  <div class="nudge-actions">
+                    <button class="nudge-btn primary" style="font-size: 11px; padding: 5px 12px;">Remind me</button>
+                    <button class="nudge-btn secondary" style="font-size: 11px; padding: 5px 12px;">I'll handle it</button>
+                  </div>
+                </div>
+                <div class="nudge-card" style="background: var(--accent-green-light);">
+                  <div class="nudge-title" style="color: var(--accent-green);">🌿 Gentle reminder</div>
+                  <div class="nudge-text" style="font-size: 12px;">62° and sunny — perfect for that morning walk you wanted this week.</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Inbox Preview -->
+            <div class="d-card">
+              <div class="d-card-header">
+                <div class="d-card-title">Inbox — 3 need your attention</div>
+                <div class="d-card-action">Open Inbox</div>
+              </div>
+              <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;">
+                <div style="background: var(--warm-bg); border-radius: var(--radius-sm); padding: 12px;">
+                  <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+                    <div style="width: 28px; height: 28px; border-radius: 50%; background: var(--accent-blue); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700;">J</div>
+                    <div style="font-size: 12px; font-weight: 600;">Jessica Chen</div>
+                    <div style="font-size: 10px; color: var(--text-muted); margin-left: auto;">9:15</div>
+                  </div>
+                  <div style="font-size: 11px; color: var(--text-muted);">Field trip permission slip</div>
+                </div>
+                <div style="background: var(--warm-bg); border-radius: var(--radius-sm); padding: 12px;">
+                  <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+                    <div style="width: 28px; height: 28px; border-radius: 50%; background: var(--accent-green); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700;">M</div>
+                    <div style="font-size: 12px; font-weight: 600;">Mom</div>
+                    <div style="font-size: 10px; color: var(--text-muted); margin-left: auto;">8:42</div>
+                  </div>
+                  <div style="font-size: 11px; color: var(--text-muted);">Lunch tomorrow — Italian place?</div>
+                </div>
+                <div style="background: var(--warm-bg); border-radius: var(--radius-sm); padding: 12px;">
+                  <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+                    <div style="width: 28px; height: 28px; border-radius: 50%; background: var(--accent-purple); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700;">R</div>
+                    <div style="font-size: 12px; font-weight: 600;">Rebecca</div>
+                    <div style="font-size: 10px; color: var(--text-muted); margin-left: auto;">Yesterday</div>
+                  </div>
+                  <div style="font-size: 11px; color: var(--text-muted);">Review Q2 budget by Thursday</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="annotation">
+    <div class="ann-label">Design Note — Desktop</div>
+    <div class="ann-text">The sidebar replaces mobile's bottom tab bar, giving persistent navigation. The 3-column grid in the main area takes advantage of widescreen real estate — tasks, calendar, and nudges all visible at once. The inbox preview shows a horizontal card layout instead of a vertical list, scannable at a glance. Calendar week strip is desktop-native (no swiping needed).</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION: Chat                               -->
+<!-- ═══════════════════════════════════════════ -->
+<div id="chat" class="section">
+  <div class="section-header">
+    <h1>Chat with Ellie — Desktop</h1>
+    <p>A full conversation view with context panel — Ellie can show related memories, tasks, and suggestions alongside the chat.</p>
+  </div>
+  <div class="desktop-grid">
+
+    <div class="desktop-container">
+      <div class="desktop-label">Conversation with Context Panel</div>
+      <div class="desktop-frame">
+        <div class="desktop-titlebar">
+          <div class="titlebar-dots">
+            <div class="titlebar-dot" style="background: #FF5F57;"></div>
+            <div class="titlebar-dot" style="background: #FFBD2E;"></div>
+            <div class="titlebar-dot" style="background: #28C840;"></div>
+          </div>
+          <div class="titlebar-url">app.ellielife.com/chat</div>
+        </div>
+        <div class="desktop-body">
+          <div class="app-sidebar">
+            <div class="sidebar-brand">
+              <div class="brand-icon">🌸</div>
+              <div>
+                <div class="brand-name">Ellie</div>
+                <div class="brand-sub">Your AI companion</div>
+              </div>
+            </div>
+            <div class="sidebar-nav">
+              <div class="sidebar-item"><div class="si-icon">🏠</div>Home</div>
+              <div class="sidebar-item active"><div class="si-icon">💬</div>Chat with Ellie</div>
+              <div class="sidebar-item"><div class="si-icon">📋</div>Tasks & Lists<div class="si-badge">3</div></div>
+              <div class="sidebar-item"><div class="si-icon">📬</div>Inbox<div class="si-badge">3</div></div>
+              <div class="sidebar-item"><div class="si-icon">🧠</div>Memory</div>
+              <div class="sidebar-section-label">Add-ons</div>
+              <div class="sidebar-item"><div class="si-icon">💚</div>Wellness</div>
+              <div class="sidebar-item"><div class="si-icon">👨‍👩‍👧‍👦</div>Family</div>
+              <div class="sidebar-item"><div class="si-icon">💰</div>Money</div>
+            </div>
+            <div class="sidebar-user">
+              <div class="sidebar-user-avatar">S</div>
+              <div>
+                <div class="sidebar-user-name">Sarah</div>
+                <div class="sidebar-user-status">Online</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Chat area + context panel -->
+          <div style="flex: 1; display: flex;">
+            <div class="app-main" style="display: flex; flex-direction: column; padding: 20px 28px;">
+              <div style="font-size: 11px; color: var(--text-light); text-align: center; margin-bottom: 16px;">Today, 10:22 AM</div>
+              <div class="chat-messages-d" style="flex: 1;">
+                <div class="chat-bubble-d user">I need to figure out a birthday gift for my sister. She's turning 40 next month</div>
+                <div class="chat-bubble-d ellie">Ooh, the big 4-0! Last time you mentioned she's really into pottery and just redecorated her living room in that earthy terracotta style. A few ideas:
+                  <br><br>🎨 <b>Pottery class for two</b> — you could go together
+                  <br>🏺 <b>Handmade vase</b> from that local ceramics studio
+                  <br>📚 <b>"The Kinfolk Table"</b> — she'd love the aesthetic
+                  <br><br>Want me to save her birthday date so I can remind you to order in time?</div>
+                <div class="chat-bubble-d user">Yes! It's April 18th. The pottery class sounds perfect</div>
+                <div class="chat-bubble-d ellie">Saved! I'll remind you April 4th to book it (2 weeks out, so spots don't fill up). And I noted she likes pottery — useful for future gift ideas too 😊</div>
+                <div class="chat-bubble-d user">You're better at this than I am lol</div>
+                <div class="chat-bubble-d ellie">Ha — I just have a better memory for details. You're the one who actually knows your sister 💛</div>
+              </div>
+              <div class="chat-input-d">
+                <input type="text" placeholder="Message Ellie..." disabled>
+                <button class="chat-send-d">↑</button>
+              </div>
+            </div>
+
+            <!-- Context Panel -->
+            <div class="chat-context-panel">
+              <div class="context-section-title">Related Memory</div>
+              <div class="memory-card-d" style="background: var(--accent-blue-light); margin-bottom: 10px;">
+                <div class="mem-label-d" style="color: var(--accent-blue);">People</div>
+                <div class="mem-text-d"><b>Kate</b> (sister) — Into pottery, earthy decor style. Lives in Portland.</div>
+                <div class="mem-date-d">Learned Mar 30</div>
+              </div>
+
+              <div class="context-section-title">Tasks Created</div>
+              <div style="background: var(--accent-green-light); border-radius: var(--radius-sm); padding: 10px 12px; margin-bottom: 6px;">
+                <div style="font-size: 12px; font-weight: 600; color: var(--accent-green);">✓ New task</div>
+                <div style="font-size: 12px; margin-top: 2px;">Book pottery class for Kate</div>
+                <div style="font-size: 11px; color: var(--text-muted);">Reminder: Apr 4</div>
+              </div>
+
+              <div class="context-section-title">New Memory</div>
+              <div class="memory-card-d" style="background: var(--accent-purple-light); margin-bottom: 10px;">
+                <div class="mem-label-d" style="color: var(--accent-purple);">Updated</div>
+                <div class="mem-text-d">Kate's birthday: April 18. Turning 40.</div>
+                <div class="mem-date-d">Just now</div>
+              </div>
+
+              <div class="context-section-title">Quick Actions</div>
+              <div style="display: flex; flex-direction: column; gap: 6px;">
+                <button style="padding: 8px 12px; border-radius: 8px; border: 1.5px solid var(--border); background: #fff; font-size: 12px; cursor: pointer; text-align: left; color: var(--text);">🎤 Send voice note</button>
+                <button style="padding: 8px 12px; border-radius: 8px; border: 1.5px solid var(--border); background: #fff; font-size: 12px; cursor: pointer; text-align: left; color: var(--text);">📎 Share a photo</button>
+                <button style="padding: 8px 12px; border-radius: 8px; border: 1.5px solid var(--border); background: #fff; font-size: 12px; cursor: pointer; text-align: left; color: var(--text);">🧠 View all memories</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="desktop-container">
+      <div class="desktop-label">Emotional Support — Focused View</div>
+      <div class="desktop-frame">
+        <div class="desktop-titlebar">
+          <div class="titlebar-dots">
+            <div class="titlebar-dot" style="background: #FF5F57;"></div>
+            <div class="titlebar-dot" style="background: #FFBD2E;"></div>
+            <div class="titlebar-dot" style="background: #28C840;"></div>
+          </div>
+          <div class="titlebar-url">app.ellielife.com/chat</div>
+        </div>
+        <div class="desktop-body">
+          <div class="app-sidebar">
+            <div class="sidebar-brand">
+              <div class="brand-icon">🌸</div>
+              <div><div class="brand-name">Ellie</div><div class="brand-sub">Your AI companion</div></div>
+            </div>
+            <div class="sidebar-nav">
+              <div class="sidebar-item"><div class="si-icon">🏠</div>Home</div>
+              <div class="sidebar-item active"><div class="si-icon">💬</div>Chat with Ellie</div>
+              <div class="sidebar-item"><div class="si-icon">📋</div>Tasks & Lists</div>
+              <div class="sidebar-item"><div class="si-icon">📬</div>Inbox</div>
+              <div class="sidebar-item"><div class="si-icon">🧠</div>Memory</div>
+            </div>
+            <div class="sidebar-user">
+              <div class="sidebar-user-avatar">S</div>
+              <div><div class="sidebar-user-name">Sarah</div><div class="sidebar-user-status">Online</div></div>
+            </div>
+          </div>
+          <div class="app-main" style="display: flex; flex-direction: column; padding: 20px 48px; max-width: none;">
+            <div style="max-width: 640px; margin: 0 auto; width: 100%; flex: 1; display: flex; flex-direction: column;">
+              <div style="font-size: 11px; color: var(--text-light); text-align: center; margin-bottom: 16px;">Tonight, 9:47 PM</div>
+              <div class="chat-messages-d" style="flex: 1;">
+                <div class="chat-bubble-d user">Rough day. The kids were impossible and I snapped at my husband over nothing</div>
+                <div class="chat-bubble-d ellie">That sounds really draining. Early release days are already a lot, and you'd been running since 7 AM. It makes sense you hit a wall.</div>
+                <div class="chat-bubble-d user">I just feel like I'm bad at all of this</div>
+                <div class="chat-bubble-d ellie">I hear you. And I want to gently push back — last Thursday you handled the school project crisis like a champ, and your husband told you he appreciated how calm you were at his parents' dinner. One rough evening doesn't define you.
+                  <br><br>Do you want to:
+                  <br>💬 Keep venting (totally valid)
+                  <br>🧘 Try a 5-min wind-down
+                  <br>📝 Brain dump tomorrow's worries so you can let go tonight</div>
+                <div class="chat-bubble-d user">Brain dump. I can't stop thinking about tomorrow</div>
+                <div class="chat-bubble-d ellie">Okay, tell me everything on your mind. I'll organize it and we'll make a simple plan. Nothing is too small to mention.</div>
+              </div>
+              <div class="chat-input-d">
+                <input type="text" placeholder="Message Ellie..." disabled>
+                <button class="chat-send-d">↑</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="annotation">
+    <div class="ann-label">Design Note — Desktop</div>
+    <div class="ann-text">Desktop chat adds a collapsible context panel that shows related memories, tasks created from the conversation, and quick actions — information that would need separate screens on mobile. For emotional conversations, the context panel auto-hides to create a focused, intimate space (max-width conversation centered on screen). The wider text area makes longer messages more comfortable to read and write.</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION: Organize                           -->
+<!-- ═══════════════════════════════════════════ -->
+<div id="organize" class="section">
+  <div class="section-header">
+    <h1>Life Organization — Desktop</h1>
+    <p>Tasks, lists, and calendar in a multi-panel layout. Everything visible, nothing buried.</p>
+  </div>
+  <div class="desktop-grid">
+
+    <div class="desktop-container">
+      <div class="desktop-label">Tasks & Lists — Split View</div>
+      <div class="desktop-frame">
+        <div class="desktop-titlebar">
+          <div class="titlebar-dots">
+            <div class="titlebar-dot" style="background: #FF5F57;"></div>
+            <div class="titlebar-dot" style="background: #FFBD2E;"></div>
+            <div class="titlebar-dot" style="background: #28C840;"></div>
+          </div>
+          <div class="titlebar-url">app.ellielife.com/tasks</div>
+        </div>
+        <div class="desktop-body">
+          <div class="app-sidebar">
+            <div class="sidebar-brand">
+              <div class="brand-icon">🌸</div>
+              <div><div class="brand-name">Ellie</div><div class="brand-sub">Your AI companion</div></div>
+            </div>
+            <div class="sidebar-nav">
+              <div class="sidebar-item"><div class="si-icon">🏠</div>Home</div>
+              <div class="sidebar-item"><div class="si-icon">💬</div>Chat with Ellie</div>
+              <div class="sidebar-item active"><div class="si-icon">📋</div>Tasks & Lists<div class="si-badge">3</div></div>
+              <div class="sidebar-item"><div class="si-icon">📬</div>Inbox</div>
+              <div class="sidebar-item"><div class="si-icon">🧠</div>Memory</div>
+              <div class="sidebar-section-label">Lists</div>
+              <div class="sidebar-item"><div class="si-icon">🛒</div>Shopping</div>
+              <div class="sidebar-item"><div class="si-icon">📌</div>Someday</div>
+              <div class="sidebar-item"><div class="si-icon">🎁</div>Gift ideas</div>
+            </div>
+            <div class="sidebar-user">
+              <div class="sidebar-user-avatar">S</div>
+              <div><div class="sidebar-user-name">Sarah</div><div class="sidebar-user-status">3 tasks today</div></div>
+            </div>
+          </div>
+
+          <div class="app-main">
+            <div class="main-header">
+              <div>
+                <div class="main-title">Your Week</div>
+                <div class="main-subtitle">Ellie organized these from your chats</div>
+              </div>
+              <div class="filter-pills">
+                <button class="filter-pill active">All</button>
+                <button class="filter-pill">Home</button>
+                <button class="filter-pill">Work</button>
+                <button class="filter-pill">Family</button>
+              </div>
+            </div>
+
+            <div class="grid-2">
+              <!-- Left: tasks by day -->
+              <div>
+                <div class="d-card mb-16">
+                  <div style="font-size: 11px; font-weight: 700; color: var(--primary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px;">Today — Monday</div>
+                  <div class="d-card-row"><div class="check"></div><div class="label">Call dentist (office opens 9 AM)</div><div class="meta" style="color: var(--primary);">⏰ 9:00</div></div>
+                  <div class="d-card-row"><div class="check done"></div><div class="label">Team standup</div><div class="meta">10:00</div></div>
+                  <div class="d-card-row"><div class="check"></div><div class="label">Early release pickup</div><div class="meta">2:30</div></div>
+                  <div class="d-card-row"><div class="check"></div><div class="label">Lunch with Mom</div><div class="meta">12:30</div></div>
+                </div>
+
+                <div class="d-card mb-16">
+                  <div style="font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px;">Wednesday</div>
+                  <div class="d-card-row"><div class="check"></div><div class="label">Target run: cleats, dog food, towels</div><div class="meta">📍</div></div>
+                  <div class="d-card-row"><div class="check"></div><div class="label">Reply to school email about field trip</div></div>
+                </div>
+
+                <div class="d-card">
+                  <div style="font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px;">Thursday</div>
+                  <div class="d-card-row"><div class="check"></div><div class="label">Emma's soccer practice</div><div class="meta">4:00</div></div>
+                </div>
+              </div>
+
+              <!-- Right: lists & someday -->
+              <div>
+                <div class="d-card mb-16">
+                  <div class="d-card-header">
+                    <div class="d-card-title">🛒 Target — Wednesday</div>
+                    <div class="d-card-action">Share list</div>
+                  </div>
+                  <div class="d-card-row"><div class="check"></div><div class="label">Soccer cleats (Emma, size 4)</div><div class="meta">$35-50</div></div>
+                  <div class="d-card-row"><div class="check"></div><div class="label">Dog food — Blue Buffalo</div><div class="meta">$45</div></div>
+                  <div class="d-card-row"><div class="check"></div><div class="label">Paper towels</div><div class="meta">$12</div></div>
+                </div>
+
+                <div class="d-card mb-16">
+                  <div class="d-card-header">
+                    <div class="d-card-title">🥑 Groceries</div>
+                    <div class="d-card-action">Add items</div>
+                  </div>
+                  <div class="d-card-row"><div class="check"></div><div class="label">Bananas</div></div>
+                  <div class="d-card-row"><div class="check"></div><div class="label">Chicken breast</div></div>
+                  <div class="d-card-row"><div class="check"></div><div class="label">Pasta sauce</div></div>
+                  <div class="d-card-row"><div class="check done"></div><div class="label" style="text-decoration: line-through; color: var(--text-muted);">Milk</div></div>
+                </div>
+
+                <div class="d-card" style="background: var(--accent-purple-light);">
+                  <div style="font-size: 11px; font-weight: 700; color: var(--accent-purple); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px;">Someday List</div>
+                  <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">Things Ellie is holding for when you have time</div>
+                  <div class="d-card-row"><div class="label" style="font-size: 12px;">Research summer camp options</div></div>
+                  <div class="d-card-row"><div class="label" style="font-size: 12px;">Schedule oil change</div></div>
+                  <div class="d-card-row"><div class="label" style="font-size: 12px;">Book pottery class for Kate's birthday</div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION: Comms Filter                       -->
+<!-- ═══════════════════════════════════════════ -->
+<div id="comms" class="section">
+  <div class="section-header">
+    <h1>Communication Filter — Desktop</h1>
+    <p>Ellie reads your notifications and gives you a dashboard view of what actually needs attention.</p>
+  </div>
+  <div class="desktop-grid">
+
+    <div class="desktop-container">
+      <div class="desktop-label">Filtered Inbox — Desktop View</div>
+      <div class="desktop-frame">
+        <div class="desktop-titlebar">
+          <div class="titlebar-dots">
+            <div class="titlebar-dot" style="background: #FF5F57;"></div>
+            <div class="titlebar-dot" style="background: #FFBD2E;"></div>
+            <div class="titlebar-dot" style="background: #28C840;"></div>
+          </div>
+          <div class="titlebar-url">app.ellielife.com/inbox</div>
+        </div>
+        <div class="desktop-body">
+          <div class="app-sidebar">
+            <div class="sidebar-brand">
+              <div class="brand-icon">🌸</div>
+              <div><div class="brand-name">Ellie</div><div class="brand-sub">Your AI companion</div></div>
+            </div>
+            <div class="sidebar-nav">
+              <div class="sidebar-item"><div class="si-icon">🏠</div>Home</div>
+              <div class="sidebar-item"><div class="si-icon">💬</div>Chat with Ellie</div>
+              <div class="sidebar-item"><div class="si-icon">📋</div>Tasks & Lists</div>
+              <div class="sidebar-item active"><div class="si-icon">📬</div>Inbox<div class="si-badge">3</div></div>
+              <div class="sidebar-item"><div class="si-icon">🧠</div>Memory</div>
+            </div>
+            <div class="sidebar-user">
+              <div class="sidebar-user-avatar">S</div>
+              <div><div class="sidebar-user-name">Sarah</div><div class="sidebar-user-status">3 items need you</div></div>
+            </div>
+          </div>
+
+          <div class="app-main">
+            <div class="main-header">
+              <div>
+                <div class="main-title">Inbox</div>
+                <div class="main-subtitle">3 need you · 12 handled · 5 archived</div>
+              </div>
+              <div style="background: var(--primary-light); border-radius: var(--radius-sm); padding: 8px 16px;">
+                <div style="font-size: 13px; color: var(--primary-dark); font-weight: 500;">Ellie saved you ~15 minutes today</div>
+              </div>
+            </div>
+
+            <div class="filter-pills mb-20">
+              <button class="filter-pill active">Needs You (3)</button>
+              <button class="filter-pill">All</button>
+              <button class="filter-pill">Handled (12)</button>
+              <button class="filter-pill">Archived (5)</button>
+            </div>
+
+            <div class="grid-2">
+              <!-- Needs attention -->
+              <div>
+                <div class="d-card">
+                  <div class="d-card-header">
+                    <div class="d-card-title">Needs Your Attention</div>
+                  </div>
+                  <div class="inbox-item-d">
+                    <div class="inbox-avatar-d" style="background: var(--accent-blue);">J</div>
+                    <div class="inbox-content-d">
+                      <div class="inbox-from-d">Jessica Chen <span style="font-weight: 400; color: var(--text-muted);">· School</span></div>
+                      <div class="inbox-preview-d">Field trip permission slip needs to be signed by Wednesday</div>
+                      <div class="inbox-summary-d">📋 Ellie says: She needs a signature by Wednesday. I've added it to your tasks.</div>
+                    </div>
+                    <div class="inbox-meta-d">9:15 AM</div>
+                  </div>
+
+                  <div class="inbox-item-d">
+                    <div class="inbox-avatar-d" style="background: var(--accent-green);">M</div>
+                    <div class="inbox-content-d">
+                      <div class="inbox-from-d">Mom <span style="font-weight: 400; color: var(--text-muted);">· Text</span></div>
+                      <div class="inbox-preview-d">Still on for lunch tomorrow? I was thinking that new Italian place</div>
+                      <div class="inbox-summary-d">💬 Ellie says: She wants to confirm lunch. The Italian place is 10 min from your office — timing works.</div>
+                    </div>
+                    <div class="inbox-meta-d">8:42 AM</div>
+                  </div>
+
+                  <div class="inbox-item-d">
+                    <div class="inbox-avatar-d" style="background: var(--accent-purple);">R</div>
+                    <div class="inbox-content-d">
+                      <div class="inbox-from-d">Rebecca <span style="font-weight: 400; color: var(--text-muted);">· Work Slack</span></div>
+                      <div class="inbox-preview-d">Can you review the Q2 budget before Thursday's meeting?</div>
+                      <div class="inbox-summary-d">📊 Ellie says: Non-urgent but has a deadline. I'll remind you Wed morning.</div>
+                    </div>
+                    <div class="inbox-meta-d">Yesterday</div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Handled by Ellie -->
+              <div>
+                <div class="d-card" style="opacity: 0.75;">
+                  <div class="d-card-header">
+                    <div class="d-card-title">Handled by Ellie</div>
+                    <div style="font-size: 11px; color: var(--text-muted);">Stuff that didn't need you</div>
+                  </div>
+                  <div class="inbox-item-d">
+                    <div class="inbox-avatar-d" style="background: var(--text-light); font-size: 12px;">📧</div>
+                    <div class="inbox-content-d">
+                      <div class="inbox-from-d" style="font-weight: 500;">Target <span style="color: var(--text-muted);">· Promo</span></div>
+                      <div class="inbox-preview-d">30% off home essentials this weekend</div>
+                      <div style="font-size: 11px; color: var(--accent-green); margin-top: 4px;">✓ Filed under promotions</div>
+                    </div>
+                  </div>
+                  <div class="inbox-item-d">
+                    <div class="inbox-avatar-d" style="background: var(--text-light); font-size: 12px;">📧</div>
+                    <div class="inbox-content-d">
+                      <div class="inbox-from-d" style="font-weight: 500;">LinkedIn <span style="color: var(--text-muted);">· Notification</span></div>
+                      <div class="inbox-preview-d">5 people viewed your profile</div>
+                      <div style="font-size: 11px; color: var(--accent-green); margin-top: 4px;">✓ Social notification — archived</div>
+                    </div>
+                  </div>
+                  <div class="inbox-item-d">
+                    <div class="inbox-avatar-d" style="background: var(--text-light); font-size: 12px;">📧</div>
+                    <div class="inbox-content-d">
+                      <div class="inbox-from-d" style="font-weight: 500;">Bank of America <span style="color: var(--text-muted);">· Alert</span></div>
+                      <div class="inbox-preview-d">Your payment of $142.30 was received</div>
+                      <div style="font-size: 11px; color: var(--accent-green); margin-top: 4px;">✓ Payment confirmation — logged</div>
+                    </div>
+                  </div>
+                  <div class="inbox-item-d">
+                    <div class="inbox-avatar-d" style="background: var(--text-light); font-size: 12px;">📧</div>
+                    <div class="inbox-content-d">
+                      <div class="inbox-from-d" style="font-weight: 500;">Amazon <span style="color: var(--text-muted);">· Shipping</span></div>
+                      <div class="inbox-preview-d">Your order has been delivered</div>
+                      <div style="font-size: 11px; color: var(--accent-green); margin-top: 4px;">✓ Delivery confirmed — kid's art supplies</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION: Memory                             -->
+<!-- ═══════════════════════════════════════════ -->
+<div id="memory" class="section">
+  <div class="section-header">
+    <h1>Ellie's Memory — Desktop</h1>
+    <p>Everything Ellie has learned about you — organized in a spacious, browsable layout.</p>
+  </div>
+  <div class="desktop-grid">
+
+    <div class="desktop-container">
+      <div class="desktop-label">Memory Browser — Grid View</div>
+      <div class="desktop-frame">
+        <div class="desktop-titlebar">
+          <div class="titlebar-dots">
+            <div class="titlebar-dot" style="background: #FF5F57;"></div>
+            <div class="titlebar-dot" style="background: #FFBD2E;"></div>
+            <div class="titlebar-dot" style="background: #28C840;"></div>
+          </div>
+          <div class="titlebar-url">app.ellielife.com/memory</div>
+        </div>
+        <div class="desktop-body">
+          <div class="app-sidebar">
+            <div class="sidebar-brand">
+              <div class="brand-icon">🌸</div>
+              <div><div class="brand-name">Ellie</div><div class="brand-sub">Your AI companion</div></div>
+            </div>
+            <div class="sidebar-nav">
+              <div class="sidebar-item"><div class="si-icon">🏠</div>Home</div>
+              <div class="sidebar-item"><div class="si-icon">💬</div>Chat with Ellie</div>
+              <div class="sidebar-item"><div class="si-icon">📋</div>Tasks & Lists</div>
+              <div class="sidebar-item"><div class="si-icon">📬</div>Inbox</div>
+              <div class="sidebar-item active"><div class="si-icon">🧠</div>Memory</div>
+            </div>
+            <div class="sidebar-user">
+              <div class="sidebar-user-avatar">S</div>
+              <div><div class="sidebar-user-name">Sarah</div><div class="sidebar-user-status">23 memories</div></div>
+            </div>
+          </div>
+
+          <div class="app-main">
+            <div class="main-header">
+              <div>
+                <div class="main-title">🧠 Memory</div>
+                <div class="main-subtitle">What Ellie knows about you — fully transparent, fully in your control</div>
+              </div>
+              <div style="display: flex; gap: 8px;">
+                <input type="text" placeholder="Search memories..." disabled style="padding: 8px 16px; border-radius: 10px; border: 1.5px solid var(--border); font-size: 13px; width: 200px; background: #fff;">
+                <button style="padding: 8px 16px; border-radius: 10px; background: var(--primary-light); color: var(--primary-dark); border: none; font-size: 12px; font-weight: 600; cursor: pointer;">Edit memories</button>
+              </div>
+            </div>
+
+            <div class="filter-pills mb-20">
+              <button class="filter-pill active">All</button>
+              <button class="filter-pill">About You</button>
+              <button class="filter-pill">People</button>
+              <button class="filter-pill">Preferences</button>
+              <button class="filter-pill">Emotional</button>
+            </div>
+
+            <div class="grid-3 mb-20">
+              <div class="memory-card-d" style="background: var(--accent-purple-light);">
+                <div class="mem-label-d" style="color: var(--accent-purple);">About You</div>
+                <div class="mem-text-d">Works from home. Mornings are productive time. Picks up kids at 3 PM (2:30 on early release). Evenings are recharge time — avoid scheduling.</div>
+                <div class="mem-date-d">Learned Mar 15 · Updated Mar 28</div>
+              </div>
+
+              <div class="memory-card-d" style="background: var(--accent-blue-light);">
+                <div class="mem-label-d" style="color: var(--accent-blue);">People</div>
+                <div class="mem-text-d"><b>Kate</b> (sister) — Turning 40 on April 18. Into pottery, earthy decor style. Lives in Portland.</div>
+                <div class="mem-date-d">Learned Mar 30</div>
+              </div>
+
+              <div class="memory-card-d" style="background: var(--accent-green-light);">
+                <div class="mem-label-d" style="color: var(--accent-green);">People</div>
+                <div class="mem-text-d"><b>Emma</b> (daughter) — Soccer on Thursdays. Shoe size 4. Loves art projects.</div>
+                <div class="mem-date-d">Learned Mar 22 · Updated Mar 29</div>
+              </div>
+            </div>
+
+            <div class="grid-3">
+              <div class="memory-card-d" style="background: var(--primary-light);">
+                <div class="mem-label-d" style="color: var(--primary);">Preferences</div>
+                <div class="mem-text-d">Dog: Blue Buffalo brand only. Prefers quick/casual communication. Likes to plan Target runs on Wednesdays.</div>
+                <div class="mem-date-d">Learned across multiple chats</div>
+              </div>
+
+              <div class="memory-card-d" style="background: var(--accent-gold-light);">
+                <div class="mem-label-d" style="color: var(--accent-gold);">Emotional</div>
+                <div class="mem-text-d">Tends to be hard on herself after stressful days. Responds well to gentle reminders of recent wins.</div>
+                <div class="mem-date-d">Pattern noticed Mar 28</div>
+              </div>
+
+              <div class="memory-card-d" style="background: var(--accent-blue-light);">
+                <div class="mem-label-d" style="color: var(--accent-blue);">People</div>
+                <div class="mem-text-d"><b>Mike</b> (husband) — Late meetings Wed. Gym Tue/Thu. Supportive, sometimes takes over bedtime.</div>
+                <div class="mem-date-d">Learned Mar 20 · Updated Mar 29</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="annotation">
+    <div class="ann-label">Design Note — Desktop</div>
+    <div class="ann-text">Memory browser uses a card grid layout — much more scannable than mobile's vertical scroll. Search and filtering are prominent at the top. Desktop adds an "Edit memories" button for direct control. The 3-column grid lets users see more context at once and spot patterns across memory categories.</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION: Health                             -->
+<!-- ═══════════════════════════════════════════ -->
+<div id="health" class="section">
+  <div class="section-header">
+    <h1>Add-on: Health & Wellness — Desktop</h1>
+    <p>Wellness dashboard with space for insights, habits, and weekly patterns side by side.</p>
+  </div>
+  <div class="desktop-grid">
+
+    <div class="desktop-container">
+      <div class="desktop-label">Wellness Dashboard</div>
+      <div class="desktop-frame">
+        <div class="desktop-titlebar">
+          <div class="titlebar-dots">
+            <div class="titlebar-dot" style="background: #FF5F57;"></div>
+            <div class="titlebar-dot" style="background: #FFBD2E;"></div>
+            <div class="titlebar-dot" style="background: #28C840;"></div>
+          </div>
+          <div class="titlebar-url">app.ellielife.com/wellness</div>
+        </div>
+        <div class="desktop-body">
+          <div class="app-sidebar">
+            <div class="sidebar-brand">
+              <div class="brand-icon">🌸</div>
+              <div><div class="brand-name">Ellie</div><div class="brand-sub">Your AI companion</div></div>
+            </div>
+            <div class="sidebar-nav">
+              <div class="sidebar-item"><div class="si-icon">🏠</div>Home</div>
+              <div class="sidebar-item"><div class="si-icon">💬</div>Chat with Ellie</div>
+              <div class="sidebar-item"><div class="si-icon">📋</div>Tasks & Lists</div>
+              <div class="sidebar-item"><div class="si-icon">📬</div>Inbox</div>
+              <div class="sidebar-item"><div class="si-icon">🧠</div>Memory</div>
+              <div class="sidebar-section-label">Add-ons</div>
+              <div class="sidebar-item active"><div class="si-icon">💚</div>Wellness</div>
+              <div class="sidebar-item"><div class="si-icon">👨‍👩‍👧‍👦</div>Family</div>
+              <div class="sidebar-item"><div class="si-icon">💰</div>Money</div>
+            </div>
+            <div class="sidebar-user">
+              <div class="sidebar-user-avatar">S</div>
+              <div><div class="sidebar-user-name">Sarah</div><div class="sidebar-user-status">4-day walk streak!</div></div>
+            </div>
+          </div>
+
+          <div class="app-main">
+            <div class="main-header">
+              <div>
+                <div class="main-title">Wellness</div>
+                <div class="main-subtitle">Your week at a glance — March 24-30</div>
+              </div>
+            </div>
+
+            <!-- Top row: ring + stats + habits -->
+            <div class="grid-3 mb-20">
+              <!-- Ring & Stats -->
+              <div class="d-card" style="text-align: center;">
+                <div class="health-ring-d">
+                  <svg width="160" height="160" viewBox="0 0 160 160">
+                    <circle cx="80" cy="80" r="66" fill="none" stroke="#F0EBE6" stroke-width="12"/>
+                    <circle cx="80" cy="80" r="66" fill="none" stroke="#7BC67E" stroke-width="12"
+                      stroke-dasharray="414.7" stroke-dashoffset="124" stroke-linecap="round"/>
+                    <circle cx="80" cy="80" r="50" fill="none" stroke="#F0EBE6" stroke-width="12"/>
+                    <circle cx="80" cy="80" r="50" fill="none" stroke="#6BA3D6" stroke-width="12"
+                      stroke-dasharray="314.2" stroke-dashoffset="157" stroke-linecap="round"/>
+                  </svg>
+                  <div class="health-ring-center-d">
+                    <div class="num">70%</div>
+                    <div class="unit">weekly goals</div>
+                  </div>
+                </div>
+                <div style="display: flex; gap: 8px; margin-top: 16px;">
+                  <div class="health-stat-d" style="flex: 1;">
+                    <div class="hs-val" style="color: var(--accent-green);">4/5</div>
+                    <div class="hs-label">Walks</div>
+                  </div>
+                  <div class="health-stat-d" style="flex: 1;">
+                    <div class="hs-val" style="color: var(--accent-blue);">6.5h</div>
+                    <div class="hs-label">Avg Sleep</div>
+                  </div>
+                  <div class="health-stat-d" style="flex: 1;">
+                    <div class="hs-val" style="color: var(--accent-purple);">5/7</div>
+                    <div class="hs-label">Water</div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Habits -->
+              <div class="d-card">
+                <div class="d-card-header">
+                  <div class="d-card-title">Habits</div>
+                  <div class="d-card-action">This week</div>
+                </div>
+                <div class="habit-row-d">
+                  <div class="habit-icon-d">🚶‍♀️</div>
+                  <div class="habit-name-d">Morning walk</div>
+                  <div class="habit-streak-d">🔥 4 days</div>
+                </div>
+                <div class="habit-row-d">
+                  <div class="habit-icon-d">💧</div>
+                  <div class="habit-name-d">8 glasses water</div>
+                  <div class="habit-dots-d">
+                    <span style="background: var(--accent-blue);"></span>
+                    <span style="background: var(--accent-blue);"></span>
+                    <span style="background: var(--accent-blue);"></span>
+                    <span style="background: var(--border);"></span>
+                    <span style="background: var(--accent-blue);"></span>
+                    <span style="background: var(--accent-blue);"></span>
+                    <span style="background: var(--border);"></span>
+                  </div>
+                </div>
+                <div class="habit-row-d">
+                  <div class="habit-icon-d">😴</div>
+                  <div class="habit-name-d">Bedtime by 10:30</div>
+                  <div class="habit-dots-d">
+                    <span style="background: var(--accent-purple);"></span>
+                    <span style="background: var(--border);"></span>
+                    <span style="background: var(--accent-purple);"></span>
+                    <span style="background: var(--accent-purple);"></span>
+                    <span style="background: var(--border);"></span>
+                    <span style="background: var(--accent-purple);"></span>
+                    <span style="background: var(--border);"></span>
+                  </div>
+                </div>
+                <div class="habit-row-d">
+                  <div class="habit-icon-d">🧘</div>
+                  <div class="habit-name-d">5-min stretch</div>
+                  <div class="habit-dots-d">
+                    <span style="background: var(--accent-green);"></span>
+                    <span style="background: var(--accent-green);"></span>
+                    <span style="background: var(--border);"></span>
+                    <span style="background: var(--accent-green);"></span>
+                    <span style="background: var(--border);"></span>
+                    <span style="background: var(--border);"></span>
+                    <span style="background: var(--border);"></span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Weekly Insights -->
+              <div style="display: flex; flex-direction: column; gap: 10px;">
+                <div class="insight-card-d" style="background: var(--accent-blue-light);">
+                  <div class="insight-icon">🏆</div>
+                  <div class="insight-text"><b>Best streak:</b> Morning walks — 4 days in a row, your personal best!</div>
+                </div>
+                <div class="insight-card-d" style="background: var(--accent-green-light);">
+                  <div class="insight-icon">📈</div>
+                  <div class="insight-text"><b>Sleep trend:</b> Average 6.5h, up from 5.8 last week. Bedtime routine is helping.</div>
+                </div>
+                <div class="insight-card-d" style="background: var(--accent-purple-light);">
+                  <div class="insight-icon">💡</div>
+                  <div class="insight-text"><b>Correlation:</b> Mood ratings 2x higher on days you walked AND slept 7+ hours.</div>
+                </div>
+                <div class="insight-card-d" style="background: var(--accent-gold-light);">
+                  <div class="insight-icon">🎯</div>
+                  <div class="insight-text"><b>Next week:</b> Keep the walk streak and try for 3 nights of 10:30 bedtime.</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="d-card" style="text-align: center;">
+              <div style="font-size: 13px; font-weight: 600; margin-bottom: 6px;">How Ellie tracks this</div>
+              <div style="font-size: 12px; color: var(--text-muted);">Everything comes from your conversations and check-ins. No wearable needed. Just tell Ellie how you slept, when you walked, or how you feel.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="annotation">
+    <div class="ann-label">Design Note — Desktop</div>
+    <div class="ann-text">Desktop wellness dashboard shows the ring chart, habits, and weekly insights all at once in a 3-column layout. On mobile these were separate scroll sections — on desktop it's a single scannable view. The insight cards stack vertically on the right, creating a natural left-to-right reading flow: overview → details → takeaways.</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION: Family                             -->
+<!-- ═══════════════════════════════════════════ -->
+<div id="family" class="section">
+  <div class="section-header">
+    <h1>Add-on: Family & Home — Desktop</h1>
+    <p>Household coordination with family calendar, meal planning, and member profiles in a wide layout.</p>
+  </div>
+  <div class="desktop-grid">
+
+    <div class="desktop-container">
+      <div class="desktop-label">Family Hub — Desktop View</div>
+      <div class="desktop-frame">
+        <div class="desktop-titlebar">
+          <div class="titlebar-dots">
+            <div class="titlebar-dot" style="background: #FF5F57;"></div>
+            <div class="titlebar-dot" style="background: #FFBD2E;"></div>
+            <div class="titlebar-dot" style="background: #28C840;"></div>
+          </div>
+          <div class="titlebar-url">app.ellielife.com/family</div>
+        </div>
+        <div class="desktop-body">
+          <div class="app-sidebar">
+            <div class="sidebar-brand">
+              <div class="brand-icon">🌸</div>
+              <div><div class="brand-name">Ellie</div><div class="brand-sub">Your AI companion</div></div>
+            </div>
+            <div class="sidebar-nav">
+              <div class="sidebar-item"><div class="si-icon">🏠</div>Home</div>
+              <div class="sidebar-item"><div class="si-icon">💬</div>Chat with Ellie</div>
+              <div class="sidebar-item"><div class="si-icon">📋</div>Tasks & Lists</div>
+              <div class="sidebar-item"><div class="si-icon">📬</div>Inbox</div>
+              <div class="sidebar-item"><div class="si-icon">🧠</div>Memory</div>
+              <div class="sidebar-section-label">Add-ons</div>
+              <div class="sidebar-item"><div class="si-icon">💚</div>Wellness</div>
+              <div class="sidebar-item active"><div class="si-icon">👨‍👩‍👧‍👦</div>Family</div>
+              <div class="sidebar-item"><div class="si-icon">💰</div>Money</div>
+            </div>
+            <div class="sidebar-user">
+              <div class="sidebar-user-avatar">S</div>
+              <div><div class="sidebar-user-name">Sarah</div><div class="sidebar-user-status">Family coordinator</div></div>
+            </div>
+          </div>
+
+          <div class="app-main">
+            <div class="main-header">
+              <div>
+                <div class="main-title">Family</div>
+                <div class="main-subtitle">This week's coordination</div>
+              </div>
+            </div>
+
+            <div class="grid-2 mb-20">
+              <!-- Members + Week View -->
+              <div>
+                <div class="d-card mb-16">
+                  <div class="d-card-header">
+                    <div class="d-card-title">Family Members</div>
+                    <div class="d-card-action">Manage</div>
+                  </div>
+                  <div class="family-member-d">
+                    <div class="family-avatar-d" style="background: var(--accent-blue);">M</div>
+                    <div class="family-info-d">
+                      <div class="family-name-d">Mike (husband)</div>
+                      <div class="family-status-d">Late meeting Wed · Gym Tue/Thu</div>
+                    </div>
+                    <button class="family-action-d">Remind</button>
+                  </div>
+                  <div class="family-member-d">
+                    <div class="family-avatar-d" style="background: var(--accent-green);">E</div>
+                    <div class="family-info-d">
+                      <div class="family-name-d">Emma (8)</div>
+                      <div class="family-status-d">Soccer Thu 4PM · Art project due Fri</div>
+                    </div>
+                  </div>
+                  <div class="family-member-d">
+                    <div class="family-avatar-d" style="background: var(--accent-purple);">L</div>
+                    <div class="family-info-d">
+                      <div class="family-name-d">Lucas (5)</div>
+                      <div class="family-status-d">No activities this week</div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="d-card">
+                  <div class="d-card-header">
+                    <div class="d-card-title">Week View</div>
+                    <div class="d-card-action">Full calendar</div>
+                  </div>
+                  <div class="d-card-row"><div class="dot" style="background: var(--primary);"></div><div class="label">Mon — Early release 2:30</div></div>
+                  <div class="d-card-row"><div class="dot" style="background: var(--accent-blue);"></div><div class="label">Tue — Mike: gym evening</div></div>
+                  <div class="d-card-row"><div class="dot" style="background: var(--accent-blue);"></div><div class="label">Wed — Mike late (you do pickup)</div></div>
+                  <div class="d-card-row"><div class="dot" style="background: var(--accent-green);"></div><div class="label">Thu — Emma soccer 4 PM</div></div>
+                  <div class="d-card-row"><div class="dot" style="background: var(--accent-purple);"></div><div class="label">Fri — Art project due</div></div>
+                </div>
+              </div>
+
+              <!-- Meal Planning -->
+              <div>
+                <div class="d-card mb-16">
+                  <div class="d-card-header">
+                    <div class="d-card-title">Meal Plan</div>
+                    <div class="d-card-action">Swap a meal</div>
+                  </div>
+                  <div class="meal-card-d" style="background: var(--accent-green-light); margin-bottom: 10px;">
+                    <div class="meal-time-d" style="color: var(--accent-green);">Monday — Tonight</div>
+                    <div class="meal-name-d">One-Pot Pasta Primavera</div>
+                    <div class="meal-detail-d">20 min · Kid-friendly · Uses pasta sauce from your list</div>
+                  </div>
+                  <div class="meal-card-d" style="background: var(--accent-blue-light); margin-bottom: 10px;">
+                    <div class="meal-time-d" style="color: var(--accent-blue);">Wednesday — Solo Evening</div>
+                    <div class="meal-name-d">Sheet Pan Chicken Nuggets + Veggies</div>
+                    <div class="meal-detail-d">25 min · Zero effort · Both kids love it</div>
+                  </div>
+                  <div class="meal-card-d" style="background: var(--accent-purple-light);">
+                    <div class="meal-time-d" style="color: var(--accent-purple);">Thursday — Post-Soccer</div>
+                    <div class="meal-name-d">Instant Pot Taco Bowls</div>
+                    <div class="meal-detail-d">15 min active · Dump and go · Set before soccer</div>
+                  </div>
+                </div>
+
+                <div class="nudge-card" style="background: var(--accent-blue-light);">
+                  <div class="nudge-title" style="color: var(--accent-blue);">💡 Ellie noticed</div>
+                  <div class="nudge-text" style="font-size: 12px;">Mike has a late meeting Wednesday AND Emma has soccer Thursday. That's two evenings where you're solo with both kids. The meals above are chosen for those nights — low effort, kid-approved.</div>
+                </div>
+
+                <div style="display: flex; gap: 8px; margin-top: 12px;">
+                  <button style="flex: 1; padding: 12px; border-radius: var(--radius-sm); background: var(--primary); color: #fff; border: none; font-size: 13px; font-weight: 600; cursor: pointer;">Add ingredients to list</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="annotation">
+    <div class="ann-label">Design Note — Desktop</div>
+    <div class="ann-text">Family hub uses a clean 2-column split: people + schedule on the left, meals + insights on the right. The meal plan cards are stacked vertically with visual color coding matching the schedule. Ellie's "noticed" insight connects both columns — she cross-references the schedule to inform meal suggestions. On desktop, users can see the full week's meals alongside the full week's calendar simultaneously.</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION: Money                              -->
+<!-- ═══════════════════════════════════════════ -->
+<div id="money" class="section">
+  <div class="section-header">
+    <h1>Add-on: Money & Budget — Desktop</h1>
+    <p>Spending awareness with more room for charts, breakdowns, and saving goals.</p>
+  </div>
+  <div class="desktop-grid">
+
+    <div class="desktop-container">
+      <div class="desktop-label">Money Dashboard</div>
+      <div class="desktop-frame">
+        <div class="desktop-titlebar">
+          <div class="titlebar-dots">
+            <div class="titlebar-dot" style="background: #FF5F57;"></div>
+            <div class="titlebar-dot" style="background: #FFBD2E;"></div>
+            <div class="titlebar-dot" style="background: #28C840;"></div>
+          </div>
+          <div class="titlebar-url">app.ellielife.com/money</div>
+        </div>
+        <div class="desktop-body">
+          <div class="app-sidebar">
+            <div class="sidebar-brand">
+              <div class="brand-icon">🌸</div>
+              <div><div class="brand-name">Ellie</div><div class="brand-sub">Your AI companion</div></div>
+            </div>
+            <div class="sidebar-nav">
+              <div class="sidebar-item"><div class="si-icon">🏠</div>Home</div>
+              <div class="sidebar-item"><div class="si-icon">💬</div>Chat with Ellie</div>
+              <div class="sidebar-item"><div class="si-icon">📋</div>Tasks & Lists</div>
+              <div class="sidebar-item"><div class="si-icon">📬</div>Inbox</div>
+              <div class="sidebar-item"><div class="si-icon">🧠</div>Memory</div>
+              <div class="sidebar-section-label">Add-ons</div>
+              <div class="sidebar-item"><div class="si-icon">💚</div>Wellness</div>
+              <div class="sidebar-item"><div class="si-icon">👨‍👩‍👧‍👦</div>Family</div>
+              <div class="sidebar-item active"><div class="si-icon">💰</div>Money</div>
+            </div>
+            <div class="sidebar-user">
+              <div class="sidebar-user-avatar">S</div>
+              <div><div class="sidebar-user-name">Sarah</div><div class="sidebar-user-status">Under budget!</div></div>
+            </div>
+          </div>
+
+          <div class="app-main">
+            <div class="main-header">
+              <div>
+                <div class="main-title">Money</div>
+                <div class="main-subtitle">March 2026</div>
+              </div>
+            </div>
+
+            <div class="grid-3 mb-20">
+              <!-- Overview -->
+              <div class="d-card">
+                <div class="money-total-d">
+                  <div class="sublabel">Spent so far</div>
+                  <div class="amount">$3,247</div>
+                  <div class="sublabel">of $4,200 budget</div>
+                </div>
+                <div class="money-bar-d">
+                  <div class="money-bar-fill-d" style="width: 77%; background: linear-gradient(90deg, var(--accent-green), var(--accent-gold));"></div>
+                </div>
+                <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted);">
+                  <span>$953 remaining</span>
+                  <span>2 days left</span>
+                </div>
+              </div>
+
+              <!-- Where it went -->
+              <div class="d-card">
+                <div class="d-card-header">
+                  <div class="d-card-title">Where it went</div>
+                  <div class="d-card-action">Details</div>
+                </div>
+                <div class="money-category-d">
+                  <div class="money-cat-dot-d" style="background: var(--primary);"></div>
+                  <div class="money-cat-name-d">Housing</div>
+                  <div class="money-cat-bar"><div class="money-cat-bar-fill" style="width: 100%; background: var(--primary);"></div></div>
+                  <div class="money-cat-amt-d">$1,450</div>
+                  <div class="money-cat-pct-d">45%</div>
+                </div>
+                <div class="money-category-d">
+                  <div class="money-cat-dot-d" style="background: var(--accent-green);"></div>
+                  <div class="money-cat-name-d">Groceries</div>
+                  <div class="money-cat-bar"><div class="money-cat-bar-fill" style="width: 43%; background: var(--accent-green);"></div></div>
+                  <div class="money-cat-amt-d">$620</div>
+                  <div class="money-cat-pct-d">19%</div>
+                </div>
+                <div class="money-category-d">
+                  <div class="money-cat-dot-d" style="background: var(--accent-blue);"></div>
+                  <div class="money-cat-name-d">Kids</div>
+                  <div class="money-cat-bar"><div class="money-cat-bar-fill" style="width: 27%; background: var(--accent-blue);"></div></div>
+                  <div class="money-cat-amt-d">$385</div>
+                  <div class="money-cat-pct-d">12%</div>
+                </div>
+                <div class="money-category-d">
+                  <div class="money-cat-dot-d" style="background: var(--accent-purple);"></div>
+                  <div class="money-cat-name-d">Dining out</div>
+                  <div class="money-cat-bar"><div class="money-cat-bar-fill" style="width: 19%; background: var(--accent-purple);"></div></div>
+                  <div class="money-cat-amt-d">$280</div>
+                  <div class="money-cat-pct-d">9%</div>
+                </div>
+                <div class="money-category-d">
+                  <div class="money-cat-dot-d" style="background: var(--accent-gold);"></div>
+                  <div class="money-cat-name-d">Everything else</div>
+                  <div class="money-cat-bar"><div class="money-cat-bar-fill" style="width: 35%; background: var(--accent-gold);"></div></div>
+                  <div class="money-cat-amt-d">$512</div>
+                  <div class="money-cat-pct-d">15%</div>
+                </div>
+              </div>
+
+              <!-- Bills & Goals -->
+              <div>
+                <div class="d-card mb-16">
+                  <div class="d-card-header">
+                    <div class="d-card-title">Upcoming Bills</div>
+                  </div>
+                  <div class="d-card-row"><div class="dot" style="background: var(--accent-green);"></div><div class="label">Netflix</div><div class="meta">Apr 3 · $15.49</div></div>
+                  <div class="d-card-row"><div class="dot" style="background: var(--accent-green);"></div><div class="label">Electric bill</div><div class="meta">Apr 5 · ~$145</div></div>
+                  <div class="d-card-row"><div class="dot" style="background: var(--accent-gold);"></div><div class="label">Car insurance</div><div class="meta">Apr 15 · $189</div></div>
+                  <div class="d-card-row"><div class="dot" style="background: var(--accent-green);"></div><div class="label">Internet</div><div class="meta">Apr 20 · $65</div></div>
+                </div>
+
+                <div class="d-card">
+                  <div class="d-card-header">
+                    <div class="d-card-title">Saving Goals</div>
+                    <div class="d-card-action">Add goal</div>
+                  </div>
+                  <div style="margin-bottom: 14px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                      <span style="font-size: 13px; font-weight: 600;">Summer vacation</span>
+                      <span style="font-size: 12px; color: var(--accent-green); font-weight: 600;">$1,200 / $2,000</span>
+                    </div>
+                    <div class="money-bar-d"><div class="money-bar-fill-d" style="width: 60%; background: var(--accent-green);"></div></div>
+                    <div style="font-size: 11px; color: var(--text-muted);">$200/mo · On track for June</div>
+                  </div>
+                  <div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                      <span style="font-size: 13px; font-weight: 600;">Emergency fund</span>
+                      <span style="font-size: 12px; color: var(--accent-blue); font-weight: 600;">$3,400 / $5,000</span>
+                    </div>
+                    <div class="money-bar-d"><div class="money-bar-fill-d" style="width: 68%; background: var(--accent-blue);"></div></div>
+                    <div style="font-size: 11px; color: var(--text-muted);">$150/mo · On track for September</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="insight-card-d" style="background: var(--accent-gold-light);">
+              <div class="insight-icon">💡</div>
+              <div class="insight-text"><b>Ellie tip:</b> You saved $73 on groceries this month with meal planning. At this rate, that's $876/year — almost half your summer vacation fund!</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="annotation">
+    <div class="ann-label">Design Note — Desktop</div>
+    <div class="ann-text">Money dashboard uses a 3-column layout: spending overview (with the big number and progress bar), category breakdown (with inline mini-bars for each category — a desktop upgrade from the mobile list), and bills/savings goals on the right. All financial information visible at once without scrolling. The category bars are a desktop-only visual enhancement that makes spending proportions immediately scannable.</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION: Onboarding                         -->
+<!-- ═══════════════════════════════════════════ -->
+<div id="onboarding" class="section">
+  <div class="section-header">
+    <h1>Onboarding — Desktop</h1>
+    <p>Warm, conversational setup adapted for a bigger screen. Still feels personal, not like filling out a form.</p>
+  </div>
+  <div class="desktop-grid">
+
+    <div class="desktop-container">
+      <div class="desktop-label">Welcome</div>
+      <div class="onboard-desktop-frame">
+        <div class="desktop-titlebar">
+          <div class="titlebar-dots">
+            <div class="titlebar-dot" style="background: #FF5F57;"></div>
+            <div class="titlebar-dot" style="background: #FFBD2E;"></div>
+            <div class="titlebar-dot" style="background: #28C840;"></div>
+          </div>
+          <div class="titlebar-url">app.ellielife.com/welcome</div>
+        </div>
+        <div class="onboard-desktop-body">
+          <div class="onboard-illustration-d" style="background: var(--primary-light);">🌸</div>
+          <h2>Hi, I'm Ellie</h2>
+          <p>I'm your personal AI — like a thoughtful friend who remembers everything and helps you stay organized. No tech skills needed.</p>
+          <button class="onboard-btn-d primary">Let's get to know each other</button>
+          <button class="onboard-btn-d secondary">How does this work?</button>
+          <div class="onboard-progress-d">
+            <span class="active"></span><span></span><span></span><span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="desktop-container">
+      <div class="desktop-label">Getting to Know You</div>
+      <div class="onboard-desktop-frame" style="max-width: 900px;">
+        <div class="desktop-titlebar">
+          <div class="titlebar-dots">
+            <div class="titlebar-dot" style="background: #FF5F57;"></div>
+            <div class="titlebar-dot" style="background: #FFBD2E;"></div>
+            <div class="titlebar-dot" style="background: #28C840;"></div>
+          </div>
+          <div class="titlebar-url">app.ellielife.com/welcome</div>
+        </div>
+        <div class="onboard-chat-layout">
+          <div class="onboard-chat-side">
+            <div style="font-size: 22px; font-weight: 700; margin-bottom: 8px;">Getting to know you</div>
+            <div style="font-size: 14px; color: var(--text-muted); line-height: 1.6; margin-bottom: 24px;">Ellie learns through conversation, not forms. Just chat naturally — she'll pick up on your rhythm, preferences, and what matters to you.</div>
+            <div style="display: flex; gap: 6px;">
+              <div class="onboard-progress-d">
+                <span class="active"></span><span class="active"></span><span></span><span></span>
+              </div>
+            </div>
+          </div>
+          <div class="onboard-chat-messages">
+            <div class="chat-bubble-d ellie">What should I call you? 😊</div>
+            <div class="chat-bubble-d user">Sarah</div>
+            <div class="chat-bubble-d ellie">Nice to meet you, Sarah! What does a typical day look like for you?</div>
+            <div class="chat-bubble-d user">I work from home, pick up kids at 3, usually exhausted by evening</div>
+            <div class="chat-bubble-d ellie">Got it — mornings are your power hours, afternoons are family mode, and evenings you need to recharge. I'll keep that in mind 💛</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="desktop-container">
+      <div class="desktop-label">Permissions</div>
+      <div class="onboard-desktop-frame">
+        <div class="desktop-titlebar">
+          <div class="titlebar-dots">
+            <div class="titlebar-dot" style="background: #FF5F57;"></div>
+            <div class="titlebar-dot" style="background: #FFBD2E;"></div>
+            <div class="titlebar-dot" style="background: #28C840;"></div>
+          </div>
+          <div class="titlebar-url">app.ellielife.com/welcome</div>
+        </div>
+        <div class="onboard-desktop-body" style="padding: 40px 80px;">
+          <div class="onboard-illustration-d" style="background: var(--accent-purple-light);">🔒</div>
+          <h2>Your Privacy Matters</h2>
+          <p>Ellie remembers what you share so conversations feel natural — but you're always in control.</p>
+          <div style="width: 100%; max-width: 400px; text-align: left;">
+            <div class="perm-row">
+              <div><div class="perm-label">Remember our chats</div><div class="perm-sub">So I know you over time</div></div>
+              <div class="toggle on"><div class="knob"></div></div>
+            </div>
+            <div class="perm-row">
+              <div><div class="perm-label">Read notifications</div><div class="perm-sub">To filter what's important</div></div>
+              <div class="toggle off"><div class="knob"></div></div>
+            </div>
+            <div class="perm-row">
+              <div><div class="perm-label">Calendar access</div><div class="perm-sub">To help you stay on track</div></div>
+              <div class="toggle on"><div class="knob"></div></div>
+            </div>
+          </div>
+          <button class="onboard-btn-d primary" style="margin-top: 24px;">Looks good</button>
+          <div class="onboard-progress-d">
+            <span class="active"></span><span class="active"></span><span class="active"></span><span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION: Architecture                       -->
+<!-- ═══════════════════════════════════════════ -->
+<div id="integration" class="section">
+  <div class="section-header">
+    <h1>How It All Connects</h1>
+    <p>Every module feeds into Ellie's understanding. The more she knows, the more helpful she becomes.</p>
+  </div>
+  <div class="diagram-section">
+
+    <div class="arch-box">
+      <h3>🧠 Ellie's Brain — Shared Memory & Understanding</h3>
+      <div class="arch-row">
+        <div class="arch-chip chip-infra">Personality Engine</div>
+        <div class="arch-chip chip-infra">Conversation Memory</div>
+        <div class="arch-chip chip-infra">Pattern Recognition</div>
+        <div class="arch-chip chip-infra">Proactive Nudges</div>
+      </div>
+    </div>
+
+    <div class="arch-connector">↕</div>
+
+    <div class="arch-box" style="border-color: rgba(232,115,90,0.3);">
+      <h3>🌸 Base: Ellie Life — Free / $4.99/mo</h3>
+      <div class="arch-row">
+        <div class="arch-chip chip-core">Natural Chat</div>
+        <div class="arch-chip chip-core">Task Capture</div>
+        <div class="arch-chip chip-core">Life Organization</div>
+        <div class="arch-chip chip-core">Communication Filter</div>
+        <div class="arch-chip chip-core">Voice Notes</div>
+        <div class="arch-chip chip-core">Memory Browser</div>
+        <div class="arch-chip chip-core">Daily Check-ins</div>
+      </div>
+    </div>
+
+    <div class="arch-connector">+</div>
+
+    <div style="display: flex; gap: 16px; flex-wrap: wrap;">
+      <div class="arch-box" style="flex: 1; min-width: 260px; border-color: rgba(123,198,126,0.3);">
+        <h3>💚 Health & Wellness — $2.99/mo</h3>
+        <div class="arch-row">
+          <div class="arch-chip chip-health">Habit Tracking</div>
+          <div class="arch-chip chip-health">Sleep Patterns</div>
+          <div class="arch-chip chip-health">Mood Correlation</div>
+          <div class="arch-chip chip-health">Weekly Insights</div>
+          <div class="arch-chip chip-health">Gentle Nudges</div>
+        </div>
+      </div>
+      <div class="arch-box" style="flex: 1; min-width: 260px; border-color: rgba(107,163,214,0.3);">
+        <h3>👨‍👩‍👧‍👦 Family & Home — $2.99/mo</h3>
+        <div class="arch-row">
+          <div class="arch-chip chip-family">Family Profiles</div>
+          <div class="arch-chip chip-family">Schedule Coordination</div>
+          <div class="arch-chip chip-family">Meal Planning</div>
+          <div class="arch-chip chip-family">Conflict Detection</div>
+          <div class="arch-chip chip-family">Shared Lists</div>
+        </div>
+      </div>
+      <div class="arch-box" style="flex: 1; min-width: 260px; border-color: rgba(232,184,77,0.3);">
+        <h3>💰 Money & Budget — $2.99/mo</h3>
+        <div class="arch-row">
+          <div class="arch-chip chip-money">Spending Awareness</div>
+          <div class="arch-chip chip-money">Bill Reminders</div>
+          <div class="arch-chip chip-money">Saving Goals</div>
+          <div class="arch-chip chip-money">Monthly Check-ins</div>
+          <div class="arch-chip chip-money">Cross-module Savings</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top: 40px;">
+      <h3 style="color: #fff; font-size: 20px; margin-bottom: 24px; text-align: center;">Cross-Module Magic</h3>
+
+      <div class="flow-step">
+        <div class="flow-num">1</div>
+        <div class="flow-content">
+          <h4>Family + Money</h4>
+          <p>"Emma needs soccer cleats" triggers a Family task AND a budget category entry. Ellie suggests buying them on your Wednesday Target run to combine trips.</p>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-num">2</div>
+        <div class="flow-content">
+          <h4>Health + Family</h4>
+          <p>Ellie notices solo-parenting evenings correlate with worse sleep. She proactively suggests lighter schedules on those days and offers easy dinner ideas.</p>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-num">3</div>
+        <div class="flow-content">
+          <h4>Family + Money + Health</h4>
+          <p>Meal planning reduces grocery spending AND ensures the family eats better. Ellie connects the dots: "Your meal planning saved $73 this month and the kids ate vegetables 4 more times than last month."</p>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-num">4</div>
+        <div class="flow-content">
+          <h4>Core + Everything</h4>
+          <p>Morning mood check-in informs the day. Feeling "rough"? Health module adjusts expectations, Family module suggests Dad handles pickup, Money module skips the spending notification.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════ -->
+<!-- SECTION: Pricing                            -->
+<!-- ═══════════════════════════════════════════ -->
+<div id="pricing" class="section">
+  <div class="section-header">
+    <h1>Pricing</h1>
+    <p>Start free. Add what you need. Cancel anytime.</p>
+  </div>
+  <div class="pricing-grid">
+
+    <div class="pricing-card featured">
+      <div class="pc-icon">🌸</div>
+      <h3>Ellie Life</h3>
+      <div class="pc-desc">Your AI companion</div>
+      <div class="pc-price">Free</div>
+      <div class="pc-period">forever (limited) or $4.99/mo</div>
+      <ul class="pc-feat">
+        <li>Natural conversation with memory</li>
+        <li>Task capture from chat</li>
+        <li>Daily check-ins & nudges</li>
+        <li>Basic communication filter</li>
+        <li>Voice note transcription</li>
+        <li>Memory browser & control</li>
+      </ul>
+    </div>
+
+    <div class="pricing-card">
+      <div class="pc-icon">💚</div>
+      <h3>Health</h3>
+      <div class="pc-desc">Wellness tracking</div>
+      <div class="pc-price">+$2.99</div>
+      <div class="pc-period">per month</div>
+      <ul class="pc-feat">
+        <li>Conversation-based habit tracking</li>
+        <li>Sleep & mood patterns</li>
+        <li>Weekly wellness insights</li>
+        <li>Gentle movement reminders</li>
+      </ul>
+    </div>
+
+    <div class="pricing-card">
+      <div class="pc-icon">👨‍👩‍👧‍👦</div>
+      <h3>Family</h3>
+      <div class="pc-desc">Household coordination</div>
+      <div class="pc-price">+$2.99</div>
+      <div class="pc-period">per month</div>
+      <ul class="pc-feat">
+        <li>Family member profiles</li>
+        <li>Schedule coordination</li>
+        <li>Smart meal planning</li>
+        <li>Conflict detection</li>
+      </ul>
+    </div>
+
+    <div class="pricing-card">
+      <div class="pc-icon">💰</div>
+      <h3>Money</h3>
+      <div class="pc-desc">Budget awareness</div>
+      <div class="pc-price">+$2.99</div>
+      <div class="pc-period">per month</div>
+      <ul class="pc-feat">
+        <li>Spending awareness</li>
+        <li>Bill reminders</li>
+        <li>Saving goals</li>
+        <li>Monthly check-ins</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<script>
+function showSection(id) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.showcase-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  event.target.closest('.showcase-tab').classList.add('active');
+  window.scrollTo(0, 0);
+}
+</script>
+
+</body>
+</html>

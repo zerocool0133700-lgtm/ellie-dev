@@ -474,13 +474,33 @@ export async function reconcilePlaneState(): Promise<{ pending: number; orphaned
       }
 
       if (hasFailed) {
-        // Reset failed items to pending so the queue worker retries them
-        await sql`
+        // Only reset failed items that haven't exceeded max_attempts.
+        // Items past max_attempts are permanently dead-lettered — resetting
+        // them causes infinite retry loops (see TEST-QUEUE-6 incident).
+        const resetResult = await sql`
           UPDATE plane_sync_queue
           SET status = 'pending', next_retry_at = NOW()
           WHERE work_item_id = ${workItemId} AND status = 'failed'
+            AND attempts < max_attempts
         `;
-        logger.info("Reset failed queue items for retry", { workItemId });
+        if (resetResult.count > 0) {
+          logger.info("Reset failed queue items for retry", { workItemId, count: resetResult.count });
+        }
+
+        // Log permanently failed items for visibility
+        const deadLettered = await sql`
+          SELECT id, action, attempts, max_attempts, last_error
+          FROM plane_sync_queue
+          WHERE work_item_id = ${workItemId} AND status = 'failed'
+            AND attempts >= max_attempts
+        `;
+        if (deadLettered.length > 0) {
+          logger.warn("Dead-lettered queue items skipped during reconciliation", {
+            workItemId,
+            count: deadLettered.length,
+            items: deadLettered.map(d => ({ id: d.id.slice(0, 8), action: d.action, attempts: d.attempts })),
+          });
+        }
       }
     }
 
@@ -504,8 +524,26 @@ export interface WorkItemDetails {
   description: string;
   priority: string;
   state: string;
+  /** State group from Plane (e.g. "started", "completed", "cancelled") */
+  stateGroup: string | null;
   sequenceId: number;
   projectIdentifier: string;
+  /** Story point estimate (null if unset) */
+  estimatePoint: number | null;
+  /** Assigned user IDs */
+  assignees: string[];
+  /** Label IDs */
+  labels: string[];
+  /** Target/due date (ISO 8601 or null) */
+  targetDate: string | null;
+  /** Start date (ISO 8601 or null) */
+  startDate: string | null;
+  /** Creation timestamp (ISO 8601) */
+  createdAt: string;
+  /** Last update timestamp (ISO 8601) */
+  updatedAt: string;
+  /** Parent work item ID (for sub-tasks) */
+  parent: string | null;
 }
 
 /** Strip HTML tags to plain text */
@@ -534,13 +572,22 @@ export async function fetchWorkItemDetails(workItemId: string): Promise<WorkItem
     if (!issue) return null;
 
     return {
-      id: issue.id,
-      name: issue.name,
-      description: stripHtml(issue.description_html || ""),
-      priority: issue.priority || "none",
-      state: issue.state,
-      sequenceId: issue.sequence_id,
+      id: issue.id as string,
+      name: issue.name as string,
+      description: stripHtml((issue.description_html as string) || ""),
+      priority: (issue.priority as string) || "none",
+      state: issue.state as string,
+      stateGroup: (issue.state_detail as Record<string, string>)?.group ?? null,
+      sequenceId: issue.sequence_id as number,
       projectIdentifier: parsed.projectIdentifier,
+      estimatePoint: issue.estimate_point != null ? Number(issue.estimate_point) : null,
+      assignees: Array.isArray(issue.assignees) ? (issue.assignees as string[]) : [],
+      labels: Array.isArray(issue.labels) ? (issue.labels as string[]) : [],
+      targetDate: (issue.target_date as string) ?? null,
+      startDate: (issue.start_date as string) ?? null,
+      createdAt: issue.created_at as string,
+      updatedAt: issue.updated_at as string,
+      parent: (issue.parent as string) ?? null,
     };
   } catch (error) {
     logger.warn("Failed to fetch work item", { workItemId }, error);

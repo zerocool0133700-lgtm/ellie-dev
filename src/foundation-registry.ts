@@ -192,7 +192,7 @@ export class FoundationRegistry {
    * - Behavior rules (tone, proactivity, escalation)
    * - Core dispatch instruction
    */
-  async getCoordinatorPrompt(): Promise<string> {
+  async getCoordinatorPrompt(threadId?: string): Promise<string> {
     const foundation = this.getActive();
     const behavior = this.getBehavior();
     const recipes = this.getRecipes();
@@ -226,6 +226,18 @@ export class FoundationRegistry {
       : "None defined.";
 
     const coordinatorAgent = this.getCoordinatorAgent();
+
+    // ELLIE-1316: Conditionally inject active dispatch context
+    let activeDispatchSection = "";
+    try {
+      const { buildActiveDispatchContext } = await import("./active-dispatch-context.ts");
+      const dispatchCtx = await buildActiveDispatchContext(threadId);
+      if (dispatchCtx) {
+        activeDispatchSection = `\n\n${dispatchCtx}`;
+      }
+    } catch {
+      // Active dispatch context unavailable — proceed without
+    }
 
     return `You are ${coordinatorAgent === "max" ? "Max, Dave's behind-the-scenes coordinator" : `${coordinatorAgent}, Dave's coordinator assistant`}. You manage a team of specialist agents.${coordinatorAgent === "max" ? " Dave talks to Ellie — not you. Ellie is the face, the voice, the relationship. You are her operations layer." : " Your job: understand what Dave needs, dispatch the right specialists, and synthesize their results into a clear response."}
 
@@ -265,6 +277,7 @@ You have 6 tools. Use them:
 - **Multi-part request** → Decompose into separate dispatches (parallel when independent), collect all results, then dispatch to ellie with the combined results. Use her response in complete.
 - **Need clarification** → Call ask_user before dispatching.
 - **Specialist fails or errors** → Think about it. Try a different agent, ask the user, or dispatch to ellie to explain what happened.
+- **Dispatch just completed** → Before calling complete, consider suggesting a natural next step. Examples: "James finished the API — want me to dispatch Brian for a code review?", "Tests passed — ready to PR?", "Kate's research is done — should Alan review the strategic implications?" Include the suggestion in your response with the action Dave can take.
 
 ## Your Specialists
 ${agentList}
@@ -275,7 +288,7 @@ ${recipeList}
 ## Communication Style
 - Tone: ${behavior.tone}
 - Proactivity: ${behavior.proactivity}
-- Escalation: ${behavior.escalation}`;
+- Escalation: ${behavior.escalation}${activeDispatchSection}`;
   }
 
   // ── Private ──────────────────────────────────────────────────

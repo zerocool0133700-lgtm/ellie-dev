@@ -420,9 +420,83 @@ async function fetchGardenerSuggestions(supabase: SupabaseClient): Promise<Brief
   return { key: "gardener", title: "Channel Garden", icon: "~", priority: 6, items };
 }
 
+async function fetchPunchList(): Promise<BriefingSection> {
+  const items: BriefingItem[] = [];
+  try {
+    const { extractSectionContent } = await import("./punch-list.ts");
+    const { readFile } = await import("fs/promises");
+    const { join } = await import("path");
+    const { RIVER_ROOT, parseFrontmatter } = await import("./bridge-river.ts");
+
+    const raw = await readFile(join(RIVER_ROOT, "reference/daily-punch-list.md"), "utf-8");
+    const { frontmatter, body } = parseFrontmatter(raw);
+
+    // Surface today's focus items
+    const goals = extractSectionContent(body, "Today's Focus");
+    if (goals && goals.trim() && !goals.includes("No goals set yet")) {
+      for (const line of goals.split("\n")) {
+        const trimmed = line.trim();
+        // Handle both `- text` and `- [ ] text` / `- [x] text` formats
+        const listMatch = trimmed.match(/^[-*]\s+(?:\[[ x]\]\s+)?(.+)/);
+        if (listMatch) {
+          const done = trimmed.includes("[x]");
+          if (!done) items.push({ text: `Focus: ${listMatch[1]}`, urgency: "normal" });
+        }
+      }
+    }
+
+    // Surface carrying forward items
+    const carry = extractSectionContent(body, "Moving This Forward");
+    if (carry && carry.trim()) {
+      for (const line of carry.split("\n")) {
+        const trimmed = line.trim();
+        const listMatch = trimmed.match(/^[-*]\s+(?:\[[ x]\]\s+)?(.+)/);
+        if (listMatch && !trimmed.includes("[x]")) {
+          items.push({ text: `Carry: ${listMatch[1]}`, urgency: "high" });
+        }
+      }
+    }
+
+    // Count todos across all sub-sections
+    let todoCount = 0;
+    for (const sub of ["Dave's Todos", "Ellie's Todos", "Joint"]) {
+      const content = extractSectionContent(body, sub);
+      if (content) {
+        for (const line of content.split("\n")) {
+          const trimmed = line.trim();
+          if (trimmed.match(/^[-*]\s+/) && !trimmed.includes("[x]")) todoCount++;
+        }
+      }
+    }
+    if (todoCount > 0) {
+      items.push({ text: `${todoCount} active todo${todoCount !== 1 ? "s" : ""} on the punch list`, urgency: "low" });
+    }
+
+    // Flag staleness
+    const updatedAt = frontmatter.updated_at as string | undefined;
+    if (updatedAt) {
+      const today = new Date().toISOString().slice(0, 10);
+      if (updatedAt < today) {
+        items.unshift({ text: `Punch list last updated ${updatedAt} — needs morning review`, urgency: "high" });
+      }
+    }
+  } catch (err) {
+    logger.warn("Punch list fetch failed", err);
+  }
+
+  return {
+    key: "punch-list",
+    title: "Punch List",
+    icon: "\u{1F4CC}",
+    priority: 0, // Top of briefing — this is the shared working doc
+    items,
+  };
+}
+
 async function buildBriefing(supabase: SupabaseClient, date: string): Promise<Briefing> {
   // Fetch all sources in parallel with graceful degradation
-  const [calendar, gtd, work, comms, messages, forest, gardener] = await Promise.allSettled([
+  const [punchList, calendar, gtd, work, comms, messages, forest, gardener] = await Promise.allSettled([
+    fetchPunchList(),
     fetchCalendarEvents(date),
     fetchGtdState(supabase),
     fetchWorkSessions(supabase),
@@ -436,7 +510,7 @@ async function buildBriefing(supabase: SupabaseClient, date: string): Promise<Br
   const extract = (result: PromiseSettledResult<BriefingSection>): BriefingSection | null =>
     result.status === "fulfilled" ? result.value : null;
 
-  for (const result of [calendar, gtd, work, comms, messages, forest, gardener]) {
+  for (const result of [punchList, calendar, gtd, work, comms, messages, forest, gardener]) {
     const section = extract(result);
     if (section && section.items.length > 0) sections.push(section);
   }

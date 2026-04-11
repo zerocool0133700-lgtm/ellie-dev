@@ -25,7 +25,7 @@ describe("General agent Plane MCP access (ELLIE-1092)", () => {
     const generalTools = ["forest_bridge", "plane_lookup", "google_workspace", "web_search", "memory_extraction", "agent_router"];
     const result = getAllowedToolsForCLI(generalTools, "general");
 
-    // ELLIE-1110: Only safe built-ins + gated ones matching config
+    // Only safe built-ins + gated ones matching config
     expect(result).toContain("Read");
     expect(result).toContain("Glob");
     expect(result).toContain("Grep");
@@ -51,7 +51,7 @@ describe("General agent Plane MCP access (ELLIE-1092)", () => {
     const devTools = ["read", "write", "edit", "glob", "grep", "bash_builds", "bash_tests", "systemctl", "plane_mcp", "forest_bridge_read", "forest_bridge_write", "git", "supabase_mcp", "psql_forest"];
     const result = getAllowedToolsForCLI(devTools, "dev");
 
-    // ELLIE-1110: Plane MCP comes from plane_mcp category, not ALWAYS_ALLOWED
+    // Plane MCP comes from both ALWAYS_ALLOWED and plane_mcp category
     expect(result).toContain("mcp__plane__*");
 
     // Should include explicitly enabled tools
@@ -67,8 +67,8 @@ describe("General agent Plane MCP access (ELLIE-1092)", () => {
   test("getAllowedToolsForCLI returns safe defaults with empty tools_enabled", () => {
     const result = getAllowedToolsForCLI([], "test-agent");
 
-    // ELLIE-1110: plane is no longer always-allowed
-    expect(result).not.toContain("mcp__plane__*");
+    // Plane is universal — all agents get it (reverted ELLIE-1110)
+    expect(result).toContain("mcp__plane__*");
     // Core coordination MCPs still present
     expect(result).toContain("mcp__forest-bridge__*");
     expect(result).toContain("mcp__qmd__*");
@@ -85,8 +85,8 @@ describe("General agent Plane MCP access (ELLIE-1092)", () => {
   test("getAllowedToolsForCLI returns safe defaults with null tools_enabled", () => {
     const result = getAllowedToolsForCLI(null, "test-agent");
 
-    // ELLIE-1110: plane is no longer always-allowed
-    expect(result).not.toContain("mcp__plane__*");
+    // Plane is universal — all agents get it (reverted ELLIE-1110)
+    expect(result).toContain("mcp__plane__*");
     // Core coordination MCPs still present
     expect(result).toContain("mcp__forest-bridge__*");
     expect(result).toContain("mcp__qmd__*");
@@ -116,7 +116,7 @@ describe("General agent Plane MCP access (ELLIE-1092)", () => {
     expect(secondPass).toContain("mcp__supabase__*");
     expect(secondPass).toContain("mcp__git__*");
     expect(secondPass).toContain("Read");
-    // ELLIE-1110: These are preserved from first pass (already CLI-formatted)
+    // These are preserved from first pass (already CLI-formatted)
     expect(secondPass).toContain("Bash");
     expect(secondPass).toContain("Edit");
     expect(secondPass).toContain("Write");

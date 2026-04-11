@@ -1,0 +1,2270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ellie Life — Product Mockups</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --warm-bg: #FFF8F0;
+    --card-bg: #FFFFFF;
+    --primary: #E8735A;
+    --primary-light: #FFEEE9;
+    --primary-dark: #C45A44;
+    --text: #2D2926;
+    --text-muted: #8A8380;
+    --text-light: #B5AFAB;
+    --accent-green: #7BC67E;
+    --accent-green-light: #EDF7EE;
+    --accent-blue: #6BA3D6;
+    --accent-blue-light: #EBF3FB;
+    --accent-purple: #9B8FD0;
+    --accent-purple-light: #F0EDF8;
+    --accent-gold: #E8B84D;
+    --accent-gold-light: #FDF5E3;
+    --border: #F0EBE6;
+    --shadow: 0 2px 12px rgba(45,41,38,0.06);
+    --shadow-hover: 0 4px 20px rgba(45,41,38,0.1);
+    --radius: 16px;
+    --radius-sm: 10px;
+    --radius-xs: 6px;
+  }
+
+  body {
+    font-family: -apple-system, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
+    background: #1a1a2e;
+    color: var(--text);
+    line-height: 1.5;
+  }
+
+  /* ── Navigation ── */
+  .nav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    background: rgba(26,26,46,0.95);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    padding: 12px 32px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+  }
+  .nav-title {
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.3px;
+    white-space: nowrap;
+    margin-right: 16px;
+  }
+  .nav-tabs {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    flex: 1;
+  }
+  .nav-tab {
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    color: rgba(255,255,255,0.5);
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+    border: none;
+    background: none;
+  }
+  .nav-tab:hover { color: rgba(255,255,255,0.8); background: rgba(255,255,255,0.05); }
+  .nav-tab.active { color: #fff; background: rgba(232,115,90,0.25); }
+  .nav-badge {
+    display: inline-block;
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    margin-left: 6px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .badge-base { background: rgba(232,115,90,0.2); color: var(--primary); }
+  .badge-addon { background: rgba(155,143,208,0.2); color: var(--accent-purple); }
+
+  /* ── Sections ── */
+  .section {
+    display: none;
+    padding: 80px 32px 48px;
+    min-height: 100vh;
+  }
+  .section.active { display: block; }
+  .section-header {
+    max-width: 800px;
+    margin: 0 auto 48px;
+    text-align: center;
+  }
+  .section-header h1 {
+    font-size: 32px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: -0.5px;
+    margin-bottom: 12px;
+  }
+  .section-header p {
+    font-size: 16px;
+    color: rgba(255,255,255,0.5);
+    max-width: 560px;
+    margin: 0 auto;
+  }
+
+  /* ── Phone Frame ── */
+  .phone-grid {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 40px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  .phone-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+  .phone-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: rgba(255,255,255,0.4);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+  }
+  .phone {
+    width: 320px;
+    height: 640px;
+    background: var(--warm-bg);
+    border-radius: 36px;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3), inset 0 0 0 4px #333;
+    position: relative;
+  }
+  .phone::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 120px;
+    height: 28px;
+    background: #222;
+    border-radius: 0 0 16px 16px;
+    z-index: 10;
+  }
+  .phone-screen {
+    height: 100%;
+    overflow-y: auto;
+    padding: 40px 20px 20px;
+  }
+  .phone-screen::-webkit-scrollbar { width: 0; }
+
+  /* ── Status Bar ── */
+  .status-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 4px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  /* ── Home Screen ── */
+  .greeting { font-size: 26px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 2px; }
+  .greeting-sub { font-size: 14px; color: var(--text-muted); margin-bottom: 20px; }
+
+  .mood-prompt {
+    background: var(--primary-light);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .mood-prompt .icon { font-size: 28px; }
+  .mood-prompt .text { font-size: 13px; color: var(--primary-dark); font-weight: 500; }
+  .mood-options {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .mood-btn {
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    border: 1.5px solid var(--primary);
+    color: var(--primary-dark);
+    background: transparent;
+    cursor: pointer;
+  }
+  .mood-btn.selected { background: var(--primary); color: #fff; }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--card-bg);
+    border-radius: var(--radius);
+    padding: 16px;
+    margin-bottom: 12px;
+    box-shadow: var(--shadow);
+  }
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  .card-title { font-size: 14px; font-weight: 650; }
+  .card-action { font-size: 12px; color: var(--primary); font-weight: 600; cursor: pointer; }
+  .card-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+  }
+  .card-row + .card-row { border-top: 1px solid var(--border); }
+  .card-row .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .card-row .label { flex: 1; font-size: 13px; }
+  .card-row .meta { font-size: 12px; color: var(--text-muted); }
+  .card-row .check {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 1.5px solid var(--border);
+    flex-shrink: 0;
+  }
+  .card-row .check.done {
+    background: var(--accent-green);
+    border-color: var(--accent-green);
+    position: relative;
+  }
+  .card-row .check.done::after {
+    content: '✓';
+    color: #fff;
+    font-size: 11px;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+
+  /* ── Chat ── */
+  .chat-container { display: flex; flex-direction: column; height: calc(100% - 40px); }
+  .chat-messages { flex: 1; overflow-y: auto; padding-bottom: 12px; }
+  .chat-bubble {
+    max-width: 82%;
+    padding: 10px 14px;
+    border-radius: 18px;
+    font-size: 13px;
+    line-height: 1.45;
+    margin-bottom: 8px;
+  }
+  .chat-bubble.ellie {
+    background: var(--card-bg);
+    box-shadow: var(--shadow);
+    align-self: flex-start;
+    border-bottom-left-radius: 6px;
+  }
+  .chat-bubble.user {
+    background: var(--primary);
+    color: #fff;
+    align-self: flex-end;
+    margin-left: auto;
+    border-bottom-right-radius: 6px;
+  }
+  .chat-bubble .typing {
+    display: flex; gap: 4px; padding: 4px 0;
+  }
+  .chat-bubble .typing span {
+    width: 6px; height: 6px; background: var(--text-light); border-radius: 50%;
+    animation: bounce 1.4s infinite ease-in-out;
+  }
+  .chat-bubble .typing span:nth-child(2) { animation-delay: 0.2s; }
+  .chat-bubble .typing span:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes bounce {
+    0%, 80%, 100% { transform: scale(0); }
+    40% { transform: scale(1); }
+  }
+  .chat-input-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 0 4px;
+    border-top: 1px solid var(--border);
+  }
+  .chat-input {
+    flex: 1;
+    padding: 10px 14px;
+    border-radius: 24px;
+    border: 1.5px solid var(--border);
+    font-size: 13px;
+    background: var(--card-bg);
+    color: var(--text-muted);
+  }
+  .chat-send {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--primary);
+    border: none;
+    color: #fff;
+    font-size: 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* ── Quick Actions ── */
+  .quick-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .quick-action {
+    background: var(--card-bg);
+    border-radius: var(--radius-sm);
+    padding: 14px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    box-shadow: var(--shadow);
+    cursor: pointer;
+  }
+  .quick-action .qa-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+  }
+  .quick-action .qa-label { font-size: 12px; font-weight: 600; }
+  .quick-action .qa-sub { font-size: 10px; color: var(--text-muted); }
+
+  /* ── Memory / Journal ── */
+  .memory-card {
+    background: var(--accent-purple-light);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    margin-bottom: 10px;
+  }
+  .memory-card .mem-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--accent-purple);
+    margin-bottom: 6px;
+  }
+  .memory-card .mem-text { font-size: 13px; color: var(--text); }
+  .memory-card .mem-date { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+
+  /* ── Inbox / Comms ── */
+  .inbox-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 0;
+  }
+  .inbox-item + .inbox-item { border-top: 1px solid var(--border); }
+  .inbox-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 700;
+    color: #fff;
+    flex-shrink: 0;
+  }
+  .inbox-content { flex: 1; }
+  .inbox-from { font-size: 13px; font-weight: 600; }
+  .inbox-preview { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .inbox-summary {
+    font-size: 12px;
+    color: var(--primary-dark);
+    background: var(--primary-light);
+    border-radius: var(--radius-xs);
+    padding: 6px 10px;
+    margin-top: 6px;
+  }
+  .inbox-meta { font-size: 11px; color: var(--text-light); white-space: nowrap; }
+  .priority-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-top: 4px;
+  }
+
+  /* ── Onboarding ── */
+  .onboard-screen {
+    display: flex;
+    flex-direction: column;
+    height: calc(100% - 40px);
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: 0 16px;
+  }
+  .onboard-illustration {
+    width: 140px;
+    height: 140px;
+    border-radius: 50%;
+    margin-bottom: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 56px;
+  }
+  .onboard-screen h2 {
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 10px;
+    letter-spacing: -0.3px;
+  }
+  .onboard-screen p {
+    font-size: 14px;
+    color: var(--text-muted);
+    margin-bottom: 28px;
+    line-height: 1.5;
+  }
+  .onboard-btn {
+    width: 100%;
+    padding: 14px;
+    border-radius: 14px;
+    border: none;
+    font-size: 15px;
+    font-weight: 650;
+    cursor: pointer;
+    margin-bottom: 10px;
+  }
+  .onboard-btn.primary { background: var(--primary); color: #fff; }
+  .onboard-btn.secondary { background: var(--primary-light); color: var(--primary-dark); }
+  .onboard-progress {
+    display: flex;
+    gap: 6px;
+    margin-top: 20px;
+  }
+  .onboard-progress span {
+    width: 28px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border);
+  }
+  .onboard-progress span.active { background: var(--primary); }
+
+  /* ── Health Module ── */
+  .health-ring-container {
+    display: flex;
+    justify-content: center;
+    margin: 16px 0;
+  }
+  .health-ring {
+    width: 140px;
+    height: 140px;
+    position: relative;
+  }
+  .health-ring svg { transform: rotate(-90deg); }
+  .health-ring-center {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+  }
+  .health-ring-center .num { font-size: 28px; font-weight: 700; color: var(--accent-green); }
+  .health-ring-center .unit { font-size: 11px; color: var(--text-muted); }
+
+  .health-stat-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .health-stat {
+    flex: 1;
+    background: var(--card-bg);
+    border-radius: var(--radius-sm);
+    padding: 12px;
+    text-align: center;
+    box-shadow: var(--shadow);
+  }
+  .health-stat .hs-val { font-size: 18px; font-weight: 700; }
+  .health-stat .hs-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+
+  .habit-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 0;
+  }
+  .habit-row + .habit-row { border-top: 1px solid var(--border); }
+  .habit-icon { font-size: 20px; }
+  .habit-name { flex: 1; font-size: 13px; font-weight: 500; }
+  .habit-streak {
+    font-size: 11px;
+    color: var(--accent-gold);
+    font-weight: 600;
+    background: var(--accent-gold-light);
+    padding: 3px 8px;
+    border-radius: 10px;
+  }
+  .habit-dots {
+    display: flex;
+    gap: 3px;
+  }
+  .habit-dots span {
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+  }
+
+  /* ── Family Module ── */
+  .family-member {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+  }
+  .family-member + .family-member { border-top: 1px solid var(--border); }
+  .family-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    font-weight: 700;
+    color: #fff;
+  }
+  .family-info { flex: 1; }
+  .family-name { font-size: 13px; font-weight: 600; }
+  .family-status { font-size: 11px; color: var(--text-muted); }
+  .family-action {
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1.5px solid var(--border);
+    color: var(--text-muted);
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .meal-card {
+    background: var(--accent-green-light);
+    border-radius: var(--radius-sm);
+    padding: 12px;
+    margin-bottom: 8px;
+  }
+  .meal-card .meal-time { font-size: 10px; font-weight: 700; color: var(--accent-green); text-transform: uppercase; letter-spacing: 0.5px; }
+  .meal-card .meal-name { font-size: 14px; font-weight: 600; margin-top: 4px; }
+  .meal-card .meal-detail { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+  /* ── Money Module ── */
+  .money-total {
+    text-align: center;
+    margin: 16px 0;
+  }
+  .money-total .amount { font-size: 32px; font-weight: 700; letter-spacing: -1px; }
+  .money-total .sublabel { font-size: 12px; color: var(--text-muted); }
+  .money-bar {
+    height: 8px;
+    background: var(--border);
+    border-radius: 4px;
+    margin: 12px 0;
+    overflow: hidden;
+  }
+  .money-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+  }
+  .money-category {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+  }
+  .money-category + .money-category { border-top: 1px solid var(--border); }
+  .money-cat-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .money-cat-name { flex: 1; font-size: 13px; }
+  .money-cat-amt { font-size: 13px; font-weight: 600; }
+  .money-cat-pct { font-size: 11px; color: var(--text-muted); margin-left: 4px; }
+
+  .insight-card {
+    background: var(--accent-blue-light);
+    border-radius: var(--radius-sm);
+    padding: 12px 14px;
+    margin-bottom: 8px;
+  }
+  .insight-card .insight-icon { font-size: 16px; margin-bottom: 4px; }
+  .insight-card .insight-text { font-size: 12px; color: var(--text); line-height: 1.45; }
+
+  /* ── Tab Bar ── */
+  .tab-bar {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: space-around;
+    align-items: center;
+    padding: 8px 0 16px;
+    background: var(--card-bg);
+    border-top: 1px solid var(--border);
+  }
+  .tab-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    font-size: 10px;
+    color: var(--text-light);
+  }
+  .tab-item.active { color: var(--primary); }
+  .tab-item .tab-icon { font-size: 20px; }
+
+  /* ── Integration Diagram ── */
+  .diagram-section {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 0 20px;
+  }
+  .arch-box {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 16px;
+    padding: 28px;
+    margin-bottom: 20px;
+  }
+  .arch-box h3 {
+    color: #fff;
+    font-size: 16px;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .arch-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .arch-chip {
+    padding: 8px 16px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .chip-core { background: rgba(232,115,90,0.15); color: var(--primary); border: 1px solid rgba(232,115,90,0.25); }
+  .chip-health { background: rgba(123,198,126,0.15); color: var(--accent-green); border: 1px solid rgba(123,198,126,0.25); }
+  .chip-family { background: rgba(107,163,214,0.15); color: var(--accent-blue); border: 1px solid rgba(107,163,214,0.25); }
+  .chip-money { background: rgba(232,184,77,0.15); color: var(--accent-gold); border: 1px solid rgba(232,184,77,0.25); }
+  .chip-infra { background: rgba(155,143,208,0.15); color: var(--accent-purple); border: 1px solid rgba(155,143,208,0.25); }
+
+  .arch-connector {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 8px 0;
+    color: rgba(255,255,255,0.2);
+    font-size: 20px;
+  }
+
+  .flow-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .flow-num {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--primary);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  .flow-content h4 { color: #fff; font-size: 14px; margin-bottom: 4px; }
+  .flow-content p { color: rgba(255,255,255,0.5); font-size: 13px; }
+
+  /* ── Pricing ── */
+  .pricing-grid {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 20px;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  .pricing-card {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 20px;
+    padding: 28px 24px;
+    width: 200px;
+    text-align: center;
+  }
+  .pricing-card.featured {
+    border-color: var(--primary);
+    background: rgba(232,115,90,0.06);
+  }
+  .pricing-card .pc-icon { font-size: 32px; margin-bottom: 12px; }
+  .pricing-card h3 { color: #fff; font-size: 16px; margin-bottom: 4px; }
+  .pricing-card .pc-desc { color: rgba(255,255,255,0.4); font-size: 12px; margin-bottom: 16px; }
+  .pricing-card .pc-price { color: #fff; font-size: 28px; font-weight: 700; }
+  .pricing-card .pc-period { color: rgba(255,255,255,0.4); font-size: 12px; }
+  .pricing-card .pc-feat {
+    text-align: left;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid rgba(255,255,255,0.08);
+  }
+  .pricing-card .pc-feat li {
+    color: rgba(255,255,255,0.6);
+    font-size: 12px;
+    padding: 4px 0;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .pricing-card .pc-feat li::before {
+    content: '✓';
+    color: var(--accent-green);
+    font-weight: 700;
+    font-size: 11px;
+  }
+
+  /* ── Annotations ── */
+  .annotation {
+    background: rgba(232,184,77,0.1);
+    border-left: 3px solid var(--accent-gold);
+    border-radius: 0 8px 8px 0;
+    padding: 12px 16px;
+    margin: 20px auto;
+    max-width: 600px;
+  }
+  .annotation .ann-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--accent-gold);
+    margin-bottom: 4px;
+  }
+  .annotation .ann-text {
+    font-size: 13px;
+    color: rgba(255,255,255,0.7);
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+
+<!-- Navigation -->
+<nav class="nav">
+  <div class="nav-title">Ellie Life</div>
+  <div class="nav-tabs">
+    <button class="nav-tab active" onclick="showSection('onboarding')">Onboarding <span class="nav-badge badge-base">Base</span></button>
+    <button class="nav-tab" onclick="showSection('home')">Home <span class="nav-badge badge-base">Base</span></button>
+    <button class="nav-tab" onclick="showSection('chat')">Chat <span class="nav-badge badge-base">Base</span></button>
+    <button class="nav-tab" onclick="showSection('organize')">Organize <span class="nav-badge badge-base">Base</span></button>
+    <button class="nav-tab" onclick="showSection('comms')">Comms Filter <span class="nav-badge badge-base">Base</span></button>
+    <button class="nav-tab" onclick="showSection('memory')">Memory <span class="nav-badge badge-base">Base</span></button>
+    <button class="nav-tab" onclick="showSection('health')">Health <span class="nav-badge badge-addon">Add-on</span></button>
+    <button class="nav-tab" onclick="showSection('family')">Family <span class="nav-badge badge-addon">Add-on</span></button>
+    <button class="nav-tab" onclick="showSection('money')">Money <span class="nav-badge badge-addon">Add-on</span></button>
+    <button class="nav-tab" onclick="showSection('integration')">Architecture</button>
+    <button class="nav-tab" onclick="showSection('pricing')">Pricing</button>
+  </div>
+</nav>
+
+<!-- ════════════════════════════════════════ -->
+<!-- SECTION: Onboarding -->
+<!-- ════════════════════════════════════════ -->
+<div id="onboarding" class="section active">
+  <div class="section-header">
+    <h1>First Launch — Onboarding</h1>
+    <p>Warm, conversational setup. No forms. Ellie asks questions like a friend getting to know you.</p>
+  </div>
+  <div class="phone-grid">
+
+    <div class="phone-container">
+      <div class="phone-label">Welcome</div>
+      <div class="phone">
+        <div class="phone-screen">
+          <div class="status-bar"><span>9:41</span><span>●●●</span></div>
+          <div class="onboard-screen">
+            <div class="onboard-illustration" style="background: var(--primary-light);">🌸</div>
+            <h2>Hi, I'm Ellie</h2>
+            <p>I'm your personal AI — like a thoughtful friend who remembers everything and helps you stay organized. No tech skills needed.</p>
+            <button class="onboard-btn primary">Let's get to know each other</button>
+            <button class="onboard-btn secondary">How does this work?</button>
+            <div class="onboard-progress">
+              <span class="active"></span><span></span><span></span><span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="phone-container">
+      <div class="phone-label">Getting to Know You</div>
+      <div class="phone">
+        <div class="phone-screen">
+          <div class="status-bar"><span>9:42</span><span>●●●</span></div>
+          <div class="chat-container">
+            <div class="chat-messages" style="display: flex; flex-direction: column;">
+              <div class="chat-bubble ellie">What should I call you? 😊</div>
+              <div class="chat-bubble user">Sarah</div>
+              <div class="chat-bubble ellie">Nice to meet you, Sarah! What does a typical day look like for you? I want to understand your rhythm.</div>
+              <div class="chat-bubble user">I work from home, pick up kids at 3, usually exhausted by evening</div>
+              <div class="chat-bubble ellie">Got it — mornings are your power hours, afternoons are family mode, and evenings you need to recharge. I'll keep that in mind for everything I suggest. 💛</div>
+              <div class="chat-bubble ellie">One more — how do you prefer I talk to you? Some people like detailed explanations, others prefer quick and to-the-point.</div>
+            </div>
+            <div class="onboard-progress" style="justify-content: center; padding: 12px 0;">
+              <span class="active"></span><span class="active"></span><span></span><span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="phone-container">
+      <div class="phone-label">Permissions</div>
+      <div class="phone">
+        <div class="phone-screen">
+          <div class="status-bar"><span>9:43</span><span>●●●</span></div>
+          <div class="onboard-screen">
+            <div class="onboard-illustration" style="background: var(--accent-purple-light);">🔒</div>
+            <h2>Your Privacy Matters</h2>
+            <p>Ellie remembers what you share so conversations feel natural — but you're always in control.</p>
+            <div style="text-align: left; width: 100%; margin-bottom: 20px;">
+              <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border);">
+                <div>
+                  <div style="font-size: 13px; font-weight: 600;">Remember our chats</div>
+                  <div style="font-size: 11px; color: var(--text-muted);">So I know you over time</div>
+                </div>
+                <div style="width: 44px; height: 24px; background: var(--accent-green); border-radius: 12px; position: relative;">
+                  <div style="width: 20px; height: 20px; background: #fff; border-radius: 50%; position: absolute; right: 2px; top: 2px;"></div>
+                </div>
+              </div>
+              <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border);">
+                <div>
+                  <div style="font-size: 13px; font-weight: 600;">Read notifications</div>
+                  <div style="font-size: 11px; color: var(--text-muted);">To filter what's important</div>
+                </div>
+                <div style="width: 44px; height: 24px; background: var(--border); border-radius: 12px; position: relative;">
+                  <div style="width: 20px; height: 20px; background: #fff; border-radius: 50%; position: absolute; left: 2px; top: 2px;"></div>
+                </div>
+              </div>
+              <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 0;">
+                <div>
+                  <div style="font-size: 13px; font-weight: 600;">Calendar access</div>
+                  <div style="font-size: 11px; color: var(--text-muted);">To help you stay on track</div>
+                </div>
+                <div style="width: 44px; height: 24px; background: var(--accent-green); border-radius: 12px; position: relative;">
+                  <div style="width: 20px; height: 20px; background: #fff; border-radius: 50%; position: absolute; right: 2px; top: 2px;"></div>
+                </div>
+              </div>
+            </div>
+            <button class="onboard-btn primary">Looks good</button>
+            <div class="onboard-progress" style="justify-content: center;">
+              <span class="active"></span><span class="active"></span><span class="active"></span><span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="phone-container">
+      <div class="phone-label">Ready</div>
+      <div class="phone">
+        <div class="phone-screen">
+          <div class="status-bar"><span>9:44</span><span>●●●</span></div>
+          <div class="onboard-screen">
+            <div class="onboard-illustration" style="background: var(--accent-green-light);">✨</div>
+            <h2>You're all set, Sarah!</h2>
+            <p>I'll learn more about you as we talk. No pressure — just message me whenever you need anything, like texting a friend.</p>
+            <div style="background: var(--primary-light); border-radius: var(--radius-sm); padding: 14px; margin-bottom: 20px; text-align: left;">
+              <div style="font-size: 12px; font-weight: 600; color: var(--primary-dark); margin-bottom: 6px;">Try saying:</div>
+              <div style="font-size: 13px; color: var(--text); margin-bottom: 4px;">"What should I focus on today?"</div>
+              <div style="font-size: 13px; color: var(--text); margin-bottom: 4px;">"Remind me to call the dentist"</div>
+              <div style="font-size: 13px; color: var(--text);">"I'm feeling overwhelmed"</div>
+            </div>
+            <button class="onboard-btn primary">Start chatting</button>
+            <div class="onboard-progress" style="justify-content: center;">
+              <span class="active"></span><span class="active"></span><span class="active"></span><span class="active"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="annotation">
+    <div class="ann-label">Design Note</div>
+    <div class="ann-text">Onboarding is conversational, not a form. Ellie asks ~5 questions total, confirms understanding back in her own words. The user never sees "settings" — just a natural getting-to-know-you chat. Privacy controls use plain language, not tech jargon.</div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════ -->
+<!-- SECTION: Home -->
+<!-- ════════════════════════════════════════ -->
+<div id="home" class="section">
+  <div class="section-header">
+    <h1>Home Dashboard</h1>
+    <p>Your day at a glance. Ellie surfaces what matters based on what she knows about you.</p>
+  </div>
+  <div class="phone-grid">
+
+    <div class="phone-container">
+      <div class="phone-label">Morning View</div>
+      <div class="phone">
+        <div class="phone-screen" style="padding-bottom: 60px;">
+          <div class="status-bar"><span>7:15 AM</span><span>Mon, Mar 30</span></div>
+          <div class="greeting">Good morning, Sarah</div>
+          <div class="greeting-sub">You have a calm morning ahead ☀️</div>
+
+          <div class="mood-prompt">
+            <div class="icon">🌤️</div>
+            <div>
+              <div class="text">How are you feeling this morning?</div>
+              <div class="mood-options">
+                <button class="mood-btn">Great</button>
+                <button class="mood-btn selected">Okay</button>
+                <button class="mood-btn">Meh</button>
+                <button class="mood-btn">Rough</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Today's Focus</div>
+              <div class="card-action">See all</div>
+            </div>
+            <div class="card-row">
+              <div class="check"></div>
+              <div class="label">Call dentist to reschedule</div>
+              <div class="meta">AM</div>
+            </div>
+            <div class="card-row">
+              <div class="check done"></div>
+              <div class="label">Submit expense report</div>
+              <div class="meta">Done</div>
+            </div>
+            <div class="card-row">
+              <div class="check"></div>
+              <div class="label">Pick up kids — early release</div>
+              <div class="meta">2:30</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Coming Up</div>
+            </div>
+            <div class="card-row">
+              <div class="dot" style="background: var(--accent-blue);"></div>
+              <div class="label">Team standup</div>
+              <div class="meta">10:00</div>
+            </div>
+            <div class="card-row">
+              <div class="dot" style="background: var(--accent-green);"></div>
+              <div class="label">Lunch with Mom</div>
+              <div class="meta">12:30</div>
+            </div>
+            <div class="card-row">
+              <div class="dot" style="background: var(--primary);"></div>
+              <div class="label">Early release pickup</div>
+              <div class="meta">2:30</div>
+            </div>
+          </div>
+
+          <div class="quick-actions">
+            <div class="quick-action">
+              <div class="qa-icon" style="background: var(--primary-light);">💬</div>
+              <div>
+                <div class="qa-label">Chat</div>
+                <div class="qa-sub">Talk to Ellie</div>
+              </div>
+            </div>
+            <div class="quick-action">
+              <div class="qa-icon" style="background: var(--accent-green-light);">📝</div>
+              <div>
+                <div class="qa-label">Quick Note</div>
+                <div class="qa-sub">Capture a thought</div>
+              </div>
+            </div>
+            <div class="quick-action">
+              <div class="qa-icon" style="background: var(--accent-blue-light);">📬</div>
+              <div>
+                <div class="qa-label">Inbox</div>
+                <div class="qa-sub">3 need attention</div>
+              </div>
+            </div>
+            <div class="quick-action">
+              <div class="qa-icon" style="background: var(--accent-purple-light);">🧠</div>
+              <div>
+                <div class="qa-label">Memory</div>
+                <div class="qa-sub">What Ellie knows</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-bar">
+            <div class="tab-item active"><div class="tab-icon">🏠</div>Home</div>
+            <div class="tab-item"><div class="tab-icon">💬</div>Chat</div>
+            <div class="tab-item"><div class="tab-icon">📋</div>Tasks</div>
+            <div class="tab-item"><div class="tab-icon">📬</div>Inbox</div>
+            <div class="tab-item"><div class="tab-icon">⚙️</div>You</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="phone-container">
+      <div class="phone-label">Ellie's Nudge</div>
+      <div class="phone">
+        <div class="phone-screen" style="padding-bottom: 60px;">
+          <div class="status-bar"><span>7:16 AM</span><span>Mon, Mar 30</span></div>
+
+          <div style="background: var(--primary-light); border-radius: var(--radius); padding: 18px; margin-bottom: 16px;">
+            <div style="font-size: 13px; font-weight: 600; color: var(--primary-dark); margin-bottom: 8px;">💡 Ellie noticed</div>
+            <div style="font-size: 14px; color: var(--text); line-height: 1.5;">You mentioned the dentist 3 times this week but haven't called yet. Want me to remind you at 9 AM when the office opens?</div>
+            <div style="display: flex; gap: 8px; margin-top: 12px;">
+              <button class="mood-btn selected" style="flex: 1; text-align: center;">Yes, remind me</button>
+              <button class="mood-btn" style="flex: 1; text-align: center;">I'll handle it</button>
+            </div>
+          </div>
+
+          <div style="background: var(--accent-blue-light); border-radius: var(--radius); padding: 18px; margin-bottom: 16px;">
+            <div style="font-size: 13px; font-weight: 600; color: var(--accent-blue); margin-bottom: 8px;">📅 Schedule heads-up</div>
+            <div style="font-size: 14px; color: var(--text); line-height: 1.5;">Today is an early release day — pickup is at 2:30 instead of 3:00. I've adjusted your afternoon accordingly.</div>
+          </div>
+
+          <div style="background: var(--accent-green-light); border-radius: var(--radius); padding: 18px; margin-bottom: 16px;">
+            <div style="font-size: 13px; font-weight: 600; color: var(--accent-green); margin-bottom: 8px;">🌿 Gentle reminder</div>
+            <div style="font-size: 14px; color: var(--text); line-height: 1.5;">You said you wanted to take a walk before work this week. It's 62° and sunny right now — perfect for a quick 15 minutes.</div>
+          </div>
+
+          <div class="card">
+            <div style="font-size: 12px; color: var(--text-muted); text-align: center; padding: 8px 0;">
+              These nudges are based on what you've told Ellie.<br>
+              <span style="color: var(--primary); font-weight: 500;">Manage what Ellie remembers →</span>
+            </div>
+          </div>
+
+          <div class="tab-bar">
+            <div class="tab-item active"><div class="tab-icon">🏠</div>Home</div>
+            <div class="tab-item"><div class="tab-icon">💬</div>Chat</div>
+            <div class="tab-item"><div class="tab-icon">📋</div>Tasks</div>
+            <div class="tab-item"><div class="tab-icon">📬</div>Inbox</div>
+            <div class="tab-item"><div class="tab-icon">⚙️</div>You</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="annotation">
+    <div class="ann-label">Design Note</div>
+    <div class="ann-text">Ellie's nudges are the key differentiator. She doesn't just list tasks — she notices patterns ("you mentioned the dentist 3 times") and proactively helps. The mood check-in builds emotional awareness over time. Everything is optional and gentle.</div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════ -->
+<!-- SECTION: Chat -->
+<!-- ════════════════════════════════════════ -->
+<div id="chat" class="section">
+  <div class="section-header">
+    <h1>Chat with Ellie</h1>
+    <p>Natural conversation — like texting a friend who happens to have perfect memory and infinite patience.</p>
+  </div>
+  <div class="phone-grid">
+
+    <div class="phone-container">
+      <div class="phone-label">Everyday Help</div>
+      <div class="phone">
+        <div class="phone-screen">
+          <div class="status-bar"><span>10:22 AM</span><span>●●●</span></div>
+          <div class="chat-container">
+            <div class="chat-messages" style="display: flex; flex-direction: column;">
+              <div class="chat-bubble user">I need to figure out a birthday gift for my sister. She's turning 40 next month</div>
+              <div class="chat-bubble ellie">Ooh, the big 4-0! Last time you mentioned she's really into pottery and just redecorated her living room in that earthy terracotta style. A few ideas:
+                <br><br>🎨 <b>Pottery class for two</b> — you could go together
+                <br>🏺 <b>Handmade vase</b> from that local ceramics studio
+                <br>📚 <b>"The Kinfolk Table"</b> — she'd love the aesthetic
+                <br><br>Want me to save her birthday date so I can remind you to order in time?</div>
+              <div class="chat-bubble user">Yes! It's April 18th. The pottery class sounds perfect</div>
+              <div class="chat-bubble ellie">Saved! I'll remind you April 4th to book it (2 weeks out, so spots don't fill up). And I noted she likes pottery — useful for future gift ideas too 😊</div>
+              <div class="chat-bubble user">You're better at this than I am lol</div>
+              <div class="chat-bubble ellie">Ha — I just have a better memory for details. You're the one who actually knows your sister 💛</div>
+            </div>
+            <div class="chat-input-bar">
+              <div class="chat-input">Message Ellie...</div>
+              <button class="chat-send">↑</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="phone-container">
+      <div class="phone-label">Emotional Support</div>
+      <div class="phone">
+        <div class="phone-screen">
+          <div class="status-bar"><span>9:47 PM</span><span>●●●</span></div>
+          <div class="chat-container">
+            <div class="chat-messages" style="display: flex; flex-direction: column;">
+              <div class="chat-bubble user">Rough day. The kids were impossible and I snapped at my husband over nothing</div>
+              <div class="chat-bubble ellie">That sounds really draining. Early release days are already a lot, and you'd been running since 7 AM. It makes sense you hit a wall.</div>
+              <div class="chat-bubble user">I just feel like I'm bad at all of this</div>
+              <div class="chat-bubble ellie">I hear you. And I want to gently push back — last Thursday you handled the school project crisis like a champ, and your husband told you he appreciated how calm you were at his parents' dinner. One rough evening doesn't define you.
+                <br><br>Do you want to:
+                <br>💬 Keep venting (totally valid)
+                <br>🧘 Try a 5-min wind-down
+                <br>📝 Brain dump tomorrow's worries so you can let go tonight</div>
+              <div class="chat-bubble user">Brain dump. I can't stop thinking about tomorrow</div>
+              <div class="chat-bubble ellie">Okay, tell me everything on your mind. I'll organize it and we'll make a simple plan. Nothing is too small to mention.</div>
+            </div>
+            <div class="chat-input-bar">
+              <div class="chat-input">Message Ellie...</div>
+              <button class="chat-send">↑</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="phone-container">
+      <div class="phone-label">Voice Note</div>
+      <div class="phone">
+        <div class="phone-screen">
+          <div class="status-bar"><span>8:30 AM</span><span>●●●</span></div>
+          <div class="chat-container">
+            <div class="chat-messages" style="display: flex; flex-direction: column;">
+              <div class="chat-bubble user" style="display: flex; align-items: center; gap: 10px;">
+                <div style="width: 28px; height: 28px; border-radius: 50%; background: rgba(255,255,255,0.2); display: flex; align-items: center; justify-content: center;">🎤</div>
+                <div>
+                  <div style="font-size: 11px; opacity: 0.8;">Voice note · 0:23</div>
+                  <div style="display: flex; gap: 2px; margin-top: 4px;">
+                    <span style="width: 3px; height: 8px; background: rgba(255,255,255,0.5); border-radius: 2px;"></span>
+                    <span style="width: 3px; height: 14px; background: rgba(255,255,255,0.5); border-radius: 2px;"></span>
+                    <span style="width: 3px; height: 6px; background: rgba(255,255,255,0.5); border-radius: 2px;"></span>
+                    <span style="width: 3px; height: 16px; background: rgba(255,255,255,0.5); border-radius: 2px;"></span>
+                    <span style="width: 3px; height: 10px; background: rgba(255,255,255,0.5); border-radius: 2px;"></span>
+                    <span style="width: 3px; height: 4px; background: rgba(255,255,255,0.5); border-radius: 2px;"></span>
+                    <span style="width: 3px; height: 12px; background: rgba(255,255,255,0.5); border-radius: 2px;"></span>
+                  </div>
+                </div>
+              </div>
+              <div class="chat-bubble ellie" style="font-size: 11px; color: var(--text-muted); font-style: italic; padding: 8px 14px;">I heard: "Need to remember to grab Emma's soccer cleats, she has practice Thursday, and also we're out of dog food and I think the oil change is overdue"</div>
+              <div class="chat-bubble ellie">Got it! I've captured three things:
+                <br><br>⚽ Emma's soccer cleats — before Thursday
+                <br>🐕 Dog food — adding to shopping list
+                <br>🚗 Oil change — I'll check when you last mentioned getting it done
+                <br><br>I see you have a Target run planned for Wednesday — want me to add cleats and dog food to that trip?</div>
+              <div class="chat-bubble user">Perfect yes</div>
+              <div class="chat-bubble ellie">Done! Your Wednesday Target list now has: cleats, dog food, and the paper towels you added last week. I'll nudge you Wednesday morning.</div>
+            </div>
+            <div class="chat-input-bar">
+              <div class="chat-input">Message Ellie...</div>
+              <button class="chat-send">↑</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="annotation">
+    <div class="ann-label">Design Note</div>
+    <div class="ann-text">Chat is the core interaction. Ellie has personality — warm but not saccharine, helpful but not pushy. She references past conversations naturally ("Last time you mentioned she's into pottery"). Voice notes are transcribed and acted on automatically. The key UX principle: Ellie handles logistics so the user can focus on living.</div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════ -->
+<!-- SECTION: Organize -->
+<!-- ════════════════════════════════════════ -->
+<div id="organize" class="section">
+  <div class="section-header">
+    <h1>Life Organization</h1>
+    <p>Tasks, lists, and reminders — surfaced by Ellie at the right time, not buried in an app you forget to check.</p>
+  </div>
+  <div class="phone-grid">
+
+    <div class="phone-container">
+      <div class="phone-label">Tasks View</div>
+      <div class="phone">
+        <div class="phone-screen" style="padding-bottom: 60px;">
+          <div class="status-bar"><span>11:00 AM</span><span>●●●</span></div>
+          <div style="font-size: 22px; font-weight: 700; margin-bottom: 4px;">Your Week</div>
+          <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">Ellie organized these from your chats</div>
+
+          <div style="display: flex; gap: 8px; margin-bottom: 16px; overflow-x: auto;">
+            <div style="padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 600; background: var(--primary); color: #fff;">All</div>
+            <div style="padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 500; background: var(--card-bg); color: var(--text-muted); box-shadow: var(--shadow);">Home</div>
+            <div style="padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 500; background: var(--card-bg); color: var(--text-muted); box-shadow: var(--shadow);">Work</div>
+            <div style="padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 500; background: var(--card-bg); color: var(--text-muted); box-shadow: var(--shadow);">Family</div>
+          </div>
+
+          <div class="card">
+            <div style="font-size: 11px; font-weight: 700; color: var(--primary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">Today — Monday</div>
+            <div class="card-row"><div class="check"></div><div class="label">Call dentist (office opens 9 AM)</div><div class="meta" style="color: var(--primary);">⏰ 9:00</div></div>
+            <div class="card-row"><div class="check done"></div><div class="label">Team standup</div><div class="meta">10:00</div></div>
+            <div class="card-row"><div class="check"></div><div class="label">Early release pickup</div><div class="meta">2:30</div></div>
+            <div class="card-row"><div class="check"></div><div class="label">Lunch with Mom</div><div class="meta">12:30</div></div>
+          </div>
+
+          <div class="card">
+            <div style="font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">Wednesday</div>
+            <div class="card-row"><div class="check"></div><div class="label">Target run: cleats, dog food, towels</div><div class="meta">📍</div></div>
+            <div class="card-row"><div class="check"></div><div class="label">Reply to school email about field trip</div></div>
+          </div>
+
+          <div class="card">
+            <div style="font-size: 11px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;">Thursday</div>
+            <div class="card-row"><div class="check"></div><div class="label">Emma's soccer practice</div><div class="meta">4:00</div></div>
+          </div>
+
+          <div class="card" style="background: var(--accent-purple-light);">
+            <div style="font-size: 11px; font-weight: 700; color: var(--accent-purple); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">Someday List</div>
+            <div style="font-size: 12px; color: var(--text-muted);">Things Ellie is holding for when you have time</div>
+            <div class="card-row"><div class="label" style="font-size: 12px;">Research summer camp options</div></div>
+            <div class="card-row"><div class="label" style="font-size: 12px;">Schedule oil change</div></div>
+            <div class="card-row"><div class="label" style="font-size: 12px;">Book pottery class for Kate's birthday</div></div>
+          </div>
+
+          <div class="tab-bar">
+            <div class="tab-item"><div class="tab-icon">🏠</div>Home</div>
+            <div class="tab-item"><div class="tab-icon">💬</div>Chat</div>
+            <div class="tab-item active"><div class="tab-icon">📋</div>Tasks</div>
+            <div class="tab-item"><div class="tab-icon">📬</div>Inbox</div>
+            <div class="tab-item"><div class="tab-icon">⚙️</div>You</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="phone-container">
+      <div class="phone-label">Shopping List</div>
+      <div class="phone">
+        <div class="phone-screen" style="padding-bottom: 60px;">
+          <div class="status-bar"><span>11:01 AM</span><span>●●●</span></div>
+          <div style="font-size: 22px; font-weight: 700; margin-bottom: 4px;">🛒 Shopping</div>
+          <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">Collected from your conversations</div>
+
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Target — Wednesday</div>
+              <div class="card-action">Share list</div>
+            </div>
+            <div class="card-row"><div class="check"></div><div class="label">Soccer cleats (Emma, size 4)</div><div class="meta">$35-50</div></div>
+            <div class="card-row"><div class="check"></div><div class="label">Dog food — Blue Buffalo</div><div class="meta">$45</div></div>
+            <div class="card-row"><div class="check"></div><div class="label">Paper towels</div><div class="meta">$12</div></div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Groceries — General</div>
+              <div class="card-action">Add items</div>
+            </div>
+            <div class="card-row"><div class="check"></div><div class="label">Bananas</div></div>
+            <div class="card-row"><div class="check"></div><div class="label">Chicken breast</div></div>
+            <div class="card-row"><div class="check"></div><div class="label">Pasta sauce</div></div>
+            <div class="card-row"><div class="check done"></div><div class="label" style="text-decoration: line-through; color: var(--text-muted);">Milk</div></div>
+          </div>
+
+          <div style="background: var(--accent-blue-light); border-radius: var(--radius); padding: 14px; margin-bottom: 12px;">
+            <div style="font-size: 12px; color: var(--accent-blue); font-weight: 600;">💡 How lists work</div>
+            <div style="font-size: 12px; color: var(--text); margin-top: 4px;">When you mention needing something in chat, Ellie adds it here automatically. Just tell her "I need milk" and it shows up.</div>
+          </div>
+
+          <div class="tab-bar">
+            <div class="tab-item"><div class="tab-icon">🏠</div>Home</div>
+            <div class="tab-item"><div class="tab-icon">💬</div>Chat</div>
+            <div class="tab-item active"><div class="tab-icon">📋</div>Tasks</div>
+            <div class="tab-item"><div class="tab-icon">📬</div>Inbox</div>
+            <div class="tab-item"><div class="tab-icon">⚙️</div>You</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════ -->
+<!-- SECTION: Comms Filter -->
+<!-- ════════════════════════════════════════ -->
+<div id="comms" class="section">
+  <div class="section-header">
+    <h1>Communication Filter</h1>
+    <p>Ellie reads your notifications and tells you what actually needs your attention — and handles the rest.</p>
+  </div>
+  <div class="phone-grid">
+
+    <div class="phone-container">
+      <div class="phone-label">Filtered Inbox</div>
+      <div class="phone">
+        <div class="phone-screen" style="padding-bottom: 60px;">
+          <div class="status-bar"><span>10:30 AM</span><span>●●●</span></div>
+          <div style="font-size: 22px; font-weight: 700; margin-bottom: 4px;">Inbox</div>
+          <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">3 need you · 12 handled · 5 archived</div>
+
+          <div style="display: flex; gap: 8px; margin-bottom: 16px;">
+            <div style="padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 600; background: var(--primary); color: #fff;">Needs You (3)</div>
+            <div style="padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 500; background: var(--card-bg); color: var(--text-muted);">All</div>
+            <div style="padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 500; background: var(--card-bg); color: var(--text-muted);">Handled</div>
+          </div>
+
+          <div class="card">
+            <div class="inbox-item">
+              <div>
+                <div class="inbox-avatar" style="background: var(--accent-blue);">J</div>
+                <div class="priority-dot" style="background: var(--primary);"></div>
+              </div>
+              <div class="inbox-content">
+                <div class="inbox-from">Jessica Chen <span style="font-weight: 400; color: var(--text-muted);">· School</span></div>
+                <div class="inbox-preview">Field trip permission slip needs to be signed by Wednesday</div>
+                <div class="inbox-summary">📋 Ellie says: She needs a signature by Wednesday. I've added it to your tasks.</div>
+              </div>
+              <div class="inbox-meta">9:15</div>
+            </div>
+
+            <div class="inbox-item">
+              <div>
+                <div class="inbox-avatar" style="background: var(--accent-green);">M</div>
+                <div class="priority-dot" style="background: var(--accent-gold);"></div>
+              </div>
+              <div class="inbox-content">
+                <div class="inbox-from">Mom <span style="font-weight: 400; color: var(--text-muted);">· Text</span></div>
+                <div class="inbox-preview">Still on for lunch tomorrow? I was thinking that new Italian place</div>
+                <div class="inbox-summary">💬 Ellie says: She wants to confirm lunch. The Italian place is 10 min from your office — timing works.</div>
+              </div>
+              <div class="inbox-meta">8:42</div>
+            </div>
+
+            <div class="inbox-item">
+              <div>
+                <div class="inbox-avatar" style="background: var(--accent-purple);">R</div>
+                <div class="priority-dot" style="background: var(--accent-blue);"></div>
+              </div>
+              <div class="inbox-content">
+                <div class="inbox-from">Rebecca <span style="font-weight: 400; color: var(--text-muted);">· Work Slack</span></div>
+                <div class="inbox-preview">Can you review the Q2 budget before Thursday's meeting?</div>
+                <div class="inbox-summary">📊 Ellie says: Non-urgent but has a deadline. I'll remind you Wed morning.</div>
+              </div>
+              <div class="inbox-meta">Yesterday</div>
+            </div>
+          </div>
+
+          <div class="tab-bar">
+            <div class="tab-item"><div class="tab-icon">🏠</div>Home</div>
+            <div class="tab-item"><div class="tab-icon">💬</div>Chat</div>
+            <div class="tab-item"><div class="tab-icon">📋</div>Tasks</div>
+            <div class="tab-item active"><div class="tab-icon">📬</div>Inbox</div>
+            <div class="tab-item"><div class="tab-icon">⚙️</div>You</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="phone-container">
+      <div class="phone-label">Auto-Handled</div>
+      <div class="phone">
+        <div class="phone-screen" style="padding-bottom: 60px;">
+          <div class="status-bar"><span>10:31 AM</span><span>●●●</span></div>
+          <div style="font-size: 18px; font-weight: 700; margin-bottom: 4px;">Handled by Ellie</div>
+          <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">Stuff that didn't need you today</div>
+
+          <div class="card" style="opacity: 0.7;">
+            <div class="inbox-item">
+              <div class="inbox-avatar" style="background: var(--text-light); font-size: 12px;">📧</div>
+              <div class="inbox-content">
+                <div class="inbox-from" style="font-weight: 500;">Target <span style="color: var(--text-muted);">· Promo</span></div>
+                <div class="inbox-preview">30% off home essentials this weekend</div>
+                <div style="font-size: 11px; color: var(--accent-green); margin-top: 4px;">✓ Filed under promotions</div>
+              </div>
+            </div>
+            <div class="inbox-item">
+              <div class="inbox-avatar" style="background: var(--text-light); font-size: 12px;">📧</div>
+              <div class="inbox-content">
+                <div class="inbox-from" style="font-weight: 500;">LinkedIn <span style="color: var(--text-muted);">· Notification</span></div>
+                <div class="inbox-preview">5 people viewed your profile</div>
+                <div style="font-size: 11px; color: var(--accent-green); margin-top: 4px;">✓ Social notification — archived</div>
+              </div>
+            </div>
+            <div class="inbox-item">
+              <div class="inbox-avatar" style="background: var(--text-light); font-size: 12px;">📧</div>
+              <div class="inbox-content">
+                <div class="inbox-from" style="font-weight: 500;">Bank of America <span style="color: var(--text-muted);">· Alert</span></div>
+                <div class="inbox-preview">Your payment of $142.30 was received</div>
+                <div style="font-size: 11px; color: var(--accent-green); margin-top: 4px;">✓ Payment confirmation — logged</div>
+              </div>
+            </div>
+            <div class="inbox-item">
+              <div class="inbox-avatar" style="background: var(--text-light); font-size: 12px;">📧</div>
+              <div class="inbox-content">
+                <div class="inbox-from" style="font-weight: 500;">Amazon <span style="color: var(--text-muted);">· Shipping</span></div>
+                <div class="inbox-preview">Your order has been delivered</div>
+                <div style="font-size: 11px; color: var(--accent-green); margin-top: 4px;">✓ Delivery confirmed — kid's art supplies</div>
+              </div>
+            </div>
+          </div>
+
+          <div style="background: var(--primary-light); border-radius: var(--radius); padding: 14px; text-align: center;">
+            <div style="font-size: 13px; color: var(--primary-dark); font-weight: 500;">Ellie saved you ~15 minutes today</div>
+            <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">12 messages filtered · 3 tasks created · 2 reminders set</div>
+          </div>
+
+          <div class="tab-bar">
+            <div class="tab-item"><div class="tab-icon">🏠</div>Home</div>
+            <div class="tab-item"><div class="tab-icon">💬</div>Chat</div>
+            <div class="tab-item"><div class="tab-icon">📋</div>Tasks</div>
+            <div class="tab-item active"><div class="tab-icon">📬</div>Inbox</div>
+            <div class="tab-item"><div class="tab-icon">⚙️</div>You</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════ -->
+<!-- SECTION: Memory -->
+<!-- ════════════════════════════════════════ -->
+<div id="memory" class="section">
+  <div class="section-header">
+    <h1>Ellie's Memory</h1>
+    <p>Everything Ellie has learned about you — fully transparent, fully in your control.</p>
+  </div>
+  <div class="phone-grid">
+
+    <div class="phone-container">
+      <div class="phone-label">Memory Browser</div>
+      <div class="phone">
+        <div class="phone-screen" style="padding-bottom: 60px;">
+          <div class="status-bar"><span>2:00 PM</span><span>●●●</span></div>
+          <div style="font-size: 22px; font-weight: 700; margin-bottom: 4px;">🧠 Memory</div>
+          <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">What Ellie knows about you</div>
+
+          <div style="display: flex; gap: 8px; margin-bottom: 16px; overflow-x: auto;">
+            <div style="padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 600; background: var(--primary); color: #fff;">All</div>
+            <div style="padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 500; background: var(--card-bg); color: var(--text-muted);">About You</div>
+            <div style="padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 500; background: var(--card-bg); color: var(--text-muted);">People</div>
+            <div style="padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 500; background: var(--card-bg); color: var(--text-muted);">Prefs</div>
+          </div>
+
+          <div class="memory-card">
+            <div class="mem-label">About You</div>
+            <div class="mem-text">Works from home. Mornings are productive time. Picks up kids at 3 PM (2:30 on early release). Evenings are recharge time — avoid scheduling.</div>
+            <div class="mem-date">Learned Mar 15 · Updated Mar 28</div>
+          </div>
+
+          <div class="memory-card" style="background: var(--accent-blue-light);">
+            <div class="mem-label" style="color: var(--accent-blue);">People</div>
+            <div class="mem-text"><b>Kate</b> (sister) — Turning 40 on April 18. Into pottery, earthy decor style. Lives in Portland.</div>
+            <div class="mem-date">Learned Mar 30</div>
+          </div>
+
+          <div class="memory-card" style="background: var(--accent-green-light);">
+            <div class="mem-label" style="color: var(--accent-green);">People</div>
+            <div class="mem-text"><b>Emma</b> (daughter) — Soccer on Thursdays. Shoe size 4. Loves art projects.</div>
+            <div class="mem-date">Learned Mar 22 · Updated Mar 29</div>
+          </div>
+
+          <div class="memory-card" style="background: var(--primary-light);">
+            <div class="mem-label" style="color: var(--primary);">Preferences</div>
+            <div class="mem-text">Dog: Blue Buffalo brand only. Prefers quick/casual communication. Likes to plan Target runs on Wednesdays.</div>
+            <div class="mem-date">Learned across multiple chats</div>
+          </div>
+
+          <div class="memory-card" style="background: var(--accent-gold-light);">
+            <div class="mem-label" style="color: var(--accent-gold);">Emotional</div>
+            <div class="mem-text">Tends to be hard on herself after stressful days. Responds well to gentle reminders of recent wins.</div>
+            <div class="mem-date">Pattern noticed Mar 28</div>
+          </div>
+
+          <div style="text-align: center; padding: 16px;">
+            <div style="font-size: 12px; color: var(--primary); font-weight: 600; cursor: pointer;">Edit or delete any memory →</div>
+          </div>
+
+          <div class="tab-bar">
+            <div class="tab-item"><div class="tab-icon">🏠</div>Home</div>
+            <div class="tab-item"><div class="tab-icon">💬</div>Chat</div>
+            <div class="tab-item"><div class="tab-icon">📋</div>Tasks</div>
+            <div class="tab-item"><div class="tab-icon">📬</div>Inbox</div>
+            <div class="tab-item active"><div class="tab-icon">⚙️</div>You</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="annotation">
+    <div class="ann-label">Design Note</div>
+    <div class="ann-text">Total transparency is non-negotiable. Users can see, edit, and delete anything Ellie remembers. Memory categories help users understand what Ellie tracks. The "Emotional" category is sensitive — Ellie never judges, only notes patterns that help her support better. Users can disable any category.</div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════ -->
+<!-- SECTION: Health -->
+<!-- ════════════════════════════════════════ -->
+<div id="health" class="section">
+  <div class="section-header">
+    <h1>Add-on: Health & Wellness</h1>
+    <p>Gentle habit tracking, movement reminders, and wellness patterns — not a fitness bro, more like a caring friend.</p>
+  </div>
+  <div class="phone-grid">
+
+    <div class="phone-container">
+      <div class="phone-label">Wellness Dashboard</div>
+      <div class="phone">
+        <div class="phone-screen" style="padding-bottom: 60px;">
+          <div class="status-bar"><span>7:30 AM</span><span>●●●</span></div>
+          <div style="font-size: 22px; font-weight: 700; margin-bottom: 4px;">Wellness</div>
+          <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">Your week at a glance</div>
+
+          <div class="health-ring-container">
+            <div class="health-ring">
+              <svg width="140" height="140" viewBox="0 0 140 140">
+                <circle cx="70" cy="70" r="58" fill="none" stroke="#F0EBE6" stroke-width="10"/>
+                <circle cx="70" cy="70" r="58" fill="none" stroke="#7BC67E" stroke-width="10"
+                  stroke-dasharray="364.4" stroke-dashoffset="109" stroke-linecap="round"/>
+                <circle cx="70" cy="70" r="44" fill="none" stroke="#F0EBE6" stroke-width="10"/>
+                <circle cx="70" cy="70" r="44" fill="none" stroke="#6BA3D6" stroke-width="10"
+                  stroke-dasharray="276.5" stroke-dashoffset="138" stroke-linecap="round"/>
+              </svg>
+              <div class="health-ring-center">
+                <div class="num">70%</div>
+                <div class="unit">weekly goals</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="health-stat-row">
+            <div class="health-stat">
+              <div class="hs-val" style="color: var(--accent-green);">4/5</div>
+              <div class="hs-label">Walks</div>
+            </div>
+            <div class="health-stat">
+              <div class="hs-val" style="color: var(--accent-blue);">6.5h</div>
+              <div class="hs-label">Avg Sleep</div>
+            </div>
+            <div class="health-stat">
+              <div class="hs-val" style="color: var(--accent-purple);">5/7</div>
+              <div class="hs-label">Water</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Habits</div>
+              <div class="card-action">This week</div>
+            </div>
+            <div class="habit-row">
+              <div class="habit-icon">🚶‍♀️</div>
+              <div class="habit-name">Morning walk</div>
+              <div class="habit-streak">🔥 4 days</div>
+            </div>
+            <div class="habit-row">
+              <div class="habit-icon">💧</div>
+              <div class="habit-name">8 glasses water</div>
+              <div class="habit-dots">
+                <span style="background: var(--accent-blue);"></span>
+                <span style="background: var(--accent-blue);"></span>
+                <span style="background: var(--accent-blue);"></span>
+                <span style="background: var(--border);"></span>
+                <span style="background: var(--accent-blue);"></span>
+                <span style="background: var(--accent-blue);"></span>
+                <span style="background: var(--border);"></span>
+              </div>
+            </div>
+            <div class="habit-row">
+              <div class="habit-icon">😴</div>
+              <div class="habit-name">Bedtime by 10:30</div>
+              <div class="habit-dots">
+                <span style="background: var(--accent-purple);"></span>
+                <span style="background: var(--border);"></span>
+                <span style="background: var(--accent-purple);"></span>
+                <span style="background: var(--accent-purple);"></span>
+                <span style="background: var(--border);"></span>
+                <span style="background: var(--accent-purple);"></span>
+                <span style="background: var(--border);"></span>
+              </div>
+            </div>
+            <div class="habit-row">
+              <div class="habit-icon">🧘</div>
+              <div class="habit-name">5-min stretch</div>
+              <div class="habit-dots">
+                <span style="background: var(--accent-green);"></span>
+                <span style="background: var(--accent-green);"></span>
+                <span style="background: var(--border);"></span>
+                <span style="background: var(--accent-green);"></span>
+                <span style="background: var(--border);"></span>
+                <span style="background: var(--border);"></span>
+                <span style="background: var(--border);"></span>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-bar">
+            <div class="tab-item"><div class="tab-icon">🏠</div>Home</div>
+            <div class="tab-item"><div class="tab-icon">💬</div>Chat</div>
+            <div class="tab-item active"><div class="tab-icon">💚</div>Wellness</div>
+            <div class="tab-item"><div class="tab-icon">📬</div>Inbox</div>
+            <div class="tab-item"><div class="tab-icon">⚙️</div>You</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="phone-container">
+      <div class="phone-label">Ellie Health Chat</div>
+      <div class="phone">
+        <div class="phone-screen">
+          <div class="status-bar"><span>7:31 AM</span><span>●●●</span></div>
+          <div class="chat-container">
+            <div class="chat-messages" style="display: flex; flex-direction: column;">
+              <div class="chat-bubble ellie">Good morning! You've walked 4 mornings in a row — that's your longest streak yet! 🎉
+                <br><br>I noticed you slept about 5.5 hours last night though. Want to adjust today's expectations? There's no shame in a rest day.</div>
+              <div class="chat-bubble user">Yeah I was up late watching TV. I'll still walk but maybe skip the stretching</div>
+              <div class="chat-bubble ellie">Sounds like a good call. I'll only nudge you about the walk today.
+                <br><br>One thing I've noticed over the past two weeks — on nights you go to bed before 10:30, you rate the next morning as "great" about 80% of the time. When you stay up past 11:30, it drops to 20%.
+                <br><br>No lecture, just data from your own pattern 📊</div>
+              <div class="chat-bubble user">Ugh that's annoyingly accurate</div>
+              <div class="chat-bubble ellie">The truth hurts sometimes 😄 Want me to send a gentle "hey, it's 10:15" tonight? Just a nudge, not a nag.</div>
+              <div class="chat-bubble user">Yeah okay fine</div>
+              <div class="chat-bubble ellie">Set! And for the record — 4 mornings walking, consistently hydrating, and actually paying attention to your sleep? A month ago you weren't doing any of this. You're doing great. 💛</div>
+            </div>
+            <div class="chat-input-bar">
+              <div class="chat-input">Message Ellie...</div>
+              <button class="chat-send">↑</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="phone-container">
+      <div class="phone-label">Weekly Insight</div>
+      <div class="phone">
+        <div class="phone-screen" style="padding-bottom: 60px;">
+          <div class="status-bar"><span>Sun 8:00 PM</span><span>●●●</span></div>
+          <div style="font-size: 22px; font-weight: 700; margin-bottom: 4px;">Your Week</div>
+          <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">March 24–30</div>
+
+          <div class="insight-card">
+            <div class="insight-icon">🏆</div>
+            <div class="insight-text"><b>Best streak:</b> Morning walks — 4 days in a row, your personal best. You said you "actually looked forward to it" by Thursday.</div>
+          </div>
+          <div class="insight-card" style="background: var(--accent-green-light);">
+            <div class="insight-icon">📈</div>
+            <div class="insight-text"><b>Sleep trend:</b> Average 6.5 hours, up from 5.8 last week. Bedtime routine is helping — you hit your 10:30 target 4 out of 7 nights.</div>
+          </div>
+          <div class="insight-card" style="background: var(--accent-purple-light);">
+            <div class="insight-icon">💡</div>
+            <div class="insight-text"><b>Correlation:</b> Your mood ratings are 2x higher on days you walked AND slept 7+ hours. Only happened twice this week but both were "great" days.</div>
+          </div>
+          <div class="insight-card" style="background: var(--accent-gold-light);">
+            <div class="insight-icon">🎯</div>
+            <div class="insight-text"><b>Next week focus:</b> Based on what's working, Ellie suggests keeping the walk streak going and trying for 3 nights of 10:30 bedtime. Small wins.</div>
+          </div>
+
+          <div class="card" style="text-align: center;">
+            <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">How Ellie tracks this</div>
+            <div style="font-size: 12px; color: var(--text-muted); line-height: 1.5;">Everything comes from your conversations and check-ins. No wearable needed. Just tell Ellie how you slept, when you walked, or how you feel — she does the rest.</div>
+          </div>
+
+          <div class="tab-bar">
+            <div class="tab-item"><div class="tab-icon">🏠</div>Home</div>
+            <div class="tab-item"><div class="tab-icon">💬</div>Chat</div>
+            <div class="tab-item active"><div class="tab-icon">💚</div>Wellness</div>
+            <div class="tab-item"><div class="tab-icon">📬</div>Inbox</div>
+            <div class="tab-item"><div class="tab-icon">⚙️</div>You</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="annotation">
+    <div class="ann-label">Design Note</div>
+    <div class="ann-text">This is NOT a fitness tracker. No calorie counting, no step goals, no body metrics. It's conversation-based wellness — you tell Ellie how you slept, she notices patterns over time. The insight engine finds correlations the user can't see themselves (sleep + mood, hydration + energy). Tone is always encouraging, never shaming. "No wearable needed" is a key selling point for the non-tech audience.</div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════ -->
+<!-- SECTION: Family -->
+<!-- ════════════════════════════════════════ -->
+<div id="family" class="section">
+  <div class="section-header">
+    <h1>Add-on: Family & Home</h1>
+    <p>Household coordination, meal ideas, family calendar, and shared responsibility — without the mental load.</p>
+  </div>
+  <div class="phone-grid">
+
+    <div class="phone-container">
+      <div class="phone-label">Family Hub</div>
+      <div class="phone">
+        <div class="phone-screen" style="padding-bottom: 60px;">
+          <div class="status-bar"><span>6:00 PM</span><span>●●●</span></div>
+          <div style="font-size: 22px; font-weight: 700; margin-bottom: 4px;">Family</div>
+          <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">This week's coordination</div>
+
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Family Members</div>
+              <div class="card-action">Manage</div>
+            </div>
+            <div class="family-member">
+              <div class="family-avatar" style="background: var(--accent-blue);">M</div>
+              <div class="family-info">
+                <div class="family-name">Mike (husband)</div>
+                <div class="family-status">Late meeting Wed · Gym Tu/Th</div>
+              </div>
+              <button class="family-action">Remind</button>
+            </div>
+            <div class="family-member">
+              <div class="family-avatar" style="background: var(--accent-green);">E</div>
+              <div class="family-info">
+                <div class="family-name">Emma (8)</div>
+                <div class="family-status">Soccer Thu 4PM · Art project due Fri</div>
+              </div>
+            </div>
+            <div class="family-member">
+              <div class="family-avatar" style="background: var(--accent-purple);">L</div>
+              <div class="family-info">
+                <div class="family-name">Lucas (5)</div>
+                <div class="family-status">No activities this week</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Week View</div>
+              <div class="card-action">Full calendar</div>
+            </div>
+            <div class="card-row"><div class="dot" style="background: var(--primary);"></div><div class="label">Mon — Early release 2:30</div></div>
+            <div class="card-row"><div class="dot" style="background: var(--accent-blue);"></div><div class="label">Tue — Mike: gym evening</div></div>
+            <div class="card-row"><div class="dot" style="background: var(--accent-blue);"></div><div class="label">Wed — Mike late (you do pickup)</div></div>
+            <div class="card-row"><div class="dot" style="background: var(--accent-green);"></div><div class="label">Thu — Emma soccer 4 PM</div></div>
+            <div class="card-row"><div class="dot" style="background: var(--accent-purple);"></div><div class="label">Fri — Art project due</div></div>
+          </div>
+
+          <div style="background: var(--accent-blue-light); border-radius: var(--radius); padding: 14px;">
+            <div style="font-size: 13px; font-weight: 600; color: var(--accent-blue); margin-bottom: 4px;">💡 Ellie noticed</div>
+            <div style="font-size: 12px; color: var(--text);">Mike has a late meeting Wednesday AND Emma has soccer Thursday. That's two evenings where you're solo with both kids. Want me to suggest easy dinners for those nights?</div>
+          </div>
+
+          <div class="tab-bar">
+            <div class="tab-item"><div class="tab-icon">🏠</div>Home</div>
+            <div class="tab-item"><div class="tab-icon">💬</div>Chat</div>
+            <div class="tab-item active"><div class="tab-icon">👨‍👩‍👧‍👦</div>Family</div>
+            <div class="tab-item"><div class="tab-icon">📬</div>Inbox</div>
+            <div class="tab-item"><div class="tab-icon">⚙️</div>You</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="phone-container">
+      <div class="phone-label">Meal Planning</div>
+      <div class="phone">
+        <div class="phone-screen" style="padding-bottom: 60px;">
+          <div class="status-bar"><span>6:01 PM</span><span>●●●</span></div>
+          <div style="font-size: 22px; font-weight: 700; margin-bottom: 4px;">Meals</div>
+          <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">Ellie's suggestions based on your week</div>
+
+          <div class="meal-card">
+            <div class="meal-time">Monday — Tonight</div>
+            <div class="meal-name">One-Pot Pasta Primavera</div>
+            <div class="meal-detail">20 min · Kid-friendly · Uses pasta sauce from your list</div>
+          </div>
+          <div class="meal-card" style="background: var(--accent-blue-light);">
+            <div class="meal-time" style="color: var(--accent-blue);">Wednesday — Solo Evening</div>
+            <div class="meal-name">Sheet Pan Chicken Nuggets + Veggies</div>
+            <div class="meal-detail">25 min · Zero effort · Both kids love it</div>
+          </div>
+          <div class="meal-card" style="background: var(--accent-purple-light);">
+            <div class="meal-time" style="color: var(--accent-purple);">Thursday — Post-Soccer</div>
+            <div class="meal-name">Instant Pot Taco Bowls</div>
+            <div class="meal-detail">15 min active · Dump and go · Set before soccer</div>
+          </div>
+
+          <div class="card">
+            <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px;">Why these meals?</div>
+            <div style="font-size: 12px; color: var(--text-muted); line-height: 1.5;">
+              Ellie picked these because:<br>
+              • Wed/Thu you're solo — chose low-effort options<br>
+              • Emma doesn't like mushrooms (remembered)<br>
+              • Lucas is in a "nugget phase" (you mentioned last week)<br>
+              • Uses chicken + pasta sauce already on your list
+            </div>
+          </div>
+
+          <div style="display: flex; gap: 8px; margin-top: 12px;">
+            <button style="flex: 1; padding: 12px; border-radius: var(--radius-sm); background: var(--primary); color: #fff; border: none; font-size: 13px; font-weight: 600;">Add ingredients to list</button>
+            <button style="flex: 1; padding: 12px; border-radius: var(--radius-sm); background: var(--primary-light); color: var(--primary-dark); border: none; font-size: 13px; font-weight: 600;">Swap a meal</button>
+          </div>
+
+          <div class="tab-bar">
+            <div class="tab-item"><div class="tab-icon">🏠</div>Home</div>
+            <div class="tab-item"><div class="tab-icon">💬</div>Chat</div>
+            <div class="tab-item active"><div class="tab-icon">👨‍👩‍👧‍👦</div>Family</div>
+            <div class="tab-item"><div class="tab-icon">📬</div>Inbox</div>
+            <div class="tab-item"><div class="tab-icon">⚙️</div>You</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="annotation">
+    <div class="ann-label">Design Note</div>
+    <div class="ann-text">The Family module tackles "mental load" — the invisible work of household coordination that falls disproportionately on one person. Ellie cross-references everyone's schedules, remembers food preferences, and proactively flags conflicts. Meal planning uses what she knows (kid preferences, what's already in the shopping list, how busy each evening is). The "solo evening" detection is the kind of thoughtfulness that makes users feel truly understood.</div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════ -->
+<!-- SECTION: Money -->
+<!-- ════════════════════════════════════════ -->
+<div id="money" class="section">
+  <div class="section-header">
+    <h1>Add-on: Money & Budget</h1>
+    <p>Spending awareness, bill tracking, and saving goals — no spreadsheets, no jargon, just clarity.</p>
+  </div>
+  <div class="phone-grid">
+
+    <div class="phone-container">
+      <div class="phone-label">Money Overview</div>
+      <div class="phone">
+        <div class="phone-screen" style="padding-bottom: 60px;">
+          <div class="status-bar"><span>8:00 AM</span><span>●●●</span></div>
+          <div style="font-size: 22px; font-weight: 700; margin-bottom: 4px;">Money</div>
+          <div style="font-size: 13px; color: var(--text-muted); margin-bottom: 4px;">March 2026</div>
+
+          <div class="money-total">
+            <div class="sublabel">Spent so far</div>
+            <div class="amount">$3,247</div>
+            <div class="sublabel">of $4,200 budget</div>
+          </div>
+
+          <div class="money-bar">
+            <div class="money-bar-fill" style="width: 77%; background: linear-gradient(90deg, var(--accent-green), var(--accent-gold));"></div>
+          </div>
+          <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted); margin-bottom: 16px;">
+            <span>$953 remaining</span>
+            <span>2 days left in March</span>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Where it went</div>
+              <div class="card-action">Details</div>
+            </div>
+            <div class="money-category">
+              <div class="money-cat-dot" style="background: var(--primary);"></div>
+              <div class="money-cat-name">Housing</div>
+              <div class="money-cat-amt">$1,450</div>
+              <div class="money-cat-pct">45%</div>
+            </div>
+            <div class="money-category">
+              <div class="money-cat-dot" style="background: var(--accent-green);"></div>
+              <div class="money-cat-name">Groceries</div>
+              <div class="money-cat-amt">$620</div>
+              <div class="money-cat-pct">19%</div>
+            </div>
+            <div class="money-category">
+              <div class="money-cat-dot" style="background: var(--accent-blue);"></div>
+              <div class="money-cat-name">Kids</div>
+              <div class="money-cat-amt">$385</div>
+              <div class="money-cat-pct">12%</div>
+            </div>
+            <div class="money-category">
+              <div class="money-cat-dot" style="background: var(--accent-purple);"></div>
+              <div class="money-cat-name">Dining out</div>
+              <div class="money-cat-amt">$280</div>
+              <div class="money-cat-pct">9%</div>
+            </div>
+            <div class="money-category">
+              <div class="money-cat-dot" style="background: var(--accent-gold);"></div>
+              <div class="money-cat-name">Everything else</div>
+              <div class="money-cat-amt">$512</div>
+              <div class="money-cat-pct">15%</div>
+            </div>
+          </div>
+
+          <div class="tab-bar">
+            <div class="tab-item"><div class="tab-icon">🏠</div>Home</div>
+            <div class="tab-item"><div class="tab-icon">💬</div>Chat</div>
+            <div class="tab-item active"><div class="tab-icon">💰</div>Money</div>
+            <div class="tab-item"><div class="tab-icon">📬</div>Inbox</div>
+            <div class="tab-item"><div class="tab-icon">⚙️</div>You</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="phone-container">
+      <div class="phone-label">Ellie Money Chat</div>
+      <div class="phone">
+        <div class="phone-screen">
+          <div class="status-bar"><span>8:01 AM</span><span>●●●</span></div>
+          <div class="chat-container">
+            <div class="chat-messages" style="display: flex; flex-direction: column;">
+              <div class="chat-bubble ellie">Monthly check-in time! You're at $3,247 of your $4,200 budget with 2 days left. You'll come in under budget by about $150 if no surprises.
+                <br><br>A few things I noticed:
+                <br><br>📉 <b>Groceries down 12%</b> from last month — the meal planning is working!
+                <br>📈 <b>Dining out up $80</b> — three lunches with coworkers this month vs one last month
+                <br>💡 <b>Kids category</b> — the soccer cleats ($47) and art supplies ($32) were this month's extras</div>
+              <div class="chat-bubble user">Yeah the lunch thing got out of hand. But it's good for work relationships</div>
+              <div class="chat-bubble ellie">Totally fair — and honestly $280 for dining out isn't excessive. If you want to keep the work lunches but stay in range, one easy swap: bring lunch 2 days a week (saves ~$50/mo) and keep 2 lunch-out days guilt-free.
+                <br><br>No pressure to change anything though — you're under budget this month.</div>
+              <div class="chat-bubble user">That's actually a good idea. Can you remind me Sunday nights to prep lunches?</div>
+              <div class="chat-bubble ellie">Done! Sunday 7 PM — lunch prep reminder. I'll even suggest easy meal-prep ideas based on what's in your fridge (if you tell me what's there 😄)</div>
+            </div>
+            <div class="chat-input-bar">
+              <div class="chat-input">Message Ellie...</div>
+              <button class="chat-send">↑</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="phone-container">
+      <div class="phone-label">Bills & Savings</div>
+      <div class="phone">
+        <div class="phone-screen" style="padding-bottom: 60px;">
+          <div class="status-bar"><span>8:02 AM</span><span>●●●</span></div>
+          <div style="font-size: 22px; font-weight: 700; margin-bottom: 16px;">Bills & Goals</div>
+
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Upcoming Bills</div>
+            </div>
+            <div class="card-row">
+              <div class="dot" style="background: var(--accent-green);"></div>
+              <div class="label">Netflix</div>
+              <div class="meta">Apr 3 · $15.49</div>
+            </div>
+            <div class="card-row">
+              <div class="dot" style="background: var(--accent-green);"></div>
+              <div class="label">Electric bill</div>
+              <div class="meta">Apr 5 · ~$145</div>
+            </div>
+            <div class="card-row">
+              <div class="dot" style="background: var(--accent-gold);"></div>
+              <div class="label">Car insurance</div>
+              <div class="meta">Apr 15 · $189</div>
+            </div>
+            <div class="card-row">
+              <div class="dot" style="background: var(--accent-green);"></div>
+              <div class="label">Internet</div>
+              <div class="meta">Apr 20 · $65</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title">Saving Goals</div>
+              <div class="card-action">Add goal</div>
+            </div>
+            <div style="margin-bottom: 14px;">
+              <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                <span style="font-size: 13px; font-weight: 600;">Summer vacation fund</span>
+                <span style="font-size: 12px; color: var(--accent-green); font-weight: 600;">$1,200 / $2,000</span>
+              </div>
+              <div class="money-bar"><div class="money-bar-fill" style="width: 60%; background: var(--accent-green);"></div></div>
+              <div style="font-size: 11px; color: var(--text-muted);">$200/mo · On track for June</div>
+            </div>
+            <div>
+              <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                <span style="font-size: 13px; font-weight: 600;">Emergency fund</span>
+                <span style="font-size: 12px; color: var(--accent-blue); font-weight: 600;">$3,400 / $5,000</span>
+              </div>
+              <div class="money-bar"><div class="money-bar-fill" style="width: 68%; background: var(--accent-blue);"></div></div>
+              <div style="font-size: 11px; color: var(--text-muted);">$150/mo · On track for September</div>
+            </div>
+          </div>
+
+          <div class="insight-card" style="background: var(--accent-gold-light);">
+            <div class="insight-icon">💡</div>
+            <div class="insight-text"><b>Ellie tip:</b> You saved $73 on groceries this month with meal planning. At this rate, that's $876/year — almost half your summer vacation fund!</div>
+          </div>
+
+          <div class="tab-bar">
+            <div class="tab-item"><div class="tab-icon">🏠</div>Home</div>
+            <div class="tab-item"><div class="tab-icon">💬</div>Chat</div>
+            <div class="tab-item active"><div class="tab-icon">💰</div>Money</div>
+            <div class="tab-item"><div class="tab-icon">📬</div>Inbox</div>
+            <div class="tab-item"><div class="tab-icon">⚙️</div>You</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="annotation">
+    <div class="ann-label">Design Note</div>
+    <div class="ann-text">Money module is conversational budgeting, not a finance app. No bank linking required initially — users just tell Ellie what they spent, or forward receipts. Ellie spots patterns and makes gentle suggestions. The killer feature is cross-module integration: meal planning from Family module saving money shows up here. Bill reminders are proactive — Ellie tells you before things are due, not after. No financial jargon — "where it went" not "expense categorization."</div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════ -->
+<!-- SECTION: Integration -->
+<!-- ════════════════════════════════════════ -->
+<div id="integration" class="section">
+  <div class="section-header">
+    <h1>How It All Connects</h1>
+    <p>Every module feeds into Ellie's understanding. The more she knows, the more helpful she becomes.</p>
+  </div>
+  <div class="diagram-section">
+
+    <div class="arch-box">
+      <h3>🧠 Ellie's Brain — Shared Memory & Understanding</h3>
+      <div class="arch-row">
+        <div class="arch-chip chip-infra">Personality Engine</div>
+        <div class="arch-chip chip-infra">Conversation Memory</div>
+        <div class="arch-chip chip-infra">Pattern Recognition</div>
+        <div class="arch-chip chip-infra">Proactive Nudges</div>
+      </div>
+    </div>
+
+    <div class="arch-connector">↕</div>
+
+    <div class="arch-box" style="border-color: rgba(232,115,90,0.3);">
+      <h3>🌸 Base: Ellie Life — Free / $4.99/mo</h3>
+      <div class="arch-row">
+        <div class="arch-chip chip-core">Natural Chat</div>
+        <div class="arch-chip chip-core">Task Capture</div>
+        <div class="arch-chip chip-core">Life Organization</div>
+        <div class="arch-chip chip-core">Communication Filter</div>
+        <div class="arch-chip chip-core">Voice Notes</div>
+        <div class="arch-chip chip-core">Memory Browser</div>
+        <div class="arch-chip chip-core">Daily Check-ins</div>
+      </div>
+    </div>
+
+    <div class="arch-connector">+</div>
+
+    <div style="display: flex; gap: 16px; flex-wrap: wrap;">
+      <div class="arch-box" style="flex: 1; min-width: 260px; border-color: rgba(123,198,126,0.3);">
+        <h3>💚 Health & Wellness — $2.99/mo</h3>
+        <div class="arch-row">
+          <div class="arch-chip chip-health">Habit Tracking</div>
+          <div class="arch-chip chip-health">Sleep Patterns</div>
+          <div class="arch-chip chip-health">Mood Correlation</div>
+          <div class="arch-chip chip-health">Weekly Insights</div>
+          <div class="arch-chip chip-health">Gentle Nudges</div>
+        </div>
+      </div>
+      <div class="arch-box" style="flex: 1; min-width: 260px; border-color: rgba(107,163,214,0.3);">
+        <h3>👨‍👩‍👧‍👦 Family & Home — $2.99/mo</h3>
+        <div class="arch-row">
+          <div class="arch-chip chip-family">Family Profiles</div>
+          <div class="arch-chip chip-family">Schedule Coordination</div>
+          <div class="arch-chip chip-family">Meal Planning</div>
+          <div class="arch-chip chip-family">Conflict Detection</div>
+          <div class="arch-chip chip-family">Shared Lists</div>
+        </div>
+      </div>
+      <div class="arch-box" style="flex: 1; min-width: 260px; border-color: rgba(232,184,77,0.3);">
+        <h3>💰 Money & Budget — $2.99/mo</h3>
+        <div class="arch-row">
+          <div class="arch-chip chip-money">Spending Awareness</div>
+          <div class="arch-chip chip-money">Bill Reminders</div>
+          <div class="arch-chip chip-money">Saving Goals</div>
+          <div class="arch-chip chip-money">Monthly Check-ins</div>
+          <div class="arch-chip chip-money">Cross-module Savings</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top: 40px;">
+      <h3 style="color: #fff; font-size: 20px; margin-bottom: 24px; text-align: center;">Cross-Module Magic</h3>
+
+      <div class="flow-step">
+        <div class="flow-num">1</div>
+        <div class="flow-content">
+          <h4>Family + Money</h4>
+          <p>"Emma needs soccer cleats" triggers a Family task AND a budget category entry. Ellie suggests buying them on your Wednesday Target run to combine trips.</p>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-num">2</div>
+        <div class="flow-content">
+          <h4>Health + Family</h4>
+          <p>Ellie notices solo-parenting evenings correlate with worse sleep. She proactively suggests lighter schedules on those days and offers easy dinner ideas.</p>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-num">3</div>
+        <div class="flow-content">
+          <h4>Family + Money + Health</h4>
+          <p>Meal planning reduces grocery spending AND ensures the family eats better. Ellie connects the dots: "Your meal planning saved $73 this month and the kids ate vegetables 4 more times than last month."</p>
+        </div>
+      </div>
+      <div class="flow-step">
+        <div class="flow-num">4</div>
+        <div class="flow-content">
+          <h4>Core + Everything</h4>
+          <p>Morning mood check-in informs the day. Feeling "rough"? Health module adjusts expectations, Family module suggests Dad handles pickup, Money module skips the spending notification.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════ -->
+<!-- SECTION: Pricing -->
+<!-- ════════════════════════════════════════ -->
+<div id="pricing" class="section">
+  <div class="section-header">
+    <h1>Pricing</h1>
+    <p>Start free. Add what you need. Cancel anytime.</p>
+  </div>
+  <div class="pricing-grid">
+
+    <div class="pricing-card featured">
+      <div class="pc-icon">🌸</div>
+      <h3>Ellie Life</h3>
+      <div class="pc-desc">Your AI companion</div>
+      <div class="pc-price">Free</div>
+      <div class="pc-period">forever (limited) or $4.99/mo</div>
+      <ul class="pc-feat">
+        <li>Natural conversation with memory</li>
+        <li>Task capture from chat</li>
+        <li>Daily check-ins & nudges</li>
+        <li>Basic communication filter</li>
+        <li>Voice note transcription</li>
+        <li>Memory browser & control</li>
+      </ul>
+    </div>
+
+    <div class="pricing-card">
+      <div class="pc-icon">💚</div>
+      <h3>Health</h3>
+      <div class="pc-desc">Wellness tracking</div>
+      <div class="pc-price">+$2.99</div>
+      <div class="pc-period">per month</div>
+      <ul class="pc-feat">
+        <li>Conversation-based habit tracking</li>
+        <li>Sleep & mood pattern analysis</li>
+        <li>Weekly wellness insights</li>
+        <li>Gentle accountability nudges</li>
+        <li>Correlation engine</li>
+      </ul>
+    </div>
+
+    <div class="pricing-card">
+      <div class="pc-icon">👨‍👩‍👧‍👦</div>
+      <h3>Family</h3>
+      <div class="pc-desc">Home coordination</div>
+      <div class="pc-price">+$2.99</div>
+      <div class="pc-period">per month</div>
+      <ul class="pc-feat">
+        <li>Family member profiles</li>
+        <li>Schedule conflict detection</li>
+        <li>Smart meal planning</li>
+        <li>Shared shopping lists</li>
+        <li>Mental load reduction</li>
+      </ul>
+    </div>
+
+    <div class="pricing-card">
+      <div class="pc-icon">💰</div>
+      <h3>Money</h3>
+      <div class="pc-desc">Budget awareness</div>
+      <div class="pc-price">+$2.99</div>
+      <div class="pc-period">per month</div>
+      <ul class="pc-feat">
+        <li>Conversational budgeting</li>
+        <li>Bill reminders & tracking</li>
+        <li>Saving goal progress</li>
+        <li>Monthly spending check-ins</li>
+        <li>Cross-module savings insights</li>
+      </ul>
+    </div>
+
+  </div>
+
+  <div style="text-align: center; margin-top: 40px; max-width: 600px; margin-left: auto; margin-right: auto;">
+    <div style="background: rgba(232,115,90,0.1); border: 1px solid rgba(232,115,90,0.2); border-radius: 16px; padding: 24px;">
+      <div style="font-size: 18px; font-weight: 700; color: #fff; margin-bottom: 8px;">Everything Bundle</div>
+      <div style="font-size: 32px; font-weight: 700; color: var(--primary);">$9.99<span style="font-size: 14px; color: rgba(255,255,255,0.4);">/mo</span></div>
+      <div style="font-size: 13px; color: rgba(255,255,255,0.5); margin-top: 4px;">Save $3/mo vs. individual add-ons</div>
+    </div>
+  </div>
+
+  <div class="annotation" style="margin-top: 40px;">
+    <div class="ann-label">Business Model Notes</div>
+    <div class="ann-text">
+      <b>Free tier:</b> Full chat + limited memory (30 days) + 3 tasks/day. Enough to feel the magic.<br>
+      <b>Paid base ($4.99):</b> Unlimited memory, unlimited tasks, advanced comm filter, priority responses.<br>
+      <b>Add-ons ($2.99 each):</b> Low commitment, easy to try. Cross-module features incentivize the bundle.<br>
+      <b>Bundle ($9.99):</b> Clear value vs $13.96 a la carte. Target ARPU: $8-10/mo.<br>
+      <b>Key insight:</b> The more modules someone uses, the more Ellie understands about their life, making the product harder to leave. This is a healthy moat — the AI genuinely gets better with more context.
+    </div>
+  </div>
+</div>
+
+<script>
+function showSection(id) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  event.target.closest('.nav-tab').classList.add('active');
+  window.scrollTo(0, 0);
+}
+</script>
+
+</body>
+</html>

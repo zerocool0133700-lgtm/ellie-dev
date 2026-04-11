@@ -81,7 +81,7 @@ export interface RoundTableOrchestratorDeps {
 // ── Configuration ───────────────────────────────────────────────
 
 export interface RoundTableConfig {
-  /** Timeout per phase in ms. Default: 120000 (2 min). */
+  /** Timeout per phase in ms. Default: 600000 (10 min). */
   phaseTimeoutMs: number;
   /** Timeout for the entire session in ms. Default: 900000 (15 min). */
   sessionTimeoutMs: number;
@@ -92,7 +92,7 @@ export interface RoundTableConfig {
 }
 
 const DEFAULT_CONFIG: RoundTableConfig = {
-  phaseTimeoutMs: 120_000,
+  phaseTimeoutMs: 600_000,
   sessionTimeoutMs: 900_000,
   conveneAgent: "strategy",
   deliverAgent: "strategy",

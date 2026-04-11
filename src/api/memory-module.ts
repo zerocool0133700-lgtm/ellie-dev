@@ -455,11 +455,17 @@ export async function getHealth(
 ): Promise<void> {
   try {
     const { getMemoryHealth } = await import("../ums/consumers/memory.ts");
+    const { getMemorySearchHealth } = await import("../memory.ts");
     const health = getMemoryHealth();
+    const searchHealth = getMemorySearchHealth();
 
     // Compute overall health grade
     let grade: "good" | "fair" | "poor" = "good";
     const issues: string[] = [];
+
+    // ELLIE-1425: Search outage degrades health grade
+    if (!searchHealth.searchAvailable) { grade = "poor"; issues.push("Memory search unavailable — dedup paused"); }
+    else if (searchHealth.outageCount > 0) { if (grade !== "poor") grade = "fair"; issues.push(`${searchHealth.outageCount} search outage(s) detected`); }
 
     if (health.conflictRate > 0.1) { grade = "poor"; issues.push("High conflict rate"); }
     else if (health.conflictRate > 0.05) { grade = "fair"; issues.push("Moderate conflict rate"); }
@@ -473,7 +479,7 @@ export async function getHealth(
 
     if (health.staleFacts > 10) { if (grade !== "poor") grade = "fair"; issues.push(`${health.staleFacts} stale facts`); }
 
-    res.json({ success: true, grade, issues, ...health });
+    res.json({ success: true, grade, issues, search: searchHealth, ...health });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Health check failed" });
   }

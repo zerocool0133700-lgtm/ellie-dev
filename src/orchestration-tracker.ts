@@ -36,6 +36,7 @@ export interface RunState {
   pid?: number;
   channel?: string;
   message?: string;
+  thread_id?: string;  // ELLIE-1374
 }
 
 // ── In-memory state ────────────────────────────────────────

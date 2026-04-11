@@ -63,7 +63,7 @@ export interface DiscussDeps {
 
 /** Configuration for the discuss phase. */
 export interface DiscussConfig {
-  /** Timeout per formation in ms. Default: 120000 (2 min). */
+  /** Timeout per formation in ms. Default: 600000 (10 min). */
   formationTimeoutMs: number;
   /** Maximum concurrent formations. Default: 5. */
   maxConcurrent: number;
@@ -72,7 +72,7 @@ export interface DiscussConfig {
 }
 
 const DEFAULT_CONFIG: DiscussConfig = {
-  formationTimeoutMs: 120_000,
+  formationTimeoutMs: 600_000,
   maxConcurrent: 5,
   minSuccessful: 1,
 };

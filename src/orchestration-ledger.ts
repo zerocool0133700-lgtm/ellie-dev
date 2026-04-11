@@ -89,7 +89,8 @@ export type OrchestrationEventType =
   | "failed"
   | "cancelled"
   | "retried"
-  | "timeout";
+  | "timeout"
+  | "stalled";
 
 export interface OrchestrationEvent {
   id: string;
@@ -125,7 +126,7 @@ export function emitEvent(
     await withDbTimeout(
       () => sql`
         INSERT INTO orchestration_events (run_id, event_type, agent_type, work_item_id, payload)
-        VALUES (${runId}, ${eventType}, ${agentType || null}, ${workItemId || null}, ${JSON.stringify(payload || {})})
+        VALUES (${runId}, ${eventType}, ${agentType || null}, ${workItemId || null}, ${sql.json(payload || {})})
       `,
       `emitEvent:${eventType}`,
     );

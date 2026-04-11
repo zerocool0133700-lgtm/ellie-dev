@@ -37,11 +37,14 @@ export async function expireStaleAgentSessions(sb: SupabaseClient): Promise<void
 export async function graduateMemories(sb: SupabaseClient): Promise<number> {
   // Fix #4: Fetch facts that haven't been graduated yet
   // Two queries: corroborated facts + high-confidence non-graduated facts
+  // ELLIE-1428: Fix PostgREST filter — .not("metadata->>graduated", "eq", "true") returns 0 rows
+  // because NULL != 'true' evaluates to NULL (not TRUE) in SQL, so NOT(NULL) = NULL = excluded.
+  // Use .or() to correctly match rows where graduated is either null or not 'true'.
   const { data: candidates, error } = await sb
     .from("memory")
     .select("id, content, type, source_agent, visibility, metadata, created_at")
     .eq("type", "fact")
-    .not("metadata->>graduated", "eq", "true")
+    .or("metadata->>graduated.is.null,metadata->>graduated.neq.true")
     .order("created_at", { ascending: false })
     .limit(50);
 
@@ -73,18 +76,34 @@ export async function graduateMemories(sb: SupabaseClient): Promise<number> {
       const graduatingMeta = { ...(fact.metadata ?? {}), graduating: true };
       await sb.from("memory").update({ metadata: graduatingMeta }).eq("id", fact.id);
 
-      // Write to Forest
-      await writeMemory({
+      // Write to Forest — router auto-classifies scope from content
+      // Preserve original created_at so timeline is accurate
+      const forestMemory = await writeMemory({
         content: fact.content,
         type: 'fact',
         confidence: 0.7,
         source_agent_species: fact.source_agent ?? undefined,
+        created_at: fact.created_at,
         metadata: {
           graduated_from: 'supabase',
           supabase_id: fact.id,
           graduated_at: new Date().toISOString(),
         },
       });
+
+      // Index into ES so context builder picks it up immediately
+      try {
+        const { indexMemory, classifyDomain } = await import("./elasticsearch.ts");
+        await indexMemory({
+          id: forestMemory.id,
+          content: fact.content,
+          type: 'fact',
+          domain: classifyDomain(fact.content),
+          created_at: fact.created_at,
+          scope_path: forestMemory.scope_path ?? undefined,
+          metadata: { source: 'shared_memories', scope_path: '2' },
+        });
+      } catch { /* ES indexing is non-fatal */ }
 
       // Mark as fully graduated in Supabase
       await sb.from("memory").update({

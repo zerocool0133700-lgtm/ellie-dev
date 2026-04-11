@@ -20,6 +20,7 @@ import { getRiverContextForAgent } from "./context-sources.ts";
 import type { PlaybookContext } from "./playbook.ts";
 import { withRetry, classifyError } from "./dispatch-retry.ts";
 import { getAdviceForDispatch, enrichPromptWithAdvice } from "./dispatch-advice-injector.ts";
+import { checkReadiness, formatReadinessResult } from "./dispatch-readiness.ts";
 import { enqueue, getQueueDepth } from "./dispatch-queue.ts";
 import { withTrace, getTraceId, generateTraceId } from "./trace.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
@@ -29,6 +30,7 @@ import { recordUsage, shouldBlock } from "./creature-cost-tracker.ts";
 import { startCreature, failCreature, completeCreature, dispatchPushCreature, writeJobCompletionMetric } from "../../ellie-forest/src/index";
 import { postCreatureEvent, postJobEvent } from "./channels/discord/observation.ts";
 import { RELAY_BASE_URL } from "./relay-config.ts";
+import { persistCreatureFindings } from "./creature-findings.ts";
 import { logToolUsage } from "./tool-usage-audit.ts";
 import {
   spawnSession,
@@ -62,6 +64,10 @@ export interface TrackedDispatchOpts {
     env?: string[];
     binds?: string[];
   };
+  /** ELLIE-1268: Override readiness check config (e.g. strictMode for overnight). */
+  readinessConfig?: Partial<import("./dispatch-readiness.ts").ReadinessConfig>;
+  /** Internal: tracks how many times this dispatch has been re-queued. */
+  _retryCount?: number;
 }
 
 export interface TrackedDispatchResult {
@@ -88,6 +94,7 @@ export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispat
       gchatSpaceName: opts.playbookCtx.gchatSpaceName,
     };
 
+    const retryCount = opts._retryCount ?? 0;
     const { position } = enqueue({
       id: queueId,
       agentType: opts.agentType,
@@ -95,10 +102,11 @@ export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispat
       channel: opts.channel,
       message: opts.message,
       enqueuedAt: Date.now(),
+      retryCount,
       notifyCtx,
       execute: () => {
-        // Re-dispatch when the current run completes
-        executeTrackedDispatch(opts);
+        // Re-dispatch when the current run completes (increment retry count)
+        executeTrackedDispatch({ ...opts, _retryCount: retryCount + 1 });
       },
     });
 
@@ -107,6 +115,7 @@ export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispat
       existingRunId: existingRun.runId.slice(0, 8),
       requestedAgent: opts.agentType,
       queuePosition: position,
+      retryCount,
     });
 
     notify(notifyCtx, {
@@ -128,6 +137,7 @@ export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispat
       gchatSpaceName: opts.playbookCtx.gchatSpaceName,
     };
 
+    const retryCount2 = opts._retryCount ?? 0;
     const { position } = enqueue({
       id: queueId,
       agentType: opts.agentType,
@@ -135,9 +145,10 @@ export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispat
       channel: opts.channel,
       message: opts.message,
       enqueuedAt: Date.now(),
+      retryCount: retryCount2,
       notifyCtx,
       execute: () => {
-        executeTrackedDispatch(opts);
+        executeTrackedDispatch({ ...opts, _retryCount: retryCount2 + 1 });
       },
     });
 
@@ -146,6 +157,7 @@ export function executeTrackedDispatch(opts: TrackedDispatchOpts): TrackedDispat
       activeCount,
       maxConcurrent: MAX_CONCURRENT_DISPATCHES,
       queuePosition: position,
+      retryCount: retryCount2,
     });
 
     notify(notifyCtx, {
@@ -252,6 +264,30 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
     }
 
     emitEvent(runId, "progress", agentType, workItemId, { step: "ticket_fetched", ticket_title: details.name });
+
+    // 1b. Pre-dispatch readiness validation (ELLIE-1268)
+    const readiness = checkReadiness(details, opts.readinessConfig);
+    if (readiness.warnings.length > 0) {
+      const summary = formatReadinessResult(readiness, workItemId);
+      logger.warn("Dispatch readiness warnings", { workItemId, warnings: readiness.warnings });
+      emitEvent(runId, "progress", agentType, workItemId, { step: "readiness_warnings", warnings: readiness.warnings });
+    }
+    if (!readiness.ready) {
+      const summary = formatReadinessResult(readiness, workItemId);
+      logger.warn("Dispatch blocked by readiness check", { workItemId, blockers: readiness.blockers });
+      emitEvent(runId, "failed", agentType, workItemId, { error: "Readiness check failed", blockers: readiness.blockers });
+      endRun(runId, "failed");
+      if (jobId) {
+        await updateJob(jobId, { status: "failed", error_count: 1, current_step: null });
+        await appendJobEvent(jobId, "failed", { error: summary });
+      }
+      await notify(notifyCtx, {
+        event: "error",
+        workItemId,
+        telegramMessage: summary,
+      });
+      return;
+    }
 
     // 2. Notify dispatch
     await notify(notifyCtx, {
@@ -491,6 +527,52 @@ async function runDispatch(runId: string, opts: TrackedDispatchOpts): Promise<vo
       }).catch(err =>
         logger.warn("completeCreature failed (non-fatal)", { creature_id: sessionIds.creature_id, err: err.message })
       );
+      // ELLIE-1428 Phase 2: Auto-persist creature findings to Forest
+      persistCreatureFindings({
+        creatureId: sessionIds.creature_id,
+        treeId: sessionIds.tree_id,
+        entityId: sessionIds.entity_id,
+        result: {
+          response_preview: responsePreview,
+          duration_ms: durationMs,
+          work_item_id: workItemId,
+        },
+        agentName: agentType,
+        workItemId,
+      }).catch(err =>
+        logger.warn("persistCreatureFindings failed (non-fatal)", { err: err instanceof Error ? err.message : String(err) })
+      );
+      // ELLIE-1428 Phase 2: Auto-link trees via vines when dispatching
+      if (sessionIds.tree_id && workItemId) {
+        try {
+          const { createLink } = await import("../../ellie-forest/src/vines.ts");
+          const { default: forestSql } = await import("../../ellie-forest/src/db.ts");
+          const siblings = await forestSql<{ id: string }[]>`
+            SELECT id FROM trees
+            WHERE work_item_id = ${workItemId}
+              AND id != ${sessionIds.tree_id}
+              AND state NOT IN ('archived', 'composted')
+            LIMIT 3
+          `;
+          for (const sibling of siblings) {
+            await createLink({
+              source_tree_id: sessionIds.tree_id,
+              target_tree_id: sibling.id,
+              link_type: 'related',
+              confidence: 0.8,
+              note: `Sibling dispatches for ${workItemId}`,
+              metadata: { auto_linked: true, work_item_id: workItemId },
+            }).catch(() => {});
+          }
+          if (siblings.length > 0) {
+            logger.info("Auto-linked trees via vines", {
+              tree_id: sessionIds.tree_id,
+              siblings: siblings.length,
+              work_item_id: workItemId,
+            });
+          }
+        } catch { /* vine linking is non-fatal */ }
+      }
       // ELLIE-442: Post completed event to #creature-log
       postCreatureEvent("completed", { agentType, workItemId, durationMs, responsePreview });
     }

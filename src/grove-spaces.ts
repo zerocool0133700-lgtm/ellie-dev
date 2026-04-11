@@ -130,8 +130,9 @@ export async function provisionGrove(baseDir?: string): Promise<{ spaces: string
   // Ensure parent scope exists
   const parentPath = "2/grove";
   await sql`
-    INSERT INTO knowledge_scopes (path, name, level, parent_id, description)
-    VALUES (${parentPath}, 'Grove', 'topic',
+    INSERT INTO knowledge_scopes (path, name, scope_type_id, parent_id, description)
+    VALUES (${parentPath}, 'Grove',
+      (SELECT id FROM scope_types WHERE name = 'topic' LIMIT 1),
       (SELECT id FROM knowledge_scopes WHERE path = '2'),
       'Collaborative knowledge spaces')
     ON CONFLICT (path) DO NOTHING
@@ -148,8 +149,10 @@ export async function provisionGrove(baseDir?: string): Promise<{ spaces: string
     // Create knowledge scope
     const scopePath = `2/grove/${space}`;
     const [inserted] = await sql`
-      INSERT INTO knowledge_scopes (path, name, level, parent_id, description)
-      VALUES (${scopePath}, ${space}, 'grove', ${parent?.id ?? null}, ${'Grove space: ' + space})
+      INSERT INTO knowledge_scopes (path, name, scope_type_id, parent_id, description)
+      VALUES (${scopePath}, ${space},
+        (SELECT id FROM scope_types WHERE name = 'grove' LIMIT 1),
+        ${parent?.id ?? null}, ${'Grove space: ' + space})
       ON CONFLICT (path) DO NOTHING
       RETURNING id
     `;

@@ -65,6 +65,7 @@ import { capturePrompt } from "./api/agent-prompts.ts";
 import type { FoundationRegistry } from "./foundation-registry.ts";
 import { parseFoundationCommand, executeFoundationCommand } from "./foundation-commands.ts";
 import { enterDispatchMode, exitDispatchMode } from "./tool-approval.ts";
+import type { SurfaceContext } from "./surface-context.ts";
 
 const logger = log.child("ellie-chat");
 
@@ -153,6 +154,8 @@ import {
 import {
   getAgentStructuredContext, getAgentMemoryContext, getMaxMemoriesForModel,
   getLiveForestContext,
+  getScopedForestContext,   // NEW: Phase 3
+  resolveAgentScope,        // NEW: Phase 3
 } from "./context-sources.ts";
 import { getAgentMemorySummary } from "./agent-memory-store.ts";
 import {
@@ -186,8 +189,9 @@ import { getCreatureProfile } from "./creature-profile.ts";
 import { withTrace } from "./trace.ts";
 import { createJob, updateJob, appendJobEvent, verifyJobWork, estimateJobCost } from "./jobs-ledger.ts";
 import { checkContextPressure, shouldNotify, getCompactionNotice, checkpointSessionToForest } from "./api/session-compaction.ts";
+import { getSearchDegradationWarning } from "./memory.ts";
 import { resilientTask } from "./resilient-task.ts";
-import { primeWorkingMemoryCache } from "./working-memory.ts";
+import { primeWorkingMemoryCache, getSiblingThreadMemories, readWorkingMemory } from "./working-memory.ts";
 import { trackDispatchStart, trackDispatchComplete, trackDispatchFailure } from "./dispatch-commitment-tracker.ts";
 import { setPendingCommitmentsContext } from "./pending-commitments-prompt.ts";
 import { detectAndLogCommitments } from "./conversational-commitment-detector.ts";
@@ -210,6 +214,8 @@ import {
   classifyRoute,
   COMMAND_BAR_CHANNEL_ID,
 } from "./ellie-chat-utils.ts";
+import { getThread, getDefaultThread, getThreadParticipants, filterRosterByThread, buildCrossThreadAwareness } from "./thread-context.ts";
+import { buildDirectPrompt, runDirectChat } from "./direct-chat.ts";
 
 export async function handleEllieChatMessage(
   ws: WebSocket,
@@ -221,10 +227,12 @@ export async function handleEllieChatMessage(
   mode?: string,
   abortSignal?: AbortSignal,
   replyTo?: { id: string; text: string; role: string; agent?: string }, // ELLIE-1090
+  threadId?: string, // ELLIE-1374
+  surfaceContext?: SurfaceContext, // ELLIE-1455
 ): Promise<void> {
   // ELLIE-461: Top-level error boundary — any uncaught error gets a user-facing message
   try {
-    return await withTrace(async () => _handleEllieChatMessage(ws, text, phoneMode, image, channelId, clientId, mode, abortSignal, replyTo));
+    return await withTrace(async () => _handleEllieChatMessage(ws, text, phoneMode, image, channelId, clientId, mode, abortSignal, replyTo, threadId, surfaceContext));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Don't send error to user for aborted dispatches — they closed the connection
@@ -251,8 +259,27 @@ async function _handleEllieChatMessage(
   mode?: string,
   abortSignal?: AbortSignal,
   replyTo?: { id: string; text: string; role: string; agent?: string }, // ELLIE-1090
+  threadId?: string, // ELLIE-1374
+  surfaceContext?: SurfaceContext, // ELLIE-1455
 ): Promise<void> {
   const { bot, anthropic, supabase } = getRelayDeps();
+
+  // ELLIE-1374: Resolve thread
+  let thread: Awaited<ReturnType<typeof getThread>> = null;
+  let threadAgents: string[] | null = null;
+  if (threadId && supabase) {
+    thread = await getThread(supabase, threadId);
+    if (thread) {
+      threadAgents = await getThreadParticipants(supabase, thread.id);
+    }
+  }
+  if (!thread && supabase) {
+    thread = await getDefaultThread(supabase);
+    if (thread) {
+      threadAgents = await getThreadParticipants(supabase, thread.id);
+    }
+  }
+  const effectiveThreadId = thread?.id || null;
   logger.info("User message received", { phoneMode, hasImage: !!image, mode, channelId: channelId?.substring(0, 8) });
   acknowledgeChannel("ellie-chat");
   resetEllieChatIdleTimer();
@@ -267,7 +294,7 @@ async function _handleEllieChatMessage(
   const ecUser = wsAppUserMap.get(ws);
   const ecUserId = ecUser?.id || ecUser?.anonymous_id || undefined;
 
-  await saveMessage("user", text, image ? { image_name: image.name, image_mime: image.mime_type } : {}, "ellie-chat", ecUserId, clientId, "user");
+  await saveMessage("user", text, { ...(image ? { image_name: image.name, image_mime: image.mime_type } : {}), ...(effectiveThreadId ? { thread_id: effectiveThreadId } : {}) }, "ellie-chat", ecUserId, clientId, "user", effectiveThreadId || undefined);
   broadcastExtension({ type: "message_in", channel: "ellie-chat", preview: text.substring(0, 200) });
 
   // ELLIE-1276: Check if any dispatched agents are waiting for user answers (with disambiguation)
@@ -327,7 +354,7 @@ async function _handleEllieChatMessage(
 
   // Correction detection + calendar linking (ELLIE-250)
   if (supabase) {
-    const convId = await getOrCreateConversation(supabase, "ellie-chat", "general", channelId);
+    const convId = await getOrCreateConversation(supabase, "ellie-chat", "general", channelId, undefined, undefined, effectiveThreadId || undefined);
     if (convId) {
       // Correction detection — check if user is correcting last assistant response
       supabase.from("messages")
@@ -755,7 +782,7 @@ async function _handleEllieChatMessage(
       // Post-message psy assessment (ELLIE-330)
       runPostMessageAssessment(text, cleanedText, anthropic).catch(err => logger.error("Post-message assessment failed", err));
 
-      const phoneMemoryId = await saveMessage("assistant", cleanedText, {}, "ellie-chat", ecUserId);
+      const phoneMemoryId = await saveMessage("assistant", cleanedText, {}, "ellie-chat", ecUserId, undefined, undefined, effectiveThreadId || undefined);
       broadcastExtension({
         type: "message_out", channel: "ellie-chat",
         agent: "general",
@@ -899,14 +926,14 @@ async function _handleEllieChatMessage(
 
     if (isSpecialist && !isMultiStep && agentResult && process.env.COORDINATOR_MODE !== "true") {
       const ack = getSpecialistAck(ecRouteAgent);
-      const ackMemoryId = await saveMessage("assistant", ack, { agent: "general" }, "ellie-chat", ecUserId);
+      const ackMemoryId = await saveMessage("assistant", ack, { agent: "general" }, "ellie-chat", ecUserId, undefined, undefined, effectiveThreadId || undefined);
       deliverResponse(ws, { type: "response", text: ack, agent: "general", memoryId: ackMemoryId, ts: Date.now() });
       broadcastExtension({ type: "message_out", channel: "ellie-chat", agent: "general", preview: ack });
 
       // Fire-and-forget: specialist runs outside the queue
       // ELLIE-479: WS-disconnect abort not used — specialist survives WS close since it's already acked
       // ELLIE-482: queue-timeout signal passed so specialist can be aborted on queue timeout
-      runSpecialistAsync(ws, supabase, effectiveText, text, agentResult, imagePath, ellieChatWorkItem, channelId, channelProfile, queueSignal).catch(err => {
+      runSpecialistAsync(ws, supabase, effectiveText, text, agentResult, imagePath, ellieChatWorkItem, channelId, channelProfile, queueSignal, effectiveThreadId || undefined).catch(err => {
         logger.error("Specialist async error", err);
       });
 
@@ -915,7 +942,7 @@ async function _handleEllieChatMessage(
     }
 
     const ellieChatActiveAgent = getActiveAgent("ellie-chat");
-    const ecConvoId = await getOrCreateConversation(supabase!, "ellie-chat", "general", channelId) || undefined;
+    const ecConvoId = await getOrCreateConversation(supabase!, "ellie-chat", "general", channelId, undefined, undefined, effectiveThreadId || undefined) || undefined;
 
     // ── ELLIE-325/334: Mode detection — channel profile overrides regex detection ──
     const ecConvoKey = ecConvoId || "ellie-chat-default";
@@ -931,8 +958,21 @@ async function _handleEllieChatMessage(
     const shouldFetch = buildShouldFetch(contextMode, ellieChatActiveAgent);
     const ecCreatureProfile = getCreatureProfile(ellieChatActiveAgent); // needed for skill snapshot
 
+    // ── Layered Prompt (ELLIE-1442) ──
+    const useLayeredPrompt = process.env.LAYERED_PROMPT === "true";
+    let layeredContext: import("./prompt-layers/types").LayeredPromptResult | undefined;
+    if (useLayeredPrompt) {
+      try {
+        const { gatherLayeredContext } = await import("./ellie-chat-pipeline");
+        layeredContext = await gatherLayeredContext(text, channelId || "ellie-chat", ecRouteAgent || "ellie", supabase, surfaceContext);
+      } catch (err) {
+        const { log } = await import("./logger.ts");
+        log.child("layered-prompt").warn({ err }, "Layered prompt failed, falling back to standard pipeline");
+      }
+    }
+
     const { convoContext: ecConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext: ecQueueContext, liveForest } = await gatherContextSources(
-      supabase, ecConvoId, effectiveText, ellieChatActiveAgent, agentResult?.dispatch ?? null, ellieChatWorkItem, shouldFetch,
+      supabase, ecConvoId, effectiveText, ellieChatActiveAgent, agentResult?.dispatch ?? null, ellieChatWorkItem, shouldFetch, effectiveThreadId || undefined,
     );
     const recentMessages = ecConvoContext.text;
     if (agentResult?.dispatch.is_new && ecQueueContext) {
@@ -1060,7 +1100,7 @@ async function _handleEllieChatMessage(
         const { cleanedText: ellieChatOrcPlaybookClean, commands: ellieChatOrcPlaybookCmds } = extractPlaybookCommands(tier2Pipeline);
         // ELLIE-389: Save first to get memoryId, then send with it
         const { cleanedText: orcPreClean } = extractApprovalTags(ellieChatOrcPlaybookClean);
-        const orcMemoryId = await saveMessage("assistant", orcPreClean, { agent: orcAgent }, "ellie-chat", ecUserId);
+        const orcMemoryId = await saveMessage("assistant", orcPreClean, { agent: orcAgent }, "ellie-chat", ecUserId, undefined, undefined, effectiveThreadId || undefined);
         const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, ellieChatOrcPlaybookClean, session.sessionId, orcAgent, orcMemoryId);
 
         broadcastExtension({
@@ -1156,6 +1196,166 @@ async function _handleEllieChatMessage(
     // Prime cognitive load cache so buildPrompt can inject it (ELLIE-338)
     await getCognitiveLoadContext(supabase).catch(() => {});
 
+    // ELLIE-1374: Direct mode — bypass coordinator entirely
+    if (thread?.routing_mode === "direct" && thread.direct_agent) {
+      const directAgent = thread.direct_agent;
+      log.info("[direct-chat] Direct mode", { agent: directAgent, threadId: effectiveThreadId });
+
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "typing", agent: directAgent }));
+      }
+
+      try {
+        const wm = await readWorkingMemory({ agent: directAgent, thread_id: effectiveThreadId || undefined });
+        const wmSummary = wm ? Object.entries(wm.sections).filter(([, v]) => v).map(([k, v]) => `## ${k}\n${v}`).join("\n\n") : undefined;
+
+        // Cross-thread awareness
+        let crossThreadCtx: string | undefined;
+        if (effectiveThreadId) {
+          const siblings = await getSiblingThreadMemories(directAgent, effectiveThreadId);
+          if (siblings.length > 0 && supabase) {
+            const enriched = [];
+            for (const s of siblings) {
+              const t = await getThread(supabase, s.thread_id);
+              enriched.push({ thread_id: s.thread_id, thread_name: t?.name || "Unknown", context_anchors: s.context_anchors as string });
+            }
+            crossThreadCtx = buildCrossThreadAwareness(directAgent, effectiveThreadId, enriched) || undefined;
+          }
+        }
+
+        // ELLIE-1400: Load conversation history for the direct thread
+        let conversationHistory: string | undefined;
+        if (supabase && effectiveThreadId) {
+          const directConvoId = await getOrCreateConversation(supabase, "ellie-chat", directAgent, channelId, undefined, undefined, effectiveThreadId);
+          if (directConvoId) {
+            const convoResult = await getConversationMessages(supabase, directConvoId);
+            if (convoResult.text) {
+              conversationHistory = convoResult.text;
+              log.info("[direct-chat] Loaded conversation history", { threadId: effectiveThreadId, messageCount: convoResult.messageCount });
+            }
+          }
+        }
+
+        // ELLIE-1374: Load profile + relationship context
+        // Ellie gets full profile + relationship; other agents get a lighter version
+        let profileCtx: string | undefined;
+        let relationshipCtx: string | undefined;
+        {  // All agents get Dave's profile so they know who they're talking to
+          try {
+            const { readFile } = await import("fs/promises");
+            const { join } = await import("path");
+            profileCtx = await readFile(join(process.cwd(), "config", "profile.md"), "utf-8");
+          } catch { /* profile unavailable */ }
+
+          // ELLIE-1428: Fetch relationship context from Forest (scoped, weighted)
+          // Pull from Y/ (Dave's personal tree) and E/4/1 (Ellie's knowledge of Dave)
+          try {
+            const { readMemories: readForestMemories } = await import("../../ellie-forest/src/index.ts");
+            const [daveCtx, ellieKnowsDave] = await Promise.all([
+              readForestMemories({ query: "Dave values family identity how he thinks", scope_path: "Y", match_count: 10, match_threshold: 0.3 }),
+              readForestMemories({ query: "Dave relationship preferences working style", scope_path: "E/4/1", match_count: 5, match_threshold: 0.3 }),
+            ]);
+            const allCtx = [...daveCtx, ...ellieKnowsDave];
+            if (allCtx.length > 0) {
+              relationshipCtx = allCtx
+                .sort((a: any, b: any) => (b.weight || 0) - (a.weight || 0))
+                .slice(0, 15)
+                .map((m: any) => `- [${m.content_tier || m.type}, ${m.scope_path || "?"}] ${m.content.slice(0, 200)}`)
+                .join("\n");
+            }
+          } catch { /* Forest context non-fatal */ }
+
+          // Fetch the most recent conversation summary from the General thread
+          if (supabase) {
+            try {
+              const { data: recentConvos } = await supabase
+                .from("conversations")
+                .select("summary")
+                .eq("channel", "ellie-chat")
+                .not("summary", "is", null)
+                .order("last_message_at", { ascending: false })
+                .limit(1);
+              if (recentConvos?.[0]?.summary) {
+                relationshipCtx = (relationshipCtx || "") + `\n\n## Recent Conversation (from General thread)\n${recentConvos[0].summary}`;
+              }
+            } catch { /* summary unavailable */ }
+          }
+        }
+
+        // ELLIE-1428: Load Forest + memory context for direct chat (same ES path as coordinated mode)
+        let directForestCtx: string | undefined;
+        try {
+          const { searchElastic } = await import("./elasticsearch.ts");
+          const ctx = await searchElastic(text, { limit: 5, recencyBoost: true, channel: "ellie-chat", scope_path: resolveAgentScope(directAgent) });
+          if (ctx) directForestCtx = ctx;
+        } catch { /* ES context is non-fatal */ }
+
+        // ELLIE-1428 Phase 2: Semantic edge context for direct chat
+        let directRelatedCtx: string | undefined;
+        try {
+          const { getRelatedKnowledge } = await import("./context-sources.ts");
+          const related = await getRelatedKnowledge(text, { limit: 3 });
+          if (related) directRelatedCtx = related;
+        } catch { /* non-fatal */ }
+
+        // ELLIE-1428 Phase 3: Scoped Forest context for direct chat
+        let directScopedForestCtx: string | undefined;
+        try {
+          const scopedCtx = await getScopedForestContext(text, directAgent, { limit: 8 });
+          if (scopedCtx) directScopedForestCtx = scopedCtx;
+        } catch { /* non-fatal */ }
+
+        const prompt = buildDirectPrompt({
+          agent: directAgent,
+          message: text,
+          conversationHistory,
+          workingMemorySummary: wmSummary,
+          forestContext: [directForestCtx, directRelatedCtx, directScopedForestCtx].filter(Boolean).join("\n\n") || undefined,
+          crossThreadAwareness: crossThreadCtx,
+          profileContext: profileCtx,
+          relationshipContext: relationshipCtx,
+        });
+
+        const result = await runDirectChat(prompt, directAgent);
+
+        // ELLIE-1428: Run memory pipeline on direct chat responses (same as coordinator path)
+        // This ensures [REMEMBER:] tags, [GOAL:] tags, and conversation facts are captured
+        let processedResponse = result.response;
+        try {
+          const { processMemoryIntents } = await import("./memory.ts");
+          processedResponse = await processMemoryIntents(supabase, result.response, directAgent, "shared", []);
+        } catch { /* memory pipeline non-fatal */ }
+        try {
+          const { processResponseTags } = await import("./response-tag-processor.ts");
+          processedResponse = await processResponseTags(supabase, processedResponse, "ellie-chat");
+        } catch { /* tag processing non-fatal */ }
+
+        const memoryId = await saveMessage("assistant", processedResponse, { agent: directAgent, thread_id: effectiveThreadId }, "ellie-chat", ecUserId, undefined, undefined, effectiveThreadId || undefined);
+        const directPayload = {
+          type: "response",
+          text: processedResponse,
+          agent: directAgent,
+          thread_id: effectiveThreadId,
+          memoryId: memoryId || undefined,
+          ts: Date.now(),
+          duration_ms: result.duration_ms,
+        };
+        deliverResponse(ws, directPayload, ecUserId);
+        // ELLIE-1454: Also broadcast to all connected clients
+        broadcastToEllieChatClients(directPayload);
+      } catch (err) {
+        log.error("[direct-chat] Error", { error: String(err) });
+        deliverResponse(ws, {
+          type: "response",
+          text: "Something went wrong in direct chat. Please try again.",
+          agent: thread.direct_agent,
+          thread_id: effectiveThreadId,
+          ts: Date.now(),
+        }, ecUserId);
+      }
+      return;
+    }
+
     // ── COORDINATOR_MODE: async fire-and-forget coordinator path (ELLIE-1098) ──
     // Ack immediately, run coordinator in background, deliver via WebSocket when done.
     // This frees the message queue so new user messages can be processed.
@@ -1210,7 +1410,7 @@ async function _handleEllieChatMessage(
                     "Content-Type": "application/json",
                     "x-bridge-key": process.env.BRIDGE_KEY || "",
                   },
-                  body: JSON.stringify({ query, scope_path: "2" }),
+                  body: JSON.stringify({ query, scope_path: resolveAgentScope(ecRouteAgent) }),
                 });
                 const data = await resp.json() as { memories?: Array<{ content: string }> };
                 return data.memories?.map(m => m.content).join("\n") || "No results.";
@@ -1236,9 +1436,14 @@ async function _handleEllieChatMessage(
             coordinatorAgent: foundationRegistry?.getCoordinatorAgent() || "max",
             systemPrompt: (foundationRegistry ? await foundationRegistry.getCoordinatorPrompt() : null) || "You are Max, Dave's behind-the-scenes coordinator. Dave talks to Ellie — not you. Route efficiently, dispatch specialists, synthesize results in Ellie's voice.",
             model: foundationRegistry?.getBehavior()?.coordinator_model || coordAgentModel || "claude-sonnet-4-6",
-            agentRoster: foundationRegistry?.getAgentRoster() || ["james", "brian", "kate", "alan", "jason", "amy", "marcus"],
+            agentRoster: threadAgents
+              ? filterRosterByThread(foundationRegistry?.getAgentRoster() || ["james", "brian", "kate", "alan", "jason", "amy", "marcus", "ellie"], threadAgents)
+              : foundationRegistry?.getAgentRoster() || ["james", "brian", "kate", "alan", "jason", "amy", "marcus", "ellie"],
+            rosterFilter: threadAgents || undefined,
             deps: coordinatorDeps,
             workItemId: coordWorkItem,
+            threadId: effectiveThreadId || undefined,
+            surfaceContext: surfaceContext ?? undefined,  // ELLIE-1455 — from Task 4 plumbing
             resumeState: resumeState || undefined,
           });
 
@@ -1259,7 +1464,7 @@ async function _handleEllieChatMessage(
                   choices: paused.questionMetadata.choices,
                 })
               : coordinatorResult.response;
-            await saveMessage("assistant", formattedForSave, {}, "ellie-chat", ecUserId);
+            await saveMessage("assistant", formattedForSave, {}, "ellie-chat", ecUserId, undefined, undefined, effectiveThreadId || undefined);
             return;
           }
 
@@ -1270,16 +1475,52 @@ async function _handleEllieChatMessage(
           }
 
           const coordResponse = coordinatorResult.response || "I completed the request but didn't generate a response. Please try again.";
+
+          // ELLIE-1462: Extract contributing agents from coordinator dispatch envelopes
+          const contributors = coordinatorResult.envelopes
+            ? [...new Set(
+                coordinatorResult.envelopes
+                  .filter((e: any) => e.type === "specialist" && e.status === "completed")
+                  .map((e: any) => e.agent as string)
+              )]
+            : [];
+
           // ELLIE-1097: Use deliverResponse instead of raw ws.send — buffers on disconnect
-          const memoryId = await saveMessage("assistant", coordResponse, {}, "ellie-chat", ecUserId);
-          deliverResponse(ws, {
+          const memoryId = await saveMessage(
+            "assistant", coordResponse,
+            {
+              agent: "ellie",
+              ...(contributors.length > 0 ? { contributors } : {}),
+              ...(effectiveThreadId ? { thread_id: effectiveThreadId } : {}),
+            },
+            "ellie-chat", ecUserId,
+            undefined, "system",
+            effectiveThreadId || undefined,
+          );
+          const responsePayload: Record<string, unknown> = {
             type: "response",
             text: coordResponse,
             agent: "ellie",
+            contributors: contributors.length > 0 ? contributors : undefined, // ELLIE-1466: include contributor list in broadcast
+            thread_id: effectiveThreadId,
             memoryId: memoryId || undefined,
             ts: Date.now(),
             duration_ms: coordinatorResult.durationMs,
-          }, ecUserId);
+          };
+
+          // ELLIE-1455: Include surface_actions if Ellie called any surface tools
+          if (coordinatorResult.surfaceActions && coordinatorResult.surfaceActions.length > 0) {
+            responsePayload.surface_actions = coordinatorResult.surfaceActions;
+          }
+
+          // ELLIE-1455: Echo surface_origin so the originating panel can filter
+          if (surfaceContext?.surface_origin) {
+            responsePayload.surface_origin = surfaceContext.surface_origin;
+          }
+
+          deliverResponse(ws, responsePayload, ecUserId);
+          // ELLIE-1454: Also broadcast to all connected clients so any open tab gets the response
+          broadcastToEllieChatClients(responsePayload);
           log.info(
             `[coordinator] ellie-chat complete — iterations=${coordinatorResult.loopIterations} ` +
             `tokens_in=${coordinatorResult.totalTokensIn} tokens_out=${coordinatorResult.totalTokensOut} ` +
@@ -1340,6 +1581,7 @@ async function _handleEllieChatMessage(
       undefined, // fullWorkingMemory
       empathyGuidance || undefined,
       ecAgentLocalMemory || undefined,
+      layeredContext,
     );
 
     capturePrompt({
@@ -1485,6 +1727,10 @@ async function _handleEllieChatMessage(
       }
     }
 
+    // ELLIE-1425: Append search degradation warning if memory dedup is paused
+    const degradationWarning = getSearchDegradationWarning();
+    if (degradationWarning) rawResponse += `\n\n${degradationWarning}`;
+
     const response = await processMemoryIntents(supabase, rawResponse, agentResult?.dispatch.agent.name || "general", "shared", effectiveSessionIds);
     // ELLIE-649 Tier 2: Process response tags for conversation_facts
     const tier2Response = await import("./response-tag-processor.ts").then(m => m.processResponseTags(supabase, response, "ellie-chat"));
@@ -1494,7 +1740,7 @@ async function _handleEllieChatMessage(
     const ecAgent = agentResult?.dispatch.agent.name || "general";
     // ELLIE-389: Save first to get memoryId, then send with it
     const { cleanedText: ecPreClean } = extractApprovalTags(ecPlaybookClean);
-    const ecMemoryId = await saveMessage("assistant", ecPreClean, { agent: ecAgent }, "ellie-chat", ecUserId);
+    const ecMemoryId = await saveMessage("assistant", ecPreClean, { agent: ecAgent }, "ellie-chat", ecUserId, undefined, undefined, effectiveThreadId || undefined);
     const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, ecPlaybookClean, session.sessionId, ecAgent, ecMemoryId);
 
     broadcastExtension({
@@ -1573,6 +1819,7 @@ export async function runSpecialistAsync(
   channelId?: string,
   channelProfile?: import("./api/mode-profile.ts").ChannelContextProfile | null,
   queueSignal?: AbortSignal,
+  threadId?: string, // ELLIE-1374
 ): Promise<void> {
   const { bot, anthropic } = getRelayDeps();
   const agentName = agentResult.dispatch.agent.name;
@@ -1624,7 +1871,7 @@ export async function runSpecialistAsync(
 
     // Gather context (same sources as sync path)
     const ellieChatActiveAgent = getActiveAgent("ellie-chat");
-    const specConvoId = await getOrCreateConversation(supabase!, "ellie-chat", "general", channelId) || undefined;
+    const specConvoId = await getOrCreateConversation(supabase!, "ellie-chat", "general", channelId, undefined, undefined, threadId) || undefined;
 
     // ── ELLIE-325/334: Use channel profile or conversation mode ──
     const specConvoKey = specConvoId || "ellie-chat-default";
@@ -1635,7 +1882,7 @@ export async function runSpecialistAsync(
     const specCreatureProfile = getCreatureProfile(ellieChatActiveAgent); // needed for skill snapshot
 
     const { convoContext: specConvoContext, contextDocket, relevantContext, elasticContext, structuredContext, forestContext, agentMemory, queueContext: specQueueContext, liveForest } = await gatherContextSources(
-      supabase, specConvoId, effectiveText, ellieChatActiveAgent, agentResult.dispatch, workItemId, shouldFetch,
+      supabase, specConvoId, effectiveText, ellieChatActiveAgent, agentResult.dispatch, workItemId, shouldFetch, threadId,
     );
     const recentMessages = specConvoContext.text;
     if (agentResult.dispatch.is_new && specQueueContext) {
@@ -1841,6 +2088,10 @@ export async function runSpecialistAsync(
       }
     }
 
+    // ELLIE-1425: Append search degradation warning if memory dedup is paused
+    const specDegradationWarning = getSearchDegradationWarning();
+    if (specDegradationWarning) rawResponse += `\n\n${specDegradationWarning}`;
+
     const response = await processMemoryIntents(supabase, rawResponse, agentName, "shared", agentMemory.sessionIds);
     // ELLIE-649 Tier 2: Process response tags for conversation_facts
     const tier2Spec = await import("./response-tag-processor.ts").then(m => m.processResponseTags(supabase, response, "ellie-chat"));
@@ -1849,7 +2100,7 @@ export async function runSpecialistAsync(
     const { cleanedText: playClean, commands: playCmds } = extractPlaybookCommands(tier2Spec);
     // ELLIE-389: Save first to get memoryId, then send with it
     const { cleanedText: specPreClean } = extractApprovalTags(playClean);
-    const specMemoryId = await saveMessage("assistant", specPreClean, { agent: agentName }, "ellie-chat", ecUserId);
+    const specMemoryId = await saveMessage("assistant", specPreClean, { agent: agentName }, "ellie-chat", ecUserId, undefined, undefined, threadId || undefined);
     const { cleanedText, hadConfirmations } = sendWithApprovalsEllieChat(ws, playClean, session.sessionId, agentName, specMemoryId);
 
     broadcastExtension({
@@ -1912,7 +2163,7 @@ export async function runSpecialistAsync(
       appendJobEvent(jobId, "failed", { error: err instanceof Error ? err.message.slice(0, 500) : String(err) });
     }
     const errorMsg = `Sorry, the ${agentName} specialist ran into an issue. You can try again or rephrase.`;
-    const errMemoryId = await saveMessage("assistant", errorMsg, {}, "ellie-chat", ecUserId).catch(() => null);
+    const errMemoryId = await saveMessage("assistant", errorMsg, {}, "ellie-chat", ecUserId, undefined, undefined, threadId || undefined).catch(() => null);
     deliverResponse(ws, { type: "response", text: errorMsg, agent: agentName, memoryId: errMemoryId, ts: Date.now(), channelId });
     clearProcessing(ecUserId || "anonymous");
     exitDispatchMode();

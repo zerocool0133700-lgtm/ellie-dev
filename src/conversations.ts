@@ -51,6 +51,7 @@ export async function getOrCreateConversation(
   channelId?: string,
   userId?: string,
   initiatedBy: "user" | "system" | "agent" = "system",
+  threadId?: string,  // ELLIE-1374
 ): Promise<string | null> {
   try {
     const { data, error } = await supabase.rpc("get_or_create_conversation", {
@@ -68,6 +69,15 @@ export async function getOrCreateConversation(
     }
 
     const conversationId = data as string;
+
+    // ELLIE-1374: Tag conversation with thread_id
+    if (threadId && conversationId) {
+      await supabase
+        .from("conversations")
+        .update({ thread_id: threadId })
+        .eq("id", conversationId)
+        .is("thread_id", null);
+    }
 
     // ELLIE-232: Check for conversations the RPC just expired that need extraction.
     // The RPC sets status='expired' for idle conversations, skipping memory extraction.
@@ -222,21 +232,31 @@ Instructions:
 
 Return ONLY the summary text, nothing else.`;
 
-  try {
-    const summary = await callClaudeCLI(prompt);
+  // ELLIE-1402: Retry once on transient failure
+  const MAX_ATTEMPTS = 2;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const summary = await callClaudeCLI(prompt);
 
-    if (summary && summary.length > 10) {
-      await supabase
-        .from("conversations")
-        .update({ summary })
-        .eq("id", conversationId);
+      if (summary && summary.length > 10) {
+        await supabase
+          .from("conversations")
+          .update({ summary })
+          .eq("id", conversationId);
 
-      logger.info("Summary updated", { preview: summary.substring(0, 80) });
+        logger.info("Summary updated", { conversationId, attempt, preview: summary.substring(0, 80) });
+        return;
+      }
+      logger.warn("Summary generation returned empty/short result", { conversationId, attempt, length: summary?.length || 0 });
+    } catch (err) {
+      logger.warn("Summary generation failed", { conversationId, attempt, maxAttempts: MAX_ATTEMPTS, error: String(err) });
+      if (attempt < MAX_ATTEMPTS) {
+        // Brief pause before retry
+        await new Promise(r => setTimeout(r, 1000));
+      }
     }
-  } catch (err) {
-    logger.error("summary generation failed", { conversationId }, err);
-    // Non-fatal — conversation tracking continues without summary
   }
+  logger.warn("Summary generation exhausted all retries", { conversationId, attempts: MAX_ATTEMPTS });
 }
 
 /**
@@ -292,7 +312,7 @@ export async function promoteToRiver(
 
     const resp = await fetch("http://localhost:3001/api/bridge/river/write", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-bridge-key": process.env.BRIDGE_KEY || "" },
       body: JSON.stringify({
         path: doc.path,
         content: doc.content,
@@ -643,15 +663,39 @@ export async function getConversationMessages(
       // Medium — first 5 (for context anchoring) + last 35
       const head = messages.slice(0, 5).map(fmt);
       const tail = messages.slice(-35).map(fmt);
-      lines = [...head, `\n[... ${total - 40} earlier messages omitted ...]\n`, ...tail];
+      const dropped = total - 40;
+      logger.warn("Conversation truncated (41-100 range)", { conversationId, total, dropped, strategy: "head5+tail35" });
+      lines = [...head, `\n[... ${dropped} earlier messages omitted ...]\n`, ...tail];
     } else {
       // Long — first 5 + rolling summary (if available) + last 35
       const head = messages.slice(0, 5).map(fmt);
       const tail = messages.slice(-35).map(fmt);
-      const summaryLine = convo.summary
-        ? `\n[CONVERSATION SUMMARY (${total - 40} earlier messages): ${convo.summary}]\n`
-        : `\n[... ${total - 40} earlier messages omitted ...]\n`;
-      lines = [...head, summaryLine, ...tail];
+      const dropped = total - 40;
+      const hasSummary = !!convo.summary;
+
+      if (convo.summary) {
+        logger.warn("Conversation truncated (100+ range)", { conversationId, total, dropped, hasSummary: true, strategy: "head5+summary+tail35" });
+        lines = [...head, `\n[CONVERSATION SUMMARY (${dropped} earlier messages): ${convo.summary}]\n`, ...tail];
+      } else {
+        // ELLIE-1402: Fallback — include a sample of middle messages when no summary exists
+        // Take up to 10 messages from the middle to preserve some context
+        const middleStart = 5;
+        const middleEnd = total - 35;
+        const middleSample = messages.slice(middleStart, Math.min(middleStart + 10, middleEnd)).map(fmt);
+        const remainingDropped = middleEnd - middleStart - middleSample.length;
+        logger.warn("Conversation truncated (100+ range, no summary)", {
+          conversationId, total, dropped, hasSummary: false,
+          strategy: "head5+middle10+tail35",
+          middleSampled: middleSample.length,
+          middleDropped: remainingDropped,
+        });
+        lines = [
+          ...head,
+          ...middleSample,
+          `\n[... ${remainingDropped} additional messages omitted — summary generation failed or pending ...]\n`,
+          ...tail,
+        ];
+      }
     }
 
     const text = "CURRENT CONVERSATION:\n" + lines.join("\n");
@@ -660,6 +704,37 @@ export async function getConversationMessages(
     logger.error("getConversationMessages error", { conversationId }, err);
     return { text: "", messageCount: 0, conversationId };
   }
+}
+
+/**
+ * Load messages for a specific thread — true thread isolation (ELLIE-1458).
+ * Returns messages in the same format as getConversationMessages.
+ */
+export async function getThreadMessages(
+  supabase: SupabaseClient,
+  threadId: string,
+  limit: number = 50,
+): Promise<{ text: string; messageCount: number; conversationId: string }> {
+  const { data, error } = await supabase
+    .from("messages")
+    .select("id, role, content, metadata, created_at")
+    .eq("thread_id", threadId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error || !data || data.length === 0) {
+    return { text: "", messageCount: 0, conversationId: "" };
+  }
+
+  // Reverse to chronological order
+  const messages = (data as any[]).reverse();
+  const formatted = messages.map((m: any) => {
+    const role = m.role === "user" ? "Dave" : (m.metadata?.agent || "Ellie");
+    return `${role}: ${m.content}`;
+  }).join("\n\n");
+
+  const text = "CURRENT CONVERSATION:\n" + formatted;
+  return { text, messageCount: messages.length, conversationId: "" };
 }
 
 /**

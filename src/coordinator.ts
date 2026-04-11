@@ -20,6 +20,9 @@ import {
   type CompleteInput,
   type InvokeRecipeInput,
 } from "./coordinator-tools.ts";
+import type { SurfaceContext } from "./surface-context.ts";
+import { SURFACE_TOOL_DEFINITIONS, buildSurfaceAction, type SurfaceAction, type SurfaceToolName } from "./surface-tools.ts";
+import { renderSurfaceContext } from "./surface-context.ts";
 import {
   createEnvelope,
   completeEnvelope,
@@ -29,6 +32,11 @@ import {
 } from "./dispatch-envelope.ts";
 import { rebuildDispatchStateFromGTD } from "./gtd-recovery.ts";
 import { formatQuestionMessage } from "./telegram-question-format.ts";
+import { emitDispatchEvent } from "./dispatch-events.ts";
+import { writeOutcome } from "./dispatch-outcomes.ts";
+import { checkQueuedContext, clearQueuedContext } from "./dispatch-context-queue.ts";
+import { detectFileConflicts } from "./conflict-detector.ts";
+import { emitRoutingDecision, extractRoutingReasoning, journalRoutingDecision } from "./routing-observability.ts";
 
 const logger = log.child("coordinator");
 
@@ -73,6 +81,9 @@ export interface CoordinatorOpts {
   sessionTimeoutMs?: number;
   costCapUsd?: number;
   workItemId?: string;
+  threadId?: string;  // ELLIE-1374: thread context
+  rosterFilter?: string[];  // ELLIE-1374: thread participant filter (used in Task 9)
+  surfaceContext?: SurfaceContext | null;  // ELLIE-1455
   resumeState?: CoordinatorPausedState;  // ELLIE-1101: resume from ask_user pause
   _testResponses?: Array<{
     stop_reason: string;
@@ -120,7 +131,10 @@ export interface CoordinatorResult {
   hitSafetyRail: boolean;
   durationMs: number;
   paused?: CoordinatorPausedState;  // ELLIE-1101: set when ask_user pauses the loop
+  surfaceActions?: SurfaceAction[];  // ELLIE-1455
 }
+
+const SURFACE_TOOL_NAMES: ReadonlySet<string> = new Set(SURFACE_TOOL_DEFINITIONS.map(d => d.name));
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -164,7 +178,31 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
   const effectiveCoordinatorAgent = opts.coordinatorAgent
     ?? opts.registry?.getCoordinatorAgent()
     ?? "max";
-  const effectivePrompt = opts.registry ? await opts.registry.getCoordinatorPrompt() : systemPrompt;
+
+  // ELLIE-1455: Add surface action tools when a surface is attached
+  const effectiveTools = opts.surfaceContext
+    ? [...COORDINATOR_TOOL_DEFINITIONS, ...SURFACE_TOOL_DEFINITIONS]
+    : COORDINATOR_TOOL_DEFINITIONS;
+
+  // ELLIE-1452: Use layered prompt pipeline when flag is set
+  const useLayeredCoordinator = process.env.LAYERED_PROMPT === "true" && opts.registry;
+  let effectivePrompt: string;
+  if (useLayeredCoordinator) {
+    const { buildCoordinatorLayeredContext } = await import("./prompt-layers/coordinator.ts");
+    const layers = await buildCoordinatorLayeredContext(opts.registry!, opts.threadId, opts.surfaceContext);
+    // ELLIE-1455: surfaceContext (already includes its own "## SURFACE CONTEXT" heading) is injected
+    // between awareness and knowledge — same priority slot as ellie's prompt-builder.
+    const sections = [layers.identity, layers.awareness, layers.surfaceContext, layers.knowledge].filter(s => s);
+    effectivePrompt = sections.join("\n\n");
+    logger.info({ totalBytes: layers.totalBytes, hasSurfaceContext: !!opts.surfaceContext }, "Coordinator using layered prompt pipeline");
+  } else {
+    effectivePrompt = opts.registry ? await opts.registry.getCoordinatorPrompt(opts.threadId) : systemPrompt;
+    // ELLIE-1455: even on the non-layered fallback, prepend surface context if present
+    if (opts.surfaceContext) {
+      const surfaceBlock = renderSurfaceContext(opts.surfaceContext);
+      effectivePrompt = `${effectivePrompt}\n\n${surfaceBlock}`;
+    }
+  }
 
   const startTime = Date.now();
   const isTestMode = !!_testResponses;
@@ -172,9 +210,14 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
 
   // System prompt comes from the foundation registry (includes roster, recipes, behavior)
   // Only append roster if using a raw prompt (no registry)
-  const fullSystemPrompt = opts.registry
+  let fullSystemPrompt = opts.registry
     ? effectivePrompt
     : `${effectivePrompt}\n\n## Available Agents\n${effectiveRoster.join(", ")}`;
+
+  // ELLIE-1374: If a thread roster filter was passed, append a roster override to the prompt
+  if (opts.rosterFilter && opts.rosterFilter.length > 0) {
+    fullSystemPrompt += `\n\n## THREAD ROSTER OVERRIDE\nThis conversation is in a thread. You can ONLY dispatch to these agents: ${opts.rosterFilter.join(", ")}. Do not dispatch to any agent not in this list.`;
+  }
 
   // 1. Create coordinator context
   const ctx = new CoordinatorContext({
@@ -192,6 +235,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
   });
 
   const envelopes: DispatchEnvelope[] = [coordEnvelope];
+  const surfaceActions: SurfaceAction[] = [];  // ELLIE-1455
 
   // Tracking
   let totalTokensIn = 0;
@@ -295,6 +339,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
             model: effectiveModel,
             systemPrompt: ctx.getSystemPrompt(),
             messages: ctx.getMessages(),
+            tools: effectiveTools,  // ELLIE-1455
           });
           apiResponse = {
             stop_reason: anthropicResponse.stop_reason ?? "end_turn",
@@ -355,6 +400,21 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
     const otherCalls: Array<Record<string, unknown>> = [];
 
     for (const tool of toolUses) {
+      // ELLIE-1455: Surface tools — synthesize action, ack to LLM, accumulate for response
+      if (SURFACE_TOOL_NAMES.has(tool.name as string)) {
+        const action = buildSurfaceAction(
+          tool.name as SurfaceToolName,
+          tool.input as Record<string, unknown>,
+        );
+        surfaceActions.push(action);
+        ctx.addToolResult(
+          tool.id as string,
+          JSON.stringify({ status: "queued", proposal_id: action.proposal_id }),
+        );
+        logger.info("[surface] action queued", { tool: tool.name, proposal_id: action.proposal_id });
+        continue;
+      }
+
       if (tool.name === "complete") {
         // Handle complete tool — extract response, optionally promote
         const input = tool.input as unknown as CompleteInput;
@@ -471,6 +531,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
           hitSafetyRail: false,
           durationMs,
           paused: pausedState,
+          surfaceActions,  // ELLIE-1455
         };
       } else if (tool.name === "dispatch_agent") {
         dispatchCalls.push(tool);
@@ -508,6 +569,13 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
         const input = tool.input as unknown as DispatchAgentInput;
         const toolId = tool.id as string;
 
+        // Guard against missing required fields
+        if (!input.task || !input.agent) {
+          const errorMsg = `dispatch_agent requires both "agent" and "task" fields. Got agent="${input.agent}", task="${input.task}"`;
+          logger.warn("Dispatch missing required fields", { agent: input.agent, task: input.task });
+          return { toolId, result: errorMsg };
+        }
+
         // Validate agent is in roster
         if (!effectiveRoster.includes(input.agent)) {
           const errorMsg = `Agent "${input.agent}" is not in the roster. Available: ${effectiveRoster.join(", ")}`;
@@ -525,6 +593,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
           work_item_id: workItemId,
         });
 
+        // DEPRECATED: Remove after dashboard migrates to dispatch_event (ELLIE-1308)
         // ELLIE-1099: Send spawn_status so dashboard shows agent activity
         try {
           await deps.sendEvent({
@@ -536,6 +605,54 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
             ts: Date.now(),
           });
         } catch { /* best-effort */ }
+
+        // Unified dispatch event (ELLIE-1308)
+        emitDispatchEvent(specEnvelope.id, "dispatched", {
+          agent: input.agent,
+          title: input.task.slice(0, 200),
+          work_item_id: workItemId,
+          dispatch_type: "single",
+          thread_id: opts.threadId ?? null,
+        });
+
+        // ELLIE-1452: Emit routing decision with reasoning for observability
+        try {
+          const reasoning = extractRoutingReasoning(
+            apiResponse.content,
+            toolId,
+          );
+          const routingDecision = {
+            envelopeId: specEnvelope.id,
+            agentChosen: input.agent,
+            task: input.task,
+            reasoning,
+            agentsAvailable: effectiveRoster,
+            workItemId: workItemId ?? null,
+            threadId: opts.threadId ?? null,
+            timestamp: Date.now(),
+          };
+          emitRoutingDecision(routingDecision);
+          journalRoutingDecision(routingDecision);
+        } catch { /* best-effort observability */ }
+
+        // ELLIE-1325: Check for file conflicts with active dispatches
+        if (workItemId) {
+          try {
+            const conflicts = await detectFileConflicts(workItemId);
+            if (conflicts.length > 0) {
+              for (const conflict of conflicts) {
+                await deps.sendEvent({
+                  type: "conflict_warning",
+                  agent: input.agent,
+                  conflictAgent: conflict.activeAgent,
+                  conflictWorkItem: conflict.activeWorkItem,
+                  overlappingFiles: conflict.overlappingFiles,
+                  ts: Date.now(),
+                });
+              }
+            }
+          } catch { /* best-effort */ }
+        }
 
         // ELLIE-1152: Create GTD child item for dispatch tracking
         let gtdItem: { id: string } | null = null;
@@ -597,6 +714,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
             }
           }
 
+          // DEPRECATED: Remove after dashboard migrates to dispatch_event (ELLIE-1308)
           // ELLIE-1099: Send spawn_announcement so dashboard shows completion
           try {
             await deps.sendEvent({
@@ -614,6 +732,32 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
             });
           } catch { /* best-effort */ }
 
+          // Unified dispatch event (ELLIE-1308)
+          emitDispatchEvent(specEnvelope.id, specResult.status === "error" ? "failed" : "completed", {
+            agent: input.agent,
+            title: input.task.slice(0, 200),
+            work_item_id: workItemId,
+            dispatch_type: "single",
+            duration_ms: specResult.duration_ms,
+            cost_usd: completed.cost_usd,
+            thread_id: opts.threadId ?? null,
+          });
+
+          // Write dispatch outcome (ELLIE-1309, ELLIE-1459: include source_thread_id)
+          writeOutcome({
+            run_id: specEnvelope.id,
+            agent: input.agent,
+            work_item_id: workItemId,
+            dispatch_type: "single",
+            status: specResult.status === "error" ? "failed" : "completed",
+            summary: specResult.output?.slice(0, 1000) || null,
+            duration_ms: specResult.duration_ms,
+            tokens_in: specResult.tokens_used,
+            tokens_out: 0,
+            cost_usd: completed.cost_usd,
+            source_thread_id: opts.threadId ?? null,
+          });
+
           if (specResult.status === "error") {
             return {
               toolId,
@@ -623,6 +767,22 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
                 error: specResult.error || "Unknown specialist error",
               }),
             };
+          }
+
+          // ELLIE-1317: Check for queued context from Dave — auto-redispatch if present
+          try {
+            const coordSessionId = `coordinator-${Date.now().toString(36)}`;
+            const queuedMessages = await checkQueuedContext(coordSessionId, input.agent);
+            if (queuedMessages.length > 0) {
+              logger.info("Queued context found — auto-redispatching", { agent: input.agent, messageCount: queuedMessages.length });
+              await clearQueuedContext(coordSessionId, input.agent);
+              const redispatchTask = `Continue your previous work. Here are additional instructions from Dave that came in while you were working:\n\n${queuedMessages.map(m => `- ${m}`).join("\n")}\n\nYour previous result:\n${specResult.output?.slice(0, 2000) || "No output"}`;
+              const redispatchResult = await deps.callSpecialist(input.agent, redispatchTask, input.context, input.timeout_ms);
+              // Use the redispatch output instead
+              return { toolId, result: redispatchResult.output || specResult.output };
+            }
+          } catch (err) {
+            logger.warn("Queued context check failed — using original result", { agent: input.agent, error: err instanceof Error ? err.message : String(err) });
           }
 
           return {
@@ -717,6 +877,7 @@ export async function runCoordinatorLoop(opts: CoordinatorOpts): Promise<Coordin
     totalCostUsd,
     hitSafetyRail,
     durationMs,
+    surfaceActions,  // ELLIE-1455
   };
 }
 
@@ -817,6 +978,7 @@ async function callMessagesAPI(
     model: string;
     systemPrompt: string;
     messages: Anthropic.MessageParam[];
+    tools: Anthropic.Tool[];  // ELLIE-1455
   },
 ): Promise<Anthropic.Message> {
   return client.messages.create({
@@ -824,7 +986,7 @@ async function callMessagesAPI(
     max_tokens: 4096,
     system: opts.systemPrompt,
     messages: opts.messages,
-    tools: COORDINATOR_TOOL_DEFINITIONS,
+    tools: opts.tools,
   });
 }
 
@@ -878,6 +1040,7 @@ async function executeRecipe(
   const inputText = typeof recipeInput.input === "string" ? recipeInput.input : JSON.stringify(recipeInput.input);
   logger.info("Executing recipe", { name: recipe.name, pattern: recipe.pattern, agents });
 
+  // DEPRECATED: Remove after dashboard migrates to dispatch_event (ELLIE-1308)
   // Notify UI
   try {
     await deps.sendEvent({
@@ -993,6 +1156,7 @@ async function executeRecipe(
   const durationMs = Date.now() - startTime;
   logger.info("Recipe complete", { name: recipe.name, pattern: recipe.pattern, agents: agentOutputs.length, durationMs });
 
+  // DEPRECATED: Remove after dashboard migrates to dispatch_event (ELLIE-1308)
   // Notify UI of completion
   try {
     await deps.sendEvent({

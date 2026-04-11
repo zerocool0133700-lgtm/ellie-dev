@@ -200,10 +200,12 @@ import { handleCommsRoute } from "./api/routes/comms.ts";
 import { handleCalendarIntelRoute } from "./api/routes/calendar-intel.ts";
 import { handleRelationshipsRoute } from "./api/routes/relationships.ts";
 import { handleBriefingRoute } from "./api/routes/briefing.ts";
+import { handlePunchListRoute } from "./api/routes/punch-list.ts";
 import { handleAlertsRoute } from "./api/routes/alerts.ts";
 import { handleReactionsRoute } from "./api/routes/reactions.ts";
 import { handleEmojiPrefsRoute } from "./api/routes/emoji-prefs.ts";
 import { handleAgentMemoryRoute } from "./api/routes/agent-memory.ts";
+import { handleIngest as handleKnowledgeIngest, handlePurge as handleKnowledgePurge } from "./api/knowledge.ts";
 import { handleOsAuthRoute, parseOsAuthRoute } from "./os-auth/index.ts";
 import { getRedisClient } from "./os-auth/redis.ts";
 import { handleAvatarRoutes } from "./avatar-routes.ts";
@@ -1779,6 +1781,52 @@ export async function handleHttpRequest(req: IncomingMessage, res: ServerRespons
         res.end(JSON.stringify({ error: err?.message || "Failed to get orchestration status" }));
       }
     })();
+    return;
+  }
+
+  // ── Routing Observability — ELLIE-1452 ──
+
+  if (url.pathname === "/api/routing/decisions" && req.method === "GET") {
+    try {
+      const { handleGetRoutingDecisions } = await import("./routing-observability.ts");
+      const result = handleGetRoutingDecisions();
+      res.writeHead(result.status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result.body));
+    } catch (err: any) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: err?.message || "Failed to get routing decisions" }));
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/routing/feedback" && req.method === "POST") {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => { chunks.push(chunk); });
+    req.on("end", async () => {
+      try {
+        const parsed = JSON.parse(Buffer.concat(chunks).toString());
+        const { handleRoutingFeedback } = await import("./routing-observability.ts");
+        const result = await handleRoutingFeedback({ json: () => Promise.resolve(parsed) });
+        res.writeHead(result.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result.body));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Failed to process routing feedback" }));
+      }
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/routing/feedback" && req.method === "GET") {
+    try {
+      const { handleGetRoutingFeedback } = await import("./routing-observability.ts");
+      const result = handleGetRoutingFeedback();
+      res.writeHead(result.status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(result.body));
+    } catch (err: any) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: err?.message || "Failed to get routing feedback" }));
+    }
     return;
   }
 
@@ -3897,6 +3945,28 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Workshop debrief endpoint (ELLIE-1454)
+  if (url.pathname === "/api/workshop/debrief" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body);
+        const headers: Record<string, string | undefined> = {
+          "x-bridge-key": req.headers["x-bridge-key"] as string | undefined,
+        };
+        const { handleDebrief } = await import("./api/workshop.ts");
+        const result = await handleDebrief(data, headers);
+        res.writeHead(result.status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result.body));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
+    return;
+  }
+
   // Work session endpoints
   if (url.pathname.startsWith("/api/work-session/") && req.method === "POST") {
     let body = "";
@@ -4245,7 +4315,7 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
 
         switch (endpoint) {
           case "write":
-            await writeMemoryEndpoint(mockReq, mockRes, bot);
+            await writeMemoryEndpoint(mockReq, mockRes, bot, supabase);
             break;
           case "read":
             await readMemoryEndpoint(mockReq, mockRes, bot);
@@ -4275,6 +4345,113 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
         res.end(JSON.stringify({ error: "Internal server error" }));
       }
     });
+    return;
+  }
+
+  // Data Contracts API — contract builder endpoints (ELLIE-1532)
+  if (url.pathname.startsWith("/api/contracts/") && (req.method === "POST" || req.method === "GET")) {
+    const isPost = req.method === "POST";
+
+    const handleContractRequest = async (body?: string) => {
+      try {
+        let data: Record<string, unknown> = {};
+        if (isPost && body) {
+          try { data = JSON.parse(body); } catch {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Invalid JSON body" }));
+            return;
+          }
+        }
+
+        const endpoint = url.pathname.replace("/api/contracts/", "");
+
+        const {
+          contractCreateEndpoint, contractGetEndpoint, contractListEndpoint,
+          contractReviseEndpoint, contractHistoryEndpoint,
+          documentCreateEndpoint, documentGetEndpoint, documentListEndpoint,
+          documentReviseEndpoint, documentHistoryEndpoint,
+          contractRefAddEndpoint, contractRefListEndpoint,
+          documentRefAddEndpoint, documentRefListEndpoint,
+        } = await import("./api/data-contracts.ts");
+
+        const queryParams: Record<string, string> = {};
+        url.searchParams.forEach((v: string, k: string) => { queryParams[k] = v; });
+
+        const mockReq: ApiRequest = { body: data, query: queryParams };
+        const mockRes: ApiResponse = {
+          status: (code: number) => ({
+            json: (resData: unknown) => {
+              res.writeHead(code, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(resData));
+            },
+          }),
+          json: (resData: unknown) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(resData));
+          },
+        };
+
+        switch (endpoint) {
+          case "create":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await contractCreateEndpoint(mockReq, mockRes); break;
+          case "get":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await contractGetEndpoint(mockReq, mockRes); break;
+          case "list":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await contractListEndpoint(mockReq, mockRes); break;
+          case "revise":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await contractReviseEndpoint(mockReq, mockRes); break;
+          case "history":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await contractHistoryEndpoint(mockReq, mockRes); break;
+          case "documents/create":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await documentCreateEndpoint(mockReq, mockRes); break;
+          case "documents/get":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await documentGetEndpoint(mockReq, mockRes); break;
+          case "documents/list":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await documentListEndpoint(mockReq, mockRes); break;
+          case "documents/revise":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await documentReviseEndpoint(mockReq, mockRes); break;
+          case "documents/history":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await documentHistoryEndpoint(mockReq, mockRes); break;
+          case "refs/add":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await contractRefAddEndpoint(mockReq, mockRes); break;
+          case "refs/list":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await contractRefListEndpoint(mockReq, mockRes); break;
+          case "documents/refs/add":
+            if (!isPost) { res.writeHead(405); res.end(); return; }
+            await documentRefAddEndpoint(mockReq, mockRes); break;
+          case "documents/refs/list":
+            if (isPost) { res.writeHead(405); res.end(); return; }
+            await documentRefListEndpoint(mockReq, mockRes); break;
+          default:
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Unknown contracts endpoint" }));
+        }
+      } catch (err) {
+        logger.error("Contracts API error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    };
+
+    if (isPost) {
+      let body = "";
+      req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+      req.on("end", () => handleContractRequest(body));
+    } else {
+      handleContractRequest();
+    }
     return;
   }
 
@@ -5457,6 +5634,101 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // Thread API endpoints (ELLIE-1374)
+  if (url.pathname.startsWith("/api/threads")) {
+    let body = "";
+    req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
+    req.on("end", async () => {
+      try {
+        let data: Record<string, unknown> = {};
+        if (body) try { data = JSON.parse(body); } catch { /* ignore */ }
+
+        const pathParts = url.pathname.replace("/api/threads", "").split("/").filter(Boolean);
+        const threadId = pathParts[0] || undefined;
+        const subResource = pathParts[1] || undefined;
+        const subId = pathParts[2] || undefined;
+
+        const queryParams: Record<string, string> = {};
+        for (const [k, v] of url.searchParams.entries()) queryParams[k] = v;
+
+        const mockReq: ApiRequest = { body: data, query: queryParams, params: { id: threadId || null, agent: subId || null } };
+        let _statusCode = 200;
+        const mockRes: ApiResponse = {
+          status(code: number) { _statusCode = code; return { json: (d: unknown) => { res.writeHead(code, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); } }; },
+          json(d: unknown) { res.writeHead(_statusCode, { "Content-Type": "application/json" }); res.end(JSON.stringify(d)); },
+        };
+
+        const { listThreads, createThread, getThreadWithParticipants, addParticipant, removeParticipant, updateThread } =
+          await import("./api/threads.ts");
+
+        if (!threadId && req.method === "GET") {
+          const domainId = url.searchParams.get("domain_id") || undefined;
+          const result = await listThreads(supabase, { domain_id: domainId });
+          mockRes.json({ success: true, ...result });
+        } else if (!threadId && req.method === "POST") {
+          const { name, channel_id, domain_id, surface_id, routing_mode, direct_agent, agents, created_by } = data;
+          if (!name || !channel_id || !routing_mode) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "name, channel_id, and routing_mode are required" }));
+            return;
+          }
+          const result = await createThread(supabase, {
+            name: name as string,
+            channel_id: channel_id as string,
+            domain_id: domain_id as string | undefined,
+            surface_id: surface_id as string | undefined,
+            routing_mode: routing_mode as string,
+            direct_agent: direct_agent as string | undefined,
+            agents: (agents as string[]) ?? [],
+            created_by: created_by as string | undefined,
+          });
+          mockRes.json({ success: true, ...result });
+        } else if (threadId && subResource === "participants" && req.method === "POST") {
+          const { agent } = data;
+          if (!agent) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "agent is required" }));
+            return;
+          }
+          await addParticipant(supabase, threadId, agent as string);
+          mockRes.json({ success: true });
+        } else if (threadId && subResource === "participants" && req.method === "DELETE") {
+          if (!subId) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "agent param required" }));
+            return;
+          }
+          await removeParticipant(supabase, threadId, subId);
+          mockRes.json({ success: true });
+        } else if (threadId && !subResource && req.method === "PATCH") {
+          const { name, routing_mode, direct_agent } = data;
+          const updates: { name?: string; routing_mode?: string; direct_agent?: string | null } = {};
+          if (name !== undefined) updates.name = name as string;
+          if (routing_mode !== undefined) updates.routing_mode = routing_mode as string;
+          if (direct_agent !== undefined) updates.direct_agent = (direct_agent as string | null);
+          await updateThread(supabase, threadId, updates);
+          mockRes.json({ success: true });
+        } else if (threadId && req.method === "GET") {
+          const result = await getThreadWithParticipants(supabase, threadId);
+          if (!result) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Thread not found" }));
+            return;
+          }
+          mockRes.json({ success: true, ...result });
+        } else {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Unknown threads endpoint" }));
+        }
+      } catch (err) {
+        logger.error("Threads API error", err);
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
+      }
+    });
+    return;
+  }
+
   // Vault credential endpoints (ELLIE-32)
   if (url.pathname.startsWith("/api/vault/")) {
     let body = "";
@@ -5808,6 +6080,9 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
 
   // Briefing endpoints (ELLIE-316) — extracted to api/routes/briefing.ts
   if (await handleBriefingRoute(req, res, url, supabase, bot)) return;
+
+  // Punch List — collaborative daily working document
+  if (await handlePunchListRoute(req, res, url)) return;
 
   // Work Item Gardener endpoints (ELLIE-407)
   if (url.pathname === "/api/work-item-gardener/run" && req.method === "POST") {
@@ -6826,6 +7101,16 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // ── ELLIE-1471: Knowledge ingestion pipeline ──
+  if (url.pathname === "/api/knowledge/ingest" && req.method === "POST") {
+    (async () => { await handleKnowledgeIngest(req, res); })();
+    return;
+  }
+  if (url.pathname === "/api/knowledge/purge" && req.method === "DELETE") {
+    (async () => { await handleKnowledgePurge(req, res); })();
+    return;
+  }
+
   // ── ELLIE-1149: Overnight Task Approval/Rejection ────────
   if (url.pathname.startsWith("/api/overnight/tasks/") && req.method === "POST") {
     (async () => {
@@ -7162,6 +7447,34 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
     return;
   }
 
+  // GET /api/dispatches/snapshot — morning dashboard data (ELLIE-1328)
+  if (url.pathname === "/api/dispatches/snapshot" && req.method === "GET") {
+    (async () => {
+      try {
+        const { getRecentOutcomes } = await import("./dispatch-outcomes.ts");
+        const { getActiveRunStates } = await import("./orchestration-tracker.ts");
+
+        const recentOutcomes = await getRecentOutcomes(24, 50);
+        const activeRuns = getActiveRunStates().filter(r => r.status === "running");
+
+        const done = recentOutcomes.filter(o => o.status === "completed");
+        const failed = recentOutcomes.filter(o => o.status === "failed");
+
+        res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin) });
+        res.end(JSON.stringify({
+          done: done.map(o => ({ run_id: o.run_id, agent: o.agent, work_item_id: o.work_item_id, summary: o.summary?.slice(0, 200), created_at: o.created_at })),
+          active: activeRuns.map(r => ({ run_id: r.runId, agent: r.agentType, work_item_id: r.workItemId, started_at: r.startedAt })),
+          failed: failed.map(o => ({ run_id: o.run_id, agent: o.agent, work_item_id: o.work_item_id, summary: o.summary?.slice(0, 200), created_at: o.created_at })),
+          summary: { done: done.length, active: activeRuns.length, failed: failed.length, needs_attention: failed.length },
+        }));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Failed to build snapshot" }));
+      }
+    })();
+    return;
+  }
+
   // ELLIE-1277: Dispatch progress events — query Forest orchestration_events by dispatch_envelope_id
   const eventsMatch = url.pathname.match(/^\/api\/dispatches\/([^/]+)\/events$/);
   if (eventsMatch && req.method === "GET") {
@@ -7208,6 +7521,32 @@ If no Forest-worthy knowledge exists, return: { "candidates": [] }`;
       } catch (err: any) {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: err?.message || "Internal error" }));
+      }
+    })();
+    return;
+  }
+
+  // GET /api/dispatches/:run_id/outcome — ELLIE-1321
+  const outcomeMatch = url.pathname.match(/^\/api\/dispatches\/([^/]+)\/outcome$/);
+  if (outcomeMatch && req.method === "GET") {
+    const runId = outcomeMatch[1];
+    (async () => {
+      try {
+        const { readOutcomeWithParticipants } = await import("./dispatch-outcomes.ts");
+        const result = await readOutcomeWithParticipants(runId);
+        if (!result) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Outcome not found" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json", ...corsHeader(req.headers.origin as string | undefined) });
+        res.end(JSON.stringify({
+          ...result.outcome,
+          participants: result.participants.length > 0 ? result.participants : undefined,
+        }));
+      } catch (err: any) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err?.message || "Internal server error" }));
       }
     })();
     return;

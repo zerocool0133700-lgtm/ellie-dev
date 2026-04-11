@@ -152,7 +152,7 @@ export async function bridgeReadEndpoint(req: ApiRequest, res: ApiResponse) {
       scope_path: effectiveScopePath,
       tree_id,
       match_count: match_count ?? 10,
-      match_threshold: match_threshold ?? 0.7,
+      match_threshold: match_threshold ?? (scope_path ? 0.4 : 0.7),  // Lower threshold for scoped searches — scope itself is the filter
       category,
       cognitive_type,
       include_global: false,
@@ -472,6 +472,9 @@ export async function bridgePromoteEndpoint(req: ApiRequest, res: ApiResponse) {
       return res.status(404).json({ error: `Memory ${memory_id} not found` })
     }
 
+    // ELLIE-1428: Log before/after state for tier transitions
+    const previousTier = existing.memory_tier;
+
     let memory
     if (tier === 'core') {
       memory = await promoteToCore(memory_id)
@@ -484,7 +487,13 @@ export async function bridgePromoteEndpoint(req: ApiRequest, res: ApiResponse) {
       })
     }
 
-    logger.info(`${key.key_prefix} (${key.collaborator}) promoted ${memory_id.slice(0, 8)} to ${tier}`)
+    logger.info(`Tier promote: ${memory_id.slice(0, 8)} ${previousTier} → ${tier}`, {
+      memory_id,
+      from_tier: previousTier,
+      to_tier: tier,
+      collaborator: key.collaborator,
+      goal_status: memory.goal_status,
+    })
 
     return res.json({
       success: true,
@@ -516,6 +525,9 @@ export async function bridgeDemoteEndpoint(req: ApiRequest, res: ApiResponse) {
       return res.status(404).json({ error: `Memory ${memory_id} not found` })
     }
 
+    // ELLIE-1428: Log before/after state for tier transitions
+    const previousTier = existing.memory_tier;
+
     let memory
     if (existing.memory_tier === 'goals' && complete_goal) {
       memory = await completeGoal(memory_id, { demote_to_extended: true })
@@ -523,7 +535,13 @@ export async function bridgeDemoteEndpoint(req: ApiRequest, res: ApiResponse) {
       memory = await demoteToExtended(memory_id)
     }
 
-    logger.info(`${key.key_prefix} (${key.collaborator}) demoted ${memory_id.slice(0, 8)} to extended`)
+    logger.info(`Tier demote: ${memory_id.slice(0, 8)} ${previousTier} → extended`, {
+      memory_id,
+      from_tier: previousTier,
+      to_tier: 'extended',
+      collaborator: key.collaborator,
+      complete_goal: !!complete_goal,
+    })
 
     return res.json({
       success: true,

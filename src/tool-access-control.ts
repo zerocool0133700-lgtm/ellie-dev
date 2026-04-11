@@ -101,13 +101,16 @@ export const TOOL_CATEGORY_TO_MCP: Record<string, string[]> = {
  * Default MCP servers available to ALL agents regardless of configuration.
  * These are core coordination and logging tools that every agent needs.
  *
- * ELLIE-1110: Removed "plane" — Plane access must be explicitly granted
- * via agent tools_enabled config (plane_mcp or plane_lookup categories).
+ * "plane" is universal — CLAUDE.md documents all agents having Plane access.
+ * ELLIE-1110 previously restricted it, but this caused Kate/Amy (and any agent
+ * without explicit plane_mcp in tools_enabled) to lose Plane access entirely.
+ * Reverted: Plane is a coordination tool like Forest, not a privileged resource.
  */
 const ALWAYS_ALLOWED_TOOLS = [
   "forest-bridge",  // All agents can read/write to Forest
   "qmd",            // All agents can search River vault
   "memory",         // All agents can extract memories
+  "plane",          // All agents can access Plane (universal per CLAUDE.md)
 ];
 
 /**

@@ -292,7 +292,7 @@ export class RiverSink {
       `${this.baseUrl}/api/bridge/river/write`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-bridge-key": process.env.BRIDGE_KEY || "" },
         body: JSON.stringify({
           path: doc.path,
           content: fullContent,
@@ -308,7 +308,7 @@ export class RiverSink {
           `${this.baseUrl}/api/bridge/river/write`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", "x-bridge-key": process.env.BRIDGE_KEY || "" },
             body: JSON.stringify({
               path: doc.path,
               content: fullContent,

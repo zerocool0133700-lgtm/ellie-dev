@@ -16,10 +16,15 @@ import { spawn } from 'bun'
 import { readFile, writeFile as writeFileFn, mkdir } from 'fs/promises'
 import { join } from 'path'
 import { writeMemory, sql } from '../../../ellie-forest/src/index'
+import { authenticateBridgeKey as _authenticateBridgeKey } from './bridge.ts'
 import type { ApiRequest, ApiResponse } from './types.ts'
 import { log } from '../logger.ts'
 
 const logger = log.child('bridge-river')
+
+/** Auth function — exported for test injection via `_setBridgeAuth()`. */
+let bridgeAuth = _authenticateBridgeKey
+export function _setBridgeAuth(fn: typeof _authenticateBridgeKey) { bridgeAuth = fn }
 
 const QMD_BIN = '/home/ellie/.bun/bin/qmd'
 const RIVER_COLLECTION = 'ellie-river'
@@ -271,52 +276,121 @@ export async function getRiverDoc(docPath: string): Promise<string | null> {
 
 // ── Oak Catalog sync (called by relay.ts daily cron) ──────────────────────────
 
+export interface OakScopeEntry {
+  scope_path: string;
+  name: string;
+  count: number;
+  topFacts: string[];
+}
+
 /**
- * Scan QMD and write an updated document manifest to R/1 (Oak Catalog) scope.
- * Called daily by the Oak cron in relay.ts.
+ * Build Oak convergence index content from scope data.
+ * Pure function — no I/O.
+ */
+export function buildOakSummary(scopeData: OakScopeEntry[]): string {
+  const date = new Date().toISOString().slice(0, 10);
+  const totalMemories = scopeData.reduce((sum, s) => sum + s.count, 0);
+
+  const lines = [
+    `Oak Knowledge Index — ${scopeData.length} domains, ${totalMemories} total memories (${date})`,
+    "",
+  ];
+
+  for (const scope of scopeData) {
+    lines.push(`## ${scope.name} (${scope.scope_path}) — ${scope.count} memories`);
+    for (const fact of scope.topFacts.slice(0, 5)) {
+      lines.push(`  - ${fact}`);
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Scan QMD and write an updated document manifest + knowledge convergence index
+ * to R/1 (Oak Catalog) scope. Called daily by the Oak cron in relay.ts.
  */
 export async function syncOakCatalog(): Promise<void> {
+  const forestSql = (await import("../../../ellie-forest/src/db.ts")).default;
+
+  // Step 1: QMD catalog (existing behavior)
   const { stdout, ok } = await qmdRun(['ls', RIVER_COLLECTION])
-  if (!ok) {
-    logger.warn('Oak Catalog sync: qmd ls failed')
-    return
+  const qmdEntries: string[] = []
+  if (ok) {
+    for (const line of stdout.split('\n')) {
+      const trimmed = line.trim()
+      if (trimmed && trimmed.includes('qmd://')) qmdEntries.push(trimmed)
+    }
   }
 
-  const entries: string[] = []
-  for (const line of stdout.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed || !trimmed.includes('qmd://')) continue
-    entries.push(trimmed)
+  // Step 2: Scope convergence — top memories per active scope
+  const scopeStats = await forestSql`
+    SELECT
+      ks.path AS scope_path,
+      ks.name,
+      COUNT(sm.id)::int as memory_count
+    FROM knowledge_scopes ks
+    LEFT JOIN shared_memories sm
+      ON sm.scope_path = ks.path
+      AND sm.status = 'active'
+    WHERE ks.path NOT LIKE '3/%'
+    GROUP BY ks.path, ks.name
+    HAVING COUNT(sm.id) > 0
+    ORDER BY COUNT(sm.id) DESC
+    LIMIT 30
+  `
+
+  const scopeData: OakScopeEntry[] = []
+  for (const stat of scopeStats) {
+    const topMemories = await forestSql`
+      SELECT content
+      FROM shared_memories
+      WHERE scope_path = ${stat.scope_path}
+        AND status = 'active'
+      ORDER BY weight DESC NULLS LAST, importance_score DESC NULLS LAST, created_at DESC
+      LIMIT 5
+    `
+
+    scopeData.push({
+      scope_path: stat.scope_path,
+      name: stat.name,
+      count: stat.memory_count,
+      topFacts: topMemories.map((m: any) => m.content.slice(0, 150)),
+    })
   }
 
-  if (entries.length === 0) {
-    logger.warn('Oak Catalog sync: no documents found')
-    return
-  }
+  // Step 3: Build combined Oak content
+  const convergenceIndex = buildOakSummary(scopeData)
+  const qmdSection = qmdEntries.length > 0
+    ? `\n## River Documents (${qmdEntries.length})\n${qmdEntries.join("\n")}`
+    : ""
 
-  const content = [
-    `Oak Catalog — ${entries.length} River documents (synced ${new Date().toISOString().slice(0, 10)})`,
-    '',
-    ...entries,
-  ].join('\n')
+  const content = convergenceIndex + qmdSection
 
+  // Step 4: Write to R/1
   await writeMemory({
     content,
     type: 'fact',
     scope: 'tree',
     scope_path: 'R/1',
     confidence: 1.0,
-    tags: ['oak-catalog', 'river', 'manifest'],
+    tags: ['oak-index', 'convergence', 'manifest'],
     metadata: {
-      doc_count: entries.length,
+      domain_count: scopeData.length,
+      total_memories: scopeData.reduce((s, d) => s + d.count, 0),
+      qmd_count: qmdEntries.length,
       synced_at: new Date().toISOString(),
-      source: 'oak-cron',
+      source: 'oak-convergence',
     },
     duration: 'long_term',
     category: 'work',
   })
 
-  logger.info('Oak Catalog synced', { doc_count: entries.length })
+  logger.info('Oak convergence sync complete', {
+    domains: scopeData.length,
+    qmdDocs: qmdEntries.length,
+  })
 }
 
 // ── POST /api/bridge/river/write (ELLIE-529) ──────────────────────────────────
@@ -455,6 +529,10 @@ export async function qmdReindex(): Promise<boolean> {
  * After writing, triggers `qmd update` to reindex the collection.
  */
 export async function bridgeRiverWriteEndpoint(req: ApiRequest, res: ApiResponse) {
+  // ── Auth (ELLIE-1418) ──────────────────────────────────────
+  const key = await bridgeAuth(req.bridgeKey, res, 'write')
+  if (!key) return
+
   const { path, content, operation = 'create', frontmatter: incomingFm = {} } = req.body
 
   // ── Input validation ────────────────────────────────────────

@@ -100,6 +100,7 @@ import { initGoogleChat, sendGoogleChatMessage, isGoogleChatEnabled } from "./go
 import { startNudgeChecker } from "./delivery.ts";
 import { initClassifier, warmTreeRoutingRules } from "./intent-classifier.ts";
 import { initEntailmentClassifier } from "./entailment-classifier.ts";
+import { initDeepClassifier } from "./deep-classifier.ts";
 import { startSkillWatcher, getSkillSnapshot } from "./skills/index.ts";
 import { initOutlook, getOutlookEmail } from "./outlook.ts";
 import { startExpiryCleanup } from "./approval.ts";
@@ -365,6 +366,7 @@ import { startSlackChannel } from "./channels/slack/index.ts";
 { const _done = startPhase("classifiers");
   if (anthropic && supabase) initClassifier(anthropic, supabase);
   if (anthropic) initEntailmentClassifier(anthropic);
+  if (anthropic) initDeepClassifier(anthropic);
   if (anthropic && supabase) { const { initMessageRefiner } = await import("./message-refiner.ts"); initMessageRefiner(anthropic, supabase); }
   _done();
 }

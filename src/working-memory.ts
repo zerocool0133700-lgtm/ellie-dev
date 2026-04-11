@@ -19,6 +19,7 @@
  *   and enables recovery if context compression loses critical information.
  */
 
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { sql } from "../../ellie-forest/src/index.ts";
 import { log } from "./logger.ts";
 import { hashToInt64 } from "./advisory-lock-hash.ts";
@@ -61,6 +62,7 @@ export interface WorkingMemoryRecord {
   updated_at: Date;
   archived_at: Date | null;
   safeguard_locked: boolean;
+  safeguard_locked_at: Date | null;
 }
 
 // ── Core operations ──────────────────────────────────────────────────────────
@@ -76,25 +78,32 @@ export async function initWorkingMemory(opts: {
   agent: string;
   sections?: WorkingMemorySections;
   channel?: string;
+  thread_id?: string;  // ELLIE-1374
 }): Promise<WorkingMemoryRecord> {
-  const { session_id, agent, sections = {}, channel = null } = opts;
+  const { session_id, agent, sections = {}, channel = null, thread_id = null } = opts;
 
-  // Archive any existing active record for this session+agent
+  // ELLIE-1427: Include thread_id in archive to avoid archiving other threads' records
+  const archiveThreadFilter = thread_id
+    ? sql`AND thread_id = ${thread_id}`
+    : sql`AND thread_id IS NULL`;
+
   await sql`
     UPDATE working_memory
     SET archived_at = NOW()
     WHERE session_id = ${session_id}
       AND agent      = ${agent}
       AND archived_at IS NULL
+      ${archiveThreadFilter}
   `;
 
   const [record] = await sql<WorkingMemoryRecord[]>`
-    INSERT INTO working_memory (session_id, agent, sections, channel)
+    INSERT INTO working_memory (session_id, agent, sections, channel, thread_id)
     VALUES (
       ${session_id},
       ${agent},
       ${sql.json(sections)},
-      ${channel}
+      ${channel},
+      ${thread_id}
     )
     RETURNING *
   `;
@@ -166,16 +175,31 @@ export async function updateWorkingMemory(opts: {
  * Returns null when no active record exists.
  */
 export async function readWorkingMemory(opts: {
-  session_id: string;
+  session_id?: string;
   agent: string;
+  thread_id?: string;  // ELLIE-1374
 }): Promise<WorkingMemoryRecord | null> {
   const { session_id, agent } = opts;
 
+  const sessionFilter = session_id
+    ? sql`AND session_id = ${session_id}`
+    : sql``;
+
+  // ELLIE-1427: Always filter by thread_id for proper isolation.
+  // When thread_id is provided, match it exactly.
+  // When not provided, only return non-threaded records (thread_id IS NULL).
+  const threadFilter = opts.thread_id
+    ? sql`AND thread_id = ${opts.thread_id}`
+    : sql`AND thread_id IS NULL`;
+
   const [record] = await sql<WorkingMemoryRecord[]>`
     SELECT * FROM working_memory
-    WHERE session_id = ${session_id}
-      AND agent      = ${agent}
+    WHERE agent = ${agent}
       AND archived_at IS NULL
+      ${sessionFilter}
+      ${threadFilter}
+    ORDER BY updated_at DESC
+    LIMIT 1
   `;
 
   return record ? normalize(record) : null;
@@ -296,7 +320,8 @@ export async function snapshotWorkingMemoryToForest(opts: {
     // Lock the working memory record
     await txn`
       UPDATE working_memory
-      SET safeguard_locked = TRUE
+      SET safeguard_locked = TRUE,
+          safeguard_locked_at = NOW()
       WHERE session_id = ${session_id}
         AND agent = ${agent}
         AND archived_at IS NULL
@@ -357,11 +382,10 @@ export async function snapshotWorkingMemoryToForest(opts: {
     ...sectionLines,
   ].join("\n");
 
-  // Write to Forest with working_memory_snapshot tag
+  // Write to Forest with working_memory_snapshot tag — router auto-classifies scope
   const memory = await writeMemory({
     content,
     type: "finding",
-    scope_path,
     confidence: 0.9,
     tags: ["working_memory_snapshot", `agent:${agent}`],
     metadata: {
@@ -401,13 +425,141 @@ export async function unlockSafeguard(opts: {
 
   await sql`
     UPDATE working_memory
-    SET safeguard_locked = FALSE
+    SET safeguard_locked = FALSE,
+        safeguard_locked_at = NULL
     WHERE session_id = ${session_id}
       AND agent = ${agent}
       AND archived_at IS NULL
   `;
 
   logger.info("Safeguard unlocked", { session_id, agent });
+}
+
+/**
+ * Auto-unlock safeguard locks older than 1 hour (ELLIE-1420).
+ *
+ * If the compaction verification process crashes after setting safeguard_locked,
+ * the session is permanently locked. This function is called hourly to clear
+ * stale locks and restore normal operation.
+ *
+ * Returns the number of sessions unlocked.
+ */
+export async function autoUnlockStaleSafeguards(): Promise<number> {
+  const unlocked = await sql<{ id: string; session_id: string; agent: string }[]>`
+    UPDATE working_memory
+    SET safeguard_locked = FALSE,
+        safeguard_locked_at = NULL
+    WHERE safeguard_locked = TRUE
+      AND archived_at IS NULL
+      AND safeguard_locked_at IS NOT NULL
+      AND safeguard_locked_at < NOW() - INTERVAL '1 hour'
+    RETURNING id, session_id, agent
+  `;
+
+  for (const row of unlocked) {
+    logger.warn("Auto-unlocked stale safeguard", {
+      id: row.id,
+      session_id: row.session_id,
+      agent: row.agent,
+    });
+  }
+
+  return unlocked.length;
+}
+
+/**
+ * Get working memory context_anchors from other threads for cross-thread awareness.
+ * ELLIE-1374
+ */
+export async function getSiblingThreadMemories(
+  agent: string,
+  currentThreadId: string,
+): Promise<Array<{ thread_id: string; context_anchors: string | null }>> {
+  const rows = await sql`
+    SELECT thread_id, sections->'context_anchors' as context_anchors
+    FROM working_memory
+    WHERE agent = ${agent}
+      AND thread_id IS NOT NULL
+      AND thread_id != ${currentThreadId}
+      AND archived_at IS NULL
+  `;
+  return rows as unknown as Array<{ thread_id: string; context_anchors: string | null }>;
+}
+
+// ── ELLIE-1423: Backfill from conversation_facts on session init ─────────────
+
+interface ConversationFactRow {
+  id: string;
+  content: string;
+  type: string;
+  category: string | null;
+  confidence: number;
+}
+
+/**
+ * Load active conversation_facts from Supabase (Tier 2) and merge them into
+ * working memory context_anchors for the given session.
+ *
+ * Call after initWorkingMemory() to backfill Tier 2 knowledge that would
+ * otherwise be missing from a fresh working memory record.
+ *
+ * Non-fatal — returns silently on error so session init is never blocked.
+ */
+export async function loadSessionContextFromConversationFacts(opts: {
+  supabase: SupabaseClient;
+  session_id: string;
+  agent: string;
+  limit?: number;
+}): Promise<void> {
+  const { supabase, session_id, agent, limit = 20 } = opts;
+
+  try {
+    const { data: facts, error } = await supabase
+      .from("conversation_facts")
+      .select("id, content, type, category, confidence")
+      .eq("status", "active")
+      .order("confidence", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(limit);
+
+    if (error || !facts || facts.length === 0) return;
+
+    const typed = facts as ConversationFactRow[];
+    const lines = typed.map(
+      (f) => `- [${f.type}${f.category ? `/${f.category}` : ""}] ${f.content}`,
+    );
+
+    const factsBlock =
+      `[Conversation facts backfilled from Tier 2 at session init]\n` +
+      lines.join("\n");
+
+    // Merge into context_anchors (preserving any existing content)
+    const current = await readWorkingMemory({ session_id, agent });
+    if (!current) return;
+
+    const existing = current.sections.context_anchors || "";
+    const merged = existing
+      ? `${existing}\n\n${factsBlock}`
+      : factsBlock;
+
+    await updateWorkingMemory({
+      session_id,
+      agent,
+      sections: { context_anchors: merged },
+    });
+
+    logger.info("Backfilled conversation_facts into working memory", {
+      session_id,
+      agent,
+      facts_count: typed.length,
+    });
+  } catch (err) {
+    logger.warn("Failed to backfill conversation_facts (non-fatal)", {
+      session_id,
+      agent,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 // ── Relay wiring (ELLIE-541) ─────────────────────────────────────────────────
@@ -486,7 +638,8 @@ export function _injectWorkingMemoryForTesting(
     created_at: new Date(),
     updated_at: new Date(),
     archived_at: null,
-    safeguard_locked: false, // ELLIE-925: Added missing field
+    safeguard_locked: false,
+    safeguard_locked_at: null,
   };
   _workingMemoryCache.set(agent, record);
 }

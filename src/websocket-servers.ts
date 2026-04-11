@@ -222,8 +222,9 @@ async function deliverPendingReadouts(ws: WebSocket): Promise<void> {
   }
 }
 
-/** ELLIE-399/463: Deliver undelivered messages + processing state + conversation history on reconnect. */
-async function deliverCatchUp(ws: WebSocket, userId: string, sinceTs?: number): Promise<void> {
+/** ELLIE-399/463: Deliver undelivered messages + processing state + conversation history on reconnect.
+ *  ELLIE-1460: If thread_id is provided, only messages from that thread are delivered. */
+async function deliverCatchUp(ws: WebSocket, userId: string, sinceTs?: number, threadId?: string): Promise<void> {
   try {
     // ELLIE-463: Drain in-memory buffer first — covers the case where Supabase is also down.
     // ELLIE-467: Capture returned IDs so we can skip them in the DB query (dedup).
@@ -237,7 +238,8 @@ async function deliverCatchUp(ws: WebSocket, userId: string, sinceTs?: number): 
     }
 
     // 1. Deliver any undelivered messages (original ELLIE-399 behavior)
-    const undelivered = (await getUndeliveredMessages(userId, sinceTs))
+    // ELLIE-1460: Pass threadId to filter by active thread when provided
+    const undelivered = (await getUndeliveredMessages(userId, sinceTs, threadId))
       .filter(m => !bufferedIds.includes(m.id));
     if (undelivered.length > 0) {
       const deliveredIds: string[] = [];
@@ -262,7 +264,8 @@ async function deliverCatchUp(ws: WebSocket, userId: string, sinceTs?: number): 
     // 2. Send full conversation history for session restoration
     //    Covers: user messages, specialist responses (marked 'sent'), ack messages
     //    The frontend merges + dedupes with whatever's in sessionStorage
-    const history = await getRecentHistory("ellie-chat", userId, 150);
+    // ELLIE-1460: Pass threadId to filter history to the active thread when provided
+    const history = await getRecentHistory("ellie-chat", userId, 150, threadId);
     if (history.length > 0 && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         type: "history",
@@ -318,7 +321,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
           ws.send(JSON.stringify({ type: "auth_ok", ts: Date.now() }));
           logger.info("Client authenticated via key", { clients: ellieChatClients.size });
           deliverPendingReadouts(ws).catch(() => {});
-          deliverCatchUp(ws, "system-dashboard", msg.since).catch(() => {});
+          deliverCatchUp(ws, "system-dashboard", msg.since, msg.thread_id).catch(() => {});
           return;
         }
 
@@ -336,7 +339,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
               ws.send(JSON.stringify({ type: "auth_ok", ts: Date.now(), user: { id: user.id, name: user.name, onboarding_state: user.onboarding_state } }));
               logger.info("App user authenticated", { userId: user.id, clients: ellieChatClients.size });
               deliverPendingReadouts(ws).catch(() => {});
-              deliverCatchUp(ws, user.id, msg.since).catch(() => {});
+              deliverCatchUp(ws, user.id, msg.since, msg.thread_id).catch(() => {});
             } catch (err) {
               logger.error("Token auth error", err);
               ws.close(4003, "Auth error");
@@ -363,10 +366,11 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
       if (msg.type === "pong") return;
 
       // ELLIE-399: Explicit catch-up request from reconnecting client
+      // ELLIE-1460: thread_id in sync message scopes catch-up to that thread
       if (msg.type === "sync") {
         const syncUser = wsAppUserMap.get(ws);
         const syncUserId = syncUser?.id || syncUser?.anonymous_id || "anonymous";
-        deliverCatchUp(ws, syncUserId, msg.since).catch(() => {});
+        deliverCatchUp(ws, syncUserId, msg.since, msg.thread_id).catch(() => {});
         return;
       }
 
@@ -408,6 +412,26 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
         return;
       }
 
+      // ELLIE-1452: Routing feedback — Dave flags a wrong agent choice
+      if (msg.type === "routing_feedback" && msg.envelope_id) {
+        (async () => {
+          try {
+            const { recordRoutingFeedback } = await import("./routing-observability.ts");
+            recordRoutingFeedback({
+              envelopeId: msg.envelope_id,
+              originalAgent: msg.original_agent || "unknown",
+              suggestedAgent: msg.suggested_agent || undefined,
+              comment: msg.comment || undefined,
+              timestamp: Date.now(),
+            });
+            ws.send(JSON.stringify({ type: "routing_feedback_ack", envelope_id: msg.envelope_id, ts: Date.now() }));
+          } catch (err) {
+            logger.error("Routing feedback error", err);
+          }
+        })();
+        return;
+      }
+
       // Session upgrade: anonymous → authenticated (ELLIE-176)
       if (msg.type === "session_upgrade" && msg.token) {
         (async () => {
@@ -431,7 +455,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
       if (msg.type === "message" && (msg.text || msg.image)) {
         // ELLIE-461: Fresh AbortController per message dispatch
         const abortCtrl = getOrCreateAbortController(ws);
-        handleEllieChatMessage(ws, msg.text || "", !!msg.phone_mode, msg.image, msg.channel_id, msg.id, msg.mode, abortCtrl.signal, msg.reply_to);
+        handleEllieChatMessage(ws, msg.text || "", !!msg.phone_mode, msg.image, msg.channel_id, msg.id, msg.mode, abortCtrl.signal, msg.reply_to, msg.thread_id, msg.surface_context);
         return;
       }
 

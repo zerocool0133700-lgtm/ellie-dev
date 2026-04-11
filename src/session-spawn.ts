@@ -42,7 +42,7 @@ const logger = log.child("session-spawn");
 
 // ── Constants ───────────────────────────────────────────────
 
-const DEFAULT_TIMEOUT_SECONDS = 300; // 5 minutes
+const DEFAULT_TIMEOUT_SECONDS = 600; // 10 minutes — bumped from 300 (ELLIE-1421: dev agents need headroom)
 const MAX_CHILDREN_PER_PARENT = 5;
 const MAX_SPAWN_DEPTH = 2; // ELLIE-948: max nesting depth (0=child, 1=grandchild)
 const GC_AGE_MS = 10 * 60_000; // ELLIE-951: prune completed spawns older than 10 minutes

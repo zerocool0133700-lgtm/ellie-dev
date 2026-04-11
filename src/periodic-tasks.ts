@@ -263,12 +263,26 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     if (refreshed > 0) logger.info(`Refreshed weights for ${refreshed} memories`);
   }, 60 * 60_000, "weight-refresh");
 
+  // ELLIE-1428: Deep classify ambiguous memories (every 30 minutes)
+  periodicTask(async () => {
+    const { processDeepClassificationBatch } = await import("./deep-classifier.ts");
+    const classified = await processDeepClassificationBatch({ limit: 50 });
+    if (classified > 0) logger.info(`Deep-classified ${classified} memories`);
+  }, 30 * 60_000, "deep-classification");
+
   // Working memory idle archive — archive sessions idle >24h (every 2 hours — ELLIE-540)
   periodicTask(async () => {
     const { archiveIdleWorkingMemory } = await import("./working-memory.ts");
     const archived = await archiveIdleWorkingMemory();
     if (archived > 0) logger.info(`Archived ${archived} idle session(s)`);
   }, 2 * 60 * 60_000, "working-memory-archive");
+
+  // ELLIE-1420: Auto-unlock stale safeguard locks — prevents permanent session lockout (every hour)
+  periodicTask(async () => {
+    const { autoUnlockStaleSafeguards } = await import("./working-memory.ts");
+    const unlocked = await autoUnlockStaleSafeguards();
+    if (unlocked > 0) logger.warn(`Auto-unlocked ${unlocked} stale safeguard lock(s)`);
+  }, 60 * 60_000, "safeguard-auto-unlock");
 
   // ELLIE-933: Auto-promote qualifying memories to Core tier (every 6 hours)
   periodicTask(async () => {
@@ -286,8 +300,11 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
   }, 24 * 60 * 60_000, "memory-graduation");
 
   // ELLIE-934: Memory arc auto-detection — chains + clusters (every 12 hours)
+  // ELLIE-1429: Also clean up expired arcs
   periodicTask(async () => {
-    const { detectArcsFromChains, detectArcsFromClusters } = await import("../../ellie-forest/src/arcs.ts");
+    const { detectArcsFromChains, detectArcsFromClusters, archiveExpiredArcs } = await import("../../ellie-forest/src/arcs.ts");
+    const expired = await archiveExpiredArcs();
+    if (expired > 0) logger.info(`Archived ${expired} expired arcs`);
     const chains = await detectArcsFromChains();
     const clusters = await detectArcsFromClusters();
     if (chains > 0 || clusters > 0) {
@@ -490,6 +507,23 @@ export function initPeriodicTasks(deps: PeriodicTaskDeps): void {
     }
   }, 30 * 60_000, "es-reconciliation");
 
+  // ELLIE-1419: Flush pending memory inserts (search was unavailable at queue time) — every 15 minutes
+  periodicTask(async () => {
+    if (!supabase) return;
+    const { flushPendingMemoryInserts } = await import("./memory.ts");
+    await flushPendingMemoryInserts(supabase);
+  }, 15 * 60_000, "pending-memory-flush");
+
+  // ELLIE-1422: Sync conversation_facts → Forest (every 6 hours)
+  periodicTask(async () => {
+    if (!supabase) return;
+    const { syncConversationFactsToForest } = await import("./sync-conversation-facts.ts");
+    const result = await syncConversationFactsToForest(supabase);
+    if (result.synced > 0 || result.failed > 0) {
+      logger.info("Conversation facts → Forest sync", result);
+    }
+  }, 6 * 60 * 60_000, "conversation-facts-forest-sync");
+
   // ELLIE-975: User-configurable scheduled tasks — evaluate cron schedules (every 60 seconds)
   periodicTask(async () => {
     const { schedulerTick, getDefaultExecutors } = await import("./scheduled-tasks.ts");
@@ -550,6 +584,19 @@ export function runStartupTasks(deps: PeriodicTaskDeps): void {
       logger.error("Initial stale expiry error", err);
     }
   }, 10_000);
+
+  // ELLIE-1419: Flush pending memory inserts on startup (15s delay)
+  if (supabase) {
+    setTimeout(async () => {
+      try {
+        const { flushPendingMemoryInserts } = await import("./memory.ts");
+        const result = await flushPendingMemoryInserts(supabase);
+        if (result.flushed > 0) logger.info("Startup pending memory flush", result);
+      } catch (err) {
+        logger.warn("Startup pending memory flush failed (non-fatal)", { error: err instanceof Error ? err.message : String(err) });
+      }
+    }, 15_000);
+  }
 
   // Preload BERT empathy model (15s delay — non-blocking)
   setTimeout(async () => {

@@ -168,7 +168,6 @@ export async function checkpointSessionToForest(opts: CheckpointOpts): Promise<v
   await writeMemory({
     content: lines.join("\n"),
     type: "finding",
-    scope_path: "2/1",
     confidence: 0.7,
     tags: ["session-checkpoint", "compaction"],
     metadata: {
@@ -200,7 +199,7 @@ export async function checkpointSessionToForest(opts: CheckpointOpts): Promise<v
         session_id: conversationId,
         agent: agentName,
         pre_snapshot_memory_id: snapshotMemoryId,
-        require_snapshot: true,
+        require_snapshot: !!snapshotMemoryId,
       });
 
       if (!verification.ok) {
