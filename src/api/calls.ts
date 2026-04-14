@@ -39,6 +39,17 @@ export interface CallSession {
   duration_ms?: number;
 }
 
+// Per-call lock to prevent concurrent mutation from parallel WS messages.
+// Bun is single-threaded but async yields between await points allow interleaving.
+const callLocks = new Map<string, Promise<void>>();
+
+function withCallLock<T>(callId: string, fn: () => T | Promise<T>): Promise<T> {
+  const prev = callLocks.get(callId) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  callLocks.set(callId, next.then(() => {}, () => {}));
+  return next;
+}
+
 // In-memory active calls (no DB table needed for ephemeral state)
 const activeCalls = new Map<string, CallSession>();
 
@@ -49,43 +60,49 @@ export function getActiveCall(channelId: string): CallSession | undefined {
   return undefined;
 }
 
-export function startCall(id: string, channelId: string, callerId: string, type: "voice" | "video" | "screen"): CallSession {
-  const call: CallSession = {
-    id,
-    channel_id: channelId,
-    type,
-    state: "ringing",
-    caller_id: callerId,
-    participants: [callerId],
-    started_at: new Date().toISOString(),
-  };
-  activeCalls.set(id, call);
-  logger.info("Call started", { id, channelId, type, caller: callerId });
-  return call;
+export function startCall(id: string, channelId: string, callerId: string, type: "voice" | "video" | "screen"): Promise<CallSession> {
+  return withCallLock(id, () => {
+    const call: CallSession = {
+      id,
+      channel_id: channelId,
+      type,
+      state: "ringing",
+      caller_id: callerId,
+      participants: [callerId],
+      started_at: new Date().toISOString(),
+    };
+    activeCalls.set(id, call);
+    logger.info("Call started", { id, channelId, type, caller: callerId });
+    return call;
+  });
 }
 
-export function acceptCall(callId: string, participantId: string): CallSession | null {
-  const call = activeCalls.get(callId);
-  if (!call || call.state === "ended") return null;
-  call.state = "active";
-  if (!call.participants.includes(participantId)) {
-    call.participants.push(participantId);
-  }
-  logger.info("Call accepted", { id: callId, participant: participantId });
-  return call;
+export function acceptCall(callId: string, participantId: string): Promise<CallSession | null> {
+  return withCallLock(callId, () => {
+    const call = activeCalls.get(callId);
+    if (!call || call.state === "ended") return null;
+    call.state = "active";
+    if (!call.participants.includes(participantId)) {
+      call.participants.push(participantId);
+    }
+    logger.info("Call accepted", { id: callId, participant: participantId });
+    return call;
+  });
 }
 
-export function endCall(callId: string): CallSession | null {
-  const call = activeCalls.get(callId);
-  if (!call) return null;
-  call.state = "ended";
-  call.ended_at = new Date().toISOString();
-  call.duration_ms = new Date(call.ended_at).getTime() - new Date(call.started_at).getTime();
-  logger.info("Call ended", { id: callId, duration: call.duration_ms });
+export function endCall(callId: string): Promise<CallSession | null> {
+  return withCallLock(callId, () => {
+    const call = activeCalls.get(callId);
+    if (!call) return null;
+    call.state = "ended";
+    call.ended_at = new Date().toISOString();
+    call.duration_ms = new Date(call.ended_at).getTime() - new Date(call.started_at).getTime();
+    logger.info("Call ended", { id: callId, duration: call.duration_ms });
 
-  // Clean up after 5 minutes
-  setTimeout(() => activeCalls.delete(callId), 5 * 60 * 1000);
-  return call;
+    // Clean up after 5 minutes
+    setTimeout(() => { activeCalls.delete(callId); callLocks.delete(callId); }, 5 * 60 * 1000);
+    return call;
+  });
 }
 
 /**

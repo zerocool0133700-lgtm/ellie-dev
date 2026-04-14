@@ -93,45 +93,46 @@ export async function rotateRefreshToken(
   oldRefreshToken: string,
   opts?: { ipAddress?: string; userAgent?: string },
 ): Promise<{ session: OsSession; replayDetected: false } | { session: null; replayDetected: boolean }> {
-  // Note: The SELECT is outside the transaction. A concurrent refresh with the same
-  // token could race here (TOCTOU). Replay detection catches this after the fact, but
-  // a future hardening pass could use SELECT ... FOR UPDATE inside the transaction.
-  const oldSession = await findSessionByRefreshToken(sql, oldRefreshToken)
+  // Entire lookup + revoke + reissue runs inside one transaction with FOR UPDATE
+  // to prevent concurrent refresh of the same token (TOCTOU race).
+  return sql.begin(async (tx) => {
+    const [oldSession] = await tx<OsSession[]>`
+      SELECT * FROM os_sessions
+      WHERE refresh_token = ${oldRefreshToken}
+      FOR UPDATE
+    `
 
-  if (!oldSession) {
-    return { session: null, replayDetected: false }
-  }
+    if (!oldSession) {
+      return { session: null, replayDetected: false }
+    }
 
-  // Replay detection: if this token was already revoked, someone stole it
-  if (isSessionRevoked(oldSession)) {
-    logger.warn("Refresh token replay detected — revoking entire family", {
-      token_family: oldSession.token_family,
-      account_id: oldSession.account_id,
-    })
-    await revokeFamilySessions(sql, oldSession.token_family)
-    await writeAudit(sql, {
-      account_id: oldSession.account_id,
-      event_type: AUDIT_EVENTS.TOKEN_FAMILY_REVOKED,
-      ip_address: opts?.ipAddress,
-      metadata: { reason: "replay_detected", token_family: oldSession.token_family },
-    })
-    return { session: null, replayDetected: true }
-  }
+    // Replay detection: if this token was already revoked, someone stole it
+    if (isSessionRevoked(oldSession)) {
+      logger.warn("Refresh token replay detected — revoking entire family", {
+        token_family: oldSession.token_family,
+        account_id: oldSession.account_id,
+      })
+      await revokeFamilySessions(tx, oldSession.token_family)
+      await writeAudit(tx, {
+        account_id: oldSession.account_id,
+        event_type: AUDIT_EVENTS.TOKEN_FAMILY_REVOKED,
+        ip_address: opts?.ipAddress,
+        metadata: { reason: "replay_detected", token_family: oldSession.token_family },
+      })
+      return { session: null, replayDetected: true }
+    }
 
-  if (isSessionExpired(oldSession)) {
-    return { session: null, replayDetected: false }
-  }
+    if (isSessionExpired(oldSession)) {
+      return { session: null, replayDetected: false }
+    }
 
-  // Atomically revoke the old token and issue a new one in the same family.
-  // If the INSERT fails after the UPDATE, the transaction rolls back and the
-  // old token remains valid — no broken session state.
-  const newRefreshToken = generateRefreshToken()
-  const newSession = await sql.begin(async (tx) => {
+    // Atomically revoke the old token and issue a new one in the same family.
+    const newRefreshToken = generateRefreshToken()
     await tx`
       UPDATE os_sessions SET revoked_at = now() WHERE id = ${oldSession.id}
     `
 
-    return createSession(tx, {
+    const newSession = await createSession(tx, {
       accountId: oldSession.account_id,
       refreshToken: newRefreshToken,
       audience: oldSession.audience,
@@ -139,9 +140,9 @@ export async function rotateRefreshToken(
       ipAddress: opts?.ipAddress,
       userAgent: opts?.userAgent,
     })
-  })
 
-  return { session: newSession, replayDetected: false }
+    return { session: newSession, replayDetected: false as const }
+  })
 }
 
 /** Revoke all sessions in a token family. */

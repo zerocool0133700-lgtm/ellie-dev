@@ -227,18 +227,19 @@ export async function semanticSearch(
 ): Promise<SemanticSearchResult[]> {
   const limit = opts.limit ?? 10;
   const minSim = opts.min_similarity ?? 0.5;
-  const embeddingStr = `[${embedding.join(",")}]`;
+  // postgres.js parameterizes this value (not string concat into SQL)
+  const vectorLiteral = `[${embedding.join(",")}]`;
 
   if (opts.category && opts.company_id) {
     return sql<SemanticSearchResult[]>`
       SELECT id, category, subcategory, content, source_doc, payer_id,
-             1 - (embedding <=> ${embeddingStr}::vector) AS similarity
+             1 - (embedding <=> ${vectorLiteral}::vector) AS similarity
       FROM medical_knowledge
       WHERE embedding IS NOT NULL
         AND category = ${opts.category}
         AND company_id = ${opts.company_id}::uuid
-        AND 1 - (embedding <=> ${embeddingStr}::vector) >= ${minSim}
-      ORDER BY embedding <=> ${embeddingStr}::vector
+        AND 1 - (embedding <=> ${vectorLiteral}::vector) >= ${minSim}
+      ORDER BY embedding <=> ${vectorLiteral}::vector
       LIMIT ${limit}
     `;
   }
@@ -246,23 +247,23 @@ export async function semanticSearch(
   if (opts.category) {
     return sql<SemanticSearchResult[]>`
       SELECT id, category, subcategory, content, source_doc, payer_id,
-             1 - (embedding <=> ${embeddingStr}::vector) AS similarity
+             1 - (embedding <=> ${vectorLiteral}::vector) AS similarity
       FROM medical_knowledge
       WHERE embedding IS NOT NULL
         AND category = ${opts.category}
-        AND 1 - (embedding <=> ${embeddingStr}::vector) >= ${minSim}
-      ORDER BY embedding <=> ${embeddingStr}::vector
+        AND 1 - (embedding <=> ${vectorLiteral}::vector) >= ${minSim}
+      ORDER BY embedding <=> ${vectorLiteral}::vector
       LIMIT ${limit}
     `;
   }
 
   return sql<SemanticSearchResult[]>`
     SELECT id, category, subcategory, content, source_doc, payer_id,
-           1 - (embedding <=> ${embeddingStr}::vector) AS similarity
+           1 - (embedding <=> ${vectorLiteral}::vector) AS similarity
     FROM medical_knowledge
     WHERE embedding IS NOT NULL
-      AND 1 - (embedding <=> ${embeddingStr}::vector) >= ${minSim}
-    ORDER BY embedding <=> ${embeddingStr}::vector
+      AND 1 - (embedding <=> ${vectorLiteral}::vector) >= ${minSim}
+    ORDER BY embedding <=> ${vectorLiteral}::vector
     LIMIT ${limit}
   `;
 }

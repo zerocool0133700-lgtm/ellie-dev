@@ -470,7 +470,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
 
             if (msg.type === "call_start") {
               const callId = `call-${Date.now().toString(36)}`;
-              const call = startCall(callId, msg.channel_id || "general", callUserId, msg.call_type || "voice");
+              const call = await startCall(callId, msg.channel_id || "general", callUserId, msg.call_type || "voice");
               // Broadcast ringing to all clients
               const ringing = JSON.stringify({ type: "call_incoming", call, ts: Date.now() });
               for (const client of ellieChatClients) {
@@ -478,7 +478,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
               }
               ws.send(JSON.stringify({ type: "call_started", call, ts: Date.now() }));
             } else if (msg.type === "call_accept" && msg.call_id) {
-              const call = acceptCall(msg.call_id, callUserId);
+              const call = await acceptCall(msg.call_id, callUserId);
               if (call) {
                 const accepted = JSON.stringify({ type: "call_accepted", call, participant: callUserId, ts: Date.now() });
                 for (const client of ellieChatClients) {
@@ -488,7 +488,7 @@ ellieChatWss.on("connection", (ws: WebSocket) => {
             } else if (msg.type === "call_decline" && msg.call_id) {
               ws.send(JSON.stringify({ type: "call_declined", call_id: msg.call_id, ts: Date.now() }));
             } else if (msg.type === "call_end" && msg.call_id) {
-              const call = endCall(msg.call_id);
+              const call = await endCall(msg.call_id);
               if (call) {
                 const ended = JSON.stringify({ type: "call_ended", call, ts: Date.now() });
                 for (const client of ellieChatClients) {

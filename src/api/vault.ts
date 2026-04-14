@@ -79,6 +79,7 @@ export async function listVaultCredentials(req: ApiRequest, res: ApiResponse, _s
     const entries = await listCredentials({
       domain: req.query?.domain,
       credential_type: req.query?.type as CredentialType | undefined,
+      keychain_id: KEYCHAIN_ID,
     });
     return res.json(entries.map(toCredentialRecord));
   } catch (err: unknown) {
@@ -92,7 +93,7 @@ export async function listVaultCredentials(req: ApiRequest, res: ApiResponse, _s
  */
 export async function getVaultCredential(req: ApiRequest, res: ApiResponse, _supabase: unknown) {
   try {
-    const result = await getCredentialById(req.params.id);
+    const result = await getCredentialById(req.params.id, KEYCHAIN_ID);
     if (!result) return res.status(404).json({ error: "Credential not found" });
     return res.json(toCredentialRecord(result.entry));
   } catch (err: unknown) {
@@ -114,7 +115,7 @@ export async function updateVaultCredential(req: ApiRequest, res: ApiResponse, _
     if (req.body.expires_at !== undefined) updates.expires_at = req.body.expires_at ? new Date(req.body.expires_at) : null;
     if (req.body.payload !== undefined) updates.value = JSON.stringify(req.body.payload);
 
-    const entry = await updateCredential(req.params.id, updates);
+    const entry = await updateCredential(req.params.id, { ...updates, keychainId: KEYCHAIN_ID });
     logger.info(`Updated credential ${req.params.id}`);
     return res.json(toCredentialRecord(entry));
   } catch (err: unknown) {
@@ -128,7 +129,7 @@ export async function updateVaultCredential(req: ApiRequest, res: ApiResponse, _
  */
 export async function deleteVaultCredential(req: ApiRequest, res: ApiResponse, _supabase: unknown) {
   try {
-    await deleteCredential(req.params.id);
+    await deleteCredential(req.params.id, KEYCHAIN_ID);
     logger.info(`Deleted credential ${req.params.id}`);
     return res.json({ success: true });
   } catch (err: unknown) {
@@ -156,7 +157,7 @@ export async function resolveVaultCredential(req: ApiRequest, res: ApiResponse, 
 
     let result;
     if (id) {
-      result = await getCredentialById(id);
+      result = await getCredentialById(id, KEYCHAIN_ID);
     } else {
       result = await getCredentialByDomain(domain, type as CredentialType | undefined);
     }
